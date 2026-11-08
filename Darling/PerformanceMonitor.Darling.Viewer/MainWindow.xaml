@@ -267,7 +267,7 @@
                         <TextBlock Text="Servers" Style="{StaticResource SectionHeader}" Margin="0,0,0,2"/>
                         <TextBlock Text="Double-click or press Enter to open a server tab" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,0,0,6"/>
                     </StackPanel>
-                    <Button Grid.Column="1" x:Name="SidebarToggleButton" AutomationProperties.Name="Collapse/expand the sidebar" Content="«" Click="ToggleSidebar_Click"
+                    <Button Grid.Column="1" x:Name="SidebarToggleButton" AutomationProperties.AutomationId="SidebarToggleButton" AutomationProperties.Name="Collapse/expand the sidebar" Content="«" Click="ToggleSidebar_Click"
                             Style="{StaticResource DarkButton}"
                             ToolTip="Collapse/expand the sidebar" VerticalAlignment="Top"
                             Width="24" Height="24" Padding="0" FontSize="14"/>
