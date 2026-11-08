@@ -301,7 +301,7 @@ WITH per_collection AS (
            CASE WHEN MAX(sample_interval_seconds) IS NULL
                 THEN coalesce(CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu') AS DOUBLE PRECISION), 0) / 1000.0 / NULLIF(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))), 0)
                 ELSE coalesce(CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu' AND sample_interval_seconds > 0) AS DOUBLE PRECISION), 0) / 1000.0
-                     / MIN(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0)
+                     / MIN(NULLIF(sample_interval_seconds, 0))
            END AS ms_per_sec
     FROM pg_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
@@ -335,7 +335,7 @@ WITH per_collection AS (
            CASE WHEN MAX(sample_interval_seconds) IS NULL
                 THEN coalesce(CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu') AS DOUBLE PRECISION), 0) / 1000.0 / NULLIF(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))), 0)
                 ELSE coalesce(CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu' AND sample_interval_seconds > 0) AS DOUBLE PRECISION), 0) / 1000.0
-                     / MIN(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0)
+                     / MIN(NULLIF(sample_interval_seconds, 0))
            END AS ms_per_sec
     FROM pg_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3

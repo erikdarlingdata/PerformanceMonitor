@@ -82,7 +82,7 @@ WITH per_collection AS (
            observed time the siblings never covered. NULL when every row is 0 (a restart: not a sample). */
         CASE WHEN MAX(sample_interval_seconds) IS NULL
              THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-             ELSE MIN(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0)
+             ELSE MIN(NULLIF(sample_interval_seconds, 0))
         END AS interval_sec
     FROM pg_wait_stats
     WHERE server_id = $1

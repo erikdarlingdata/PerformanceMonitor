@@ -488,7 +488,7 @@ WITH per_collection AS (
            CASE WHEN MAX(sample_interval_seconds) IS NULL
                 THEN COALESCE(SUM(delta_wait_time_ms) FILTER (WHERE wait_type NOT IN (" + AnomalyThresholds.YoungBaselineBarExcludedWaitsSqlList + @")), 0)::DOUBLE PRECISION / NULLIF(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))), 0)
                 ELSE COALESCE(SUM(delta_wait_time_ms) FILTER (WHERE wait_type NOT IN (" + AnomalyThresholds.YoungBaselineBarExcludedWaitsSqlList + @") AND sample_interval_seconds > 0), 0)::DOUBLE PRECISION
-                     / MIN(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0)
+                     / MIN(NULLIF(sample_interval_seconds, 0))
            END AS bar_ms_per_sec
     FROM v_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
@@ -541,7 +541,7 @@ FROM per_collection";
             double windowTotalWaitMs = 0;
             using (var rateCmd = connection.CreateCommand())
             {
-                rateCmd.CommandText = @"
+                rateCmd.CommandText = $@"
 WITH per_collection AS (
     SELECT collection_time,
            SUM(delta_wait_time_ms)::DOUBLE PRECISION AS total_wait_ms,
@@ -557,14 +557,14 @@ WITH per_collection AS (
            CASE WHEN MAX(sample_interval_seconds) IS NULL
                 THEN SUM(delta_wait_time_ms)::DOUBLE PRECISION / NULLIF(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))), 0)
                 ELSE SUM(delta_wait_time_ms) FILTER (WHERE sample_interval_seconds > 0)::DOUBLE PRECISION
-                     / MIN(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0)
+                     / MIN(NULLIF(sample_interval_seconds, 0))
            END AS ms_per_sec
     FROM v_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_wait_time_ms >= 0
     GROUP BY collection_time
 )
-SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+SELECT {WindowTiles.LocalHourSql} AS local_hour,
        MAX(ms_per_sec) AS peak_ms_per_sec,
        AVG(ms_per_sec) AS avg_ms_per_sec,
        SUM(total_wait_ms) AS total_wait_ms,

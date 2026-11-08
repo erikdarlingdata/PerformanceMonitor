@@ -835,7 +835,7 @@ WITH per_collection AS (
            CASE WHEN MAX(sample_interval_seconds) IS NULL
                 THEN SUM(delta_wait_time_ms)::DOUBLE PRECISION / NULLIF(extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))), 0)
                 ELSE SUM(delta_wait_time_ms) FILTER (WHERE sample_interval_seconds > 0)::DOUBLE PRECISION
-                     / MIN(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0)
+                     / MIN(NULLIF(sample_interval_seconds, 0))
            END AS ms_per_sec
     FROM v_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
