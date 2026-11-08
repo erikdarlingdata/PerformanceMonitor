@@ -344,6 +344,36 @@ public sealed partial class ViewerDataService
                 _dataSource, [source], null, startUtc, endUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
     }
 
+    /// <summary>The oldest <c>job_history</c> row of one server, by the time it was collected. The ordered read stops in the oldest
+    /// chunk that holds the server, as <see cref="ServerDataStart.SqlServerSql"/> does for the charts. One row. $1 server_id.</summary>
+    public const string JobHistoryOldestRetainedServerSql =
+        "SELECT collection_time FROM job_history WHERE server_id = $1 ORDER BY collection_time ASC LIMIT 1";
+
+    /// <summary>The All Servers twin of <see cref="JobHistoryOldestRetainedServerSql"/>: the oldest <c>job_history</c> row of any server.</summary>
+    public const string JobHistoryOldestRetainedFleetSql =
+        "SELECT collection_time FROM job_history ORDER BY collection_time ASC LIMIT 1";
+
+    /// <summary>
+    /// The oldest instant the store holds job history from, for the Job History tab's time range picker's "Data starts" note: the
+    /// oldest <c>job_history</c> row of <paramref name="serverId"/>, or of every server with a null <paramref name="serverId"/>
+    /// (the tab's All Servers view), as naive UTC, or null when the scope has no row yet. The note previews whatever range a reader
+    /// types, so it cannot take the grid's window-bounded coverage probe (<see cref="GetJobHistoryDataStartAsync"/>): a probe
+    /// answers the oldest row inside the window it was asked about, which for a covered window is the window's own start. One
+    /// read; the tab caches it per scope. A read that fails throws; the caller keeps what it had.
+    /// </summary>
+    public async Task<DateTime?> GetJobHistoryOldestRetainedAsync(int? serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(serverId is null ? JobHistoryOldestRetainedFleetSql : JobHistoryOldestRetainedServerSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        if (serverId is int id)
+        {
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = id });
+        }
+
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is DateTime oldest ? DateTime.SpecifyKind(oldest, DateTimeKind.Utc) : null;
+    }
+
     /// <summary>
     /// Each server's clock from its newest <c>server_properties</c> row that has an offset (the time zone id
     /// alongside it where the store has the V134 column, else the offset alone), keyed by server id. A server
