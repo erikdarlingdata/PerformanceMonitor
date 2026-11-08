@@ -45,7 +45,9 @@ public sealed record ProvisioningTrendDto(
     int MaxCpuPct,
     decimal P95CpuPct,
     decimal MemoryRatio,
-    string Status);
+    string Status,
+    decimal? StolenMemoryPct = null,
+    string? StatusReason = null);
 
 /// <summary>One day of pool-level memory-grant vs used efficiency. <paramref name="Day"/> is a naive-UTC date.</summary>
 public sealed record MemoryGrantEfficiencyDto(
@@ -331,6 +333,15 @@ ORDER BY CAST(collection_time AS DATE)";
             var p95Cpu = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3));
             var memRatio = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4));
 
+            var maxGrantWaiters = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5));
+            var grantTimeouts = reader.IsDBNull(6) ? 0L : Convert.ToInt64(reader.GetValue(6));
+            var forcedGrants = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7));
+            var maxWorkers = reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9));
+            var currentWorkers = reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10));
+            var engineEdition = reader.IsDBNull(11) ? (int?)null : Convert.ToInt32(reader.GetValue(11));
+            decimal? stolenMemoryPercent = reader.IsDBNull(14) || reader.IsDBNull(15) || Convert.ToDouble(reader.GetValue(14)) <= 0
+                ? null
+                : (decimal)((Convert.ToDouble(reader.GetValue(14)) - Convert.ToDouble(reader.GetValue(15))) / Convert.ToDouble(reader.GetValue(14)) * 100.0);
             var status = ProvisioningVerdict.Evaluate(
                 avgCpu, maxCpu, p95Cpu,
                 maxGrantWaiters: reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
@@ -353,7 +364,12 @@ ORDER BY CAST(collection_time AS DATE)";
                 maxCpu,
                 p95Cpu,
                 memRatio,
-                status));
+                status,
+                stolenMemoryPercent,
+                /* The reason comes from the same place as the verdict, as the Viewer's badge does. */
+                status == ProvisioningVerdict.UnderProvisioned
+                    ? ProvisioningVerdict.UnderProvisionedReason(p95Cpu, maxGrantWaiters, grantTimeouts, forcedGrants, maxWorkers, currentWorkers, stolenMemoryPercent, engineEdition)
+                    : null));
         }
         return items;
     }
