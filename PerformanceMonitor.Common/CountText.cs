@@ -28,4 +28,11 @@ public static class CountText
     /// </summary>
     public static string Plural(int count, string singular, string plural) =>
         count == 1 ? $"1 {singular}" : $"{count.ToString("N0", CultureInfo.InvariantCulture)} {plural}";
+
+    /// <summary>The <see cref="Plural(int, string)"/> form for a count the store returns as a 64-bit integer.</summary>
+    public static string Plural(long count, string singular) => Plural(count, singular, singular + "s");
+
+    /// <summary>The <see cref="Plural(int, string, string)"/> form for a count the store returns as a 64-bit integer.</summary>
+    public static string Plural(long count, string singular, string plural) =>
+        count == 1 ? $"1 {singular}" : $"{count.ToString("N0", CultureInfo.InvariantCulture)} {plural}";
 }
