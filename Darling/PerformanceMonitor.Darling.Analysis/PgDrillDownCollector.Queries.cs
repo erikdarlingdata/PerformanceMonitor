@@ -1468,6 +1468,9 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
     /// then CPU spent) is what separates a stale parallel plan still sitting in the cache from the serial
     /// one doing the work at the same <c>collection_time</c>. Byte-identical to Lite's
     /// <c>CollectBadActorDetail</c> text.
+    /// <para>#8317: <c>$5</c> is the finding's database, so when one hash runs in several databases the row
+    /// described is the one the fact was scored on. A finding that carries no database sends an empty
+    /// <c>$5</c> and gets the database that spent the most CPU on the hash.</para>
     /// </summary>
     public const string BadActorDetailSql = @"
 WITH windowed AS
@@ -1487,6 +1490,7 @@ WITH windowed AS
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   query_hash = $4
+    AND   ($5 = '' OR database_name = $5)
 )
 SELECT database_name, query_hash,
        MAX(query_text) AS query_text,
@@ -1508,7 +1512,9 @@ SELECT database_name, query_hash,
        MAX(max_dop_any_plan) AS max_dop_any_plan,
        MAX(CASE WHEN max_dop = max_dop_any_plan THEN collection_time END) AS max_dop_any_plan_last_seen
 FROM windowed
-GROUP BY database_name, query_hash";
+GROUP BY database_name, query_hash
+ORDER BY total_cpu_us DESC
+LIMIT 1";
 
     private async Task CollectBadActorDetail(AnalysisFinding finding, AnalysisContext context)
     {
@@ -1524,6 +1530,7 @@ GROUP BY database_name, query_hash";
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
         cmd.Parameters.AddWithValue(queryHash);
+        cmd.Parameters.AddWithValue(finding.DatabaseName ?? "");
 
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         if (await reader.ReadAsync(context.CancellationToken))

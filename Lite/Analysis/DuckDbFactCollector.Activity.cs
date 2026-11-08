@@ -74,6 +74,10 @@ LIMIT 5";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
+            /* #8317: the read ranks (database, hash) pairs, so one hash running in several databases can take
+               more than one of the five rows, and the key carries the hash alone. One fact per hash, for the
+               first row the ranking returns that is worth a fact: the highest-scoring database. */
+            var seenHashes = new HashSet<string>(StringComparer.Ordinal);
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
             {
@@ -90,6 +94,7 @@ LIMIT 5";
 
                 // Skip low-impact queries — need meaningful per-execution cost
                 if (avgCpuMs < 10 && avgReads < 1000) continue;
+                if (!seenHashes.Add(queryHash)) continue;
 
                 found.Add(new Fact
                 {

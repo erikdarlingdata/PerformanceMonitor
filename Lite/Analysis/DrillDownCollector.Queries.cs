@@ -890,7 +890,10 @@ LIMIT 5";
         /* #3648: the same per-plan max_dop provenance as CollectTopCpuQueries — see the essay there. This
            read is one hash, unfiltered by CPU spent, so the newest-plan tie-break (compile time, then CPU
            spent) is what separates a stale parallel plan still sitting in the cache from the serial one
-           doing the work at the same collection_time. Byte-identical to Darling's BadActorDetailSql. */
+           doing the work at the same collection_time. Byte-identical to Darling's BadActorDetailSql.
+           #8317: $5 is the finding's database, so when one hash runs in several databases the row described
+           is the one the fact was scored on. A finding that carries no database sends an empty $5 and gets
+           the database that spent the most CPU on the hash. */
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 WITH windowed AS
@@ -910,6 +913,7 @@ WITH windowed AS
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   query_hash = $4
+    AND   ($5 = '' OR database_name = $5)
 )
 SELECT database_name, query_hash,
        MAX(query_text) AS query_text,
@@ -931,12 +935,15 @@ SELECT database_name, query_hash,
        MAX(max_dop_any_plan) AS max_dop_any_plan,
        MAX(CASE WHEN max_dop = max_dop_any_plan THEN collection_time END) AS max_dop_any_plan_last_seen
 FROM windowed
-GROUP BY database_name, query_hash";
+GROUP BY database_name, query_hash
+ORDER BY total_cpu_us DESC
+LIMIT 1";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryHash });
+        cmd.Parameters.Add(new DuckDBParameter { Value = finding.DatabaseName ?? "" });
 
         cmd.CommandText = plan.Apply(cmd.CommandText);
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
