@@ -33,6 +33,23 @@ public sealed class ExternalAlertStoreLiveTests
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
+    /// <summary>
+    /// Holds the store's claim key as a session lock, so a claim waits for it inside its own transaction until
+    /// <see cref="ClaimGateUnlockSql"/> runs on the same session.
+    /// </summary>
+    private static readonly string ClaimGateLockSql = $"SELECT pg_advisory_lock({ExternalAlertStore.ClaimAdvisoryLockKey})";
+
+    private static readonly string ClaimGateUnlockSql = $"SELECT pg_advisory_unlock({ExternalAlertStore.ClaimAdvisoryLockKey})";
+
+    /// <summary>
+    /// How many sessions of this database are queued on the claim key. A bigint advisory key is listed split across
+    /// <c>classid</c> (its high half) and <c>objid</c> (its low half), with <c>objsubid</c> 1.
+    /// </summary>
+    private static readonly string ClaimGateWaitersSql =
+        "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+        + " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+        + $" AND classid = {ExternalAlertStore.ClaimAdvisoryLockKey >> 32} AND objid = {ExternalAlertStore.ClaimAdvisoryLockKey & 0xFFFFFFFFL} AND objsubid = 1";
+
     [Fact]
     public void TheStatements_AreParameterizedAndSchemaQualified_AndTheClaimIsSkipLockedWithAStatusGuard()
     {
@@ -56,6 +73,12 @@ public sealed class ExternalAlertStoreLiveTests
         Assert.Contains("AND status = 'claimed'", ExternalAlertStore.MarkSql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// What the store promises two claimers is that no row is handed out twice and none is lost: the claim runs under the
+    /// transaction-scoped advisory lock and takes its rows <c>FOR UPDATE SKIP LOCKED</c>. It does not promise each claimer a
+    /// share, since one can empty the queue before the other's connection has opened, so the fact arranges the share itself
+    /// by holding both claimers on the claim lock until both are queued, and only then letting them drain together.
+    /// </summary>
     [Fact]
     public async Task TwoConcurrentClaimers_TakeEveryRowExactlyOnce()
     {
@@ -96,12 +119,26 @@ public sealed class ExternalAlertStoreLiveTests
                 }
             }
 
-            var results = await Task.WhenAll(DrainAsync(a, "host-a:1"), DrainAsync(b, "host-b:2"));
+            /* The test holds the claim key as a session lock while both claimers start, so each one waits for it inside its
+               first claim transaction, with its connection open. The lock opens once the store shows both of them queued on
+               it, and is granted in queue order, so each claimer takes a batch before the other can take the rest. */
+            await ExecAsync(seed, ClaimGateLockSql, ct);
+            var drains = new[] { DrainAsync(a, "host-a:1"), DrainAsync(b, "host-b:2") };
+            try
+            {
+                await WaitUntilAsync(async () => await ScalarAsync(seed, ClaimGateWaitersSql, ct) == "2", "both claimers to wait on the claim lock", ct);
+            }
+            finally
+            {
+                await ExecAsync(seed, ClaimGateUnlockSql, CancellationToken.None);
+            }
+
+            var results = await Task.WhenAll(drains);
             var all = results[0].Concat(results[1]).ToList();
 
             Assert.Equal(Rows, all.Count);
             Assert.Equal(Rows, all.Distinct().Count());
-            Assert.True(results[0].Count > 0 && results[1].Count > 0, "both claimers should have taken part of the queue");
+            Assert.True(results[0].Count > 0 && results[1].Count > 0, "both claimers were waiting on the claim lock when it opened, so each takes at least one batch");
             Assert.Equal(Rows.ToString(CultureInfo.InvariantCulture), await ScalarAsync(seed, "SELECT count(*) FROM config.external_alert_pending WHERE status = 'claimed'", ct));
             Assert.Empty(await a.ClaimAsync("host-a:1", 50, ct));
         });
@@ -132,17 +169,25 @@ public sealed class ExternalAlertStoreLiveTests
 
             Assert.Equal(pendingId, Assert.Single(claimed).PendingId);
 
-            /* The next run reaps with a grace: a claim younger than the grace is a live run's and is left alone. */
+            Assert.Equal("true", await ScalarAsync(seed, $"SELECT (claimed_at IS NOT NULL)::text FROM config.external_alert_pending WHERE pending_id = {pendingId}", ct));
+
+            /* The reap's cutoff comes from the run's clock, and the store stamped the claim from its own, so the fact stamps the
+               claim's instant from the run's clock before each reap: every comparison a reap makes is then on one clock,
+               however far apart the two clocks sit. */
             await using var secondRun = NpgsqlDataSource.Create(connectionString);
             var store = new ExternalAlertStore(secondRun, Deadline);
+
+            /* The next run reaps with a grace: a claim younger than the grace is a live run's and is left alone. */
+            await StampClaimAsync(seed, pendingId, DateTime.UtcNow, ct);
             Assert.Equal(0, await store.ReapAsync(TimeSpan.FromMinutes(5), ct));
             Assert.Equal("claimed", await ScalarAsync(seed, $"SELECT status FROM config.external_alert_pending WHERE pending_id = {pendingId}", ct));
 
             /* Past the grace it is interrupted, finished, and never claimed again. */
-            Assert.Equal(1, await store.ReapAsync(TimeSpan.Zero, ct));
+            await StampClaimAsync(seed, pendingId, DateTime.UtcNow.AddHours(-1), ct);
+            Assert.Equal(1, await store.ReapAsync(TimeSpan.FromMinutes(5), ct));
             Assert.Equal("interrupted", await ScalarAsync(seed, $"SELECT status FROM config.external_alert_pending WHERE pending_id = {pendingId}", ct));
             Assert.Equal("true", await ScalarAsync(seed, $"SELECT (completed_at IS NOT NULL)::text FROM config.external_alert_pending WHERE pending_id = {pendingId}", ct));
-            Assert.Equal(0, await store.ReapAsync(TimeSpan.Zero, ct));
+            Assert.Equal(0, await store.ReapAsync(TimeSpan.FromMinutes(5), ct));
 
             var next = await store.ClaimAsync("host:200", 50, ct);
             Assert.Equal(freshId, Assert.Single(next).PendingId);
@@ -443,6 +488,28 @@ public sealed class ExternalAlertStoreLiveTests
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>
+    /// Returns once <paramref name="condition"/> holds, asking the store again every 50 ms. The wait is on the store's
+    /// observed state, not on elapsed time; the class deadline bounds it only so a state that never arrives fails the fact,
+    /// naming <paramref name="what"/>, instead of hanging the run.
+    /// </summary>
+    private static async Task WaitUntilAsync(Func<Task<bool>> condition, string what, CancellationToken ct)
+    {
+        using var bound = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bound.CancelAfter(TimeSpan.FromSeconds(Deadline));
+        while (!await condition())
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(50), bound.Token);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                Assert.Fail($"waited {Deadline} s for {what}");
+            }
+        }
+    }
+
     private static async Task<int> AddSourceAsync(NpgsqlConnection connection, string name, CancellationToken ct) =>
         Convert.ToInt32(
             await ScalarAsync(connection,
@@ -468,6 +535,21 @@ public sealed class ExternalAlertStoreLiveTests
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = status });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = submittedDaysAgo });
         return Convert.ToInt64(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Sets a claim's instant from the run's clock, the clock <see cref="ExternalAlertStore.ReapAsync"/> takes its cutoff
+    /// from, so a reap that follows compares two instants from one clock.
+    /// </summary>
+    private static async Task StampClaimAsync(NpgsqlConnection connection, long pendingId, DateTime claimedAtUtc, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("UPDATE config.external_alert_pending SET claimed_at = $1 WHERE pending_id = $2", connection)
+        {
+            CommandTimeout = Deadline,
+        };
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(claimedAtUtc, DateTimeKind.Utc) });
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = pendingId });
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task<string?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)

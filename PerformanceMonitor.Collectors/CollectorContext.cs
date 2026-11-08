@@ -105,6 +105,19 @@ public sealed class CollectorContext
     public string? CurrentDatabaseName { get; set; }
 
     /// <summary>
+    /// The ring-buffer <c>max_events_limit</c> the host's setting asks for (#8146). The loss note flags a session whose
+    /// own limit is below it, because a session keeps the limit it was created with. The host sets it from its
+    /// <c>xeRingBufferMaxEvents</c> / <c>xe_ring_buffer_max_events</c> setting; unset is <see cref="RingBufferTarget.DefaultMaxEvents"/>.
+    /// </summary>
+    public long RingBufferMaxEvents { get; init; } = RingBufferTarget.DefaultMaxEvents;
+
+    /// <summary>
+    /// True when this server's registration is an Azure SQL Database logical server, where the deadlock session is
+    /// per-database and loss accounting does not apply (#8146).
+    /// </summary>
+    public bool AzureRegistrationIsLogicalServer { get; init; }
+
+    /// <summary>
     /// Extension name to the schema it was created in, read from <c>pg_catalog.pg_extension</c> on the connection
     /// that is about to run the query (#6143). Null until the host has read it; the per-database path reads it again
     /// for each database, because an extension is created per database.
@@ -279,8 +292,35 @@ public sealed class CollectorContext
     /// </summary>
     public Dictionary<string, string> StagedItemState { get; } = new(StringComparer.Ordinal);
 
-    /// <summary>Moves everything staged for the current item into <see cref="PendingState"/>. Host-only: call
-    /// it once the item's read and write have both succeeded.</summary>
+    /// <summary>
+    /// #8146: measurements a definition records for the ITEM it is reading right now, held with
+    /// <see cref="StagedItemState"/> and under the same rule: they reach <see cref="Measurements"/> only when the
+    /// host lands the item, and are discarded when it drops it. For a count that describes the same span as a
+    /// staged position (the ring-buffer loss since the staged prior): a database whose write fails keeps its
+    /// prior, so the next run counts those events again, and they must not also stay on this run's note.
+    /// Every other measurement goes through <see cref="Measure"/> as before.
+    /// </summary>
+    public StagedMeasurements StagedItemMeasurements { get; } = new();
+
+    /// <summary>
+    /// #8146: the long-query definition's request to recreate this install's own session for the ITEM it is reading
+    /// (<see cref="LongQuerySessionRecreate.StageWhenBelowSetting"/>), held under the same rule as <see cref="StagedItemState"/>:
+    /// it reaches <see cref="SessionRecreates"/> only when the host lands the item, so the session is never dropped before
+    /// the events it held were written.
+    /// </summary>
+    public LongQuerySessionRecreateRequest? StagedItemSessionRecreate { get; set; }
+
+    private readonly List<LongQuerySessionRecreateRequest> _sessionRecreates = new();
+
+    /// <summary>
+    /// #8146: the recreate requests of the items this run landed. The host acts on them after the run's rows and state are
+    /// stored, and never fails the run over them.
+    /// </summary>
+    public IReadOnlyList<LongQuerySessionRecreateRequest> SessionRecreates => _sessionRecreates;
+
+    /// <summary>Moves everything staged for the current item into <see cref="PendingState"/>,
+    /// <see cref="Measurements"/> and <see cref="SessionRecreates"/>. Host-only: call it once the item's read and write have
+    /// both succeeded.</summary>
     public void LandStagedItemState()
     {
         foreach (var (key, value) in StagedItemState)
@@ -289,11 +329,38 @@ public sealed class CollectorContext
         }
 
         StagedItemState.Clear();
+
+        if (StagedItemSessionRecreate is { } recreate)
+        {
+            _sessionRecreates.Add(recreate);
+            StagedItemSessionRecreate = null;
+        }
+
+        /* #8146: unqualified on purpose: the labels were checked when they were staged, and the measurement-label sweep
+           (CollectorMeasurementSeamTests) reads `.Measure(` call sites as const labels, which these are not. */
+        foreach (var staged in StagedItemMeasurements.Entries)
+        {
+            if (staged.KeepLargest)
+            {
+                MeasureMax(staged.Label, staged.Value);
+            }
+            else
+            {
+                Measure(staged.Label, staged.Value);
+            }
+        }
+
+        StagedItemMeasurements.Clear();
     }
 
     /// <summary>Discards everything staged for the current item. Host-only: call it before an item's read,
     /// and whenever the item's read or write did not complete.</summary>
-    public void DropStagedItemState() => StagedItemState.Clear();
+    public void DropStagedItemState()
+    {
+        StagedItemState.Clear();
+        StagedItemMeasurements.Clear();
+        StagedItemSessionRecreate = null;
+    }
 
     /// <summary>
     /// The labelled COUNTS this definition measured on the target during the round trip it had already
@@ -347,6 +414,45 @@ public sealed class CollectorContext
     /// <exception cref="ArgumentException">The label is not a legal count name.</exception>
     public void Measure(string label, long value)
     {
+        ValidateMeasurementLabel(label);
+
+        for (var i = 0; i < _measurements.Count; i++)
+        {
+            if (string.Equals(_measurements[i].Label, label, StringComparison.Ordinal))
+            {
+                _measurements[i] = new CollectorMeasurement(label, _measurements[i].Value + value);
+                return;
+            }
+        }
+
+        _measurements.Add(new CollectorMeasurement(label, value));
+    }
+
+    /// <summary>
+    /// Records <paramref name="value"/> under <paramref name="label"/>, keeping the LARGER of it and any value already
+    /// recorded. For a figure that is a span or a level rather than a count (#8146: the loss window and the event limit
+    /// across the databases of one run), where <see cref="Measure"/>'s sum would report a span nobody waited. Same label
+    /// rules as <see cref="Measure"/>.
+    /// </summary>
+    /// <exception cref="ArgumentException">The label is not a legal count name.</exception>
+    public void MeasureMax(string label, long value)
+    {
+        ValidateMeasurementLabel(label);
+
+        for (var i = 0; i < _measurements.Count; i++)
+        {
+            if (string.Equals(_measurements[i].Label, label, StringComparison.Ordinal))
+            {
+                _measurements[i] = new CollectorMeasurement(label, Math.Max(_measurements[i].Value, value));
+                return;
+            }
+        }
+
+        _measurements.Add(new CollectorMeasurement(label, value));
+    }
+
+    internal static void ValidateMeasurementLabel(string label)
+    {
         if (!CollectorMeasurementNote.IsValidLabel(label))
         {
             throw new ArgumentException(
@@ -365,17 +471,6 @@ public sealed class CollectorContext
                 + "counter, is not readable by anything.",
                 nameof(label));
         }
-
-        for (var i = 0; i < _measurements.Count; i++)
-        {
-            if (string.Equals(_measurements[i].Label, label, StringComparison.Ordinal))
-            {
-                _measurements[i] = new CollectorMeasurement(label, _measurements[i].Value + value);
-                return;
-            }
-        }
-
-        _measurements.Add(new CollectorMeasurement(label, value));
     }
 
     /// <summary>Values the statement filter withheld this cycle because they were named or their match timed out

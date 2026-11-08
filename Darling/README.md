@@ -39,7 +39,7 @@ Nothing is installed on the monitored SQL Servers by either edition beyond three
 The install reference that was here moved to these pages:
 
 - [Install Darling](../docs/darling/install.md#install-reference): prerequisites, `darling.json`, the pre-flight, the Windows service, the install location, the service account, building from source and the CET error.
-- [The Darling quick start](../docs/darling-quick-start.md#run-on-linux-docker-compose-or-systemd): Docker Compose and systemd on Linux.
+- [The Darling quick start](../docs/darling-quick-start.md#run-on-linux-docker-compose-or-systemd): Docker Compose and systemd on Linux. The container runs as user 1654; see [Container user](../docs/darling/security.md#container-user) before upgrading an install that ran as root.
 - [Running Darling day to day](../docs/darling/admin.md#upgrading-an-existing-install): upgrade and roll back.
 - [Darling and your monitored servers](../docs/darling/monitored-servers.md): what the service does on each server, its Extended Events sessions and the permissions it needs.
 

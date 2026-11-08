@@ -251,6 +251,22 @@ public sealed class DarlingConfig
     public int ProcedureStatsPlanCycleInterval { get; set; } = 4;
 
     /// <summary>
+    /// #8146: the <c>max_events_limit</c> every deadlock, blocked-process and long-query session is created with. The
+    /// engine's own default is 1000, and a session over it silently evicts its oldest events; a larger limit holds more
+    /// between collections, at the cost of a larger ring buffer in the server's memory (<c>max_memory</c> stays 4096 KB,
+    /// which may cap it first). Unset is 1000; the range is 1000 to 10000 and a value outside it is clamped at load, with a
+    /// log line. A session keeps the limit it was created with, so a changed value applies to sessions created afterwards,
+    /// and the loss note says when a live session's limit is below it.
+    ///
+    /// <para>A long, not an int, so any JSON whole number binds and one too large for an int still clamps to the nearest
+    /// bound, as Lite's <c>xe_ring_buffer_max_events</c> does (#8146).</para>
+    ///
+    /// <para>A file-only knob like <see cref="ProcedureStatsPlanCycleInterval"/>: an edit takes effect on the next restart.</para>
+    /// </summary>
+    [JsonPropertyName("xeRingBufferMaxEvents")]
+    public long? XeRingBufferMaxEvents { get; set; }
+
+    /// <summary>
     /// #5158: whether <c>query_stats</c> fetches plan XML only for statement plans this host has not already
     /// committed. On (the default), the main query carries no plan and a second target query renders just the
     /// plans the host has not stored; rows for plans it has stored carry the existing digest, so every reader
