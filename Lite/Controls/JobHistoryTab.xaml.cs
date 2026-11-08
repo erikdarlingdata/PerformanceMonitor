@@ -265,6 +265,7 @@ public partial class JobHistoryTab : UserControl
                applied in the read, ahead of the row cap (#5703), so a full page of matching runs names its oldest run and the cap label
                counts the same rows. A probe that fails costs the note and never the grid. */
             await ShowDataStartNoteAsync(serverId, readClocks, startUtc, rangeEndUtc ?? nowUtc, all, gen);
+            await RefreshPickerDataStartAsync(serverId, gen);
             await choicesApplied;
         }
         catch (Exception ex)
@@ -303,8 +304,34 @@ public partial class JobHistoryTab : UserControl
             JobHistoryWindowTruncatedBanner,
             () => System.Threading.Tasks.Task.Run(() => service.GetJobHistoryDataStartAsync(serverId, startUtc, endUtc)),
             startUtc, endUtc, read, zone, zoneWord: serverId is null ? MultiServerTime.MixedZoneWord(mode) : null,
-            superseded: () => _loads.Superseded(nameof(LoadJobsAsync), gen),
-            onFloor: floor => RangePicker.DataStartUtc = LiteTimeRange.DataStartFor(floor, DateTime.UtcNow));
+            superseded: () => _loads.Superseded(nameof(LoadJobsAsync), gen));
+    }
+
+    /// <summary>
+    /// Points the picker's "Data starts" note at the oldest job history the store holds for the scope on screen (the picked server's
+    /// own, or the fleet's at All Servers, <see cref="LocalDataService.GetOldestJobHistoryAsync"/>), else the archive's static
+    /// retention edge. The note previews whatever range a reader types, so it cannot take the "Showing since" probe's floor: a
+    /// probe reads the oldest row INSIDE the window it was asked about, which for a covered window is the window's own start, not
+    /// where the data starts. The read is cached per scope, so a refresh costs nothing until the archive changes. A read that
+    /// fails leaves the retention edge; a load a newer one has superseded writes nothing.
+    /// </summary>
+    private async System.Threading.Tasks.Task RefreshPickerDataStartAsync(int? serverId, int gen)
+    {
+        if (_dataService == null) return;
+        var service = _dataService;
+
+        DateTime? oldest = null;
+        try
+        {
+            oldest = await System.Threading.Tasks.Task.Run(() => service.GetOldestJobHistoryAsync(serverId));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Debug("JobHistory", $"The oldest job history read failed, the picker's note names the retention edge: {ex.Message}");
+        }
+
+        if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+        RangePicker.DataStartUtc = LiteTimeRange.DataStartFor(oldest, DateTime.UtcNow);
     }
 
     /// <summary>
@@ -331,8 +358,7 @@ public partial class JobHistoryTab : UserControl
     /// <param name="superseded">True when a newer load has started: checked after the probe answers and before the banner is written.</param>
     internal static System.Threading.Tasks.Task ShowJobHistoryDataStartAsync(
         TextBlock banner, Func<System.Threading.Tasks.Task<DateTime?>> probe, DateTime startUtc, DateTime endUtc,
-        IReadOnlyCollection<JobHistoryRow> read, TimeZoneInfo zone, string? zoneWord, Func<bool>? superseded = null,
-        Action<DateTime?>? onFloor = null)
+        IReadOnlyCollection<JobHistoryRow> read, TimeZoneInfo zone, string? zoneWord, Func<bool>? superseded = null)
     {
         var runTimes = read.Where(r => r.RunDateTimeUtc.HasValue).Select(r => r.RunDateTimeUtc!.Value).ToList();
 
@@ -356,7 +382,6 @@ public partial class JobHistoryTab : UserControl
                 if (superseded?.Invoke() == true) return;
 
                 ServerTab.ApplyWindowFloorToBanner(banner, ServerTab.EarlierOfFloorAndRowShown(floor, ServerTab.EarliestRowShown(runTimes, t => t)), startUtc, zone);
-                onFloor?.Invoke(floor); /* #5562 R7: the picker's data-start note takes the floor this probe found */
                 Word();
             });
     }
