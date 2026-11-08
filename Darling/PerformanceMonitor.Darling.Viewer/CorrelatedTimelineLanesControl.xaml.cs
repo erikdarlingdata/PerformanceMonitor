@@ -796,9 +796,20 @@ public partial class CorrelatedTimelineLanesControl : UserControl
        size limit with it. The lane label is a caption over the lane, so no top axis sits above the plot, and a lane that shows no
        X labels keeps no room for them (ScottPlot reserves the label height even when the labels are hidden, which left a band
        under every lane). The last lane keeps the room its labels need. */
+    /// <summary>The blank strip above a lane's plot: room for the top tick label's upper half.</summary>
+    private const float LaneTopRoom = 8f;
+
     private void ReapplyAxisColors(ScottPlot.WPF.WpfPlot chart)
     {
-        chart.Plot.Axes.Top.IsVisible = false;
+        /* #8307: the top axis stays as a blank strip, so the left axis's top tick label, centered on the plot's top edge, has room
+           above the plot and is not cut by the lane's edge. */
+        var top = chart.Plot.Axes.Top;
+        top.IsVisible = true;
+        top.TickLabelStyle.IsVisible = false;
+        top.MajorTickStyle.Length = 0;
+        top.MinorTickStyle.Length = 0;
+        top.FrameLineStyle.IsVisible = false;
+        top.MinimumSize = LaneTopRoom;
         chart.Plot.Axes.Bottom.MaximumSize = chart == FileIoChart ? float.PositiveInfinity : LaneTickRoom;
         var text = ChartStyle.GetThemeColors().Text;
         chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = text;
