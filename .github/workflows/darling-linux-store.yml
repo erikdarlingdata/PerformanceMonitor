@@ -39,7 +39,6 @@ on:
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingServiceKeyFile.cs'
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingFileSecurity.cs'
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingOwnedSecrets.cs'
-      - 'Darling/PerformanceMonitor.Darling.Service/DarlingManagedRoles.cs'
       - 'Darling/PerformanceMonitor.Darling.Storage/PasswordSeal.cs'
       - 'Darling/PerformanceMonitor.Darling.Storage/PasswordBinding.cs'
       - 'Darling/PerformanceMonitor.Darling.Storage/ServerConnectionIdentity.cs'
@@ -49,7 +48,6 @@ on:
       - 'Darling/PerformanceMonitor.Darling.Storage/RollupBackfill.cs'
       - '.github/scripts/darling-nonroot-legs.sh'
       - 'Darling/compose/setup.sh'
-      - 'Darling/PerformanceMonitor.Darling.Service/DarlingManagedRoles.cs'
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingServiceKeyFile.cs'
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingWorker.Bootstrap.cs'
 
