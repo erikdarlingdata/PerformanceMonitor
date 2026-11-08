@@ -100,18 +100,6 @@ internal sealed class DarlingHealthHostService : IHostedService, IAsyncDisposabl
                 return;
             }
 
-            if (!IPAddress.IsLoopback(address))
-            {
-                /* #8184: no token and no allowFrom, so say why this listener is wide. An empty listen resolves wide only through the
-                   container default, and a host install whose service environment carries the variable gets it too. */
-                _logger.LogWarning(
-                    "Health port binds {Address}, not loopback, because {Reason}; it has no token and no allowFrom, so every host that can reach this address can read it (#8184)",
-                    address,
-                    string.IsNullOrWhiteSpace(health.Listen)
-                        ? "listen is empty and DOTNET_RUNNING_IN_CONTAINER is true"
-                        : "health.listen is " + health.Listen.Trim());
-            }
-
             port = health.Port;
             var isFrontDoor = file.FrontDoor?.Enabled ?? false;
 
@@ -136,6 +124,18 @@ internal sealed class DarlingHealthHostService : IHostedService, IAsyncDisposabl
             _app = app;
             IsListening = true;
             _logger.LogInformation("Health port listening on {Urls} (/livez, /readyz; no token, no allowFrom) (#8184)", string.Join(", ", app.Urls));
+
+            if (!IPAddress.IsLoopback(address))
+            {
+                /* #8184: after the bind, so the log never says bound and then fails. No token and no allowFrom, so say why this listener is wide. An empty listen resolves wide only through the
+                   container default, and a host install whose service environment carries the variable gets it too. */
+                _logger.LogWarning(
+                    "Health port is bound to {Address}, not loopback, because {Reason}; it has no token and no allowFrom, so every host that can reach this address can read it (#8184)",
+                    address,
+                    string.IsNullOrWhiteSpace(health.Listen)
+                        ? "listen is empty and DOTNET_RUNNING_IN_CONTAINER is true"
+                        : "health.listen is " + health.Listen.Trim());
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

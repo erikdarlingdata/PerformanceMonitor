@@ -449,10 +449,10 @@ public sealed class DarlingHealthHostTests
         await host.StopAsync(TestContext.Current.CancellationToken);
     }
 
-    /// <summary>#8184 review 1, item 2: a real response carries no Server header, and the listener speaks HTTP/1 only (an HTTP/2
-    /// prior-knowledge request is refused).</summary>
+    /// <summary>#8184 review 1, item 2: a real response carries no Server header. HTTP/1-only is set in code on the Listen call; no test
+    /// can observe it on a cleartext port, where Kestrel's default already serves HTTP/1 only.</summary>
     [Fact]
-    public async Task RealResponse_HasNoServerHeader_AndHttp2IsRefused()
+    public async Task RealResponse_HasNoServerHeader()
     {
         var ct = TestContext.Current.CancellationToken;
         var port = FreePort();
@@ -464,15 +464,7 @@ public sealed class DarlingHealthHostTests
         using var client = new HttpClient();
         using var live = await client.GetAsync($"http://127.0.0.1:{port}/livez", ct);
         Assert.Equal(HttpStatusCode.OK, live.StatusCode);
-        Assert.Equal(new Version(1, 1), live.Version);
         Assert.False(live.Headers.Contains("Server"));
-
-        using var h2 = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:{port}/livez")
-        {
-            Version = HttpVersion.Version20,
-            VersionPolicy = HttpVersionPolicy.RequestVersionExact,
-        };
-        await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.SendAsync(h2, ct));
         await host.StopAsync(ct);
     }
 
@@ -505,6 +497,7 @@ public sealed class DarlingHealthHostTests
     [InlineData("::")]
     public async Task WideListen_WarnsNamingHealthListen(string listen)
     {
+        Assert.SkipWhen(listen.Contains(':') && !Socket.OSSupportsIPv6, "This machine has no IPv6.");
         var logger = new CapturingLogger();
         await using var host = await StartWithAsync(logger, listen, inContainer: false);
 
@@ -515,6 +508,31 @@ public sealed class DarlingHealthHostTests
         Assert.Single(logger.Lines, l => l.Level == LogLevel.Information);
     }
 
+    /// <summary>The wide-listen Warning follows a successful bind: a wide address whose bind fails logs the Error and no Warning.</summary>
+    [Fact]
+    public async Task WideListen_WhoseBindFails_LogsNoWarning()
+    {
+        var taken = new TcpListener(IPAddress.Any, 0);
+        taken.Start();
+        try
+        {
+            var port = ((IPEndPoint)taken.LocalEndpoint).Port;
+            var logger = new CapturingLogger();
+            await using var host = new DarlingHealthHostService(
+                new CollectorRuntimeState(), new EmptyDirectory(), logger, () => EnabledOn(port, "0.0.0.0"));
+
+            await host.StartAsync(TestContext.Current.CancellationToken);
+
+            Assert.False(host.IsListening);
+            Assert.Single(logger.Lines, l => l.Level == LogLevel.Error);
+            Assert.DoesNotContain(logger.Lines, l => l.Level == LogLevel.Warning);
+        }
+        finally
+        {
+            taken.Stop();
+        }
+    }
+
     [Theory]
     [InlineData("", false)]
     [InlineData("127.0.0.1", false)]
@@ -522,6 +540,7 @@ public sealed class DarlingHealthHostTests
     [InlineData("::1", false)]
     public async Task LoopbackListen_GivesNoWarning(string listen, bool inContainer)
     {
+        Assert.SkipWhen(listen.Contains(':') && !Socket.OSSupportsIPv6, "This machine has no IPv6.");
         var logger = new CapturingLogger();
         await using var host = await StartWithAsync(logger, listen, inContainer);
 
