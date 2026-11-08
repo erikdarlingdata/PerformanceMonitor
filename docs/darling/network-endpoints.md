@@ -309,7 +309,7 @@ The health port is for Kubernetes and other orchestrators ([#8184](https://githu
 "health": { "enabled": true }
 ```
 
-With `listen` empty, the port binds `0.0.0.0` inside a container and `127.0.0.1` everywhere else. The port serves two routes, one word each:
+With `listen` empty, the port binds `0.0.0.0` inside a container and `127.0.0.1` everywhere else. `0.0.0.0` is IPv4 only: on an IPv6 single-stack cluster, set `listen` to `::`. The port serves two routes, one word each:
 
 | Route | HTTP | Body | When |
 |---|---|---|---|
@@ -321,7 +321,7 @@ With `listen` empty, the port binds `0.0.0.0` inside a container and `127.0.0.1`
 
 The body is `text/plain; charset=utf-8` and holds only that word. The words are the `status` values of [`/api/ping`](web-dashboard.md). A front door (see [The front door](front-door.md)) runs no collector, so its `/readyz` answers what its `/api/ping` answers: 503 `stopped` when its own `darling.json` was refused, 503 `degraded` when every store is unusable, and 200 `ok` otherwise. Its `/livez` is still 200.
 
-Any other path gets a 404 with an empty body. Any method other than GET on the two routes gets a 405 with an empty body.
+The routes are matched the way ASP.NET Core routing matches every route: case-insensitively, with a trailing slash ignored and after percent-decoding, so `/LIVEZ`, `/livez/` and `/%6civez` answer the same as `/livez`. Any other path gets a 404 with an empty body. Any method other than GET on the two routes gets a 405 with an empty body.
 
 ### What the port never returns
 
@@ -337,13 +337,16 @@ The listener starts before the worker, so before the store migrations and before
 
 ### What the port cannot cover
 
-Three cases leave the port off. In each, the service logs one Error line and keeps running:
+The listener reads only its own `health` block, `frontDoor.enabled`, `web.port` and `mcp.port`, and resolves no `env:` or `file:` reference. So a configuration with problems, or a store connection string whose secret cannot be resolved, still opens the port, and `/readyz` answers what the service is doing about it (`degraded` while it retries, `stopped` once it gives up).
 
-- **A `darling.json` that cannot be loaded.** The health listener reads its own block, so it cannot know the block when the file is unparsable, empty, unreadable or access-denied.
-- **A bind failure.** The port is taken by another process, or `health.listen` is an IP address that is not on this machine.
-- **A `health.listen` that is not an IP address.** `Validate()` reports it as a configuration problem, and the listener does not start. So a stopped service with a bad `health.listen` answers nothing on the port.
+One case is left: **a `darling.json` that cannot be read or parsed at all** (missing, empty, unreadable, access-denied or not valid JSON). The listener cannot know its own block, so the port stays off and the service logs one Error line that says why. The listener does not retry, so the port stays off for the life of that process. Restart the service after you fix the file.
 
-If an I/O error stops the file from loading, the listener does not retry, so the port stays off for the life of that process. Restart the service after you fix the file.
+### When the port does not open
+
+Two more cases leave the port off. In both, collection keeps running:
+
+- **A bad `health` block.** A port outside 1 to 65535, a port equal to `web.port` or `mcp.port`, or a `listen` that is not an IP address. The service logs one Critical line that names the setting. It is not a configuration problem, so it never stops collection.
+- **A bind failure.** The port is taken by another process, or `health.listen` is an IP address that is not on this machine. The service logs one Error line that names the address and port.
 
 ### Kubernetes probes
 

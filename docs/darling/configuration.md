@@ -239,10 +239,10 @@ On any of them, a login that is not a superuser cannot end a superuser's session
 | Key | Default | Notes |
 |---|---|---|
 | `health.enabled` | `false` | Turns on the health port ([#8184](https://github.com/erikdarlingdata/PerformanceMonitor/issues/8184)), for Kubernetes liveness and readiness probes. |
-| `health.port` | `5154` | The port. It must be 1 to 65535 and different from `web.port` and `mcp.port`, whether or not those are enabled; the service reports a clash as a configuration problem instead of failing at bind time. |
-| `health.listen` | *(empty)* | The address to bind. Empty means `0.0.0.0` inside a container and `127.0.0.1` outside one. A value that is not an IP address is a configuration problem. |
+| `health.port` | `5154` | The port. It must be 1 to 65535 and different from `web.port` and `mcp.port`, whether or not those are enabled. The check compares against the `web.port` and `mcp.port` written in `darling.json` (or their defaults when the file omits them), not a port set later from the Viewer or the web dashboard. |
+| `health.listen` | *(empty)* | The address to bind. Empty means `0.0.0.0` inside a container and `127.0.0.1` outside one. It must be an IP address. |
 
-The port has no token, no `allowFrom` and no TLS, and serves only `/livez` and `/readyz`, each answering one word. See [The health port](network-endpoints.md#the-health-port). Nothing is checked while `health.enabled` is `false`. A file-only block: the control plane never writes it, and a change needs a restart.
+The port has no token, no `allowFrom` and no TLS, and serves only `/livez` and `/readyz`, each answering one word. See [The health port](network-endpoints.md#the-health-port). Nothing is checked while `health.enabled` is `false`. A bad value is not a configuration problem: it turns off the health port only. The service logs one Critical line that names the setting, does not open the port, and keeps collecting. A file-only block: the control plane never writes it, and a change needs a restart.
 
 ## peers
 
