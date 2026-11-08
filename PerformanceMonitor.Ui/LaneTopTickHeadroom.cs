@@ -90,11 +90,15 @@ internal static class LaneTopTickHeadroom
         }
     }
 
-    /// <summary>The pixels <paramref name="label"/> needs above its tick on the plot's left axis: half the height ScottPlot lays it out at, at the plot's scale, plus <see cref="Margin"/>.</summary>
+    /// <summary>
+    /// The pixels <paramref name="label"/> needs above its tick on the plot's left axis: half the height ScottPlot lays it out at,
+    /// plus <see cref="Margin"/>. ScottPlot lays the plot out in figure pixels divided by the plot's scale factor and measures a
+    /// label at its unscaled font size, so this and the gap read from the data rectangle are in the same units at any scale.
+    /// </summary>
     internal static double NeededPixels(ScottPlot.Plot plot, string label)
     {
         using var paint = ScottPlot.Paint.NewDisposablePaint();
-        return plot.Axes.Left.TickLabelStyle.Measure(label, paint).Height / 2.0 * plot.ScaleFactor + Margin;
+        return plot.Axes.Left.TickLabelStyle.Measure(label, paint).Height / 2.0 + Margin;
     }
 
     /// <summary>
