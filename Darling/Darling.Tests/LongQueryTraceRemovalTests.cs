@@ -444,7 +444,10 @@ public sealed class LongQueryTraceRemovalTests : IAsyncDisposable
 
     private static readonly string OwnSchemaSession = SchemaChangesXeSession.NameFor(InstallIdValue);
 
-    /// <summary>The removal with the <c>schema_objects</c> collector on for the given ids; returns the databases the schema drop ran in (empty name: the server's own scope).</summary>
+    /// <summary>
+    /// The removal with the <c>schema_objects</c> collector on for the given ids, the removed server's own id standing for the store's record
+    /// of its session; returns the databases the schema drop ran in (empty name: the server's own scope).
+    /// </summary>
     private static async Task<List<string>> RemoveWithSchemaAsync(
         Rig rig, IEnumerable<int> schemaOn, LongQueryTraceInstanceGuard? schemaGuard = null, bool traceOnForOthers = false)
     {
@@ -457,7 +460,7 @@ public sealed class LongQueryTraceRemovalTests : IAsyncDisposable
         };
         var on = new HashSet<int>(schemaOn);
         await DarlingRemovedServerSessions.DropAsync(
-            rig.Removed, rig.Runner, rig.Remaining, id => traceOnForOthers && rig.TraceOn.Contains(id), _ => Task.FromResult(rig.Guard), rig.Logger, CancellationToken.None,
+            rig.Removed with { SchemaSessionRecorded = on.Contains(rig.Config.ServerId) }, rig.Runner, rig.Remaining, id => traceOnForOthers && rig.TraceOn.Contains(id), _ => Task.FromResult(rig.Guard), rig.Logger, CancellationToken.None,
             on.Contains, _ => Task.FromResult(schemaGuard ?? LongQueryTraceInstanceGuard.NoKeepers));
         return dropped;
     }
@@ -546,15 +549,16 @@ public sealed class LongQueryTraceRemovalTests : IAsyncDisposable
         Assert.Empty(dropped);
     }
 
-    /// <summary>A removed server with the long-query trace off and the schema collector on is captured for the schema drop; with both off it is still skipped.</summary>
+    /// <summary>A removed server with the long-query trace off is captured for the schema drop when the store records its schema session; with neither it is still skipped.</summary>
     [Fact]
-    public void Capture_TakesAServerWhoseTraceIsOff_WhenItsSchemaCollectorIsOn_AndSkipsOneWithBothOff()
+    public void Capture_TakesAServerWhoseTraceIsOff_WhenTheStoreRecordsItsSchemaSession_AndSkipsOneWithNeither()
     {
         var rig = BuildRig();
 
         var removed = Assert.Single(DarlingRemovedServerSessions.Capture(
             new[] { StateOf(rig, applied: false) }, Array.Empty<MonitoredServer>(), rig.Runner, id => id == rig.Config.ServerId));
         Assert.False(removed.LongQueryTraceApplied);
+        Assert.True(removed.SchemaSessionRecorded);
 
         Assert.Empty(DarlingRemovedServerSessions.Capture(
             new[] { StateOf(rig, applied: false) }, Array.Empty<MonitoredServer>(), rig.Runner, _ => false));

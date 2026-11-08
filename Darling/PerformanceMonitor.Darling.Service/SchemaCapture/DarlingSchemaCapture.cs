@@ -104,7 +104,7 @@ public static class DarlingSchemaCapture
 
             using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             budget.CancelAfter(DarlingRemovedServerSessions.Timeout);
-            var removed = new RemovedLongQueryServer(server.Config, server, null);
+            var removed = new RemovedLongQueryServer(server.Config, server, null, SchemaSessionRecorded: true);
             var dropped = await DarlingRemovedServerSessions.DropSchemaSessionAsync(
                 removed, runner, others, id => id == server.ServerId || schemaOn(id), instanceGuard, logger, budget.Token);
             if (dropped)

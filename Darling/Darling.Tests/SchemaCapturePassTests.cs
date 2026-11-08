@@ -491,6 +491,57 @@ public sealed class SchemaCapturePassTests
         });
     }
 
+    /// <summary>
+    /// The collector was on for this one server only, and the server is removed after a pass. The removal transaction deletes the server's
+    /// own schedule overrides, so its collector reads as off by the time the reload looks; the session is dropped all the same.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Pass_ServerRemovedAfterAPass_DropsTheSession_ThoughItsOverridesAreGone(bool azure)
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            Seed(rig.Source);
+            var server = rig.Server(azure: azure);
+            if (azure)
+            {
+                rig.Runner.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { Sales });
+                rig.Runner.LongQueryTraceListOverrideForTests = (_, _, _, _) => Task.FromResult(new List<string> { "master", Sales });
+            }
+
+            var drops = new List<string>();
+            rig.Runner.SchemaSessionDropForTests = (_, database, _, _) =>
+            {
+                drops.Add(database);
+                return Task.CompletedTask;
+            };
+            await rig.PassAsync(server, ct);
+
+            /* What the reload does: the server is gone from the registry, its trace was never on, and no override turns the collector on. */
+            var states = new List<DarlingWorker.ServerLoopState> { new() { Config = server.Config, Runtime = server, LongQueryTraceApplied = false } };
+            Func<int, bool> overridesGone = _ => false;
+            var recorded = await DarlingRemovedServerSessions.RecordedSchemaSessionsAsync(
+                rig.Runner, states, Array.Empty<MonitoredServer>(), NullLogger.Instance, ct);
+            var removed = DarlingRemovedServerSessions.Capture(states, Array.Empty<MonitoredServer>(), rig.Runner, recorded);
+            foreach (var each in removed)
+            {
+                await DarlingRemovedServerSessions.DropAsync(
+                    each, rig.Runner, Array.Empty<MonitoredServer>(), overridesGone, _ => Task.FromResult(LongQueryTraceInstanceGuard.NoKeepers),
+                    NullLogger.Instance, ct, overridesGone, _ => Task.FromResult(LongQueryTraceInstanceGuard.NoKeepers));
+            }
+
+            Assert.Equal(azure ? [Sales] : [string.Empty], drops);
+
+            /* A server the store shows no session for is not captured for it. */
+            var other = rig.Server(host: "schemapass-other");
+            var otherStates = new List<DarlingWorker.ServerLoopState> { new() { Config = other.Config, Runtime = other, LongQueryTraceApplied = false } };
+            var none = await DarlingRemovedServerSessions.RecordedSchemaSessionsAsync(
+                rig.Runner, otherStates, Array.Empty<MonitoredServer>(), NullLogger.Instance, ct);
+            Assert.Empty(DarlingRemovedServerSessions.Capture(otherStates, Array.Empty<MonitoredServer>(), rig.Runner, none));
+        });
+    }
+
     [Fact]
     public async Task Pass_DisabledCollector_FailedDropIsRetriedOnTheNextSweep()
     {

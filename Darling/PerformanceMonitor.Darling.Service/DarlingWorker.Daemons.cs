@@ -1373,12 +1373,14 @@ public sealed partial class DarlingWorker
         /* Structural reconcile mutates the server list; the command loop reads it concurrently, so hold
            the lock across the add/remove. NextDue recompute mutates only per-server state (safe against a
            concurrent id lookup) so it stays outside the lock. */
+        /* #7643: asked before the lock, which opens nothing. This reload is the list's only writer, so reading it here needs no lock. */
+        var schemaSessions = await DarlingRemovedServerSessions.RecordedSchemaSessionsAsync(runner, servers, view.EnabledServers, _logger, cancellationToken);
         List<RemovedLongQueryServer> removedServers;
         lock (_serversLock)
         {
             /* #4961: the reconcile clears a removed server's runtime and drops its state in one synchronous step, so what the
                drop below needs (the definition, the runtime, the long-query latch) is taken first. */
-            removedServers = DarlingRemovedServerSessions.Capture(servers, view.EnabledServers, runner, SchemaObjectsOn);
+            removedServers = DarlingRemovedServerSessions.Capture(servers, view.EnabledServers, runner, schemaSessions);
             ReconcileServers(servers, view.EnabledServers);
 
             /* #5452: an assumed-role session is kept only while an enabled server names its role and external ID. */
