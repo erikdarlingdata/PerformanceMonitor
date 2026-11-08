@@ -125,6 +125,8 @@ internal static class DarlingTriageEndpoint
            an EVENT ("N more failures since the previous sample"), not a condition that clears. */
         (DarlingSelfAlertEvaluator.RefreshJobRecoveredMetric, DarlingSelfAlertEvaluator.RefreshJobStuckMetric),
         (DarlingSelfAlertEvaluator.RetentionJobRecoveredMetric, DarlingSelfAlertEvaluator.RetentionJobStuckMetric),
+        /* #8302: a daily rollup behind its source, resolved when it catches up. */
+        (DarlingSelfAlertEvaluator.DailyRollupRecoveredMetric, DarlingSelfAlertEvaluator.DailyRollupStaleMetric),
         (DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, DarlingSelfAlertEvaluator.StaleMuteMetric),
         (DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric),
         /* #5288: the MCP endpoint's certificate alert and its own resolution title. */
@@ -317,6 +319,7 @@ internal static class DarlingTriageEndpoint
                they are all downstream of. */
             [DarlingSelfAlertEvaluator.RefreshJobStuckMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.RetentionJobStuckMetric] = StoreSections(),
+            [DarlingSelfAlertEvaluator.DailyRollupStaleMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.PolicyJobFailingMetric] = StoreSections(),
 
             /* #3306: the stale-mute alert is the one store-family member whose subject is the CONFIGURATION

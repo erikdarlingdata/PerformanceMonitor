@@ -383,7 +383,9 @@ namespace PerformanceMonitor.Common
                        which is a real measurement, and a genuine 0 there cannot occur because the arm does
                        not fire without a positive delta. */
                     or "Refresh Job Stuck"
-                    or "Retention Job Stuck" => true,
+                    or "Retention Job Stuck"
+                    /* #8302: a daily rollup behind its source fires with the same state-only sentinel. */
+                    or "Daily Rollup Stale" => true,
                 _ => false,
             };
         }

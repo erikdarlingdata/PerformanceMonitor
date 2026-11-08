@@ -15406,6 +15406,7 @@ SELECT
     j.job_id,
     cagg.user_view_name,
     CASE WHEN isfinite(w.mark) AND w.mark >= '2000-01-01'::timestamp THEN w.mark END AS watermark,
+    CASE WHEN isfinite(s.mark) AND s.mark >= '2000-01-01'::timestamp THEN s.mark END AS source_watermark,
     js.job_status
 FROM _timescaledb_catalog.continuous_agg AS cagg
 JOIN timescaledb_information.continuous_aggregates AS ca
@@ -15417,22 +15418,31 @@ JOIN timescaledb_information.jobs AS j
     OR (j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name))
 LEFT JOIN timescaledb_information.job_stats AS js ON js.job_id = j.job_id
 CROSS JOIN LATERAL (SELECT _timescaledb_functions.to_timestamp_without_timezone(_timescaledb_functions.cagg_watermark(cagg.mat_hypertable_id)) AS mark) AS w
+CROSS JOIN LATERAL (SELECT CASE WHEN cagg.parent_mat_hypertable_id IS NULL THEN NULL
+                                ELSE _timescaledb_functions.to_timestamp_without_timezone(_timescaledb_functions.cagg_watermark(cagg.parent_mat_hypertable_id)) END AS mark) AS s
 WHERE cagg.user_view_schema = 'collect'
 AND   j.scheduled";
 
     /// <summary>
     /// The margin a daily rollup's staleness threshold keeps below its own <c>start_offset</c> (#8302): the threshold
-    /// is <c>start_offset - 12 hours</c> on the newest materialized bucket's END (<see cref="DailyRollupStaleAfterSpanFor"/>).
+    /// is <c>start_offset - 12 hours</c> on how far the newest materialized bucket's END lags its SOURCE's
+    /// (<see cref="DailyRollupStaleAfterSpanFor"/>, <see cref="IsDailyRollupStale"/>).
     ///
     /// <para><b>Why below the window, and why twelve hours.</b> A daily policy refreshes the whole buckets inside
     /// <c>[now - start_offset, now - 1 day]</c> once a day on finish-to-start scheduling. Just after a run the newest
     /// bucket's end is <c>end_offset</c> plus the time of day old, and just before the next run a schedule interval
     /// more, so a healthy daily's end-age peaks at about <c>end_offset + one bucket + one schedule interval</c>: three
-    /// days, when the run falls just before 00:00 UTC, plus the run's own length. A daily-parented daily refreshes a
-    /// day on the run after its parent wrote it (#6070), so it peaks a day later. At an end-age of <c>start_offset</c>
-    /// the next bucket has already fallen out of the window, so a threshold AT the window would report a day already
-    /// lost; half a day under it warns before the loss, with about twelve hours of margin above the healthy peak and
-    /// about twelve below the loss.</para>
+    /// days, when the run falls just before 00:00 UTC, plus the run's own length. Its hourly source's newest bucket
+    /// trails the clock by one to two hours, so the LAG behind the source peaks just under that. A daily-parented
+    /// daily refreshes a day on the run after its parent wrote it (#6070), so it peaks a day later. At a lag of
+    /// <c>start_offset</c> the next bucket has already fallen out of the window, so a threshold AT the window would
+    /// report a day already lost; half a day under it warns before the loss, with about twelve hours of margin above
+    /// the healthy peak and about twelve below the loss.</para>
+    ///
+    /// <para><b>Why the lag, not the age.</b> A source that stops producing rows (Query Store collection off, every
+    /// monitored server offline for days) leaves the daily with nothing to materialize, and its newest bucket ages
+    /// with the clock while nothing is wrong with the rollup or its job. Measured against the source, a daily that is
+    /// level with it is never stale, however old both are.</para>
     /// </summary>
     public static readonly TimeSpan DailyRollupStaleMarginSpan = TimeSpan.FromHours(12);
 
@@ -15443,10 +15453,14 @@ AND   j.scheduled";
         => DailyRefreshStartSpanFor(view) - DailyRollupStaleMarginSpan;
 
     /// <summary>Whether a daily rollup whose newest materialized bucket ended at <paramref name="newestBucketEndUtc"/>
-    /// is stale at <paramref name="nowUtc"/>: strictly older than <see cref="DailyRollupStaleAfterSpanFor"/>, so an
-    /// end-age exactly at the threshold is not yet stale (#8302). Pure, so the boundary pins on both sides.</summary>
-    public static bool IsDailyRollupStale(string view, DateTime newestBucketEndUtc, DateTime nowUtc)
-        => nowUtc - newestBucketEndUtc > DailyRollupStaleAfterSpanFor(view);
+    /// is stale against its SOURCE, whose newest materialized bucket ended at <paramref name="sourceNewestBucketEndUtc"/>:
+    /// strictly more than <see cref="DailyRollupStaleAfterSpanFor"/> behind it, so a lag exactly at the threshold is not
+    /// yet stale (#8302). The lag is measured against the source rather than against the clock on purpose: a source that
+    /// has stopped producing rows (collection off, every server offline) leaves the daily with nothing to materialize,
+    /// and a daily that is level with its source is not behind however old both are. Pure, so the boundary pins on both
+    /// sides.</summary>
+    public static bool IsDailyRollupStale(string view, DateTime newestBucketEndUtc, DateTime sourceNewestBucketEndUtc)
+        => sourceNewestBucketEndUtc - newestBucketEndUtc > DailyRollupStaleAfterSpanFor(view);
 
     /// <summary>
     /// The daily rollups whose newest materialized bucket ended longer ago than <see cref="DailyRollupStaleAfterSpanFor"/>
@@ -15480,29 +15494,41 @@ AND   j.scheduled";
                     continue;
                 }
 
-                var status = reader.IsDBNull(3) ? null : reader.GetString(3);
+                /* No source watermark: the daily is built straight on a raw hypertable (none of this product's dailies
+                   is), or its source aggregate has nothing materialized yet. Neither is a lag this arm can measure. */
+                if (reader.IsDBNull(3))
+                {
+                    continue;
+                }
+
+                var status = reader.IsDBNull(4) ? null : reader.GetString(4);
                 if (string.Equals(status, "Running", StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
 
                 var watermark = reader.GetDateTime(2);
-                if (!IsDailyRollupStale(view, watermark, nowUtc))
+                var sourceWatermark = reader.GetDateTime(3);
+                if (!IsDailyRollupStale(view, watermark, sourceWatermark))
                 {
                     continue;
                 }
 
-                var age = nowUtc - watermark;
+                var lag = sourceWatermark - watermark;
+                var jobId = Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture);
                 stale.Add(new StuckPolicyJob(
-                    Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
+                    jobId,
                     view,
                     string.Format(
                         CultureInfo.InvariantCulture,
-                        "newest materialized bucket ended {0:F1} days ago, past the {1:F1}-day mark for a policy with a {2} refresh window (a healthy daily's newest bucket is at most about {3:F0} days old) — a daily run was missed, and the window is half a day from moving past a day it will not refresh on its own; a day it has already moved past needs refresh_continuous_aggregate by hand",
-                        age.TotalDays,
+                        "newest materialized bucket ended {0:yyyy-MM-dd HH:mm} UTC, {1:F1} days behind its source's newest bucket ({2:yyyy-MM-dd HH:mm} UTC), past the {3:F1}-day mark for a {4} refresh window — refresh the missed days with CALL refresh_continuous_aggregate('collect.{5}', '{0:yyyy-MM-dd HH:mm}', '{2:yyyy-MM-dd HH:mm}'), then check that refresh job {6} runs on schedule",
+                        watermark,
+                        lag.TotalDays,
+                        sourceWatermark,
                         DailyRollupStaleAfterSpanFor(view).TotalDays,
                         DailyRefreshStartOffsetFor(view),
-                        (DailyRefreshStartSpanFor(view) - DailyRollupStaleMarginSpan - TimeSpan.FromHours(12)).TotalDays),
+                        view,
+                        jobId),
                     SchedulerRetries: false,
                     Family: StorePolicyJobFamily.Refresh,
                     Scheduled: true,
@@ -16841,11 +16867,12 @@ public enum StuckPolicyJobArm
     /// arm.</summary>
     RunningPastBound,
 
-    /// <summary>A daily rollup whose newest materialized bucket ended longer ago than
-    /// <see cref="TimescaleSupport.DailyRollupStaleAfterSpanFor"/> allows, half a day inside its refresh window (#8302):
-    /// a daily run was missed, and the window is about to move past a day the policy will not refresh on its own.
-    /// Judged from the aggregate's watermark, not from the job's stat row, and reported under the rollup's refresh
-    /// job.</summary>
+    /// <summary>A daily rollup whose newest materialized bucket ended more than
+    /// <see cref="TimescaleSupport.DailyRollupStaleAfterSpanFor"/> behind its SOURCE's newest bucket, half a day inside
+    /// its refresh window (#8302): a daily run was missed, and the window is about to move past a day the policy will
+    /// not refresh on its own. Judged from the two aggregates' watermarks, not from the job's stat row, and reported
+    /// under the rollup's refresh job. Not a stuck job: the evaluator gives it its own Warning, never a re-arm, and
+    /// resolves it when the rollup catches up.</summary>
     DailyRollupStale,
 }
 
