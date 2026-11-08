@@ -19,7 +19,7 @@ All sections except `postgres` and `servers` are optional — omit a section (or
 | `mcp.enabled`, `mcp.port`, `web.enabled`, `web.port` | First-run seed | The Viewer's Settings window, live and with no restart. On a box with no Viewer, `--enable-mcp` and `--enable-web` |
 | `servers` | First-run seed, copied once while the server registry is empty. A server added to the file later is ignored | The Viewer, the web dashboard's Admin page, or the MCP tools `add_servers` and `edit_server`. The one exception is the `remediation*` and `hypotheticalIndex*` login keys, which the service syncs from the file at every start |
 | `analysis.uncorroboratedRoute` | Both. The store's value wins when it is set. Otherwise the file's value is used | The store value, from the same places as the rest of `analysis`. Clear it to hand the choice back to the file |
-| `postgres`, `collectSchemaChangeEvents`, `rawChunkIntervalReconcileEnabled` (default `true`), `queryTextTrigramIndexEnabled` (default `false`), `procedureStatsPlanCycleInterval`, `queryStatsDeferredPlanFetch`, `procedureStatsDeferredPlanFetch`, `allowedAwsRoles`, `passwordKey`, `peers`, `frontDoor`, `heartbeat`, `reads`, `forcePlanBot`, `analyzer`, and every other key in `mcp` and `web` (including `mcp.network` and `web.network`) | File only | Edit `darling.json` and restart the service |
+| `postgres`, `collectSchemaChangeEvents`, `rawChunkIntervalReconcileEnabled` (default `true`), `queryTextTrigramIndexEnabled` (default `false`), `procedureStatsPlanCycleInterval`, `queryStatsDeferredPlanFetch`, `procedureStatsDeferredPlanFetch`, `allowedAwsRoles`, `passwordKey`, `peers`, `frontDoor`, `heartbeat`, `health`, `reads`, `forcePlanBot`, `analyzer`, and every other key in `mcp` and `web` (including `mcp.network` and `web.network`) | File only | Edit `darling.json` and restart the service |
 
 ## queryTextTrigramIndexEnabled
 
@@ -207,6 +207,16 @@ On any of them, a login that is not a superuser cannot end a superuser's session
 | Key | Default | Notes |
 |---|---|---|
 | `passwordKey` | *(unset)* | Where the service reads its password key from, instead of the credentials directory ([#8006](https://github.com/erikdarlingdata/PerformanceMonitor/issues/8006)): a `file:/path` or `env:NAME` reference, such as `file:/run/secrets/password_key`. A literal value is refused, and so is a `file:` path inside the credentials directory. Unset, nothing changes: the service makes and keeps the key in the credentials directory. The key is read where it is used, not when `darling.json` loads, and `--validate-config` prints its fingerprint or a warning. With the setting the service never makes, writes or retires a key file. See [the password key](security.md#security--least-privilege-roles) for the key's format, making one with `--new-password-key`, and moving an existing key. A file-only key: edit and restart. |
+
+## health (object, optional)
+
+| Key | Default | Notes |
+|---|---|---|
+| `health.enabled` | `false` | Turns on the health port ([#8184](https://github.com/erikdarlingdata/PerformanceMonitor/issues/8184)), for Kubernetes liveness and readiness probes. |
+| `health.port` | `5154` | The port. It must be 1 to 65535 and different from `web.port` and `mcp.port`, whether or not those are enabled; the service reports a clash as a configuration problem instead of failing at bind time. |
+| `health.listen` | *(empty)* | The address to bind. Empty means `0.0.0.0` inside a container and `127.0.0.1` outside one. A value that is not an IP address is a configuration problem. |
+
+The port has no token, no `allowFrom` and no TLS, and serves only `/livez` and `/readyz`, each answering one word. See [The health port](network-endpoints.md#the-health-port). Nothing is checked while `health.enabled` is `false`. A file-only block: the control plane never writes it, and a change needs a restart.
 
 ## peers
 

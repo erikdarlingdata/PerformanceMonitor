@@ -382,6 +382,13 @@ public sealed class DarlingConfig
     public WebConfig Web { get; set; } = new();
 
     /// <summary>
+    /// #8184: the opt-in health port for Kubernetes probes, <c>/livez</c> and <c>/readyz</c> and nothing else. FILE-ONLY:
+    /// the control plane never writes it, and a change needs a restart. Optional; omit the section entirely.
+    /// </summary>
+    [JsonPropertyName("health")]
+    public HealthConfig Health { get; set; } = new();
+
+    /// <summary>
     /// Declared PEER STORES (#2339): what this store covers, and which sibling Darling stores cover the
     /// rest of the fleet. Pure disclosure — see <see cref="PeersConfig"/>. Optional; omit it entirely on a
     /// single-store deployment and every surface behaves exactly as it did before.
@@ -628,6 +635,30 @@ public sealed class DarlingConfig
         problems.AddRange(FrontDoorConfig.Validate(FrontDoor));
         /* #5450: the heartbeat block, for the same reason (a broken one is reported even with no servers yet). */
         problems.AddRange(HeartbeatConfig.Validate(Heartbeat));
+
+        /* #8184: the health checks run only when the port is on. The clash test compares against web.port and mcp.port
+           whether or not those surfaces are enabled: the control plane can turn either on later without a restart, and the
+           ports would then collide. It is refused here so it never fails at bind time. */
+        if (Health is { Enabled: true })
+        {
+            if (Health.Port is < 1 or > 65535)
+            {
+                problems.Add($"health.port must be between 1 and 65535 (got {Health.Port}).");
+            }
+            else if (Web is not null && Health.Port == Web.Port)
+            {
+                problems.Add($"health.port ({Health.Port}) is the same as web.port — give the health listener its own port.");
+            }
+            else if (Mcp is not null && Health.Port == Mcp.Port)
+            {
+                problems.Add($"health.port ({Health.Port}) is the same as mcp.port — give the health listener its own port.");
+            }
+
+            if (HealthConfig.ResolveListenAddress(Health.Listen, inContainer: false) is null)
+            {
+                problems.Add($"health.listen (\"{Health.Listen}\") is not an IP address.");
+            }
+        }
 
         /* #6468: no servers is a valid configuration. A first install starts with an empty list and the person adds the
            first server in the Viewer or the web dashboard, so an empty list is not a problem to report here. */
@@ -2110,6 +2141,39 @@ public sealed class WebConfig
     /// </summary>
     [JsonPropertyName("network")]
     public WebNetworkConfig? Network { get; set; }
+}
+
+/// <summary>
+/// #8184: the health port's config. Off by default. The port serves only <c>/livez</c> and <c>/readyz</c>, one word each,
+/// with no token, no <c>allowFrom</c> and no TLS, so it carries nothing worth protecting.
+/// </summary>
+public sealed class HealthConfig
+{
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
+
+    [JsonPropertyName("port")]
+    public int Port { get; set; } = 5154;
+
+    /// <summary>
+    /// The address to bind. Empty means <c>0.0.0.0</c> inside a container and <c>127.0.0.1</c> outside one.
+    /// </summary>
+    [JsonPropertyName("listen")]
+    public string Listen { get; set; } = "";
+
+    /// <summary>
+    /// The address <paramref name="listen"/> names, or null when it does not parse. Empty resolves by
+    /// <paramref name="inContainer"/>: a probe reaches a pod over the pod address, so a container binds every interface.
+    /// </summary>
+    internal static IPAddress? ResolveListenAddress(string listen, bool inContainer)
+    {
+        if (string.IsNullOrWhiteSpace(listen))
+        {
+            return inContainer ? IPAddress.Any : IPAddress.Loopback;
+        }
+
+        return IPAddress.TryParse(listen.Trim(), out var address) ? address : null;
+    }
 }
 
 /// <summary>
