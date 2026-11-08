@@ -327,6 +327,10 @@ JOIN sys.dm_xe_sessions AS xes
             ? RequireInstallSessionName(named)
             : throw new InvalidOperationException("The long-query completions read needs this install's session name, and the host gave none.");
 
+        var sessionPositionSql = context.Target.IsAzureSqlDb
+            ? RingBufferXml.SessionPositionDatabaseSql
+            : RingBufferXml.SessionPositionServerSql;
+
         string query = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
@@ -337,6 +341,11 @@ DECLARE
 );
 
 {RingBufferXml.DeclareSql}
+
+/* #8146: the position fragments, named for this install's own session. */
+{RingBufferXml.PositionDeclareSql}
+
+SET @ring_position_session = N'{sessionName}';
 
 SELECT /* PerformanceMonitorLite */
     @ring_text = CONVERT(nvarchar(max), xet.target_data),
@@ -350,6 +359,8 @@ OPTION(RECOMPILE);
 
 {RingBufferXml.TruncationSql}
 
+{RingBufferXml.HeaderSql}
+
 INSERT
     @PerformanceMonitor_LongQueryCompletions
 (
@@ -360,8 +371,12 @@ SELECT
 WHERE @ring_xml IS NOT NULL;
 {ShredSelect}
 
-/* #6441: whether SQL Server truncated the ring buffer's XML, read by ReadAsync after the event rows. */
-{RingBufferXml.TruncationSelectSql}";
+{sessionPositionSql}
+
+/* #6441: whether SQL Server truncated the ring buffer's XML, then #8146's position columns, read by ReadAsync after the event rows. */
+SELECT
+    {RingBufferXml.TruncationColumnsSql},
+    {RingBufferXml.PositionColumnsSql};";
 
         /* Use the most recent event_time from the host store as the cutoff, or fall back to
            CollectorContext.EventFallbackWindow on first run (mirrors the blocked-process / deadlock collectors). */
@@ -396,6 +411,9 @@ WHERE @ring_xml IS NOT NULL;
         new CollectorColumn("statement_text", CollectorColumnType.Varchar),
         new CollectorColumn("object_name", CollectorColumnType.Varchar),
     };
+
+    /// <summary>#8146: the ring-buffer position the loss accounting compares against the next run, per server or per database.</summary>
+    public override IReadOnlyList<string> StateKeys { get; } = new[] { RingBufferLossAccounting.StateKey };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
@@ -444,7 +462,19 @@ WHERE @ring_xml IS NOT NULL;
 
         /* #6441: the session's ring buffer is 4096 KB, whose XML can pass SQL Server's 4 MB cut; the cut keeps the
            OLDEST events, so the counts are what bands the collector WARNING when new completions are out of sight. */
-        await RingBufferXml.MeasureTrailingTruncationAsync(reader, context, cancellationToken);
+        if (await reader.NextResultAsync(cancellationToken) && await reader.ReadAsync(cancellationToken))
+        {
+            RingBufferXml.MeasureTruncation(reader, 0, context);
+
+            /* #8146: what the ring buffer evicted and the session dropped since the last run. */
+            var truncated = reader.FieldCount > 0 && !reader.IsDBNull(0) && reader.GetBoolean(0);
+            var observation = RingBufferObservation.Read(reader, 3);
+            RingBufferLossAccounting.Apply(context, observation, truncated);
+
+            /* #8146: a session keeps the limit it was created with, so this install's own session is recreated with the
+               setting, by the host, after this item's rows are written. */
+            LongQuerySessionRecreate.StageWhenBelowSetting(context, observation);
+        }
 
         return rows;
     }
@@ -583,7 +613,7 @@ WHERE @ring_xml IS NOT NULL;
     /// customizable TEXT columns (statement / batch_text) are turned on via SET so they are actually
     /// collected; object_name needs no SET — it is one of rpc_completed's default data fields (#2129).
     /// </summary>
-    public static string BuildCreateSessionSql(string sessionName, bool databaseScoped, long thresholdMicroseconds)
+    public static string BuildCreateSessionSql(string sessionName, bool databaseScoped, long thresholdMicroseconds, int? ringBufferMaxEvents = RingBufferTarget.DefaultMaxEvents)
     {
         /* Nothing creates the legacy name any more (#4961): a name that is not per-install is refused here. */
         RequireInstallSessionName(sessionName);
@@ -625,10 +655,7 @@ ADD EVENT sqlserver.attention
     ({actions}
     )
 )
-ADD TARGET package0.ring_buffer
-(
-    SET max_memory = 4096
-)
+{RingBufferTarget.Sql(ringBufferMaxEvents)}
 WITH
 (
     MAX_DISPATCH_LATENCY = 5 SECONDS,

@@ -358,8 +358,23 @@ public partial class SettingsWindow : Window
         if (readOnly)
         {
             PauseResumeButton.IsEnabled = false;
+
+            /* #8115: the banner says the monitoring settings are shown for reference, so the fields on the fleet tabs refuse edits and
+               Restore Defaults, which only resets fields this seat can never save, is disabled. The Viewer tab is this person's own. */
+            RestoreAlertDefaultsButton.IsEnabled = false;
+            RestoreAlertDefaultsButton.ToolTip = ReadOnlyFieldTooltip;
+            foreach (var tab in SettingsTabs.Items.OfType<TabItem>())
+            {
+                if (!ReferenceEquals(tab, ViewerTab) && tab.Content is DependencyObject content)
+                {
+                    /* The "This viewer only" triage defaults are saved to this person's own settings file, so they stay editable. */
+                    ReadOnlySettingsGate.Apply(content, ReadOnlyFieldTooltip, "ViewerOnlyTriageDefaults");
+                }
+            }
         }
     }
+
+    internal const string ReadOnlyFieldTooltip = "This viewer is connected with a read-only role, so this setting is shown for reference and cannot be changed from here.";
 
     // ── Viewer preferences (folded in from #1401: default time range + auto-refresh) ──
 
@@ -2601,8 +2616,17 @@ public partial class SettingsWindow : Window
             return;
         }
 
-        /* Write the operator config to the control-plane store (the service reloads on the config_version bump).
-           A read-only seat surfaces the friendly message and the window stays open. */
+        /* #8115: a read-only seat is told up front that only its own preferences were saved, instead of the store refusing a write
+           the dialog's banner already said could not happen. */
+        if (_dataService is not null && _dataService.IsReadOnly)
+        {
+            MessageBox.Show(
+                "Your viewer preferences were saved. The monitoring settings are read-only on this seat, so they were left as they are.",
+                "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        /* Write the operator config to the control-plane store (the service reloads on the config_version bump). */
         if (_dataService is not null)
         {
             try

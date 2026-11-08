@@ -16,8 +16,20 @@ namespace Darling.Tests;
 /// database made them order-dependent (caught live: the V20 round-trip read the V3 defaults an
 /// earlier test seeded). Each such test gets its own database instead — created here, dropped on
 /// dispose with <c>WITH (FORCE)</c> so a lingering connection can never wedge the drop.
-/// <c>Pooling=false</c> on the scratch connection string keeps in-process pooled connections from
-/// pinning the database in the first place.
+///
+/// <para><b>The scratch connection string pools (#8231).</b> A test's connections and data sources on it reuse their
+/// physical connections, where an unpooled string opened a socket per statement and left it in TIME_WAIT, until a leg of
+/// live classes ran its runner out of ephemeral ports. The dispose clears this process's pools for the string before the
+/// drop, so no idle pooled backend is left for the FORCE to terminate and no dead physical connection stays in the pool
+/// behind it. The database's default <c>search_path</c> is set at mint, before any test connection exists: a pooled
+/// physical connection keeps the session defaults its backend started with, so one opened before the test's
+/// <c>MigrateAsync</c> set that default would resolve no bare table name on a later lease. The connection string itself
+/// stays bare, as an operator's would be. Npgsql resets the rest of a session's state (its GUCs, role, temporary tables,
+/// advisory locks, prepared statements) when a connection is returned, and the string does not turn that off. A test that
+/// needs a session of its own (a backend it terminates, a session lock released by closing, a count of the database's
+/// backends, state set in a physical connection initializer) says so with <c>Pooling = false</c> on its own string, and a
+/// test that drops and recreates a database under one name clears that name's pool first. The factory's own statements on
+/// a scratch database run unpooled, so the only connections in a scratch string's pool are the test's.</para>
 ///
 /// <para><b>A scratch database must not outlive its run (#4981).</b> Each one that has the TimescaleDB extension
 /// holds a background-worker slot for its scheduler, and a long-lived local cluster has only a few, so databases
@@ -143,7 +155,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
             {
                 /* CREATE EXTENSION is what tells TimescaleDB's launcher to start a database's scheduler, and a clone never
                    runs it: its scheduler would otherwise not start, so its jobs would never run. */
-                await using var connection = new NpgsqlConnection(clone.ConnectionString);
+                await using var connection = new NpgsqlConnection(Unpooled(clone.ConnectionString));
                 await connection.OpenAsync(cancellationToken);
                 await using var start = new NpgsqlCommand("SELECT _timescaledb_functions.start_background_workers()", connection);
                 /* The call waits on TimescaleDB's launcher, which starts schedulers one at a time. With a parallel suite
@@ -172,7 +184,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
         {
             try
             {
-                scratch.TimescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, cancellationToken);
+                scratch.TimescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(Unpooled(scratch.ConnectionString), cancellationToken);
                 if (!scratch.TimescaleEnabled)
                 {
                     /* The cluster cannot load the library: do not pay a failed CREATE EXTENSION (it ends the backend) per database. */
@@ -202,14 +214,23 @@ internal sealed class ScratchPostgres : IAsyncDisposable
 
         try
         {
-            await using var admin = new NpgsqlConnection(UnpooledAdminConnectionString(baseConnectionString));
-            await admin.OpenAsync(cancellationToken);
+            await using var admin = await LeaseAdminAsync(UnpooledAdminConnectionString(baseConnectionString), cancellationToken);
             await using var create = new NpgsqlCommand(
                 template is not null ? $"CREATE DATABASE \"{databaseName}\" TEMPLATE \"{template}\""
                 : cCollation ? $"CREATE DATABASE \"{databaseName}\" TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'"
                 : $"CREATE DATABASE \"{databaseName}\"",
-                admin);
+                admin.Connection);
             await create.ExecuteNonQueryAsync(cancellationToken);
+
+            /* The store's database-default search_path, set before any test connection exists (#8231). MigrateAsync sets the
+               same default, idempotently, but a pooled physical connection keeps the session defaults its backend started
+               with, so a connection a test opened before its MigrateAsync ran would resolve no bare table name on a later
+               lease. Set here, every backend of the database starts with it. The connection string itself stays bare, as an
+               operator's would be: a test that must see no default resets it on the database. */
+            await using var searchPath = new NpgsqlCommand(
+                $"ALTER DATABASE \"{databaseName}\" SET search_path = {PerformanceMonitor.Darling.Storage.PgSchemaGenerator.SearchPath}",
+                admin.Connection);
+            await searchPath.ExecuteNonQueryAsync(cancellationToken);
         }
         catch
         {
@@ -217,10 +238,10 @@ internal sealed class ScratchPostgres : IAsyncDisposable
             throw;
         }
 
+        /* Pooled: see the class summary. */
         var builder = new NpgsqlConnectionStringBuilder(baseConnectionString)
         {
             Database = databaseName,
-            Pooling = false,
         };
 
         /* The base string can already carry the session pin (LiveStoreSessionTimeZone adds it to DARLING_TEST_PG),
@@ -273,8 +294,9 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// sweep refuse or skip a database that has it, so a killed run's template would stay.</para>
     ///
     /// <para><b>What a clone does not inherit.</b> <c>CREATE DATABASE</c> copies neither the database's own settings nor
-    /// its grants, so the database-default <c>search_path</c> arrives with the test's <c>MigrateAsync</c>, just as it does
-    /// on a fresh store. Rows a rung stamps with <c>now()</c> carry the template's time, and a rung's random row is the
+    /// its grants; the factory sets the database-default <c>search_path</c> itself at mint (see <see cref="MintAsync"/>), and
+    /// the grants arrive with the test's <c>MigrateAsync</c>, just as they do on a fresh store. Rows a rung stamps with
+    /// <c>now()</c> carry the template's time, and a rung's random row is the
     /// same in every clone (<c>config.pseudonym_key</c>). A test that depends on either passes <c>emptyStore</c>.</para>
     /// </summary>
     internal static async Task<StoreTemplate> GetTemplateAsync(string baseConnectionString, CancellationToken cancellationToken)
@@ -312,7 +334,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
         var template = await CreateEmptyAsync(baseConnectionString, plainPostgres: false, TemplateCreator, CancellationToken.None);
         try
         {
-            await using (var connection = new NpgsqlConnection(template.ConnectionString))
+            await using (var connection = new NpgsqlConnection(Unpooled(template.ConnectionString)))
             {
                 await connection.OpenAsync();
                 await PerformanceMonitor.Darling.Storage.PgMigrations.MigrateAsync(connection);
@@ -323,9 +345,8 @@ internal sealed class ScratchPostgres : IAsyncDisposable
                 }
             }
 
-            await using var admin = new NpgsqlConnection(UnpooledAdminConnectionString(baseConnectionString));
-            await admin.OpenAsync();
-            await using var close = new NpgsqlCommand($"ALTER DATABASE \"{template.DatabaseName}\" WITH ALLOW_CONNECTIONS false", admin);
+            await using var admin = await LeaseAdminAsync(UnpooledAdminConnectionString(baseConnectionString), CancellationToken.None);
+            await using var close = new NpgsqlCommand($"ALTER DATABASE \"{template.DatabaseName}\" WITH ALLOW_CONNECTIONS false", admin.Connection);
             await close.ExecuteNonQueryAsync();
         }
         catch
@@ -344,6 +365,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// </summary>
     public async ValueTask DisposeAsync()
     {
+        ClearPools();
         for (var attempt = 1; attempt <= DropAttempts; attempt++)
         {
             try
@@ -362,6 +384,29 @@ internal sealed class ScratchPostgres : IAsyncDisposable
             }
         }
     }
+
+    /// <summary>
+    /// Closes this process's idle pooled connections on both scratch strings and dooms the ones a test still holds, so they
+    /// close when returned. Before the drop: an idle pooled backend would otherwise be what <c>WITH (FORCE)</c> terminates,
+    /// and its physical connection would then sit dead in the pool. A data source a test built on the string has a pool of
+    /// its own, which its dispose clears.
+    /// </summary>
+    private void ClearPools()
+    {
+        using var pinned = new NpgsqlConnection(ConnectionString);
+        NpgsqlConnection.ClearPool(pinned);
+        using var unpinned = new NpgsqlConnection(UnpinnedConnectionString);
+        NpgsqlConnection.ClearPool(unpinned);
+    }
+
+    /// <summary>
+    /// <paramref name="connectionString"/> with pooling off, for the factory's own statements on a scratch database (a
+    /// clone's scheduler start, the template's build, the extension probe). Each is one statement on a database no test has
+    /// touched yet, and a pooled one would leave an idle backend, named after the base string, in the pool the test's first
+    /// connection then draws from, and in the template's case a session the clone would refuse to copy from.
+    /// </summary>
+    private static string Unpooled(string connectionString) =>
+        new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString;
 
     /// <summary>True while this process still has a drop pending for <paramref name="databaseName"/>.</summary>
     internal static bool IsRemembered(string databaseName) => Remembered.ContainsKey(databaseName);
@@ -496,9 +541,8 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     private static async Task DropAsync(string adminConnectionString, string databaseName)
     {
         await QuiesceTimescaleJobsAsync(adminConnectionString, databaseName);
-        await using var admin = new NpgsqlConnection(UnpooledAdminConnectionString(adminConnectionString));
-        await admin.OpenAsync();
-        await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)", admin);
+        await using var admin = await LeaseAdminAsync(UnpooledAdminConnectionString(adminConnectionString), CancellationToken.None);
+        await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)", admin.Connection);
         await drop.ExecuteNonQueryAsync();
         Remembered.TryRemove(databaseName, out _);
     }
@@ -570,9 +614,69 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// <c>DROP DATABASE ... WITH (FORCE)</c> on a scratch database and, half a second later, the
     /// <c>CALL run_job(...)</c> of the retired-baseline race test. With pooling off, the backend that ran a create or a
     /// drop ends when the connection closes, and no other test ever runs on it.
+    /// <para>#8206: the factory keeps the connections it opens with this string and runs its next create or drop on one of
+    /// them (<see cref="LeaseAdminAsync"/>), so a leg that mints hundreds of scratch databases no longer pays a fresh socket,
+    /// and an ephemeral port left in TIME_WAIT, per create and per drop: a leg ran its runner out of ports (WSAENOBUFS on a
+    /// connect). The connections stay unpooled, so Npgsql never hands one to a test, and only the factory runs on them. The
+    /// application name is what tells them apart in pg_stat_activity.</para>
     /// </summary>
     internal static string UnpooledAdminConnectionString(string adminConnectionString) =>
-        new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false }.ConnectionString;
+        new NpgsqlConnectionStringBuilder(adminConnectionString) { Pooling = false, ApplicationName = AdminApplicationName }.ConnectionString;
+
+    /// <summary>The application name of the factory's admin connections (#8206).</summary>
+    internal const string AdminApplicationName = "darling-tests-scratch-admin";
+
+    /// <summary>The factory's open admin connections not in use, per unpooled admin connection string.</summary>
+    private static readonly ConcurrentDictionary<string, ConcurrentBag<NpgsqlConnection>> IdleAdminConnections = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// An open admin connection on <paramref name="unpooledAdminConnectionString"/>: one the factory opened earlier and has
+    /// finished with when there is one still open, a new one otherwise. Disposing the lease hands the connection back when it
+    /// is still open and closes it when it is not.
+    /// </summary>
+    private static async Task<AdminLease> LeaseAdminAsync(string unpooledAdminConnectionString, CancellationToken cancellationToken)
+    {
+        var idle = IdleAdminConnections.GetOrAdd(unpooledAdminConnectionString, static _ => new ConcurrentBag<NpgsqlConnection>());
+        while (idle.TryTake(out var reused))
+        {
+            if (reused.FullState == System.Data.ConnectionState.Open)
+            {
+                return new AdminLease(reused, idle);
+            }
+
+            await reused.DisposeAsync();
+        }
+
+        var connection = new NpgsqlConnection(unpooledAdminConnectionString);
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
+
+        return new AdminLease(connection, idle);
+    }
+
+    private sealed class AdminLease(NpgsqlConnection connection, ConcurrentBag<NpgsqlConnection> idle) : IAsyncDisposable
+    {
+        public NpgsqlConnection Connection { get; } = connection;
+
+        public async ValueTask DisposeAsync()
+        {
+            if (Connection.FullState == System.Data.ConnectionState.Open)
+            {
+                idle.Add(Connection);
+            }
+            else
+            {
+                await Connection.DisposeAsync();
+            }
+        }
+    }
 
     /// <summary>The admin connection string with the exit drain's own connect and command timeouts, and no pooling: one connection per drop.</summary>
     internal static string ExitDrainConnectionString(string adminConnectionString) =>

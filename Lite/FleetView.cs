@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Common.Tags;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite;
@@ -35,6 +37,9 @@ internal sealed class FleetView
 {
     private List<FleetServer> _all = new();
     private List<ServerTag> _tags = new();
+
+    /// <summary>The active server-search term, or null for no filter. Normalised by <see cref="SetSearch"/>.</summary>
+    private string? _search;
 
     /// <summary>serverId → the set of tag ids assigned to it. Empty/absent = untagged.</summary>
     private Dictionary<int, HashSet<int>> _serverTags = new();
@@ -102,6 +107,21 @@ internal sealed class FleetView
         Rebuild();
     }
 
+    /// <summary>
+    /// Sets the sidebar search term and reprojects (#8169, the Viewer's search box). A server matches when the term is a
+    /// case-insensitive substring of its display name, its instance name, or any tag name above it. While a search is active
+    /// every group renders expanded, and tag groups with no match anywhere below them drop out; clearing the term restores
+    /// the persisted collapse state untouched.
+    /// </summary>
+    public void SetSearch(string? term)
+    {
+        _search = ServerOverviewFilter.Normalize(term);
+        Rebuild();
+    }
+
+    /// <summary>True while a search term is filtering the projection.</summary>
+    public bool IsSearching => _search is not null;
+
     /// <summary>Flips a group's expand/collapse state and reprojects. A snapshot-safe toggle: header rows
     /// are immutable snapshots, so this keys on the group identity, not the row instance.</summary>
     public void ToggleExpanded(FleetHeaderRow header)
@@ -131,7 +151,7 @@ internal sealed class FleetView
         Rebuild();
     }
 
-    private bool IsExpanded(FleetGroupKey key) => !_collapsed.Contains(key);
+    private bool IsExpanded(FleetGroupKey key) => _search is not null || !_collapsed.Contains(key);
 
     /// <summary>
     /// Recomputes <see cref="Visible"/> from the fleet, the tag forest, and the collapse state — the
@@ -149,7 +169,10 @@ internal sealed class FleetView
         {
             foreach (var s in _all)
             {
-                rows.Add(new FleetServerRow(s, depth: 0));
+                if (_search is null || ServerOverviewFilter.Matches(_search, s.DisplayName, s.Connection?.ServerName))
+                {
+                    rows.Add(new FleetServerRow(s, depth: 0));
+                }
             }
 
             _visible = rows;
@@ -157,10 +180,41 @@ internal sealed class FleetView
             return;
         }
 
+        var nodes = _tags.Select(t => new TagTreeNode(t.Id, t.Name, t.ParentId)).ToList();
+        var searchNamesByTag = _tags.ToDictionary(
+            t => t.Id,
+            t => TagTreeRules.Ancestors(nodes, t.Id).Select(a => a.Name).Prepend(t.Name).ToList());
+
+        bool ServerMatches(FleetServer s)
+        {
+            if (_search is null)
+            {
+                return true;
+            }
+
+            if (ServerOverviewFilter.Matches(_search, s.DisplayName, s.Connection?.ServerName))
+            {
+                return true;
+            }
+
+            if (_serverTags.TryGetValue(s.ServerId, out var tagIds))
+            {
+                foreach (var tid in tagIds)
+                {
+                    if (searchNamesByTag.TryGetValue(tid, out var names) && ServerOverviewFilter.Matches(_search, names.ToArray()))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
         /* Favorites float to the top so collapsing a tag can never hide a starred server. _all arrives
            favourites-first + name sorted, so this preserves that order. Favourites still also appear
            under their own tags below. */
-        var favorites = _all.Where(s => s.IsFavorite).ToList();
+        var favorites = _all.Where(s => s.IsFavorite && ServerMatches(s)).ToList();
         if (favorites.Count > 0)
         {
             var expanded = IsExpanded(FleetGroupKey.Favorites);
@@ -192,7 +246,7 @@ internal sealed class FleetView
         var serversByTag = new Dictionary<int, List<FleetServer>>();
         foreach (var s in _all)
         {
-            if (!_serverTags.TryGetValue(s.ServerId, out var tagIds))
+            if (!ServerMatches(s) || !_serverTags.TryGetValue(s.ServerId, out var tagIds))
             {
                 continue;
             }
@@ -214,6 +268,40 @@ internal sealed class FleetView
             list.Sort(CompareFavoriteThenName);
         }
 
+        /* Under a search, a tag group shows only if a match lives somewhere in its subtree. serversByTag already holds
+           matches only, so this is "any direct match, or any child subtree matches", memoised and cycle-guarded. */
+        var subtreeMemo = new Dictionary<int, bool>();
+        var subtreeInProgress = new HashSet<int>();
+
+        bool SubtreeHasMatch(int tagId)
+        {
+            if (subtreeMemo.TryGetValue(tagId, out var cached))
+            {
+                return cached;
+            }
+
+            if (!subtreeInProgress.Add(tagId))
+            {
+                return false;
+            }
+
+            var has = serversByTag.TryGetValue(tagId, out var direct) && direct.Count > 0;
+            if (childrenByParent.TryGetValue(tagId, out var kids))
+            {
+                foreach (var child in kids)
+                {
+                    if (SubtreeHasMatch(child.Id))
+                    {
+                        has = true;
+                    }
+                }
+            }
+
+            subtreeInProgress.Remove(tagId);
+            subtreeMemo[tagId] = has;
+            return has;
+        }
+
         /* A visited guard makes the DFS cycle-proof: CRUD forbids cycles and enforces the 4-level cap,
            but a hand-edited store must not be able to hang the window. */
         var visited = new HashSet<int>();
@@ -225,10 +313,17 @@ internal sealed class FleetView
                 return;
             }
 
+            if (_search is not null && !SubtreeHasMatch(tag.Id))
+            {
+                return;
+            }
+
             var expanded = IsExpanded(FleetGroupKey.ForTag(tag.Id));
             var kids = childrenByParent.TryGetValue(tag.Id, out var k) ? k : EmptyTags;
             var servers = serversByTag.TryGetValue(tag.Id, out var sv) ? sv : EmptyServers;
-            var hasChildren = kids.Count > 0 || servers.Count > 0;
+            var hasChildren = _search is null
+                ? kids.Count > 0 || servers.Count > 0
+                : servers.Count > 0 || kids.Any(c => SubtreeHasMatch(c.Id));
 
             rows.Add(new FleetHeaderRow(
                 FleetGroupKind.Tag, tag.Name, depth,
@@ -277,7 +372,7 @@ internal sealed class FleetView
         /* Untagged: servers with no assignment at all. Shown last so the tree always accounts for the
            whole fleet. */
         var untagged = _all
-            .Where(s => !_serverTags.TryGetValue(s.ServerId, out var t) || t.Count == 0)
+            .Where(s => (!_serverTags.TryGetValue(s.ServerId, out var t) || t.Count == 0) && ServerMatches(s))
             .ToList();
 
         if (untagged.Count > 0)

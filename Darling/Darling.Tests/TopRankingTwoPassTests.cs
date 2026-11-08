@@ -158,8 +158,16 @@ public sealed class TopRankingTwoPassTests
         })
         {
             var text = filter.Replace("{TimescaleSupport.IntervalHonestSourceFilter}", "sample_interval_seconds IS DISTINCT FROM 0", StringComparison.Ordinal);
-            /* once per pass; the queries' one latest-text lookup (#5309) scopes by server and reads the window too */
+            /* once per pass; the queries' one latest-text lookup (#5309) scopes by server and reads the window too, and for
+               TopQueriesSql that read is now the orphan fallback (#8139: the lookup itself reads the ranked rows and the dimension) */
             var lookup = name != "TopProceduresSql" && (filter == "server_id = $1" || filter.StartsWith("collection_time", StringComparison.Ordinal));
+            if ((name is "TopQueriesSql" or "TopQueriesByHostObjectSql") && filter.StartsWith("{TimescaleSupport", StringComparison.Ordinal))
+            {
+                /* #8139, #8138: TopQueriesSql's and TopQueriesByHostObjectSql's pass 2 carry the interval filter on each measure aggregate, not on the pass, so a plain count is one per pass plus one per measure; at least one per pass is the exact part. */
+                Assert.True(Regex.Matches(sql, Regex.Escape(text)).Count >= 2, $"{name}: the interval filter is not in both passes");
+                continue;
+            }
+
             Assert.Equal(lookup ? 3 : 2, Regex.Matches(sql, Regex.Escape(text)).Count);
         }
 

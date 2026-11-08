@@ -144,6 +144,9 @@ const spin = {
 out.spinPoints = sec.spinlockPoints(spin);
 out.spinDrawn = drew(byTitle["Contention Events: Sick Spinlocks"], spin);
 out.spinNone = drew(byTitle["Contention Events: Sick Spinlocks"], { sick_spinlock_types: [], entries: [entry(0, { sick_spinlocks: [] })] });
+/* #8187: the read names the busiest types and says how many there were; the chart says "top 2 of 6 types" only when some were left out. */
+out.spinTop = drew(byTitle["Contention Events: Sick Spinlocks"], { ...spin, sick_spinlock_type_count: 6 });
+out.spinAll = drew(byTitle["Contention Events: Sick Spinlocks"], { ...spin, sick_spinlock_type_count: 2 });
 
 /* #6439: the "charted below" sentence is shown only when a chart is drawn: a counter above 0 or a named sick spinlock draws; a window
    with no row, or rows that carry no counter and no spinlock (an Azure SQL Database), draws nothing. */

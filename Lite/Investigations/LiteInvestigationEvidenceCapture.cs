@@ -1038,8 +1038,9 @@ ORDER BY collection_time DESC";
     /// <summary>
     /// The <c>blocking_chains</c> content (#6002): the rows are placed first, by <see cref="Fit"/> with no report XML, and each kept
     /// row's report XML then takes what is left of <see cref="MaxSectionBytes"/>, in row order (longest wait first). A report that
-    /// does not fit whole is cut at the cap and its row says <c>report_xml_truncated: true</c>; once the cap is spent, every later
-    /// report is cut to nothing and says so. A report is never left out silently and never cut at a fixed length. A cut report no
+    /// does not fit whole is cut at the cap and its row says <c>report_xml_truncated: true</c>; once the cap is spent, or when what is
+    /// left is shorter than <see cref="MinReportXmlChars"/>, the report is cut to nothing and says so. A report is never left out
+    /// silently and never cut at a fixed length. A cut report no
     /// longer parses as XML, so under <c>maskLiterals</c> or <c>metadataOnly</c> the masker withholds it whole.
     /// <para>#6002 review: every row with a report first takes its floor, <c>report_xml: ""</c> and <c>report_xml_truncated:
     /// true</c>, so a report placed earlier can never leave a later row's flag over the cap (the store refuses the whole write
@@ -1088,11 +1089,20 @@ ORDER BY collection_time DESC";
                     high = mid - 1;
             }
 
-            row["report_xml"] = Prefix(xml, low);
+            /* #8090: a prefix shorter than an opening element's worth parses as nothing and costs a row of the reader's attention
+               (a few bytes of room left "<" flagged truncated); it is cut to nothing instead, flagged the same way. */
+            row["report_xml"] = Prefix(xml, low < MinReportXmlChars ? 0 : low);
         }
 
         return content.ToJsonString(Relaxed);
     }
+
+    /// <summary>
+    /// The fewest characters a cut <c>report_xml</c> keeps (#8090): an opening element's worth, the figure Darling's capture applies.
+    /// When the longest prefix that fits under <see cref="MaxSectionBytes"/> is shorter, <see cref="FitReportXml"/> stores <c>""</c>
+    /// with <c>report_xml_truncated: true</c>, the shape a report with no room at all already takes, rather than a fragment nothing can parse.
+    /// </summary>
+    internal const int MinReportXmlChars = 64;
 
     /// <summary>XML kept as written (<c>&lt;</c>, not its <c><</c> escape), as the jsonb column prints it, so the cap counts
     /// what is stored.</summary>

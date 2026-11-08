@@ -38,7 +38,11 @@ public sealed class QueryTagRollupLiveTests
 
     private sealed record Ctx(NpgsqlConnection Store, NpgsqlDataSource Source, CancellationToken Ct);
 
-    private static async Task WithStoreAsync(Func<Ctx, Task> body)
+    /// <summary>
+    /// A scratch store with two servers. <paramref name="defineTag"/> (the default) also defines one tag that maps nothing: the tool reads no
+    /// section on a store that defines no tag (#8083), and the tag carries no fact, so no test's rows change. The no-tag test passes false.
+    /// </summary>
+    private static async Task WithStoreAsync(Func<Ctx, Task> body, bool defineTag = true)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the query-tag roll-up pins.");
         var ct = TestContext.Current.CancellationToken;
@@ -51,6 +55,11 @@ public sealed class QueryTagRollupLiveTests
         foreach (var (id, name) in new[] { (ServerOne, "srv-one"), (ServerTwo, "srv-two") })
         {
             await ExecAsync(store, $"INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date) VALUES ({id}, '{name}', '{name}', TRUE, 15, now(), now())", ct);
+        }
+
+        if (defineTag)
+        {
+            await ExecAsync(store, "INSERT INTO config.query_tags (name) VALUES ('fixture')", ct);
         }
 
         var bodySucceeded = false;
@@ -148,6 +157,34 @@ public sealed class QueryTagRollupLiveTests
         section.GetProperty("tag_rows").EnumerateArray().Single(r => r.GetProperty("tag").GetString() == tag);
 
     private static double Figure(JsonElement figures, string measure) => figures.GetProperty(measure).GetDouble();
+
+    /// <summary>
+    /// #8083: a store that defines no query tag answers <c>empty</c> with the reason and no sections, in both scopes, although the window holds
+    /// work on both servers: every row would be untagged and every untagged figure would equal its total, so nothing is read. A named tag is
+    /// still the refusal an unknown tag gets.
+    /// </summary>
+    [Fact]
+    public async Task AStoreWithNoQueryTag_AnswersEmptyWithTheReason_AndReadsNoSection()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await PlanCacheAsync(c, ServerOne, "0xA1", 30, 3_000_000);
+            await PlanCacheAsync(c, ServerTwo, "0xB1", 30, 5_000_000);
+
+            foreach (var server in new[] { null, "srv-one" })
+            {
+                using var doc = await ReadAsync(c, server);
+                var root = doc.RootElement;
+                Assert.True(root.TryGetProperty("status", out var status), $"the {(server is null ? "fleet" : "server")} read carries no status: {root.GetRawText()}");
+                Assert.Equal("empty", status.GetString());
+                Assert.Contains("No query tags are defined", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+                Assert.False(root.TryGetProperty("sections", out _), "no section is read on a store with no tag");
+            }
+
+            using var named = await ReadAsync(c, null, tag: "Nope");
+            Assert.Contains("No query tag is named", named.RootElement.GetRawText(), StringComparison.Ordinal);
+        }, defineTag: false);
+    }
 
     [Fact]
     public async Task TwoKeysTaggedA_AndOneUntagged_ShowATheUntaggedRowAndATotalThatIsTheirSum()
@@ -830,8 +867,7 @@ public sealed class QueryTagRollupLiveTests
             await CoverQueryStoreAsync(c, ServerOne);
             await QueryStoreAsync(c, ServerOne, "0xA1", 1, 4_000_000, 7);
 
-            await using var holder = new NpgsqlConnection(c.Store.ConnectionString);
-            await holder.OpenAsync(c.Ct);
+            await using var holder = await c.Source.OpenConnectionAsync(c.Ct);
             await ExecAsync(holder, "BEGIN", c.Ct);
             /* The gate does not touch the tag map; the table read joins it, so the read waits here once the gate has decided. */
             await ExecAsync(holder, "LOCK TABLE config.query_tag_map IN ACCESS EXCLUSIVE MODE", c.Ct);

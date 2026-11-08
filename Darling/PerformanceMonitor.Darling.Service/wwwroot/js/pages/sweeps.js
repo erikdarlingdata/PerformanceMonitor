@@ -23,6 +23,7 @@
  * tool own that knob, and this page has no write affordance at all.
  */
 
+import { countWord } from "../plain-text.js";
 import { el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, localTime, relTime, parseUtc, rollupTextId,
          fmtInt, fmtMb, fmtMs, fmtPct, fmtBool, fmtText, bandClass, disclosure, localizeIsoText } from "../util.js";
 import { gridTable } from "../panels.js";
@@ -306,7 +307,7 @@ function livenessBlock(d, lv) {
       el("td", { class: r[2] || null, text: r[1] }),
     ])),
     faults.length
-      ? el("div", { class: "sweep-line sev-Critical", text: faults.length + " server read fault(s): "
+      ? el("div", { class: "sweep-line sev-Critical", text: countWord(faults.length, "server read fault") + ": "
           + faults.map((f) => f.server + " (" + f.error + ")").join("; ") })
       : null,
     notes.length
@@ -404,7 +405,7 @@ async function renderWatchItems(box) {
         { key: "item", label: "Item", mono: true },
         { key: "state", label: "State", display: (w) => SWEEP_WATCH_STATE_LABELS[w.state] || w.state, cellClass: (w) => watchStateSev(w.state) },
         { key: "position", label: "Position", display: (w) => watchPosition(w, d), copyValue: (w) => watchPosition(w, d), sortValue: (w) => watchPositionRank(w) },
-        { key: "first_seen_at", label: "First seen", format: "reltime" },
+        { key: "first_seen_at", label: "First ever seen", format: "reltime" },
         { key: "last_seen_at", label: "Last seen", format: "reltime" },
         {
           key: "condition",
@@ -431,7 +432,8 @@ function watchPosition(w, d) {
   if (w.state === "pending") return w.consecutive_hits + " of " + d.entry_bar_sweeps + " hits to open";
   if (w.state === "closed") return "closed";
   if (w.consecutive_misses > 0) return w.consecutive_misses + " of " + d.exit_bar_sweeps + " quiet to close";
-  return w.consecutive_hits + " consecutive hit" + (w.consecutive_hits === 1 ? "" : "s");
+  /* The hits count the current unbroken run, which starts over after a quiet sweep; first_seen_at is the first ever sighting. */
+  return w.consecutive_hits + " consecutive hit" + (w.consecutive_hits === 1 ? "" : "s") + " in the current run";
 }
 
 /* The server cell's text, also what the column sorts, filters and exports: the fallback label is not in the raw

@@ -88,7 +88,7 @@ public sealed class ChartLayoutProbeTests
             var (tallWindow, tall) = Draw(900, 700, axisStartHoursBack: 6.1);
             try
             {
-                Assert.Contains(ChartLayoutProbe.Measure(squeezed), p => p.Contains("floor") || p.Contains("under 30%"));
+                Assert.Contains(ChartLayoutProbe.Measure(squeezed), p => p.Contains("floor") || p.Contains("under 55%"));
                 Assert.Empty(ChartLayoutProbe.Measure(tall));
             }
             finally

@@ -185,7 +185,7 @@ public partial class MainWindow
             RenderTabBadge(header, show: false, default);
         }
 
-        StatusText.Text = $"Acknowledged alerts — {DateTime.Now:HH:mm:ss}";
+        StatusText.Text = $"Acknowledged alerts — {ViewerTimeHelper.RefreshedStamp()}";
     }
 
     /// <summary>Sidebar row context-menu "Acknowledge Alerts" — quiets the badge for the right-clicked server.</summary>

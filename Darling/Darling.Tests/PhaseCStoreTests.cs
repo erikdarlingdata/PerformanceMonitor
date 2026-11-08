@@ -11,6 +11,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
@@ -39,7 +40,7 @@ public sealed class PhaseCStoreTests
     [Fact]
     public async Task ANewStore_HoldsTheWholeRung()
     {
-        await WithStoreAsync(async (store, ct) =>
+        await WithStoreAsync(async (store, _, ct) =>
         {
             Assert.Equal(StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture), await ScalarAsync(store, "SELECT max(version) FROM darling_schema_version", ct));
             Assert.Equal("3", await ScalarAsync(store,
@@ -81,7 +82,7 @@ public sealed class PhaseCStoreTests
     [Fact]
     public async Task AnUpgradedStore_KeepsItsRows_FillsEventIds_AndASecondRunChangesNothing()
     {
-        await WithStoreAsync(async (store, ct) =>
+        await WithStoreAsync(async (store, _, ct) =>
         {
             await RungRewindArtifacts.DropSentinelsAboveAsync(store, Rung.Version - 1, ct);
             await ExecAsync(store, "DELETE FROM darling_schema_version WHERE version >= " + Rung.Version.ToString(CultureInfo.InvariantCulture), ct);
@@ -114,7 +115,7 @@ public sealed class PhaseCStoreTests
     [Fact]
     public async Task Retention_ClearsEvidenceWithTheBriefAt90Days_AndKeepsYoungerEvidence()
     {
-        await WithStoreAsync(async (store, ct) =>
+        await WithStoreAsync(async (store, storeConnectionString, ct) =>
         {
             await InsertRequestAsync(store, RequestA, openedDaysAgo: 100, state: "closed", ct: ct);
             await InsertRequestAsync(store, RequestB, openedDaysAgo: 30, state: "closed", ct: ct);
@@ -124,7 +125,7 @@ public sealed class PhaseCStoreTests
                 await ExecAsync(store, $"INSERT INTO config.investigation_evidence (request_id, section, state, content) VALUES ('{request}', 'waits', 'ready', '{{\"k\":1}}'::jsonb), ('{request}', 'jobs', 'ready', '{{\"k\":2}}'::jsonb)", ct);
             }
 
-            await PurgeAsync(store, ct);
+            await PurgeAsync(storeConnectionString, ct);
 
             Assert.Equal("0", await ScalarAsync(store, $"SELECT count(*) FROM config.investigation_evidence WHERE request_id = '{RequestA}'", ct));
             Assert.Null(await ScalarAsync(store, $"SELECT brief::text FROM config.investigation_requests WHERE request_id = '{RequestA}'", ct));
@@ -137,7 +138,7 @@ public sealed class PhaseCStoreTests
     [Fact]
     public async Task Retention_KeepsTheEvidenceOfAnOpenOrClaimedRequest()
     {
-        await WithStoreAsync(async (store, ct) =>
+        await WithStoreAsync(async (store, storeConnectionString, ct) =>
         {
             const string Claimed = "cccccccc-0000-0000-0000-000000000001";
             await InsertRequestAsync(store, RequestA, openedDaysAgo: 100, state: "open", ct: ct);
@@ -148,7 +149,7 @@ public sealed class PhaseCStoreTests
                 await ExecAsync(store, $"INSERT INTO config.investigation_evidence (request_id, section, state, content) VALUES ('{request}', 'waits', 'ready', '{{\"k\":1}}'::jsonb)", ct);
             }
 
-            await PurgeAsync(store, ct);
+            await PurgeAsync(storeConnectionString, ct);
 
             Assert.Equal($"{RequestA},{Claimed}", await ScalarAsync(store, "SELECT string_agg(request_id::text, ',' ORDER BY request_id) FROM config.investigation_evidence", ct));
         });
@@ -158,7 +159,7 @@ public sealed class PhaseCStoreTests
     [Fact]
     public async Task Retention_PurgesSignatureDaysAt30Days_AndKeepsMerges()
     {
-        await WithStoreAsync(async (store, ct) =>
+        await WithStoreAsync(async (store, storeConnectionString, ct) =>
         {
             await ExecAsync(store,
                 "INSERT INTO config.investigation_signature_days (server_id, signature, day, count) VALUES "
@@ -170,7 +171,7 @@ public sealed class PhaseCStoreTests
                 "INSERT INTO config.investigation_signature_merges (server_id, signature, merged_into, reason, merged_by, merged_at) "
                 + "VALUES (1, 'sig-a', 'sig-b', 'same procedure, two object sets', 'erik', now() - interval '400 days')", ct);
 
-            await PurgeAsync(store, ct);
+            await PurgeAsync(storeConnectionString, ct);
 
             Assert.Equal("sig-a:5,sig-b:1", await ScalarAsync(store,
                 "SELECT string_agg(signature || ':' || count, ',' ORDER BY signature) FROM config.investigation_signature_days", ct));
@@ -197,13 +198,19 @@ public sealed class PhaseCStoreTests
         + "investigation_requests.evidence_state,investigation_requests.follow_up_at,investigation_requests.follow_up_condition,investigation_requests.follow_up_of,"
         + "investigation_requests.max_severity,procedure_stats.module_modify_date";
 
-    private static async Task PurgeAsync(NpgsqlConnection store, CancellationToken ct)
+    private static async Task PurgeAsync(string storeConnectionString, CancellationToken ct)
     {
-        await using var dataSource = NpgsqlDataSource.Create(store.ConnectionString);
-        await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, logger: null, ct);
+        await using var dataSource = NpgsqlDataSource.Create(storeConnectionString);
+        var logger = new CapturingTestLogger();
+        await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, logger, ct);
+        /* The purge isolates a failing table and carries on, so a purge that cannot reach the store deletes nothing and
+           returns as if it had. Its own log is the only place that failure shows; a clean purge logs no warning or error. */
+        Assert.True(logger.CountAtLevel(LogLevel.Warning) + logger.CountAtLevel(LogLevel.Error) == 0,
+            "the purge isolated a failure instead of deleting: " + logger.Joined);
     }
 
-    private static async Task WithStoreAsync(Func<NpgsqlConnection, CancellationToken, Task> body)
+    /* Npgsql leaves the password out of an opened connection's ConnectionString, so a data source the body builds comes from the scratch store's own string. */
+    private static async Task WithStoreAsync(Func<NpgsqlConnection, string, CancellationToken, Task> body)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the Phase C store pins.");
         var ct = TestContext.Current.CancellationToken;
@@ -215,7 +222,7 @@ public sealed class PhaseCStoreTests
         var bodySucceeded = false;
         try
         {
-            await body(store, ct);
+            await body(store, scratch.ConnectionString, ct);
             bodySucceeded = true;
         }
         finally

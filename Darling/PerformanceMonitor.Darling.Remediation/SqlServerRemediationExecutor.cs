@@ -100,12 +100,13 @@ SELECT edition = @edition, granted = @granted, cached = @cached;";
     /// and stops at the first that applies: the engine is an Azure SQL Database (<c>azure_sql_database</c>: its kill is <see cref="AzureKillSql"/>, in the session's own database), the session is this connection's
     /// own (<c>own_session</c>), no such session (<c>session_gone</c>), a different <c>login_time</c> (<c>session_reused</c>: the id was reused),
     /// not a user session (<c>not_user_session</c>), a session of Darling itself (a program name that starts with <c>PerformanceMonitorDarling</c> AND the monitoring
-    /// or the remediation login, or the remediation login with any program name: <c>tool_login_session</c>; with no monitoring login known, the program name alone), the login lacks <c>ALTER ANY CONNECTION</c> (<c>kill_permission_denied</c>). A write whose <c>@expected_last_end</c> is not the session's <c>last_request_end_time</c>, when <c>@check_activity</c> is 1, stops at <c>session_changed</c> (#7109). Then it runs the
+    /// or the remediation login, or the remediation login with any program name: <c>tool_login_session</c>; with no monitoring login known, the program name alone), the login lacks <c>ALTER ANY CONNECTION</c> (<c>kill_permission_denied</c>). A write whose <c>@expected_last_end</c> is not the session's <c>last_request_end_time</c>, when <c>@check_activity</c> is 1, stops at <c>session_changed</c> (#7109), and one whose <c>@expected_database_id</c> is not the session's <c>database_id</c> stops at <c>database_changed</c>: a running request can move its session to another database without ending, so the database is compared here too. Then it runs the
     /// <c>KILL</c> unless <c>@dry</c>, and answers <c>dry_ok</c> or <c>killed</c>. The check and the <c>KILL</c> are one batch but not one atomic step:
     /// a session can end and its id be reused between them. The <c>KILL</c> text is built from the int parameter's decimal form only. After a real
     /// <c>KILL</c> it reads the session's request once (<c>command</c>, <c>percent_complete</c>), so a rollback shows. That read sits in TRY/CATCH, so
     /// nothing after the <c>KILL</c> can raise an error that would read as a failed kill: a read that fails answers <c>rollback_read = 0</c>, and the
-    /// kill is still <c>killed</c> with its rollback not read. No statement text and no input buffer are read.
+    /// kill is still <c>killed</c> with its rollback not read. No statement text and no input buffer are read. The session's current database (<c>database_id</c> and its name) is read
+    /// in the same batch, so the tool can refuse a session in a database the server's entry excludes before anything is killed.
     /// </summary>
     internal const string KillSql = @"
 DECLARE @edition bigint = CONVERT(bigint, SERVERPROPERTY('EngineEdition'));
@@ -120,6 +121,8 @@ DECLARE @status nvarchar(30) = NULL;
 DECLARE @open_tran int = NULL;
 DECLARE @last_end datetime = NULL;
 DECLARE @log_bytes bigint = NULL;
+DECLARE @database_id int = NULL;
+DECLARE @database_name nvarchar(128) = NULL;
 DECLARE @command nvarchar(32) = NULL;
 DECLARE @percent real = NULL;
 DECLARE @rollback_read bit = 1;
@@ -137,6 +140,8 @@ BEGIN
         @status = s.status,
         @open_tran = s.open_transaction_count,
         @last_end = s.last_request_end_time,
+        @database_id = s.database_id,
+        @database_name = DB_NAME(s.database_id),
         @log_bytes =
         (
             SELECT SUM(CONVERT(bigint, ddt.database_transaction_log_bytes_used))
@@ -169,6 +174,9 @@ BEGIN
     ELSE IF @check_activity = 1
          AND NOT (@last_end = @expected_last_end OR (@last_end IS NULL AND @expected_last_end IS NULL))
         SET @outcome = 'session_changed';
+    ELSE IF @check_activity = 1
+         AND NOT (@database_id = @expected_database_id OR (@database_id IS NULL AND @expected_database_id IS NULL))
+        SET @outcome = 'database_changed';
     ELSE IF @dry = 1
         SET @outcome = 'dry_ok';
     ELSE
@@ -191,17 +199,21 @@ BEGIN
 END;
 SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actual, login_name = @login_name, host_name = @host_name,
        program_name = @program_name, status = @status, open_transaction_count = @open_tran, last_request_end_time = @last_end,
-       log_bytes_used = @log_bytes, rollback_command = @command, percent_complete = @percent, rollback_read = @rollback_read;";
+       log_bytes_used = @log_bytes, rollback_command = @command, percent_complete = @percent, rollback_read = @rollback_read,
+       database_id = @database_id, database_name = @database_name;";
 
-    /// <summary>Query Store plan rows: the plan asked about, and any plan of the query that is forced now.</summary>
+    /// <summary>
+    /// Query Store plan rows: the plan asked about, and any plan of the query that is forced now, each with the query's <c>query_hash</c> as <c>0x</c> text
+    /// (the form the store keeps it in), so a caller can tell whether the query behind this query_id is the one whose rows it collected.
+    /// </summary>
     internal const string PlanFactsSql =
-        "SELECT p.plan_id, is_forced_plan = CONVERT(bit, p.is_forced_plan), p.force_failure_count, p.last_force_failure_reason_desc " +
-        "FROM sys.query_store_plan AS p WHERE p.query_id = @query_id AND (p.plan_id = @plan_id OR p.is_forced_plan = 1) OPTION(RECOMPILE);";
+        "SELECT p.plan_id, is_forced_plan = CONVERT(bit, p.is_forced_plan), p.force_failure_count, p.last_force_failure_reason_desc, query_hash = CONVERT(varchar(18), q.query_hash, 1) " +
+        "FROM sys.query_store_plan AS p JOIN sys.query_store_query AS q ON q.query_id = p.query_id WHERE p.query_id = @query_id AND (p.plan_id = @plan_id OR p.is_forced_plan = 1) OPTION(RECOMPILE);";
 
     /// <summary><see cref="PlanFactsSql"/> with the forcing type, for SQL Server 2022 and later.</summary>
     internal const string PlanFactsWithTypeSql =
-        "SELECT p.plan_id, is_forced_plan = CONVERT(bit, p.is_forced_plan), p.force_failure_count, p.last_force_failure_reason_desc, p.plan_forcing_type_desc " +
-        "FROM sys.query_store_plan AS p WHERE p.query_id = @query_id AND (p.plan_id = @plan_id OR p.is_forced_plan = 1) OPTION(RECOMPILE);";
+        "SELECT p.plan_id, is_forced_plan = CONVERT(bit, p.is_forced_plan), p.force_failure_count, p.last_force_failure_reason_desc, p.plan_forcing_type_desc, query_hash = CONVERT(varchar(18), q.query_hash, 1) " +
+        "FROM sys.query_store_plan AS p JOIN sys.query_store_query AS q ON q.query_id = p.query_id WHERE p.query_id = @query_id AND (p.plan_id = @plan_id OR p.is_forced_plan = 1) OPTION(RECOMPILE);";
 
     /// <summary>SQL Server 2022 and later say how a plan was forced (<c>plan_forcing_type_desc</c>: MANUAL or AUTO); earlier versions have no such column.</summary>
     internal const string ForcingTypeColumnSql =
@@ -232,10 +244,12 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
 
             PlanRow? requested = null;
             PlanRow? forced = null;
+            string? queryHash = null;
             await using (var read = Command(connection, hasType ? PlanFactsWithTypeSql : PlanFactsSql))
             {
                 read.Parameters.Add(new SqlParameter("@plan_id", SqlDbType.BigInt) { Value = planId });
                 read.Parameters.Add(new SqlParameter("@query_id", SqlDbType.BigInt) { Value = queryId });
+                var hashOrdinal = hasType ? 5 : 4;
                 await using var reader = await read.ExecuteReaderAsync(ct);
                 while (await reader.ReadAsync(ct))
                 {
@@ -246,12 +260,15 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
                         requested = row;
                     if (row.IsForced)
                         forced = row;
+                    /* Every row is a plan of the one query, so each carries the same hash. */
+                    queryHash ??= reader.IsDBNull(hashOrdinal) ? null : reader.GetString(hashOrdinal);
                 }
             }
 
             state = new PlanForceState(database, queryId, planId,
                 requested is null ? null : new RequestedPlanState(requested.PlanId, requested.IsForced, requested.FailureCount, requested.FailureReason),
-                forced is null ? null : new ForcedPlanState(forced.PlanId, forced.ForcingType, forced.FailureCount, forced.FailureReason));
+                forced is null ? null : new ForcedPlanState(forced.PlanId, forced.ForcingType, forced.FailureCount, forced.FailureReason),
+                queryHash);
             return RemediationResult.Done(name, true, wrote: false, "Read the Query Store state of the query. Nothing was written.");
         }, ct);
         return PlanStateRead.From(result, state);
@@ -460,9 +477,9 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
     };
 
     /// <summary>
-    /// The two parameters both kill batches take for the activity check (#7109). With no <paramref name="expected"/> the check is off (a dry run,
-    /// or a caller that holds no binding). With one, the batch refuses unless <c>last_request_end_time</c> equals the expected value, where a NULL
-    /// equals only a NULL.
+    /// The three parameters both kill batches take for the activity check (#7109). With no <paramref name="expected"/> the check is off (a dry run,
+    /// or a caller that holds no binding). With one, the batch refuses unless <c>last_request_end_time</c> equals the expected value and the session's
+    /// <c>database_id</c> equals the expected one, where a NULL equals only a NULL.
     /// </summary>
     internal static void AddKillActivityParameters(SqlCommand command, KillExpectedActivity? expected)
     {
@@ -471,6 +488,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
         {
             Value = expected?.LastRequestEnd is { } ended ? DateTime.SpecifyKind(ended, DateTimeKind.Unspecified) : DBNull.Value,
         });
+        command.Parameters.Add(new SqlParameter("@expected_database_id", SqlDbType.Int) { Value = (object?)expected?.DatabaseId ?? DBNull.Value });
     }
 
     private static async Task<RemediationResult> ReadKillAnswerAsync(SqlCommand command, string name, bool dryRun, int sessionId, CancellationToken ct,
@@ -493,7 +511,9 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
                     reader.IsDBNull(6) ? null : reader.GetString(6),
                     reader.IsDBNull(7) ? null : Convert.ToInt32(reader.GetValue(7), CultureInfo.InvariantCulture),
                     reader.IsDBNull(8) ? null : reader.GetDateTime(8),
-                    reader.IsDBNull(9) ? null : Convert.ToInt64(reader.GetValue(9), CultureInfo.InvariantCulture));
+                    reader.IsDBNull(9) ? null : Convert.ToInt64(reader.GetValue(9), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(13) ? null : Convert.ToInt32(reader.GetValue(13), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(14) ? null : reader.GetString(14));
             }
 
             var rollbackCommand = reader.IsDBNull(10) ? null : reader.GetString(10);
@@ -541,6 +561,8 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
                 $"Session {sessionId} is now a different session: it has another login time, so the server reused the id. Nothing was run."),
             KillOutcomes.SessionChanged => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SessionChanged,
                 $"Session {sessionId} has run something new since the dry run: its last request ended at another time, so it may hold a different transaction than the one that was checked. Nothing was run. Read it again with a dry run to see what it holds now."),
+            KillOutcomes.DatabaseChanged => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.DatabaseChanged,
+                $"Session {sessionId} has moved to another database since the dry run: its running request changed the session's database, so the kill was not sent to the session that was checked. Nothing was run. Read it again with a dry run to see where it is now."),
             KillOutcomes.NotUserSession => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.NotUserSession,
                 $"Session {sessionId} is not a user session. Nothing was run."),
             KillOutcomes.PermissionDenied => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.KillPermissionDenied,
@@ -688,6 +710,7 @@ internal static class KillOutcomes
     internal const string SessionGone = "session_gone";
     internal const string SessionReused = "session_reused";
     internal const string SessionChanged = "session_changed";
+    internal const string DatabaseChanged = "database_changed";
     internal const string NotUserSession = "not_user_session";
     internal const string PermissionDenied = "kill_permission_denied";
     internal const string DryOk = "dry_ok";
@@ -697,17 +720,20 @@ internal static class KillOutcomes
 /// <summary>
 /// What the server's session view held for the session the kill named, read in the same batch as the decision (#5632, step 12). <c>LoginTime</c> is
 /// the session's actual value, so a reused id shows the new session's time. Times are the server's own clock, with no zone. No statement text and no
-/// input buffer: they are never read.
+/// input buffer: they are never read. <c>DatabaseId</c> and <c>DatabaseName</c> are the database the session is in now, read in the same batch; the tool
+/// refuses a session in a database the server's entry excludes.
 /// </summary>
 public sealed record KillSessionFacts(
     int SessionId, DateTime? LoginTime, string? LoginName, string? HostName, string? ProgramName, string? Status,
-    int? OpenTransactionCount, DateTime? LastRequestEndTime, long? LogBytesUsed);
+    int? OpenTransactionCount, DateTime? LastRequestEndTime, long? LogBytesUsed, int? DatabaseId = null, string? DatabaseName = null);
 
 /// <summary>
 /// What a SQL Server or Azure kill write expects of the session beyond its id and login time (#7109): the <c>last_request_end_time</c> the dry run
-/// read, in the server's own clock. NULL means the session had never finished a request, and it equals only a NULL.
+/// read, in the server's own clock, and the <c>database_id</c> the dry run read the session in. A NULL means the session had never finished a request, or
+/// its database was not read, and it equals only a NULL. A running request can move its session to another database without ending, so the database is
+/// compared in the batch too, not only before it.
 /// </summary>
-public sealed record KillExpectedActivity(DateTime? LastRequestEnd);
+public sealed record KillExpectedActivity(DateTime? LastRequestEnd, int? DatabaseId = null);
 
 /// <summary>Whether the session's request showed a rollback right after a real kill, read once. <c>PercentComplete</c> is null when none runs.</summary>
 public sealed record KillRollback(bool InProgress, double? PercentComplete);
@@ -776,13 +802,16 @@ public sealed record ForcedPlanState(
 /// <summary>
 /// The server's own Query Store state for one query (#5632, step 7), the before and after image a force or an unforce journals. A null
 /// <see cref="ForcedPlan"/> means no plan of the query is forced; a null <see cref="RequestedPlan"/> means the plan is not among the query's rows.
+/// <see cref="QueryHash"/> is the query's <c>query_hash</c> as <c>0x</c> text, the same form the store's collected rows keep, so the journal shows which
+/// query the ids named when the change was made; null when the query has no Query Store rows.
 /// </summary>
 public sealed record PlanForceState(
     [property: JsonPropertyName("database")] string Database,
     [property: JsonPropertyName("query_id")] long QueryId,
     [property: JsonPropertyName("plan_id")] long PlanId,
     [property: JsonPropertyName("requested_plan")] RequestedPlanState? RequestedPlan,
-    [property: JsonPropertyName("forced_plan")] ForcedPlanState? ForcedPlan);
+    [property: JsonPropertyName("forced_plan")] ForcedPlanState? ForcedPlan,
+    [property: JsonPropertyName("query_hash")] string? QueryHash = null);
 
 /// <summary>What <see cref="SqlServerRemediationExecutor.ReadPlanStateAsync"/> found: the state, or the refusal or failure that stopped the read.</summary>
 public sealed record PlanStateRead(RemediationOutcome Outcome, string? Reason, string Message, PlanForceState? State)

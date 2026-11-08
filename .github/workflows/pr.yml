@@ -4,7 +4,8 @@ name: PR CI
 # both test projects once, N test legs run weighted slices of the classes from that build, and one verdict job turns the
 # result into the commit status `CI result`. `CI result` is a commit status and not a job: a skipped required job counts
 # as passing, so a skipped run could leave a green on a SHA nobody tested. The status stays pending until the
-# verdict sets it, so a run that is cancelled or dies early never passes.
+# verdict sets it, so a run that is cancelled or dies early never passes. A fork pull request's run has a read-only
+# token, so fork-ci-result.yml writes its `CI result` from the verdict job's conclusion once the run completes (#8188).
 #
 # Every pull request runs, draft or ready for review (#7717; PR 2 of the rollout removed the `ci-next` label gate). Agent
 # pull requests open as drafts and need their first build and test run on CI, not on the laptop. The draft flag does not
@@ -277,8 +278,9 @@ jobs:
           print("exporter=" + ("true" if run else "false"))
           PY
 
-      # Pending from the moment the plan says the run goes. A fork's read-only token cannot write it (the verdict job
-      # says so in one notice). A run on the dev ref that plans every area also marks `CI full suite` pending (#7819); the verdict
+      # Pending from the moment the plan says the run goes. A fork's read-only token cannot write it: for a fork pull request,
+      # fork-ci-result.yml writes the final state from this run's `CI verdict` job conclusion once the run completes (#8188).
+      # A run on the dev ref that plans every area also marks `CI full suite` pending (#7819); the verdict
       # job finishes both, and the hourly re-dispatch skips a commit whose `CI full suite` is finished. A pull request's ref is
       # refs/pull/N/merge and a manual dispatch on another branch has that branch's ref, so neither writes `CI full suite`.
       - name: Set CI result to pending
@@ -567,10 +569,25 @@ jobs:
           name: ci-test-results-${{ matrix.leg }}
           path: |
             TestResults/
+            !TestResults/crash-dumps/**
             ${{ runner.temp }}/darling-pg*.log
           retention-days: 7
           overwrite: true
           if-no-files-found: ignore
+
+      # #8190: a test host that died with a native fault (exit -1073741819 is an access violation) wrote a minidump under
+      # TestResults/crash-dumps, and the shard scripts recorded its exit code there (.github/scripts/crash-dumps.ps1). The folder
+      # is its own artifact: only a crashed leg has one, and a dump is tens of MB, so it is kept out of the results above.
+      - name: Upload the leg's crash dumps
+        if: always() && hashFiles('TestResults/crash-dumps/**') != ''
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: actions/upload-artifact@v6
+        with:
+          name: ci-crash-dumps-${{ matrix.leg }}
+          path: TestResults/crash-dumps/
+          retention-days: 7
+          overwrite: true
 
   # The Darling export tool (Exporter/): restore in locked mode, build, and run its tests. It is a plain net10.0 console app,
   # so it runs on Linux, where Docker is available for the tests that start a real PostgreSQL (they skip themselves without
@@ -790,6 +807,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # Only the scripts folder, for ci-verdict-issues.py (#8202): the two issue steps below call it. No credentials stay
+      # in the checkout; the steps use GH_TOKEN.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+
       - name: Set CI result
         id: verdict
         shell: bash
@@ -864,9 +889,13 @@ jobs:
           echo "state=${state}" >> "${GITHUB_OUTPUT}"
           echo "failed=${failed}" >> "${GITHUB_OUTPUT}"
 
+          # #8188: a fork's token is read-only, so this run cannot write the status. fork-ci-result.yml writes it once this run
+          # completes, from this job's conclusion as the API reports it, so the step exits by the state: a failure fails this job.
+          # (A failure that a newer run replaced exited 0 above; the relay makes the same newer-run check before it writes.)
           if [ "${IS_FORK}" = "true" ]; then
-            echo "::notice title=CI result is not set on a fork pull request::A fork's token is read-only, so this run cannot set the CI result status (it would be '${state}'). A maintainer pushes the branch to this repository to run CI there, or an admin merges."
-            exit 0
+            echo "::notice title=CI result is relayed for a fork pull request::A fork's token is read-only, so this run cannot set the CI result status. The PR CI fork result workflow sets it from this job's conclusion ('${state}') once the run completes; success also needs a maintainer's approval of this commit."
+            [ "${state}" = "success" ] && exit 0
+            exit 1
           fi
 
           gh api "repos/${GITHUB_REPOSITORY}/statuses/${CI_RESULT_SHA}" -f state="${state}" -f context='CI result' \
@@ -878,6 +907,26 @@ jobs:
             gh api "repos/${GITHUB_REPOSITORY}/statuses/${CI_RESULT_SHA}" -f state="${state}" -f context='CI full suite' \
               -f description="${desc:0:140}" -f target_url="${TARGET_URL}" > /dev/null
           fi
+
+      # #8202: a pull request whose green came from a rerun passed by luck once. The script reads every earlier attempt's
+      # failed test legs for their [FAIL] lines and files one issue per test (or comments on the open one), before the merge
+      # button is pressed. It reports only: the script exits 0 on its own failures and the step never fails the run.
+      - name: File the tests an earlier attempt failed, when the run passed only on a rerun
+        if: ${{ always() && github.event_name == 'pull_request' && steps.verdict.outputs.state == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATE: ${{ steps.verdict.outputs.state }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+
+          python -I .github/scripts/ci-verdict-issues.py rerun-passes --repo "${GITHUB_REPOSITORY}" --server-url "${GITHUB_SERVER_URL}" \
+            --event "${GITHUB_EVENT_NAME}" --state "${STATE}" --run-id "${GITHUB_RUN_ID}" --run-attempt "${RUN_ATTEMPT}" \
+            --pr-number "${PR_NUMBER}" --head-sha "${HEAD_SHA}"
 
       # A dev run that turns red opens one "dev is red" issue, or comments on the open one. Only a green FULL run closes it
       # (#7819): a green push that ran the map's classes says nothing about the classes it did not run, and the hourly full
@@ -902,9 +951,9 @@ jobs:
             --jq '[.[] | select(.title == "dev is red")][0].number // empty')
 
           if [ "${FULL_SUITE}" = "true" ]; then
-            kind="full suite"; context="CI full suite"; last="the last dev commit with a green CI full suite"
+            kind="full suite"; context="CI full suite"
           else
-            kind="push"; context="CI result"; last="the last dev commit with a green CI result"
+            kind="push"; context="CI result"
           fi
 
           if [ "${STATE}" = "success" ]; then
@@ -920,36 +969,10 @@ jobs:
             exit 0
           fi
 
-          # The commits since the last dev commit whose status in `context` is success (newest first, at most 30 looked at).
-          since=""
-          nl=$'\n'
-          tab=$'\t'
-          seen_self=false
-          while IFS="${tab}" read -r sha subject; do
-            if [ "${seen_self}" = "false" ]; then
-              [ "${sha}" = "${GITHUB_SHA}" ] && seen_self=true
-              [ "${seen_self}" = "true" ] || continue
-            else
-              green=$(CONTEXT="${context}" gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/statuses" \
-                --jq '[.[] | select(.context == env.CONTEXT and .state == "success")] | length' 2>/dev/null || echo 0)
-              if [ "${green}" != "0" ]; then
-                since="${since}(stopped at ${sha:0:9}, ${last})${nl}"
-                break
-              fi
-            fi
-            since="${since}- ${sha:0:9} ${subject//@/(at)}${nl}"
-          done < <(gh api "repos/${GITHUB_REPOSITORY}/commits?sha=dev&per_page=30" --jq '.[] | [.sha, (.commit.message | split("\n")[0])] | @tsv')
-          [ -n "${since}" ] || since="(none found in the last 30 commits)"$'\n'
-
-          {
-            echo "The dev ${kind} CI failed at ${GITHUB_SHA}."
-            echo
-            echo "Run: ${RUN_URL}"
-            echo "Failed:${FAILED:- see the run}"
-            echo
-            echo "Commits since ${last} (newest first):"
-            printf '%s' "${since}"
-          } > body.txt
+          # The body: the failure, the run, and every dev commit from this sha back to the last one whose `context` status is
+          # success, each with its short sha, pull request number and title. The script writes the head of the body even
+          # when the commit list cannot be read, so the issue is filed either way.
+          python -I .github/scripts/ci-verdict-issues.py dev-red-body --repo "${GITHUB_REPOSITORY}" --red-sha "${GITHUB_SHA}" \n            --run-url "${RUN_URL}" --failed "${FAILED}" --kind "${kind}" --context "${context}" --out body.txt
 
           if [ -n "${issue}" ]; then
             gh issue comment "${issue}" --repo "${GITHUB_REPOSITORY}" --body-file body.txt

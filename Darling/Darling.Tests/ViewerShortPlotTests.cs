@@ -74,7 +74,7 @@ public sealed class ViewerShortPlotTests
     public void BlockingTrendAxisTitle_FitsTheMinimumRowWhole_AndTheSourceMovesToTheLegend()
     {
         var (text, size) = ChartAxisTitle.Fit(PerformanceMonitor.Darling.Viewer.ViewerServerTab.BlockingTrendAxisTitle, MinRowTitleSpace);
-        Assert.Equal(PerformanceMonitor.Ui.BlockingTrendLabels.AxisShort, text);
+        Assert.Equal(PerformanceMonitor.Darling.Viewer.ViewerServerTab.BlockingTrendAxisTitle, text);
         Assert.InRange(size, ChartAxisTitle.MinFontSize, ChartAxisTitle.BaseFontSize);
         Assert.Equal("Blocking Incidents (blocked-process-report)", BlockingSourceLabel.For("Blocking Incidents", new string?[] { "blocked-process-report" }));
     }
@@ -265,7 +265,7 @@ public sealed class ViewerShortPlotTests
     public void RowMinimum_FollowsWhatTheLegendAndTicksTake()
     {
         Assert.Equal(ChartLayout.MinPlotHeight, ChartLayout.RowMinHeightFor(40));
-        Assert.Equal(171 + ChartLayout.MinPlotAreaHeight, ChartLayout.RowMinHeightFor(171));
+        Assert.Equal(171 / (1 - ChartLayout.MinPlotShare), ChartLayout.RowMinHeightFor(171), 6);
     }
 
     // ---- #6832: the fitted title stays inside the plot, clear of the top and bottom tick labels, and keeps its unit ----

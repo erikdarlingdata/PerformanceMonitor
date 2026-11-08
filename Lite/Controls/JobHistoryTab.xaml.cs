@@ -98,29 +98,41 @@ public partial class JobHistoryTab : UserControl
     private readonly Dictionary<int, ServerClock> _readClocks = new();
 
     /// <summary>
-    /// The zone the picker reads typed times and calendar periods in (#5562 M1): the zone the grid words its rows in. For one
-    /// server that is its wall clock (the clock its last read used, else its open tab's, else this machine's, the chain
-    /// <see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/> follows); for All Servers it is UTC, since the rows
-    /// sit on different servers' clocks (<see cref="ShowDataStartNoteAsync"/>).
+    /// The zone the picker reads typed times and calendar periods in (#5562 M1) and the "Showing since" note is worded in: the zone
+    /// the grid words its rows in, under the process-wide display mode (<see cref="JobHistoryZone(int?, TimeDisplayMode, IReadOnlyDictionary{int, ServerClock}?, IReadOnlyDictionary{int, ServerClock}?)"/>).
     /// </summary>
-    internal static TimeZoneInfo JobHistoryZone(int? serverId, IReadOnlyDictionary<int, ServerClock>? readClocks, IReadOnlyDictionary<int, ServerClock>? openTabClocks)
+    internal static TimeZoneInfo JobHistoryZone(int? serverId, IReadOnlyDictionary<int, ServerClock>? readClocks, IReadOnlyDictionary<int, ServerClock>? openTabClocks) =>
+        JobHistoryZone(serverId, ServerTimeHelper.CurrentDisplayMode, readClocks, openTabClocks);
+
+    /// <summary>
+    /// The zone the grid words its rows in for <paramref name="mode"/>, which the picker and the note share. For All Servers the rows sit
+    /// on different servers' clocks and read on the one clock a mixed list reads on (<see cref="MultiServerTime.MixedZone(TimeDisplayMode)"/>:
+    /// UTC in UTC mode, this machine's zone otherwise, as Alert History's rows do). For one server it is
+    /// <see cref="ServerTimeHelper.DisplayZoneFor"/> on that server's clock (the clock its last read used, else its open tab's), so Server
+    /// time is its wall clock and UTC and Local are those zones; a server with no clock known reads this machine's zone in Server time.
+    /// Pure, so a test names the mode instead of setting the process-wide one.
+    /// </summary>
+    internal static TimeZoneInfo JobHistoryZone(
+        int? serverId, TimeDisplayMode mode, IReadOnlyDictionary<int, ServerClock>? readClocks, IReadOnlyDictionary<int, ServerClock>? openTabClocks)
     {
         if (serverId is not int one)
         {
-            return TimeZoneInfo.Utc;
+            return MultiServerTime.MixedZone(mode);
         }
 
+        ServerClock? clock = null;
         if (readClocks is not null && readClocks.TryGetValue(one, out var read))
         {
-            return read.AsTimeZone();
+            clock = read;
         }
-
-        if (openTabClocks is not null && openTabClocks.TryGetValue(one, out var tab))
+        else if (openTabClocks is not null && openTabClocks.TryGetValue(one, out var tab))
         {
-            return tab.AsTimeZone();
+            clock = tab;
         }
 
-        return TimeZoneInfo.Local;
+        return clock is null && mode == TimeDisplayMode.ServerTime
+            ? TimeZoneInfo.Local
+            : ServerTimeHelper.DisplayZoneFor(mode, clock ?? ServerClock.Utc);
     }
 
     private TimeZoneInfo PickerZone()
@@ -211,6 +223,8 @@ public partial class JobHistoryTab : UserControl
             var categoriesTask = _choicesFreshness.NeedsRead(choicesKey, DateTime.UtcNow)
                 ? ReadKnownCategoriesAsync(startUtc, rangeEndUtc, serverId, choicesKey)
                 : null;
+            /* #8133: at All Servers the cap is shared out per server, so one busy server cannot fill the page alone. */
+            _dataService.ShareJobHistoryCapPerServer = true;
             var readTask = System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryWithClocksAsync(startUtc, RowCap, serverId, openTabClocks, rangeEndUtc, statusFilter, categoryFilter));
 
             var (all, readClocks) = await readTask;
@@ -222,6 +236,12 @@ public partial class JobHistoryTab : UserControl
             {
                 return;
             }
+
+            /* The rows are bound, so the loading note comes down now, ahead of the agent-status read and the data-start note: each can
+               take a while, and neither may keep "Loading job history…" over rows a reader can already see. Like every other paint in
+               this method, the collapse sits behind this load's own supersession check. */
+            if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+            LoadingMessage.Visibility = Visibility.Collapsed;
 
             var choicesApplied = ApplyKnownCategoriesAsync(categoriesTask, choicesKey, gen, all);
 
@@ -241,8 +261,6 @@ public partial class JobHistoryTab : UserControl
             await UpdateAgentStatusAsync(serverId);
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
-            LoadingMessage.Visibility = Visibility.Collapsed;
-
             /* #4966: the rows are bound and the loading note is down; the note comes last, from the read (all). Status and Category are
                applied in the read, ahead of the row cap (#5703), so a full page of matching runs names its oldest run and the cap label
                counts the same rows. A probe that fails costs the note and never the grid. */
@@ -260,10 +278,11 @@ public partial class JobHistoryTab : UserControl
 
     /// <summary>
     /// The "Showing since" note of the grid (#4966), worked out for one load: the frame it is worded in,
-    /// then the step below. For one server the note is worded on that server's wall clock, the clock the read windowed on (the
-    /// server's collected clock, else its open tab's, else the machine's, <see cref="LocalDataService.ReadJobHistoryClockAsync"/>, handed back by the read),
-    /// which is the clock the Run Time column prints in. For the All Servers view the rows sit on different servers' clocks, so
-    /// the note is worded in UTC and says so; the probe reads the All Servers set itself
+    /// then the step below. The frame is the zone the grid words its rows in (<see cref="JobHistoryZone(int?, TimeDisplayMode, IReadOnlyDictionary{int, ServerClock}?, IReadOnlyDictionary{int, ServerClock}?)"/>).
+    /// For one server that is the clock the read windowed on (the server's collected clock, else its open tab's, else the machine's,
+    /// <see cref="LocalDataService.ReadJobHistoryClockAsync"/>, handed back by the read) in the display mode, which is the clock the Run Time
+    /// column prints in. For the All Servers view the rows sit on different servers' clocks, so the note is worded on the one clock a
+    /// mixed list reads on and names it ("UTC" or "local"); the probe reads the All Servers set itself
     /// (<see cref="LocalDataService.GetJobHistoryDataStartAsync"/> takes the earliest coverage among the servers with a run or a logged collector run in the window and bounds its own work).
     /// A load that a newer one has superseded writes nothing.
     /// </summary>
@@ -275,14 +294,15 @@ public partial class JobHistoryTab : UserControl
         var service = _dataService;
 
         /* One clock read: for one server the note is worded on the clock the read windowed on, handed back by the read. */
-        var zone = serverId is int one && readClocks.TryGetValue(one, out var clock) ? clock.AsTimeZone() : TimeZoneInfo.Utc;
+        var mode = ServerTimeHelper.CurrentDisplayMode;
+        var zone = JobHistoryZone(serverId, mode, readClocks, null);
 
         if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
         await ShowJobHistoryDataStartAsync(
             JobHistoryWindowTruncatedBanner,
             () => System.Threading.Tasks.Task.Run(() => service.GetJobHistoryDataStartAsync(serverId, startUtc, endUtc)),
-            startUtc, endUtc, read, zone, inUtc: serverId is null,
+            startUtc, endUtc, read, zone, zoneWord: serverId is null ? MultiServerTime.MixedZoneWord(mode) : null,
             superseded: () => _loads.Superseded(nameof(LoadJobsAsync), gen),
             onFloor: floor => RangePicker.DataStartUtc = LiteTimeRange.DataStartFor(floor, DateTime.UtcNow));
     }
@@ -296,7 +316,8 @@ public partial class JobHistoryTab : UserControl
     /// (<see cref="ServerTab.CappedGridBannerAsync{T}"/>). A window of 90 minutes or less makes no probe call, and a probe that
     /// throws shows no note (<see cref="ServerTab.ProbeWindowFloorOrNullAsync"/>). <paramref name="read"/> is the read's own result,
     /// the runs the grid shows (Status and Category are applied in the read, ahead of the row cap, #5703). The time is worded to the second in <paramref name="zone"/>; with
-    /// <paramref name="inUtc"/> (the All Servers view, whose rows sit on different servers' clocks) the text ends in "UTC". The cap
+    /// <paramref name="zoneWord"/> (the All Servers view, whose rows sit on different servers' clocks) the text ends in that word, "UTC"
+    /// or "local", the clock the Run Time header names. The cap
     /// label beside the count (<see cref="JobHistoryCap"/>) stays: it says how many runs the page is cut to, and this note says the
     /// time that page reaches back to. A step of its own so the tests run the tab's banner call without building the control.
     /// </summary>
@@ -306,20 +327,20 @@ public partial class JobHistoryTab : UserControl
     /// <param name="endUtc">The window's end.</param>
     /// <param name="read">The runs the read returned.</param>
     /// <param name="zone">The zone the time is worded in.</param>
-    /// <param name="inUtc">Whether the text names UTC.</param>
+    /// <param name="zoneWord">The word the text ends with to name its zone, or null for a single server's note, which is on that server's clock.</param>
     /// <param name="superseded">True when a newer load has started: checked after the probe answers and before the banner is written.</param>
     internal static System.Threading.Tasks.Task ShowJobHistoryDataStartAsync(
         TextBlock banner, Func<System.Threading.Tasks.Task<DateTime?>> probe, DateTime startUtc, DateTime endUtc,
-        IReadOnlyCollection<JobHistoryRow> read, TimeZoneInfo zone, bool inUtc, Func<bool>? superseded = null,
+        IReadOnlyCollection<JobHistoryRow> read, TimeZoneInfo zone, string? zoneWord, Func<bool>? superseded = null,
         Action<DateTime?>? onFloor = null)
     {
         var runTimes = read.Where(r => r.RunDateTimeUtc.HasValue).Select(r => r.RunDateTimeUtc!.Value).ToList();
 
         void Word()
         {
-            if (inUtc && banner.Visibility == Visibility.Visible)
+            if (zoneWord is not null && banner.Visibility == Visibility.Visible)
             {
-                banner.Text += " UTC";
+                banner.Text += " " + zoneWord;
             }
         }
 

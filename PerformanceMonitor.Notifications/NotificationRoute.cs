@@ -32,8 +32,8 @@ namespace PerformanceMonitor.Notifications;
 /// </summary>
 /// <param name="RouteId">The identity key, for the ledger's provenance and the editors' updates.</param>
 /// <param name="MetricMatch">A family name (<see cref="AlertFamily.All"/>, matched case-insensitively) or an
-/// exact metric name, or <c>Analysis: {category}</c> for every analysis finding of one category (#5632). Exact wins
-/// over category, and category over family, at resolution.</param>
+/// exact metric name, or <c>Analysis: {category}</c> for every analysis finding of one category (#5632), or <c>Analysis: *</c> for every analysis finding (#7999). Exact wins
+/// over category, category over <c>Analysis: *</c>, and that over family, at resolution.</param>
 /// <param name="TeamsUrl">Teams incoming-webhook URL, or empty to inherit.</param>
 /// <param name="SlackUrl">Slack incoming-webhook URL, or empty to inherit.</param>
 /// <param name="GenericUrl">The generic JSON-POST endpoint, or empty to inherit. Headers, body template and
@@ -64,7 +64,8 @@ public sealed record NotificationRoute(
     /// because a destination the route set could not be read (#5366). Not a stored column: the reader that could not open
     /// a saved value sets it. A channel that is off here sends nothing for this route's alerts, and does not fall back
     /// to the settings row or a less specific route, because the alert would then go somewhere it was not configured to
-    /// go. Null or empty means no channel is off.</summary>
+    /// go. Null or empty means no channel is off. Email is not among them from either store, because a recipient list is
+    /// not a secret that can fail to be read; the email path still honours the name if a writer sets it (#8246).</summary>
     public IReadOnlyCollection<string>? OffChannels { get; init; }
 
     /// <summary>The signing keys of this route's own generic URL (#5998, decision D2): sealed as the store holds them, opened
@@ -308,8 +309,40 @@ public sealed record NotificationRoute(
         }
 
         var category = match[AlertFamily.AnalysisMetricPrefix.Length..].Trim();
-        return category.Length == 0 ? null : category;
+        /* #7999: "Analysis: *" is the every-finding route, not a category named "*". */
+        return category.Length == 0 || string.Equals(category, WildcardMatch, StringComparison.Ordinal) ? null : category;
     }
+
+    /// <summary>The canonical spelling of the every-analysis-finding match (#7999): <c>Analysis: *</c>. Every writer stores this
+    /// text for any spelling <see cref="IsAnalysisAllMatch"/> accepts.</summary>
+    public const string AnalysisAllMatch = "Analysis: *";
+
+    /// <summary>Whether <paramref name="metricMatch"/> is the every-analysis-finding match (#7999): the <c>Analysis: </c> prefix
+    /// (any case, trimmed, the tolerance a category route gets) followed by exactly <c>*</c>. <c>Analysis:*</c> without the
+    /// space is neither this nor a category, the same as <c>Analysis:queries</c> today.</summary>
+    public static bool IsAnalysisAllMatch(string? metricMatch)
+    {
+        var match = metricMatch?.Trim();
+        return !string.IsNullOrEmpty(match)
+            && match.StartsWith(AlertFamily.AnalysisMetricPrefix, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(match[AlertFamily.AnalysisMetricPrefix.Length..].Trim(), WildcardMatch, StringComparison.Ordinal);
+    }
+
+    /// <summary>The text a writer should store for <paramref name="metricMatch"/> (#7999): <see cref="AnalysisAllMatch"/> for any
+    /// accepted spelling of the every-finding match, otherwise the input unchanged. One helper for the MCP writers, the web agent-setup form and both
+    /// edit dialogs, so no product canonicalises it differently.</summary>
+    public static string CanonicalMatch(string metricMatch) =>
+        IsAnalysisAllMatch(metricMatch) ? AnalysisAllMatch : metricMatch;
+
+    /// <summary>Whether this route is the every-analysis-finding route, <c>Analysis: *</c> (#7999).</summary>
+    public bool IsAnalysisAll => IsAnalysisAllMatch(MetricMatch);
+
+    /// <summary>Whether this route matches <paramref name="metricName"/> as an analysis finding of ANY category (#7999): the route
+    /// is <c>Analysis: *</c> and the metric has the finding shape, <c>Analysis: {category} [{hash8}]</c>. A digest title
+    /// (<c>Analysis Singles Digest</c>) and a name without the hash suffix are not findings. Less specific than a category route,
+    /// more specific than a family.</summary>
+    public bool MatchesAnalysisAll(string metricName) =>
+        IsAnalysisAll && AlertFamily.TryGetAnalysisCategory(metricName, out _);
 
     /// <summary>Whether this route matches <paramref name="metricName"/> by its analysis finding CATEGORY (#5632,
     /// ruling R5): the route is <c>Analysis: queries</c> and the metric is <c>Analysis: queries [1a2b3c4d]</c>. Less

@@ -118,14 +118,16 @@ public sealed class ViewerQueryTabLoadTests
         Assert.Contains("700 ms of client work", line, StringComparison.Ordinal);
     }
 
+    /// <summary>A completed task is booked as one phase before <c>Track</c> hands it back: the watcher's await of a
+    /// finished task never suspends, so the phase is recorded on the caller's own thread. The load is quick, so
+    /// <c>Finish</c> still says nothing; <c>PhaseCount</c> is what shows the phase was recorded at all.</summary>
     [Fact]
-    public async Task LoadTimer_Track_RecordsAPhase_AndHandsTheTaskBackUnchanged()
+    public void LoadTimer_Track_RecordsAPhase_AndHandsTheTaskBackUnchanged()
     {
         var timer = new ViewerLoadTimer();
         var task = Task.FromResult(7);
         Assert.Same(task, timer.Track("grid read", task));
-        await task;
-        await Task.Delay(50, TestContext.Current.CancellationToken);
+        Assert.Equal(1, timer.PhaseCount);
         timer.Surface = "x";
         Assert.Null(timer.Finish("fallback"));
     }

@@ -34,6 +34,11 @@
         visible server tab's active inner tab); the Overview has its own timer at the same interval.
     -->
     <Window.Resources>
+        <ResourceDictionary>
+        <ResourceDictionary.MergedDictionaries>
+            <!-- #8144: the Viewer's EmptyHint and the other shared text styles come from the shared dictionary, not a copy here. -->
+            <ResourceDictionary Source="pack://application:,,,/PerformanceMonitor.Ui;component/Themes/SharedStyles.xaml"/>
+        </ResourceDictionary.MergedDictionaries>
         <local:StatusToBrushConverter x:Key="StatusToBrush"/>
         <BooleanToVisibilityConverter x:Key="BoolToVisibility"/>
         <local:FleetDepthToIndentConverter x:Key="FleetDepthToIndent"/>
@@ -43,17 +48,6 @@
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
             <Setter Property="Margin" Value="0,0,0,6"/>
-        </Style>
-
-        <Style x:Key="EmptyHint" TargetType="TextBlock">
-            <Setter Property="Foreground" Value="{DynamicResource ForegroundMutedBrush}"/>
-            <Setter Property="HorizontalAlignment" Value="Center"/>
-            <Setter Property="VerticalAlignment" Value="Center"/>
-            <Setter Property="TextWrapping" Value="Wrap"/>
-            <Setter Property="TextAlignment" Value="Center"/>
-            <Setter Property="MaxWidth" Value="480"/>
-            <Setter Property="IsHitTestVisible" Value="False"/>
-            <Setter Property="Visibility" Value="Collapsed"/>
         </Style>
 
         <!-- One dark grid chrome shared by the aggregate-tab data grids (hoisted from the wave-1
@@ -93,6 +87,7 @@
             <Setter Property="ui:DataGridClipboardBehavior.FixHeaderCopy" Value="True"/>
             <Setter Property="ui:DataGridSortBehavior.SortDescendingFirst" Value="True"/>
             <Setter Property="ui:DataGridFillColumn.Enabled" Value="True"/>
+            <Setter Property="ui:DataGridHeaderFit.Enabled" Value="True"/>
             <Setter Property="ui:ScrollPanBehavior.EnableMiddleClickPanning" Value="True"/>
             <Setter Property="AutoGenerateColumns" Value="False"/>
             <Setter Property="IsReadOnly" Value="True"/>
@@ -244,6 +239,7 @@
                 </Setter.Value>
             </Setter>
         </Style>
+            </ResourceDictionary>
     </Window.Resources>
 
     <Grid Margin="10">
@@ -867,7 +863,7 @@
                                     <Border Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource CardBorderBrush}"
                                             BorderThickness="1" CornerRadius="5" MinWidth="86" Margin="0,0,8,0" Padding="12,6">
                                         <StackPanel>
-                                            <TextBlock Text="{Binding TotalServers}" FontSize="22" FontWeight="Bold"
+                                            <TextBlock Text="{Binding TotalServers}" Style="{StaticResource KpiValueText}"
                                                        Foreground="{DynamicResource ForegroundBrush}" HorizontalAlignment="Center"/>
                                             <TextBlock Text="Enabled servers" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}"
                                                        HorizontalAlignment="Center"/>
@@ -876,7 +872,7 @@
                                     <Border Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource SuccessBrush}"
                                             BorderThickness="1" CornerRadius="5" MinWidth="86" Margin="0,0,8,0" Padding="12,6">
                                         <StackPanel>
-                                            <TextBlock Text="{Binding HealthyCount}" FontSize="22" FontWeight="Bold"
+                                            <TextBlock Text="{Binding HealthyCount}" Style="{StaticResource KpiValueText}"
                                                        Foreground="{DynamicResource SuccessBrush}" HorizontalAlignment="Center"/>
                                             <TextBlock Text="Healthy" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}"
                                                        HorizontalAlignment="Center"/>
@@ -885,7 +881,7 @@
                                     <Border Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource WarningBrush}"
                                             BorderThickness="1" CornerRadius="5" MinWidth="86" Margin="0,0,8,0" Padding="12,6">
                                         <StackPanel>
-                                            <TextBlock Text="{Binding WarningCount}" FontSize="22" FontWeight="Bold"
+                                            <TextBlock Text="{Binding WarningCount}" Style="{StaticResource KpiValueText}"
                                                        Foreground="{DynamicResource WarningBrush}" HorizontalAlignment="Center"/>
                                             <TextBlock Text="Warning" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}"
                                                        HorizontalAlignment="Center"/>
@@ -894,7 +890,7 @@
                                     <Border Background="{DynamicResource BackgroundBrush}" BorderBrush="{DynamicResource ErrorBrush}"
                                             BorderThickness="1" CornerRadius="5" MinWidth="86" Margin="0,0,8,0" Padding="12,6">
                                         <StackPanel>
-                                            <TextBlock Text="{Binding CriticalCount}" FontSize="22" FontWeight="Bold"
+                                            <TextBlock Text="{Binding CriticalCount}" Style="{StaticResource KpiValueText}"
                                                        Foreground="{DynamicResource ErrorBrush}" HorizontalAlignment="Center"/>
                                             <TextBlock Text="Critical" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}"
                                                        HorizontalAlignment="Center"/>
@@ -903,7 +899,7 @@
                                     <Border Background="{DynamicResource BackgroundBrush}" BorderBrush="#888888"
                                             BorderThickness="1" CornerRadius="5" MinWidth="86" Margin="0,0,8,0" Padding="12,6">
                                         <StackPanel>
-                                            <TextBlock Text="{Binding OfflineCount}" FontSize="22" FontWeight="Bold"
+                                            <TextBlock Text="{Binding OfflineCount}" Style="{StaticResource KpiValueText}"
                                                        Foreground="{DynamicResource ForegroundMutedBrush}" HorizontalAlignment="Center"/>
                                             <TextBlock Text="Offline" FontSize="10" Foreground="{DynamicResource ForegroundMutedBrush}"
                                                        HorizontalAlignment="Center"/>
@@ -1041,6 +1037,13 @@
                             </StackPanel>
                         </Border>
 
+                        <!-- Shown while the first fleet read is in flight (FleetOverviewLoadingText.Shows), so an empty card area
+                             is not the same picture as an empty fleet. -->
+                        <TextBlock x:Name="OverviewLoadingText" DockPanel.Dock="Top"
+                                   Text="{x:Static local:FleetOverviewLoadingText.Loading}"
+                                   FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                   HorizontalAlignment="Center" Margin="0,24,0,0" Visibility="Collapsed"/>
+
                         <ScrollViewer VerticalScrollBarVisibility="Auto">
                         <ui:InvokableItemsControl x:Name="OverviewItemsControl" ItemInvoked="OverviewItemsControl_ItemInvoked">
                             <ItemsControl.ItemsPanel>
@@ -1060,8 +1063,8 @@
                                         <Grid>
                                             <StackPanel Margin="16">
                                                 <DockPanel Margin="0,0,0,4">
-                                                    <TextBlock Text="{Binding DisplayName}" AutomationProperties.AutomationId="OverviewServerCardName" FontSize="16" FontWeight="SemiBold"
-                                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                                    <TextBlock Text="{Binding DisplayName}" AutomationProperties.AutomationId="OverviewServerCardName"
+                                                               Style="{StaticResource PanelTitleText}"/>
                                                     <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}"
                                                              ToolTip="{Binding StatusTooltip}"
                                                              HorizontalAlignment="Right" VerticalAlignment="Center"/>
@@ -1135,79 +1138,83 @@
                                                     <Ellipse Grid.Row="0" Grid.Column="0" Width="9" Height="9" Fill="{Binding CpuSeverityBrush}" VerticalAlignment="Center" Margin="0,2,6,2"/>
                                                     <TextBlock Grid.Row="0" Grid.Column="1" Text="CPU:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
                                                     <TextBlock Grid.Row="0" Grid.Column="2" Text="{Binding CpuDisplay}" FontSize="11" Foreground="{Binding CpuSeverityBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
-                                                    <TextBlock Grid.Row="0" Grid.Column="3" Text="{Binding CpuDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
+                                                    <TextBlock Grid.Row="0" Grid.Column="3" Text="{Binding CpuDetail}" ToolTip="{Binding CpuDetail}" Background="Transparent" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
 
                                                     <!-- Threads (enrichment) -->
                                                     <Ellipse Grid.Row="1" Grid.Column="0" Width="9" Height="9" Fill="{Binding ThreadsSeverityBrush}" VerticalAlignment="Center" Margin="0,2,6,2"/>
                                                     <TextBlock Grid.Row="1" Grid.Column="1" Text="Threads:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
                                                     <TextBlock Grid.Row="1" Grid.Column="2" Text="{Binding ThreadsDisplay}" FontSize="11" Foreground="{Binding ThreadsSeverityBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
-                                                    <TextBlock Grid.Row="1" Grid.Column="3" Text="{Binding ThreadsDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
+                                                    <TextBlock Grid.Row="1" Grid.Column="3" Text="{Binding ThreadsDetail}" ToolTip="{Binding ThreadsDetail}" Background="Transparent" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
 
                                                     <!-- Memory (richer: total value + resource-semaphore detail) -->
                                                     <Ellipse Grid.Row="2" Grid.Column="0" Width="9" Height="9" Fill="{Binding MemorySeverityBrush}" VerticalAlignment="Center" Margin="0,2,6,2"/>
                                                     <TextBlock Grid.Row="2" Grid.Column="1" Text="Memory:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
                                                     <TextBlock Grid.Row="2" Grid.Column="2" Text="{Binding MemoryDisplay}" FontSize="11" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
-                                                    <TextBlock Grid.Row="2" Grid.Column="3" Text="{Binding MemoryDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
+                                                    <TextBlock Grid.Row="2" Grid.Column="3" Text="{Binding MemoryDetail}" ToolTip="{Binding MemoryDetail}" Background="Transparent" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
 
                                                     <!-- Blocking (richer: count value + max-duration detail) -->
                                                     <Ellipse Grid.Row="3" Grid.Column="0" Width="9" Height="9" Fill="{Binding BlockingSeverityBrush}" VerticalAlignment="Center" Margin="0,2,6,2"/>
                                                     <TextBlock Grid.Row="3" Grid.Column="1" Text="Blocking:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
                                                     <TextBlock Grid.Row="3" Grid.Column="2" Text="{Binding BlockingDisplay}" FontSize="11" Foreground="{Binding BlockingSeverityBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
-                                                    <TextBlock Grid.Row="3" Grid.Column="3" Text="{Binding BlockingDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
+                                                    <TextBlock Grid.Row="3" Grid.Column="3" Text="{Binding BlockingDetail}" ToolTip="{Binding BlockingDetail}" Background="Transparent" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
 
                                                     <!-- Deadlocks -->
                                                     <Ellipse Grid.Row="4" Grid.Column="0" Width="9" Height="9" Fill="{Binding DeadlockSeverityBrush}" VerticalAlignment="Center" Margin="0,2,6,2"/>
                                                     <TextBlock Grid.Row="4" Grid.Column="1" Text="Deadlocks:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
                                                     <TextBlock Grid.Row="4" Grid.Column="2" Text="{Binding DeadlockDisplay}" FontSize="11" Foreground="{Binding DeadlockSeverityBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
-                                                    <TextBlock Grid.Row="4" Grid.Column="3" Text="{Binding DeadlockDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
+                                                    <TextBlock Grid.Row="4" Grid.Column="3" Text="{Binding DeadlockDetail}" ToolTip="{Binding DeadlockDetail}" Background="Transparent" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
 
                                                     <!-- Collectors (enrichment) -->
                                                     <Ellipse Grid.Row="5" Grid.Column="0" Width="9" Height="9" Fill="{Binding CollectorSeverityBrush}" VerticalAlignment="Center" Margin="0,2,6,2"/>
                                                     <TextBlock Grid.Row="5" Grid.Column="1" Text="Collectors:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
                                                     <TextBlock Grid.Row="5" Grid.Column="2" Text="{Binding CollectorDisplay}" FontSize="11" Foreground="{Binding CollectorSeverityBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
-                                                    <TextBlock Grid.Row="5" Grid.Column="3" Text="{Binding CollectorDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,2"/>
+                                                    <TextBlock Grid.Row="5" Grid.Column="3" Text="{Binding CollectorDetail}" ToolTip="{Binding CollectorDetail}" Background="Transparent" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
 
+                                                    <!-- #8112: an optional row keeps its label, value and detail in one cell that spans to the star column, so a long
+                                                         label ("Identity capacity:") or value ("4 items on 4 databases") widens none of the Auto columns the core rows
+                                                         share, and the detail column keeps its room on every card. Every detail cell trims with an ellipsis and carries
+                                                         its full text as a tooltip; Background=Transparent is what lets the tooltip open between the glyphs (#2422). -->
                                                     <!-- Agent alerts (#6874): shown only when the SQL Server Agent alert setup has a gap, the way the web
                                                          fleet card's chip is. Not a band: nothing above reads it. -->
                                                     <Ellipse Grid.Row="6" Grid.Column="0" Width="9" Height="9" Fill="{Binding AgentAlertsBrush}" VerticalAlignment="Center" Margin="0,2,6,2"
                                                              Visibility="{Binding HasAgentAlertGaps, Converter={StaticResource BoolToVisibility}}"/>
-                                                    <TextBlock Grid.Row="6" Grid.Column="1" Text="Agent alerts:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"
-                                                               Visibility="{Binding HasAgentAlertGaps, Converter={StaticResource BoolToVisibility}}"/>
-                                                    <TextBlock Grid.Row="6" Grid.Column="2" Text="{Binding AgentAlertsDisplay}" FontSize="11" Foreground="{Binding AgentAlertsBrush}" FontWeight="SemiBold" Margin="0,2,8,2"
-                                                               Visibility="{Binding HasAgentAlertGaps, Converter={StaticResource BoolToVisibility}}"/>
-                                                    <TextBlock Grid.Row="6" Grid.Column="3" Text="{Binding AgentAlertsDetail}" ToolTip="{Binding AgentAlertsDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"
-                                                               Visibility="{Binding HasAgentAlertGaps, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <DockPanel Grid.Row="6" Grid.Column="1" Grid.ColumnSpan="3" LastChildFill="True"
+                                                               Visibility="{Binding HasAgentAlertGaps, Converter={StaticResource BoolToVisibility}}">
+                                                        <TextBlock DockPanel.Dock="Left" Text="Agent alerts:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
+                                                        <TextBlock DockPanel.Dock="Left" Text="{Binding AgentAlertsDisplay}" FontSize="11" Foreground="{Binding AgentAlertsBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
+                                                        <TextBlock Text="{Binding AgentAlertsDetail}" ToolTip="{Binding AgentAlertsDetail}" Background="Transparent" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
+                                                    </DockPanel>
                                                     <!-- Identity capacity (#6875): shown only when a column is at the warning bar or past it, the way the web
                                                          fleet card's chip is. Not a band: nothing above reads it. -->
                                                     <Ellipse Grid.Row="8" Grid.Column="0" Width="9" Height="9" Fill="{Binding IdentityCapacityBrush}" VerticalAlignment="Center" Margin="0,2,6,2"
                                                              Visibility="{Binding HasIdentityCapacity, Converter={StaticResource BoolToVisibility}}"/>
-                                                    <TextBlock Grid.Row="8" Grid.Column="1" Text="Identity capacity:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"
-                                                               Visibility="{Binding HasIdentityCapacity, Converter={StaticResource BoolToVisibility}}"/>
-                                                    <TextBlock Grid.Row="8" Grid.Column="2" Text="{Binding IdentityCapacityDisplay}" FontSize="11" Foreground="{Binding IdentityCapacityBrush}" FontWeight="SemiBold" Margin="0,2,8,2"
-                                                               Visibility="{Binding HasIdentityCapacity, Converter={StaticResource BoolToVisibility}}"/>
-                                                    <TextBlock Grid.Row="8" Grid.Column="3" Text="{Binding IdentityCapacityDetail}" ToolTip="{Binding IdentityCapacityDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"
-                                                               Visibility="{Binding HasIdentityCapacity, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <DockPanel Grid.Row="8" Grid.Column="1" Grid.ColumnSpan="3" LastChildFill="True"
+                                                               Visibility="{Binding HasIdentityCapacity, Converter={StaticResource BoolToVisibility}}">
+                                                        <TextBlock DockPanel.Dock="Left" Text="Identity capacity:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
+                                                        <TextBlock DockPanel.Dock="Left" Text="{Binding IdentityCapacityDisplay}" FontSize="11" Foreground="{Binding IdentityCapacityBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
+                                                        <TextBlock Text="{Binding IdentityCapacityDetail}" ToolTip="{Binding IdentityCapacityDetail}" Background="Transparent" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
+                                                    </DockPanel>
 
                                                     <!-- Last Collect (footer row, no severity dot) -->
                                                     <!-- #6873: shown only when a full backup, a log backup or a CHECKDB is overdue. Not a band. -->
                                                     <Ellipse Grid.Row="7" Grid.Column="0" Width="9" Height="9" Fill="{Binding DatabaseProtectionBrush}" VerticalAlignment="Center" Margin="0,2,6,2"
                                                              Visibility="{Binding HasDatabaseProtectionOverdue, Converter={StaticResource BoolToVisibility}}"/>
-                                                    <TextBlock Grid.Row="7" Grid.Column="1" Text="Protection:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"
-                                                               Visibility="{Binding HasDatabaseProtectionOverdue, Converter={StaticResource BoolToVisibility}}"/>
-                                                    <TextBlock Grid.Row="7" Grid.Column="2" Text="{Binding DatabaseProtectionChipValue}" FontSize="11" Foreground="{Binding DatabaseProtectionBrush}" FontWeight="SemiBold" Margin="0,2,8,2"
-                                                               Visibility="{Binding HasDatabaseProtectionOverdue, Converter={StaticResource BoolToVisibility}}"/>
-                                                    <TextBlock Grid.Row="7" Grid.Column="3" Text="{Binding DatabaseProtectionChipDetail}" ToolTip="{Binding DatabaseProtectionChipDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
-                                                               Visibility="{Binding HasDatabaseProtectionOverdue, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <DockPanel Grid.Row="7" Grid.Column="1" Grid.ColumnSpan="3" LastChildFill="True"
+                                                               Visibility="{Binding HasDatabaseProtectionOverdue, Converter={StaticResource BoolToVisibility}}">
+                                                        <TextBlock DockPanel.Dock="Left" Text="Protection:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
+                                                        <TextBlock DockPanel.Dock="Left" Text="{Binding DatabaseProtectionChipValue}" FontSize="11" Foreground="{Binding DatabaseProtectionBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
+                                                        <TextBlock Text="{Binding DatabaseProtectionChipDetail}" ToolTip="{Binding DatabaseProtectionChipDetail}" Background="Transparent" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
+                                                    </DockPanel>
                                                     <!-- Database state (#7647): shown only when a database's state deviates from its expected state in both of the two newest
                                                          snapshots, the way the web fleet card's chip is. A Critical state (SUSPECT, RECOVERY_PENDING, EMERGENCY) also bands the card. -->
                                                     <Ellipse Grid.Row="9" Grid.Column="0" Width="9" Height="9" Fill="{Binding DatabaseStateBrush}" VerticalAlignment="Center" Margin="0,2,6,2"
                                                              Visibility="{Binding HasDatabaseStateDeviations, Converter={StaticResource BoolToVisibility}}"/>
-                                                    <TextBlock Grid.Row="9" Grid.Column="1" Text="Database state:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"
-                                                               Visibility="{Binding HasDatabaseStateDeviations, Converter={StaticResource BoolToVisibility}}"/>
-                                                    <TextBlock Grid.Row="9" Grid.Column="2" Text="{Binding DatabaseStateDisplay}" FontSize="11" Foreground="{Binding DatabaseStateBrush}" FontWeight="SemiBold" Margin="0,2,8,2"
-                                                               Visibility="{Binding HasDatabaseStateDeviations, Converter={StaticResource BoolToVisibility}}"/>
-                                                    <TextBlock Grid.Row="9" Grid.Column="3" Text="{Binding DatabaseStateDetail}" ToolTip="{Binding DatabaseStateDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"
-                                                               Visibility="{Binding HasDatabaseStateDeviations, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <DockPanel Grid.Row="9" Grid.Column="1" Grid.ColumnSpan="3" LastChildFill="True"
+                                                               Visibility="{Binding HasDatabaseStateDeviations, Converter={StaticResource BoolToVisibility}}">
+                                                        <TextBlock DockPanel.Dock="Left" Text="Database state:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
+                                                        <TextBlock DockPanel.Dock="Left" Text="{Binding DatabaseStateDisplay}" FontSize="11" Foreground="{Binding DatabaseStateBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
+                                                        <TextBlock Text="{Binding DatabaseStateDetail}" ToolTip="{Binding DatabaseStateDetail}" Background="Transparent" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
+                                                    </DockPanel>
                                                     <TextBlock Grid.Row="10" Grid.Column="1" Text="Last Collect:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
                                                     <TextBlock Grid.Row="10" Grid.Column="2" Text="{Binding LastCollectionDisplay}" FontSize="11" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
                                                 </Grid>
@@ -1451,13 +1458,13 @@
                                     Click="RecommendationsGenerateNow_Click"
                                     ToolTip="Ask the Darling service to run analysis for this server now, then refresh"/>
                             <TextBlock x:Name="RecommendationsStatusText" Margin="12,0,0,0" VerticalAlignment="Center"
-                                       FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
                         </StackPanel>
 
                         <!-- #5558: the node holds a secondary copy of some availability group databases, so their
                              per-database findings are left to the primary. Shown only with a list or the all-clear. -->
                         <TextBlock x:Name="RecommendationsReplicaNoteText" Grid.Row="1" Visibility="Collapsed"
-                                   TextWrapping="Wrap" Margin="2,6,2,0" FontStyle="Italic"
+                                   TextWrapping="Wrap" Margin="2,6,2,0"
                                    Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
                         <!-- Content: exactly one region is visible per state. -->

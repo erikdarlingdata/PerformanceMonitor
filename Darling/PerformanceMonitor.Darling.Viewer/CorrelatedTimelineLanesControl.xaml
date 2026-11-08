@@ -6,89 +6,61 @@
 
     <!-- #6652: five lanes keep a minimum height each; the control scrolls when they do not fit (1366x768). -->
     <ScrollViewer Margin="8" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-    <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="750">
+    <Grid x:Name="LanesGrid" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}">
         <Grid.RowDefinitions>
-            <!-- 5 lanes, equal height -->
-            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
-            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
-            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
-            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
-            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+            <!-- 5 lanes, equal height. #8224: a lane has no legend, title or Y unit and only the last has X labels, so its floor is
+                 the shared plot-area floor (ui:ChartLayout.MinPlotAreaHeight, 120 px) plus its 4 px of margins and 6 px of tick
+                 marks: 130 px, so a lane at its minimum still keeps the floor. The five fit a 1280x800 window and scroll below that. -->
+            <RowDefinition Height="*" MinHeight="130"/>
+            <RowDefinition Height="*" MinHeight="130"/>
+            <RowDefinition Height="*" MinHeight="130"/>
+            <RowDefinition Height="*" MinHeight="130"/>
+            <!-- #8162: the last lane also holds its X labels, so it takes a little more of the height and a floor 25 px taller. -->
+            <RowDefinition Height="1.15*" MinHeight="155"/>
         </Grid.RowDefinitions>
 
         <!-- Lane 1: CPU -->
         <Grid Grid.Row="0" Margin="0,0,0,2">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="100"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="CPU %" VerticalAlignment="Center"
-                       FontSize="12" FontWeight="SemiBold"
-                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
-            <ScottPlot:WpfPlot Grid.Column="1" x:Name="CpuChart"/>
+            <ScottPlot:WpfPlot x:Name="CpuChart"/>
+            <TextBlock x:Name="CpuCaption" Text="CPU %" Style="{DynamicResource PanelSubtitleText}"
+                       HorizontalAlignment="Left" VerticalAlignment="Top" Margin="56,3,0,0" IsHitTestVisible="False"/>
         </Grid>
 
         <!-- Lane 2: Wait Stats -->
         <Grid Grid.Row="1" Margin="0,2,0,2">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="100"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="Wait ms/sec" VerticalAlignment="Center"
-                       FontSize="12" FontWeight="SemiBold"
-                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
-            <ScottPlot:WpfPlot Grid.Column="1" x:Name="WaitStatsChart"/>
+            <ScottPlot:WpfPlot x:Name="WaitStatsChart"/>
+            <TextBlock x:Name="WaitStatsCaption" Text="Wait ms/sec" Style="{DynamicResource PanelSubtitleText}"
+                       HorizontalAlignment="Left" VerticalAlignment="Top" Margin="56,3,0,0" IsHitTestVisible="False"/>
         </Grid>
 
         <!-- Lane 3: Blocking -->
         <Grid Grid.Row="2" Margin="0,2,0,2">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="100"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
             <Grid.RowDefinitions>
                 <!-- The "Showing since" note: Auto, so a hidden note gives the whole chart back to the chart. -->
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
-            <TextBlock Grid.Row="0" Grid.Column="1" x:Name="BlockingLaneDataStartBanner" Visibility="Collapsed"
+            <TextBlock Grid.Row="0" x:Name="BlockingLaneDataStartBanner" Visibility="Collapsed"
                        Padding="8,1" FontSize="11" FontWeight="Bold"
                        Foreground="{DynamicResource ForegroundBrush}"
                        Background="#22FFAA00"/>
-            <TextBlock Grid.Row="0" Grid.RowSpan="2" Grid.Column="0" VerticalAlignment="Center"
-                       FontSize="12" FontWeight="SemiBold"
-                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0">
-                <Run Text="Blocking &amp;"/>
-                <LineBreak/>
-                <Run Text="Deadlocking"/>
-                <LineBreak/>
-                <Run Text="events"/>
-            </TextBlock>
-            <ScottPlot:WpfPlot Grid.Row="1" Grid.Column="1" x:Name="BlockingChart"/>
+            <ScottPlot:WpfPlot Grid.Row="1" x:Name="BlockingChart"/>
+            <TextBlock x:Name="BlockingCaption" Grid.Row="1" Text="Blocking &amp; Deadlocking events" Style="{DynamicResource PanelSubtitleText}"
+                       HorizontalAlignment="Left" VerticalAlignment="Top" Margin="56,3,0,0" IsHitTestVisible="False"/>
         </Grid>
 
         <!-- Lane 4: Buffer Pool -->
         <Grid Grid.Row="3" Margin="0,2,0,2">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="100"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="Buffer Pool MB" VerticalAlignment="Center"
-                       FontSize="12" FontWeight="SemiBold"
-                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
-            <ScottPlot:WpfPlot Grid.Column="1" x:Name="MemoryChart"/>
+            <ScottPlot:WpfPlot x:Name="MemoryChart"/>
+            <TextBlock x:Name="MemoryCaption" Text="Buffer Pool MB" Style="{DynamicResource PanelSubtitleText}"
+                       HorizontalAlignment="Left" VerticalAlignment="Top" Margin="56,3,0,0" IsHitTestVisible="False"/>
         </Grid>
 
         <!-- Lane 5: File I/O -->
         <Grid Grid.Row="4" Margin="0,2,0,0">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="100"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="I/O Latency ms" VerticalAlignment="Center"
-                       FontSize="12" FontWeight="SemiBold"
-                       Foreground="{DynamicResource ForegroundBrush}" Margin="4,0"/>
-            <ScottPlot:WpfPlot Grid.Column="1" x:Name="FileIoChart"/>
+            <ScottPlot:WpfPlot x:Name="FileIoChart"/>
+            <TextBlock x:Name="FileIoCaption" Text="I/O Latency ms" Style="{DynamicResource PanelSubtitleText}"
+                       HorizontalAlignment="Left" VerticalAlignment="Top" Margin="56,3,0,0" IsHitTestVisible="False"/>
         </Grid>
     </Grid>
     </ScrollViewer>

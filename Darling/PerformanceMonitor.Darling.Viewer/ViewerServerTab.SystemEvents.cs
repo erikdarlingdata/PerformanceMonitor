@@ -162,7 +162,7 @@ public partial class ViewerServerTab
         _seSchedulerFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
         ShowSystemHealthEmptyState(SchedulerIssuesNoDataMessage, data.Count);
-        SchedulerIssuesCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        SchedulerIssuesCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "event") : "";
     }
 
     private async Task LoadSevereErrorsAsync()
@@ -175,7 +175,7 @@ public partial class ViewerServerTab
         _seSevereErrorFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
         ShowSystemHealthEmptyState(SevereErrorsNoDataMessage, data.Count);
-        SevereErrorsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        SevereErrorsCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "event") : "";
     }
 
     private async Task LoadMemoryConditionsAsync()
@@ -188,7 +188,7 @@ public partial class ViewerServerTab
         _seMemoryConditionsFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
         ShowSystemHealthEmptyState(MemoryConditionsNoDataMessage, data.Count);
-        MemoryConditionsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        MemoryConditionsCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "event") : "";
     }
 
     private async Task LoadMemoryBrokerAsync()
@@ -201,7 +201,7 @@ public partial class ViewerServerTab
         _seMemoryBrokerFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
         ShowSystemHealthEmptyState(MemoryBrokerNoDataMessage, data.Count);
-        MemoryBrokerCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        MemoryBrokerCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "event") : "";
     }
 
     private async Task LoadMemoryNodeOomAsync()
@@ -214,7 +214,7 @@ public partial class ViewerServerTab
         _seMemoryNodeOomFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
         ShowSystemHealthEmptyState(MemoryNodeOomNoDataMessage, data.Count);
-        MemoryNodeOomCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        MemoryNodeOomCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "event") : "";
     }
 
     private async Task LoadSignificantWaitsAsync()
@@ -227,7 +227,7 @@ public partial class ViewerServerTab
         _seSignificantWaitsFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
         ShowSystemHealthEmptyState(SignificantWaitsNoDataMessage, data.Count);
-        SignificantWaitsCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        SignificantWaitsCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "event") : "";
     }
 
     private async Task LoadCpuTasksAsync()
@@ -240,7 +240,7 @@ public partial class ViewerServerTab
         _seCpuTasksFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
         ShowSystemHealthEmptyState(CpuTasksNoDataMessage, data.Count);
-        CpuTasksCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        CpuTasksCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "event") : "";
     }
 
     private async Task LoadIoIssuesAsync()
@@ -253,7 +253,7 @@ public partial class ViewerServerTab
         _seIoIssuesFilterMgr!.UpdateData(data);
         await ShowEventDataStartAsync(SystemEventsTruncationBanner, dataStartTask, "System Events", startUtc, data.Select(r => r.EventTime));
         ShowSystemHealthEmptyState(IoIssuesNoDataMessage, data.Count);
-        IoIssuesCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        IoIssuesCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "event") : "";
     }
 
     private async Task LoadDefaultTraceEventsAsync()
@@ -268,7 +268,7 @@ public partial class ViewerServerTab
         if (DefaultTraceGapNote(_server.DisplayName, _server.EngineEdition, _server.EngineKind) is { } gap)
             DefaultTraceNoDataMessage.Text = gap;
         DefaultTraceNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        DefaultTraceCountIndicator.Text = data.Count > 0 ? $"{data.Count} event(s)" : "";
+        DefaultTraceCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "event") : "";
     }
 
     /// <summary>
@@ -306,7 +306,7 @@ public partial class ViewerServerTab
         try
         {
             await LoadSystemEventsAsync();
-            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {DateTime.Now:HH:mm:ss}");
+            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {

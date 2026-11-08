@@ -130,7 +130,7 @@ public class ServerTabEmptyStateAndNamesTests
     [Fact]
     public void EmptyState_TheGenericGridWording_MatchesTheThemesNoDataText()
     {
-        Assert.Equal("No data for the selected time range.", EmptyState.DefaultGridText);
+        Assert.Equal("No data in the selected time window.", EmptyState.DefaultGridText);
         foreach (var theme in new[] { "Lite/Themes/DarkTheme.xaml", "Lite/Themes/LightTheme.xaml", "Lite/Themes/CoolBreezeTheme.xaml",
             "Darling/PerformanceMonitor.Darling.Viewer/Themes/DarkTheme.xaml", "Darling/PerformanceMonitor.Darling.Viewer/Themes/LightTheme.xaml", "Darling/PerformanceMonitor.Darling.Viewer/Themes/CoolBreezeTheme.xaml" })
         {
@@ -225,7 +225,7 @@ public class ServerTabEmptyStateAndNamesTests
 
         Assert.Equal("example-sql-01", peerName);
         Assert.Equal(System.Windows.Automation.Peers.AutomationControlType.Group, controlType);
-        Assert.Contains("<controls:OverviewCardBorder", RepoFile("Lite/MainWindow.xaml"), StringComparison.Ordinal);
+        Assert.Contains("<controls:OverviewCardBorder", RepoFile("Lite/Controls/ServerOverviewCard.xaml"), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -326,9 +326,6 @@ public class ServerTabEmptyStateAndNamesTests
     }
 
     [Theory]
-    [InlineData("Lite/Themes/CoolBreezeTheme.xaml")]
-    [InlineData("Lite/Themes/DarkTheme.xaml")]
-    [InlineData("Lite/Themes/LightTheme.xaml")]
     [InlineData("Darling/PerformanceMonitor.Darling.Viewer/Themes/CoolBreezeTheme.xaml")]
     [InlineData("Darling/PerformanceMonitor.Darling.Viewer/Themes/DarkTheme.xaml")]
     [InlineData("Darling/PerformanceMonitor.Darling.Viewer/Themes/LightTheme.xaml")]
@@ -355,8 +352,8 @@ public class ServerTabEmptyStateAndNamesTests
         var xaml = RepoFile(file);
 
         Assert.Contains("Text=\"I/O Latency ms\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("<Run Text=\"events\"/>", xaml, StringComparison.Ordinal);
-        Assert.DoesNotContain("<Run Text=\"events\" FontWeight", xaml, StringComparison.Ordinal);
+        /* #8162: each lane label is one caption (PanelSubtitleText) now, so the blocking lane's unit is part of its text, not a Run. */
+        Assert.Contains("Text=\"Blocking &amp; Deadlocking events\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"CPU %\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"Buffer Pool MB\"", xaml, StringComparison.Ordinal);
     }

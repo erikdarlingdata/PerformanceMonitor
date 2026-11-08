@@ -274,13 +274,33 @@ public partial class ViewerServerTab
         MemoryChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(MemoryChart);
-        MemoryChart.Plot.YLabel("Memory (GB)");
+        MemoryChart.Plot.YLabel("GB");
 
-        var maxVal = totalMem.Max();
+        var maxVal = MemoryOverviewYMax(totalMem, targetMem, bufferPool, grantMb);
         SetChartYLimitsWithLegendPadding(MemoryChart, 0, maxVal);
 
         ShowChartLegend(MemoryChart);
         MemoryChart.Refresh();
+    }
+
+    /// <summary>
+    /// The top of the Memory Overview's data range, Lite's <c>MemoryOverviewYMax</c>: the largest sample across
+    /// every series the chart draws (Total Server Memory, Target Memory, Buffer Pool and Memory Grants), so the
+    /// Y axis the shared headroom is added to covers all four. Target Memory is the engine's ceiling and moves
+    /// with the host's free memory when no max server memory cap is set, so it can sit well above Total while
+    /// the workload holds Total where it is; a grant spike can do the same. An empty series is skipped, and
+    /// with nothing plotted the top is 0, which the shared helper widens to a visible band.
+    /// </summary>
+    internal static double MemoryOverviewYMax(params double[][] series)
+    {
+        double max = 0;
+        foreach (var values in series)
+        {
+            if (values.Length == 0) continue;
+            var seriesMax = values.Max();
+            if (seriesMax > max) max = seriesMax;
+        }
+        return max;
     }
 
     /// <summary>
@@ -355,7 +375,7 @@ public partial class ViewerServerTab
         MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryGrantSizingChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryGrantSizingChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(MemoryGrantSizingChart);
-        MemoryGrantSizingChart.Plot.YLabel("Memory (MB)");
+        MemoryGrantSizingChart.Plot.YLabel("MB");
         SetChartYLimitsWithLegendPadding(MemoryGrantSizingChart, 0, sizingMax > 0 ? sizingMax : 100);
         ShowChartLegend(MemoryGrantSizingChart);
         MemoryGrantSizingChart.Refresh();
@@ -393,7 +413,7 @@ public partial class ViewerServerTab
         MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryGrantActivityChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryGrantActivityChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(MemoryGrantActivityChart);
-        MemoryGrantActivityChart.Plot.YLabel("Count");
+        MemoryGrantActivityChart.Plot.YLabel("count");
         PerformanceMonitor.Ui.ChartStyle.UseCountAxis(MemoryGrantActivityChart); // #7606: a count, whole-number ticks
         SetChartYLimitsWithLegendPadding(MemoryGrantActivityChart, 0, activityMax > 0 ? activityMax : 10);
         ShowChartLegend(MemoryGrantActivityChart);
@@ -403,7 +423,8 @@ public partial class ViewerServerTab
     /// <summary>
     /// The Memory Pressure Events sub-tab — Lite's <c>UpdateMemoryPressureEventsChart</c>: hour-bucketed
     /// stacked bars of pressure events, SQL Server (process) vs OS (system) side-by-side and stacked by
-    /// severity (medium = indicator 2, severe = indicator ≥ 3). Bar geometry copied verbatim from Lite;
+    /// severity (medium = indicator 2, severe = indicator ≥ 3). The hour bins and bar geometry are
+    /// <see cref="MemoryPressureBars"/>, shared with Lite;
     /// the X range is the toolbar's settable window and every bar/bound is the UTC
     /// instant (see the class remarks on pressure sample_time).
     /// </summary>
@@ -424,14 +445,12 @@ public partial class ViewerServerTab
 
         if (pressureRows.Count > 0)
         {
-            var grouped = pressureRows
-                .GroupBy(d => new DateTime(d.SampleTime.Year, d.SampleTime.Month, d.SampleTime.Day, d.SampleTime.Hour, 0, 0))
-                .OrderBy(g => g.Key)
-                .ToList();
+            /* #8109: binned on the display zone's hour, where the ticks are; each hour's two stacks sit inside that hour, either side of its midpoint. */
+            var hours = MemoryPressureBars.Place(
+                pressureRows.Select(d => (d.SampleTime, d.MemoryIndicatorsProcess, d.MemoryIndicatorsSystem)),
+                ViewerTimeHelper.CurrentDisplayZone());
 
-            double hourWidth = 1.0 / 24.0;
-            double barSize = hourWidth * 0.4;
-            double barOffset = hourWidth * 0.22;
+            double barSize = MemoryPressureBars.BarSize;
 
             var sqlMediumColor = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SqlPressureMedium"));
             var sqlSevereColor = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SqlPressureSevere"));
@@ -443,22 +462,23 @@ public partial class ViewerServerTab
             var osMediumBars = new List<ScottPlot.Bar>();
             var osSevereBars = new List<ScottPlot.Bar>();
 
-            foreach (var g in grouped)
+            foreach (var h in hours)
             {
-                int sqlMedium = g.Count(d => d.MemoryIndicatorsProcess == 2);
-                int sqlSevere = g.Count(d => d.MemoryIndicatorsProcess >= 3);
-                int osMedium = g.Count(d => d.MemoryIndicatorsSystem == 2);
-                int osSevere = g.Count(d => d.MemoryIndicatorsSystem >= 3);
-                double x = g.Key.ToOADate();
+                int sqlMedium = h.SqlMedium;
+                int sqlSevere = h.SqlSevere;
+                int osMedium = h.OsMedium;
+                int osSevere = h.OsSevere;
+                double sqlX = h.SqlStackPosition;
+                double osX = h.OsStackPosition;
 
                 if (sqlMedium > 0)
-                    sqlMediumBars.Add(new ScottPlot.Bar { Position = x - barOffset, ValueBase = 0, Value = sqlMedium, Size = barSize, FillColor = sqlMediumColor, LineWidth = 0 });
+                    sqlMediumBars.Add(new ScottPlot.Bar { Position = sqlX, ValueBase = 0, Value = sqlMedium, Size = barSize, FillColor = sqlMediumColor, LineWidth = 0 });
                 if (sqlSevere > 0)
-                    sqlSevereBars.Add(new ScottPlot.Bar { Position = x - barOffset, ValueBase = sqlMedium, Value = sqlMedium + sqlSevere, Size = barSize, FillColor = sqlSevereColor, LineWidth = 0 });
+                    sqlSevereBars.Add(new ScottPlot.Bar { Position = sqlX, ValueBase = sqlMedium, Value = sqlMedium + sqlSevere, Size = barSize, FillColor = sqlSevereColor, LineWidth = 0 });
                 if (osMedium > 0)
-                    osMediumBars.Add(new ScottPlot.Bar { Position = x + barOffset, ValueBase = 0, Value = osMedium, Size = barSize, FillColor = osMediumColor, LineWidth = 0 });
+                    osMediumBars.Add(new ScottPlot.Bar { Position = osX, ValueBase = 0, Value = osMedium, Size = barSize, FillColor = osMediumColor, LineWidth = 0 });
                 if (osSevere > 0)
-                    osSevereBars.Add(new ScottPlot.Bar { Position = x + barOffset, ValueBase = osMedium, Value = osMedium + osSevere, Size = barSize, FillColor = osSevereColor, LineWidth = 0 });
+                    osSevereBars.Add(new ScottPlot.Bar { Position = osX, ValueBase = osMedium, Value = osMedium + osSevere, Size = barSize, FillColor = osSevereColor, LineWidth = 0 });
 
                 int sqlTotal = sqlMedium + sqlSevere;
                 int osTotal = osMedium + osSevere;
@@ -500,7 +520,7 @@ public partial class ViewerServerTab
         MemoryPressureEventsChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryPressureEventsChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryPressureEventsChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(MemoryPressureEventsChart);
-        MemoryPressureEventsChart.Plot.YLabel("Pressure Events per Hour");
+        MemoryPressureEventsChart.Plot.YLabel("events/hour");
         PerformanceMonitor.Ui.ChartStyle.UseCountAxis(MemoryPressureEventsChart); // #7606: a count, whole-number ticks
         SetChartYLimitsWithLegendPadding(MemoryPressureEventsChart, 0, Math.Max(maxBarCount, 5));
 
@@ -705,7 +725,7 @@ public partial class ViewerServerTab
             MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             MemoryClerksChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryClerksChart.Plot, xMin, xMax), xMax);
             ReapplyAxisColors(MemoryClerksChart);
-            MemoryClerksChart.Plot.YLabel("Memory (MB)");
+            MemoryClerksChart.Plot.YLabel("MB");
             SetChartYLimitsWithLegendPadding(MemoryClerksChart, 0, globalMax > 0 ? globalMax : 100);
             ShowChartLegend(MemoryClerksChart);
             MemoryClerksChart.Refresh();

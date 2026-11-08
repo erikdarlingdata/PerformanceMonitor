@@ -81,10 +81,16 @@ CROSS JOIN
 ) AS pc_buffer
 CROSS JOIN
 (
+    /* #8079: the _Total instance is the plan cache once. The object's other instances are the cache stores
+       it adds up (SQL Plans, Object Plans, Bound Trees, Extended Stored Procedures, Temporary Tables & Table
+       Variables), so a sum over every row would count the cache twice. SUM over that one row keeps this a
+       one-row derived table should the instance be missing (NULL then, which the reader stores as 0), so the
+       CROSS JOIN never drops the memory_stats row. */
     SELECT cntr_value = SUM(cntr_value)
     FROM sys.dm_os_performance_counters
     WHERE counter_name = N'Cache Pages'
       AND object_name LIKE N'%:Plan Cache%'
+      AND instance_name = N'_Total'
 ) AS pc_plan
 OPTION(RECOMPILE);";
 
@@ -126,10 +132,16 @@ CROSS JOIN
 ) AS pc_buffer
 CROSS JOIN
 (
+    /* #8079: the _Total instance is the plan cache once. The object's other instances are the cache stores
+       it adds up (SQL Plans, Object Plans, Bound Trees, Extended Stored Procedures, Temporary Tables & Table
+       Variables), so a sum over every row would count the cache twice. SUM over that one row keeps this a
+       one-row derived table should the instance be missing (NULL then, which the reader stores as 0), so the
+       CROSS JOIN never drops the memory_stats row. */
     SELECT cntr_value = SUM(cntr_value)
     FROM sys.dm_os_performance_counters
     WHERE counter_name = N'Cache Pages'
       AND object_name LIKE N'%:Plan Cache%'
+      AND instance_name = N'_Total'
 ) AS pc_plan
 CROSS JOIN
 (

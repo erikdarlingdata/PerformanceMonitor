@@ -128,11 +128,11 @@ public sealed class ClickThroughUiTextTests : IDisposable
     public void ListMarkup_NamesItsRowsCardsAndComboItemsForScreenReaders()
     {
         var main = File.ReadAllText(FindRepoFile(@"Lite\MainWindow.xaml"));
-        var finOps = File.ReadAllText(FindRepoFile(@"Lite\Controls\FinOpsTab.xaml"));
+        var card = File.ReadAllText(FindRepoFile(@"Lite\Controls\ServerOverviewCard.xaml"));
 
         Assert.Contains("AutomationProperties.Name\" Value=\"{Binding AutomationName", main, StringComparison.Ordinal);
-        Assert.Contains("AutomationProperties.Name=\"{Binding DisplayName}\"", main, StringComparison.Ordinal);
-        Assert.Contains("AutomationProperties.Name\" Value=\"{Binding DisplayNameWithIntent", finOps, StringComparison.Ordinal);
+        Assert.Contains("AutomationProperties.Name=\"{Binding DisplayName}\"", card, StringComparison.Ordinal);
+        // The server picker's item names are checked on the rendered containers: ThemeLeftoversRenderTests.TheServerBoxItems_AreNamedByTheServer_AfterARunTimeThemeSwitch.
     }
 
     [Fact]

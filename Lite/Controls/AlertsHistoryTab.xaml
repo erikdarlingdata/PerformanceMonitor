@@ -73,27 +73,33 @@
         </Grid.RowDefinitions>
 
         <!-- Header Controls -->
-        <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" MinHeight="36">
+        <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8,10,4" MinHeight="36">
             <TextBlock Text="Alert History" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14"
                        Foreground="{DynamicResource ForegroundBrush}"/>
-            <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="5,0,4,0"
-                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
-            <ui:TimeRangePicker x:Name="RangePicker" VerticalAlignment="Center" RangeChanged="RangePicker_RangeChanged"/>
-            <TextBlock Text="Server:" VerticalAlignment="Center" Margin="12,0,4,0"
-                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
-            <ComboBox x:Name="ServerFilterComboBox" Width="160" VerticalAlignment="Center"
-                      SelectionChanged="ServerFilterComboBox_SelectionChanged">
-                <ComboBoxItem Content="All Servers" Tag="" IsSelected="True"/>
-            </ComboBox>
+            <!-- #8219: the label and its control wrap together. -->
+            <StackPanel Orientation="Horizontal" Margin="5,0,0,4">
+                <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="0,0,4,0"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <ui:TimeRangePicker x:Name="RangePicker" VerticalAlignment="Center" RangeChanged="RangePicker_RangeChanged"/>
+            </StackPanel>
+            <!-- #8219: the label and its control wrap together. -->
+            <StackPanel Orientation="Horizontal" Margin="12,0,0,4">
+                <TextBlock Text="Server:" VerticalAlignment="Center" Margin="0,0,4,0"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <ComboBox x:Name="ServerFilterComboBox" Width="160" VerticalAlignment="Center"
+                          SelectionChanged="ServerFilterComboBox_SelectionChanged">
+                    <ComboBoxItem Content="All Servers" Tag="" IsSelected="True"/>
+                </ComboBox>
+            </StackPanel>
             <Button Content="Refresh" Click="RefreshButton_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
             <Button x:Name="DismissSelectedButton" Content="Dismiss Selected" Click="DismissSelected_Click"
                     Margin="8,0,0,0" Padding="10,4" MinWidth="90" IsEnabled="False"/>
             <Button x:Name="DismissAllButton" Content="Dismiss All" Click="DismissAll_Click"
                     Margin="4,0,0,0" Padding="10,4" MinWidth="70"/>
             <TextBlock x:Name="DismissWaitIndicator" Text="Waiting for the local database..." Margin="10,0,0,0"
-                       VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource WarningTextBrush}" Visibility="Collapsed"/>
+                       VerticalAlignment="Center" Foreground="{DynamicResource WarningTextBrush}" Visibility="Collapsed"/>
             <TextBlock x:Name="AlertCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
-                       FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                       Style="{DynamicResource PanelSubtitleText}"/>
             <TextBlock x:Name="LastRefreshedIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
                        FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
             <TextBlock x:Name="ArchivalWarning" Text="" Margin="8,0,0,0" VerticalAlignment="Center"
@@ -122,7 +128,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding ServerName}" Width="140">
+                    <DataGridTextColumn Binding="{Binding ServerName}" Width="Auto" MinWidth="140">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ServerName" Click="FilterButton_Click" Margin="0,0,4,0"/>

@@ -39,18 +39,24 @@ public sealed class ChartRenderHelper
     }
 
     /// <summary>
-    /// Shows the legend on a chart and tracks it for cleanup on the next refresh. #7385: the legend runs horizontally and
-    /// wraps only when it does not fit the chart's width, so a chart pays for a second legend line only when it must (the
-    /// default is one line per series). <see cref="WrappedLegendLayout"/> gives the panel the wrapped height in the same render.
+    /// Shows the legend on a chart and tracks it for cleanup on the next refresh. #8220: where the legend goes is not decided here. The
+    /// chart's <see cref="WrappedLegendLayout"/> applies the one legend rule on every layout, at the size the chart has then, so a chart
+    /// drawn before it had a size, or resized later, still gets the right place (beside the plot, under it, or as one row).
+    /// #7385: a legend under the plot wraps only when it does not fit the chart's width, so a chart pays for a second legend line only when it must.
     /// </summary>
     public void ShowChartLegend(ScottPlot.WPF.WpfPlot chart)
     {
+        ChartStyle.FloorAllZeroYAxis(chart.Plot);
         var panel = chart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
         _legendPanels[chart] = panel;
         var legend = chart.Plot.Legend;
         legend.FontSize = 13;
-        legend.Orientation = ScottPlot.Orientation.Horizontal;
-        legend.TightHorizontalWrapping = true;
+        // No frame and no fill: the legend sits on the figure's own background, outside the plot.
+        legend.BackgroundColor = ScottPlot.Colors.Transparent;
+        legend.OutlineColor = ScottPlot.Colors.Transparent;
+        legend.OutlineWidth = 0;
+        legend.ShadowColor = ScottPlot.Colors.Transparent;
+        // The engine sets the edge, the orientation, the padding and the alignment for the side it picks, on every layout.
         chart.Plot.Layout.LayoutEngine = new WrappedLegendLayout(panel);
     }
 
@@ -61,28 +67,43 @@ public sealed class ChartRenderHelper
     public void SetLegendPanel(ScottPlot.WPF.WpfPlot chart, ScottPlot.IPanel? panel) => _legendPanels[chart] = panel;
 
     /// <summary>
-    /// Sets up an empty chart with dark theme, Y-axis label, and a centered "No Data" annotation. #7385: no legend box (the
-    /// name is already in the plot), and no tick labels, so the chart's own frame is small; <see cref="ChartGroupAligner"/>
-    /// gives it its neighbors' frame when it sits in a group.
+    /// Sets up an empty chart: one centered, muted sentence and nothing else (#8086): no axes, no grid, no data box and no legend.
+    /// <see cref="ChartGroupAligner"/> leaves it out of its group, since there is no plot rectangle to share.
     /// </summary>
     public void RefreshEmptyChart(ScottPlot.WPF.WpfPlot chart, string legendText, string yAxisLabel)
     {
         ChartStyle.ReapplyAxisColors(chart);
 
-        /* Add centered "No Data" text */
-        var text = chart.Plot.Add.Text($"{legendText}\nNo Data", 0, 0);
-        text.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
+        var name = string.IsNullOrWhiteSpace(legendText) ? "data" : $"{legendText} data";
+        var sentence = $"No {name} in this window";
+        /* One sentence; on a narrow chart it breaks before the tail rather than running off the edge. */
+        var label = sentence.Length > 36 ? $"No {name}\nin this window" : sentence;
+        var text = chart.Plot.Add.Text(label, 0, 0);
+        text.LabelFontColor = MutedTextColor();
         text.LabelFontSize = 14;
+        text.LabelItalic = false;
         text.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
 
-        /* Configure axes */
-        chart.Plot.HideGrid();
         chart.Plot.Axes.SetLimitsX(-1, 1);
         chart.Plot.Axes.SetLimitsY(-1, 1);
-        chart.Plot.Axes.Bottom.TickGenerator = new ScottPlot.TickGenerators.EmptyTickGenerator();
-        chart.Plot.Axes.Left.TickGenerator = new ScottPlot.TickGenerators.EmptyTickGenerator();
         chart.Plot.YLabel(yAxisLabel);
+        chart.Plot.HideAxesAndGrid();
+        // The data area takes the figure's own color, so no box is left behind the sentence.
+        chart.Plot.DataBackground.Color = chart.Plot.FigureBackground.Color;
+        ChartGroupAligner.MarkEmpty(chart.Plot);
 
         chart.Refresh();
+    }
+
+    /// <summary>The theme's muted text color (the one the XAML empty hints use), or the palette's placeholder grey when no theme is loaded.</summary>
+    private static ScottPlot.Color MutedTextColor()
+    {
+        if (System.Windows.Application.Current?.TryFindResource("ForegroundMutedBrush") is System.Windows.Media.SolidColorBrush brush)
+        {
+            var c = brush.Color;
+            return new ScottPlot.Color(c.R, c.G, c.B, c.A);
+        }
+
+        return ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
     }
 }

@@ -73,7 +73,7 @@ export const MCP_ACTION_TOOL_NAMES = [
   "record_investigation_feedback", "reject_investigation_note", "reload_config", "remove_server", "remove_webhook_signing_key", "reset_collector_schedules", "restore_alert_history", "resume_collection", "run_collectors_now", "run_custom_view_panel",
   "save_environment_profile", "send_daily_health_report_now", "set_agent_actions_enabled", "set_alert_threshold_override", "set_collector_databases", "set_collector_frequency", "set_collector_retention", "set_collector_run_at", "set_database_state_expected", "set_mute_rule_enabled",
   "set_notification_route_enabled", "set_notification_route_fallback", "set_quiet_window", "set_server_action", "set_server_excluded_databases", "set_server_xe_session_databases",
-  "submit_investigation_report", "test_connection", "test_custom_alert_rule", "test_query_tag_rule", "start_practice_request", "unassign_query_tag",
+  "submit_investigation_report", "post_investigation_message", "test_connection", "test_custom_alert_rule", "test_query_tag_rule", "start_practice_request", "unassign_query_tag",
   "unassign_server_tag", "undo_agent_change", "undo_plan_change", "unforce_query_store_plan", "unmute_analysis_finding", "update_alert_settings", "update_custom_alert_rule",
   "update_custom_view", "update_known_pattern", "update_mute_rule", "update_notification_channels", "update_notification_route", "update_query_tag", "update_query_tag_rule",
   "update_server_tag", "update_service_flags", "validate_custom_alert_rule", "validate_custom_view", "wait_for_investigation_requests", "write_investigation_note",
@@ -119,9 +119,11 @@ export const MEASUREMENT_LABELS = [
   "job_history_identity_target_row", "json_records_discarded", "log_bytes_skipped", "log_files_skipped_by_rotation",
   "log_matches_limited", "log_resume_file_missing", "log_resume_file_recycled", "newest_visible_event_age_s",
   "postmaster_epoch_changes", "raise_shaped_deadlocks_skipped", "report_xml_empty", "report_xml_unparsed",
-  "ring_buffer_events_hidden", "ring_buffer_truncated", "shred_gated", "statement_scrub_ms",
+  "ring_buffer_events_hidden", "ring_buffer_events_limit", "ring_buffer_evicted", "ring_buffer_limit_below_setting",
+  "ring_buffer_loss_at_least", "ring_buffer_loss_unknown", "ring_buffer_loss_window_s", "ring_buffer_memory_capped",
+  "ring_buffer_truncated", "shred_gated", "statement_scrub_ms",
   "statement_scrub_named", "statement_scrub_timeouts", "statement_scrub_unjudged", "statements_dealloc",
-  "statements_epoch_changes",
+  "statements_epoch_changes", "xe_session_dropped",
 ];
 const LABEL_SET = new Set(MEASUREMENT_LABELS);
 
@@ -251,6 +253,16 @@ function measurementCountsText(text) {
  * `text` with the named internal tokens and the measurement counts put into words, nothing else (#6649). For a collection
  * log's message cell: a successful run leaves its counts there, and a failed run leaves a real error message.
  */
+/** The plural the "(s)" rewrite below gives a word: "hours", "alerts", "queries". */
+function wordsOf(word) {
+  return /[^aeiou]y$/.test(word) ? word.slice(0, -1) + "ies" : word + "s";
+}
+
+/** A count and its word agreeing ("1 alert", "3 alerts", "2 queries"), for text a page builds from a number it knows. */
+export function countWord(n, word) {
+  return n + " " + (String(n) === "1" ? word : wordsOf(word));
+}
+
 export function plainTextCounts(text) {
   if (typeof text !== "string" || text === "") return text;
   return measurementCountsText(namedTokenText(text));
@@ -357,7 +369,11 @@ function lowerEmphasisWords(text) {
  */
 export function plainText(text) {
   if (typeof text !== "string" || text === "") return text;
-  if (text.includes(ENGINE_GATE_MARK)) return AZURE_SQL_DATABASE_MARK.test(text) ? AZURE_SQL_DATABASE_NOT_COLLECTED_LINE : NOT_COLLECTED_LINE;
+  if (text.includes(ENGINE_GATE_MARK)) {
+    if (AZURE_SQL_DATABASE_MARK.test(text)) return AZURE_SQL_DATABASE_NOT_COLLECTED_LINE;
+    if (AWS_RDS_MARK.test(text)) return awsRdsNotCollectedLine(text);
+    return NOT_COLLECTED_LINE;
+  }
   let t = text;
   if (text.includes(RUNTIME_PRECONDITION_MARK)) t = runtimePreconditionText(text);
   t = namedTokenText(t);
@@ -419,7 +435,7 @@ export function plainText(text) {
   /* #6831: the empty cut-window sentence's pointer at hints.effective_start, when the page has no instant to put there (util.js names it when it has one). */
   t = t.replace(/\bstarts at effective_start \(see hints\)/g, "starts partway into the window");
   /* "24 hour(s)", "288 collector run(s)": the count is known, so the word agrees with it ("1 hour", "24 hours", "2 queries"). */
-  t = t.replace(/(?<![\w.])(\d[\d,]*) ((?:[a-z]+ )?[a-z]+)\(s\)/g, (m, n, word) => n + " " + (n === "1" ? word : /[^aeiou]y$/.test(word) ? word.slice(0, -1) + "ies" : word + "s"));
+  t = t.replace(/(?<![\w.])(\d[\d,]*) ((?:[a-z]+ )?[a-z]+)\(s\)/g, (m, n, word) => n + " " + (n === "1" ? word : wordsOf(word)));
 
   /* "raise limit": the pages have no row-limit control. "...filter - raise limit to see more." and "...returned; raise limit
      (now 50) for more." lose the clause; ", or raise limit," and ", and raise limit if none ... shows one" lose theirs. */
@@ -530,6 +546,19 @@ export const AZURE_SQL_DATABASE_NOT_COLLECTED_LINE = "Azure SQL Database does no
 
 /** How the server's engine-gate sentence names an Azure SQL Database ("<server> runs on Azure SQL Database (EngineEdition 5)."). */
 const AZURE_SQL_DATABASE_MARK = /runs on Azure SQL Database \(EngineEdition 5\)/;
+
+/** #8095: how the engine-gate sentence names an Amazon RDS for SQL Server instance whose gap is the platform's (CollectorEngineCapability.AwsRdsDescription),
+    and the clause of that sentence that names what is not collected ("so this server does not collect the SQL Agent running-job snapshot, and never will"). */
+const AWS_RDS_MARK = /runs on Amazon RDS for SQL Server \(an AWS RDS instance\)/;
+const NOT_COLLECTED_CLAUSE = /does not collect (.+?), and never will/;
+
+/** #8095: the line for an Amazon RDS for SQL Server engine gate. It names the engine and the data it does not expose, the way the Azure line
+    names its engine, because the generic line sits above panels RDS does fill: "does not apply to this kind of server" over a Job History grid
+    full of Agent runs reads as a contradiction, while "does not expose the SQL Agent running-job snapshot" does not. */
+export function awsRdsNotCollectedLine(text) {
+  const clause = NOT_COLLECTED_CLAUSE.exec(text);
+  return "Amazon RDS for SQL Server does not expose " + (clause ? clause[1] : "this data") + ".";
+}
 
 /** The words every engine-gate sentence ends on (CollectorEngineCapability's permanent-gap epilogue). A "not collected"
     answer that is something else, such as a plan that was never stored, does not carry them and keeps its own sentence.

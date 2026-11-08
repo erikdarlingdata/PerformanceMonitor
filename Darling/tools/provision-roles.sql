@@ -3583,7 +3583,7 @@ BEGIN
       RETURN NEW;
    END IF;
 
-   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent', 'server_action_switched', 'action_called', 'action_done', 'action_failed', 'person_added', 'person_renamed', 'person_enabled', 'person_disabled', 'person_identity_added', 'person_identity_removed', 'person_grant_added', 'person_grant_removed', 'proposal_created', 'proposal_first_press', 'proposal_approved', 'proposal_run', 'proposal_failed', 'proposal_unknown', 'proposal_refused', 'proposal_expired', 'proposal_superseded', 'proposal_voided', 'proposal_notice_sent', 'slack_thread_posted', 'person_message') THEN
+   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent', 'server_action_switched', 'action_called', 'action_done', 'action_failed', 'person_added', 'person_renamed', 'person_enabled', 'person_disabled', 'person_identity_added', 'person_identity_removed', 'person_grant_added', 'person_grant_removed', 'proposal_created', 'proposal_first_press', 'proposal_approved', 'proposal_run', 'proposal_failed', 'proposal_unknown', 'proposal_refused', 'proposal_expired', 'proposal_superseded', 'proposal_voided', 'proposal_notice_sent', 'slack_thread_posted', 'slack_press', 'person_message', 'agent_message') THEN
       IF NEW.event = 'opened'
          AND EXISTS (SELECT 1 FROM config.investigation_requests AS r
                      WHERE r.request_id = NEW.request_id AND r.practice_of IS NOT NULL
@@ -3761,6 +3761,36 @@ BEGIN
 
    REVOKE ALL ON config.investigation_request_threads FROM PUBLIC, admin, viewer, web, mcp CASCADE;
    GRANT SELECT ON config.investigation_request_threads TO admin;
+END $do$;
+
+-- 3j6. The Slack cards (V253, #7658), mirroring managed provisioning's section 10e6: the channel and ts of each card the bot posted with
+--     buttons, and its state. Owner-written as the threads are: REVOKE ALL ... CASCADE, then SELECT back to admin alone. The table has no
+--     sequence. It is created by V253: on a store below it the block warns and skips, so the rest of the script still runs.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.investigation_slack_posts') IS NULL THEN
+      RAISE WARNING 'The Slack card table was not found, so its grants were skipped. Run this script again after the service has upgraded the store.';
+      RETURN;
+   END IF;
+
+   REVOKE ALL ON config.investigation_slack_posts FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+   GRANT SELECT ON config.investigation_slack_posts TO admin;
+END $do$;
+
+-- 3j7. The chat requests (V254, #7659), mirroring managed provisioning's section 10e7: who asked in a chat request, and each person's message.
+--     Owner-written as the threads are: REVOKE ALL ... CASCADE, then SELECT back to admin alone; mcp reads neither. The tables have no sequence.
+--     They are created by V254: on a store below it the block warns and skips, so the rest of the script still runs.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.investigation_person_messages') IS NULL THEN
+      RAISE WARNING 'The chat request tables were not found, so their grants were skipped. Run this script again after the service has upgraded the store.';
+      RETURN;
+   END IF;
+
+   REVOKE ALL ON config.investigation_request_askers FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+   GRANT SELECT ON config.investigation_request_askers TO admin;
+   REVOKE ALL ON config.investigation_person_messages FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+   GRANT SELECT ON config.investigation_person_messages TO admin;
 END $do$;
 
 -- 3k. Query-tag tables (V192, #5977), mirroring managed provisioning's grants for them. mcp writes the three tables a person

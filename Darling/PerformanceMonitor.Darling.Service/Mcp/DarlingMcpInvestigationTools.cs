@@ -70,7 +70,7 @@ public sealed partial class DarlingMcpInvestigationTools
     [McpServerTool(Name = "list_investigation_requests"), Description(
         "Lists the investigation requests alerts opened for your agent, newest first, with state, lease and expiry. Writes " +
         "nothing. status ok or empty. Claim one with claim_investigation_request. <<GUIDE>> " +
-        "Each row: id, server, family, first metric, alert count, state, lease and expiry; a Change Watch request also carries detail_text, " +
+        "Each row: id, server (server_name is the label the opening alert carried, kept for the request's life, so two requests for one server can carry two labels; instance_name is the registry's current name for server_id and display_name its display name, read when served, so group requests by server_id or instance_name), family, first metric, alert count, state, lease and expiry; a Change Watch request also carries detail_text, " +
         "its changes and the measures that moved, each query measure with its database. The state is computed from the " +
         "lease and expiry at read time (a lapsed lease reads open), and the read writes nothing. " +
         "A request is opened when an alert matches a notification route whose agent_level is 1 (get_notification_routes), " +
@@ -383,9 +383,10 @@ public sealed partial class DarlingMcpInvestigationTools
         [Description("Your claim_id, to renew. Omit to claim.")] string? claim_id = null,
         [Description("Omit, or 1.")] int? brief_format = null,
         DarlingMcpServedPolicy? served = null,
+        DarlingAgentActionSeat? seat = null,
         CancellationToken cancellationToken = default) =>
         ClaimAsync(Store(postgres), composer, request_id, agent_id, claim_id, brief_format, cancellationToken, served?.Policy.AgentTokenName,
-            served?.NamedAgentNames);
+            served?.NamedAgentNames, seat?.Owner?.Read() is { } owner ? Store(owner) : null);
 
     /// <summary>The claim over a given store and composer, so a test can drive a composer that fails. <paramref name="tokenName"/> is
     /// the name of the named agent token the call came with (#6542), or null for the legacy token: with a name, the agent is that
@@ -394,7 +395,7 @@ public sealed partial class DarlingMcpInvestigationTools
     /// (<paramref name="tokenName"/> null) may not claim under one of them.</summary>
     internal static async Task<string> ClaimAsync(InvestigationRequestStore store, InvestigationBriefComposer composer,
         string request_id, string agent_id, string? claim_id, int? brief_format, CancellationToken cancellationToken, string? tokenName = null,
-        IReadOnlySet<string>? namedAgentNames = null)
+        IReadOnlySet<string>? namedAgentNames = null, InvestigationRequestStore? ownerStore = null)
     {
         if (!Guid.TryParse(request_id, out var requestId))
             return InvestigationToolCore.Status("not_found", $"request_id '{request_id}' is not a request id.");
@@ -496,7 +497,7 @@ public sealed partial class DarlingMcpInvestigationTools
                     new InvalidOperationException("the brief could not be stored under this claim, so the claim was released."));
             }
 
-            return JsonSerializer.Serialize(new
+            var answer = JsonSerializer.SerializeToNode(new
             {
                 status = "claimed",
                 request_id = requestId,
@@ -506,7 +507,19 @@ public sealed partial class DarlingMcpInvestigationTools
                 brief_format = InvestigationFormats.BriefFormat,
                 report_formats = InvestigationFormats.AcceptedReportFormats,
                 brief = JsonNode.Parse(brief),
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions)!.AsObject();
+
+            /* #7659: what granted people asked in the thread rides beside the brief, never inside it, read on the owner connection (the mcp login
+               holds no SELECT on the message table). A request nobody asked in carries no key, so an alert claim answers as before. */
+            if (ownerStore is not null && await PersonRequestsAsync(ownerStore, requestId, cancellationToken) is { Requests: { } personRequests } people)
+            {
+                answer["person_requests"] = personRequests;
+                answer["person_requests_rule"] = PersonRequestsRule;
+                if (people.Omitted > 0)
+                    answer["person_requests_omitted"] = people.Omitted;
+            }
+
+            return answer.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -515,8 +528,8 @@ public sealed partial class DarlingMcpInvestigationTools
     }
 
     [McpServerTool(Name = "get_investigation_evidence"), Description(
-        "Reads the frozen evidence sections of one investigation request, reported ones too. Writes nothing. status ok, empty, not_found or " +
-        "already_claimed. <<GUIDE>> " +
+        "Reads the frozen evidence sections of one investigation request, reported ones too. Writes nothing. status ok, empty, invalid (a " +
+        "sections name no section carries, the known names listed), not_found or already_claimed. <<GUIDE>> " +
         "Where the host serves named agent tokens, claim_not_token (a named token passed another token's claim_id) and " +
         "agent_id_is_named_token (the legacy token passed a claim_id a named token holds) can also answer. " +
         "The brief is composed once, at claim time; evidence that freezes later reaches you only as an evidence_ready event " +
@@ -562,6 +575,17 @@ public sealed partial class DarlingMcpInvestigationTools
 
                 if (holder is null)
                     return InvestigationToolCore.Status("already_claimed", "Another claim holds a live lease on this request.");
+            }
+
+            /* #8090: a name no evidence section carries is refused by name, with the sections listed, before the stored rows are
+               filtered; empty would read as "the request has no evidence". A known section the request has no row for stays empty. */
+            if (sections is { Length: > 0 })
+            {
+                var known = InvestigationEvidenceCapture.SectionCollectors.Keys;
+                var unknown = sections.Where(s => !known.Contains(s)).Distinct(StringComparer.Ordinal).ToArray();
+                if (unknown.Length > 0)
+                    return InvestigationToolCore.Status("invalid",
+                        $"sections names no evidence section: {string.Join(", ", unknown.Select(u => $"'{u}'"))}. The sections are {string.Join(", ", known)}.");
             }
 
             var wanted = sections is { Length: > 0 } ? new HashSet<string>(sections, StringComparer.Ordinal) : null;

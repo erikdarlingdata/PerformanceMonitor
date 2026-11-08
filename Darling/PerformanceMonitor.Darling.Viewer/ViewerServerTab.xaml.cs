@@ -133,6 +133,11 @@ public partial class ViewerServerTab : UserControl
             }
         }
         InitializeComponent();
+        PerformanceMonitor.Ui.ChartPairLayout.Attach(CurrentWaitsScroll, CurrentWaitsGrid, CurrentWaitsFirstCard, CurrentWaitsSecondCard, CurrentWaitsGrid.RowDefinitions[2]); // #8219: side by side when the tab is too short for both stacked
+        DataGridNumberHeaders.Apply(this); // #8223: a number column's header on the same edge as its values
+        ViewerChartCards.Attach(this); // #8151: "0 throughout" in a card whose chart plots only zeros
+        ApplyTheme(WaitStatsChart);
+        _chartHelper.RefreshEmptyChart(WaitStatsChart, "Wait Stats", ""); // #8086: not the default -10 to 10 axes before the first read
         // #6652: the stacked-chart tabs scroll at small sizes; the wheel over a chart stays that chart's zoom.
         PerformanceMonitor.Ui.ChartLayout.KeepWheelOnPlot(
             QueryDurationTrendChart, ProcDurationTrendChart, QueryStoreDurationTrendChart, ExecutionCountTrendChart,
@@ -143,7 +148,7 @@ public partial class ViewerServerTab : UserControl
             BlockingDurationChart, BlockingTotalDurationChart, DeadlockWaitChart, DeadlockTotalWaitChart,
             CurrentWaitsDurationChart, CurrentWaitsBlockedChart, LatchStatsChart, SpinlockStatsChart,
             BadPagesChart, DumpRequestsChart, AccessViolationsChart, WriteAccessViolationsChart,
-            NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart);
+            NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart, CpuChart);
         /* #5565: every filtered grid below this tab keeps its column filters across a restart under this server. */
         ColumnFilterScope.SetServer(this, _server.ServerName);
 
@@ -205,6 +210,9 @@ public partial class ViewerServerTab : UserControl
 
         /* Collection Health's Duration Trends chart (copied from Lite): up-front theme + hover. */
         InitializeCollectionHealthChart();
+
+        /* #8103: a read-only seat sees Collection Health's write buttons off with the reason, before it clicks one. */
+        InitializeCollectionHealthSeat();
 
         /* System Events inner tab (system_health parity): register the category grids' filter managers. */
         InitializeSystemEventsTab();
@@ -541,7 +549,7 @@ public partial class ViewerServerTab : UserControl
                     break;
             }
 
-            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {DateTime.Now:HH:mm:ss}");
+            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {

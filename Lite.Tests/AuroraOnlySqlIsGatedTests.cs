@@ -109,6 +109,18 @@ public class AuroraOnlySqlIsGatedTests
             "writes that column NULL off Aurora, so off Aurora the value is NULL, the fact metadata key is " +
             "absent, and the advice sentence is omitted — never emitted as 0. The dependency itself is " +
             "PgStatementStatsCollector's PAIRED entry above.",
+
+        ["PgStatementEvictionNote.cs"] =
+            "PROSE (#8075). The unknown-eviction sentence for an Aurora target whose collector database has no " +
+            "pg_stat_statements row says that aurora_stat_statements() serves the statements without the extension " +
+            "and that the counter needs CREATE EXTENSION there. It reads a flag the store reader set, never the " +
+            "target; the dependency itself is PgStatementStatsCollector's PAIRED entry above.",
+
+        ["DarlingMcpPgServerStateTools.cs"] =
+            "PROSE (#8075). get_pg_extensions' description carves out pg_stat_statements on Aurora, where " +
+            "get_pg_top_queries reads aurora_stat_statements() and serves rows while the extension row reads " +
+            "available or absent. The tool reads the STORE, never the target; the dependency itself is " +
+            "PgStatementStatsCollector's PAIRED entry above.",
     };
 
     [Fact]

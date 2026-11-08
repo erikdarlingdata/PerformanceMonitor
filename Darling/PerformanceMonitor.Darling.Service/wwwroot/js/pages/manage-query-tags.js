@@ -33,6 +33,7 @@
  * they keep the typed id, so a write is never blocked by a failed name lookup.
  */
 
+import { countWord } from "../plain-text.js";
 import { el, mount, apiGet, apiGetFleet, apiWrite, loadingStrip, errorStrip, emptyStrip } from "../util.js";
 import { orderServers } from "../server-order.js";
 import { getSession } from "../views-api.js";
@@ -278,7 +279,7 @@ function drawNotice(state) {
     const b = pendingDelete.body || {};
     nodes.push(el("div", { class: "strip error" }, [
       el("div", { text: pendingDelete.message }),
-      el("div", { class: "meta", text: (b.child_tags || 0) + " child tag(s), " + (b.assignments || 0) + " hand assignment(s), " + (b.rules || 0) + " rule(s) would go with it." }),
+      el("div", { class: "meta", text: countWord(b.child_tags || 0, "child tag") + ", " + countWord(b.assignments || 0, "hand assignment") + ", " + countWord(b.rules || 0, "rule") + " would go with it." }),
       el("div", { class: "form-actions" }, [
         el("button", { class: "btn primary", type: "button", text: "Delete anyway", onClick: confirmDelete }),
         lockButton({ class: "btn", type: "button", text: "Cancel", onClick: cancelDelete }),
@@ -573,7 +574,7 @@ function testNodes(r) {
   if (r.error) return [el("div", { class: "strip error", role: "alert", text: r.error })];
   const nodes = [el("div", { class: "meta", text: r.message || "" })];
   if (r.keys_examined != null) {
-    nodes.push(el("div", { text: r.keys_examined + " key(s) examined, " + r.keys_matched + " matched: " + r.would_tag + " would be tagged, " + r.held_by_hand_assignment + " held by a hand assignment, " + r.held_by_higher_rule + " held by a higher rule." }));
+    nodes.push(el("div", { text: countWord(r.keys_examined, "key") + " examined, " + r.keys_matched + " matched: " + r.would_tag + " would be tagged, " + r.held_by_hand_assignment + " held by a hand assignment, " + r.held_by_higher_rule + " held by a higher rule." }));
   }
   if (Array.isArray(r.samples) && r.samples.length) {
     nodes.push(el("ul", { class: "rule-samples" }, r.samples.map((s) => el("li", { text: s.outcome + ": " + s.key + " (" + s.matched_field + " = " + s.matched_value + ")" + (s.held_tag ? " held by " + s.held_tag : "") }))));

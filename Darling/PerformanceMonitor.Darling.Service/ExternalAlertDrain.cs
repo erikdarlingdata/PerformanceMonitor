@@ -332,11 +332,12 @@ public sealed class ExternalAlertDrain
 
         if (FailedSendBackoff.EveryChannelFailed(delivery))
         {
-            /* Delivery is at least once: a fire every channel refused goes back for another attempt. The answer cannot show
+            /* Delivery is at least once: a fire every channel refused, or whose deliverer threw outside its channels and so
+               wrote no history row (AlertDelivery.DelivererFailed), goes back for another attempt. The answer cannot show
                that no request left the process (a webhook that timed out after its request was sent reads the same as a
                refused connection), so a repeat can post twice. PagerDuty drops a repeat trigger that carries the same dedup
                key, and the key is derived from the server and the metric name, so every attempt of this row sends the same one. */
-            var result = await RetryOrFailAsync(row, "every channel failed; the alert history row has the error");
+            var result = await RetryOrFailAsync(row, "every channel failed, or the deliverer threw; the alert history row has the error when one was written");
             if (result == ExternalAlertOutcome.Failed)
             {
                 await TryAbandonFireAsync(row, server.StateLabel);

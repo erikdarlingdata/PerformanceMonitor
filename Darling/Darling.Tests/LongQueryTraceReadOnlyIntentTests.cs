@@ -123,6 +123,7 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
         runner.LegacyLongQueryRecordsForTests = new LongQueryTraceLifecycleTests.InMemoryLegacyRecords();
         runner.LegacyLongQueryPresentForTests = (_, _, _) => Task.FromResult(false);
         runner.LongQueryTraceReplicaStateForTests = (_, _) => rig.Replica;
+        runner.LongQueryUtcNowForTests = () => rig.Clock;
         runner.LongQueryTraceStepOverrideForTests = (_, databaseName, connectionString, step, sessionName, _) =>
         {
             if (step is LongQueryTraceStep.Stop or LongQueryTraceStep.Drop)
@@ -273,6 +274,94 @@ public sealed class LongQueryTraceReadOnlyIntentTests : IAsyncDisposable
 
         Assert.NotNull(rig.State.LongQueryTraceFault);
         Assert.Contains(rig.Logger.Entries, e => e.Level >= LogLevel.Warning);
+    }
+
+    private static Exception NotVisible() =>
+        SqlExceptionFactory.Create(15151, 16, "Cannot alter the event session, because it does not exist or you do not have permission.");
+
+    /// <summary>
+    /// #8146: the replica's lag gets an hour from the first refusal. A replica that never shows the definition is pending,
+    /// without a fault or a warning, on every sweep inside that hour, and a fault with a warning on the first sweep past it.
+    /// </summary>
+    [Fact]
+    public async Task Azure_AReplicaThatNeverShowsTheDefinition_IsPendingForAnHour_ThenAFaultWithAWarning()
+    {
+        var rig = BuildRig("beta", readOnlyIntent: true);
+        rig.Refusal = step => step == LongQueryTraceStep.Start ? NotVisible() : null;
+        var firstRefusal = rig.Clock;
+
+        foreach (var minutes in new[] { 0, 30, 60 })
+        {
+            rig.Clock = firstRefusal + TimeSpan.FromMinutes(minutes);
+            await rig.ReconcileAsync();
+
+            Assert.Null(rig.State.LongQueryTraceFault);
+            Assert.Null(rig.State.LongQueryTraceApplied);
+            Assert.Empty(rig.Loud());
+        }
+
+        rig.Clock = firstRefusal + LongQueryTraceDatabases.RetryInterval + TimeSpan.FromMinutes(1);
+        await rig.ReconcileAsync();
+
+        Assert.NotNull(rig.State.LongQueryTraceFault);
+        Assert.NotEmpty(rig.Loud());
+    }
+
+    /// <summary>
+    /// #8146: a replica that shows the definition after two refusals inside the hour gets the start, and that ends the window:
+    /// a refusal hours later starts a fresh one, so it is pending again, not a fault.
+    /// </summary>
+    [Fact]
+    public async Task Azure_AReplicaThatCatchesUpWithinTheHour_IsStarted_AndALaterRefusalStartsAFreshWindow()
+    {
+        var rig = BuildRig("beta", readOnlyIntent: true);
+        rig.Refusal = step => step == LongQueryTraceStep.Start ? NotVisible() : null;
+        var firstRefusal = rig.Clock;
+
+        await rig.ReconcileAsync();
+        rig.Clock = firstRefusal + TimeSpan.FromMinutes(10);
+        await rig.ReconcileAsync();
+        Assert.Null(rig.State.LongQueryTraceApplied);
+
+        rig.Refusal = _ => null;
+        rig.Replica = new LongQueryTraceReplicaState(DefinitionExists: true, Running: false);
+        rig.Steps.Clear();
+        rig.Clock = firstRefusal + TimeSpan.FromMinutes(20);
+        await rig.ReconcileAsync();
+
+        Assert.Equal(new[] { LongQueryTraceStep.Check, LongQueryTraceStep.Start }, rig.Steps.Select(s => s.Step));
+        Assert.True(rig.State.LongQueryTraceApplied);
+
+        /* Hours later the session is gone from the replica's view again, and the hourly create pass meets the same refusal. */
+        rig.Refusal = step => step == LongQueryTraceStep.Start ? NotVisible() : null;
+        rig.Replica = default;
+        rig.Steps.Clear();
+        rig.Clock = firstRefusal + TimeSpan.FromHours(3);
+        await rig.ReconcileAsync();
+
+        Assert.Equal(
+            new[] { LongQueryTraceStep.Check, LongQueryTraceStep.CreateDefinition, LongQueryTraceStep.Start },
+            rig.Steps.Select(s => s.Step));
+        Assert.Null(rig.State.LongQueryTraceFault);
+        Assert.Empty(rig.Loud());
+    }
+
+    /// <summary>
+    /// #8146: the not-visible refusal of a start for a definition the replica already shows is no lag: a fault and a warning
+    /// at once, with no grace.
+    /// </summary>
+    [Fact]
+    public async Task Azure_ANotVisibleRefusalWhenTheReplicaShowsTheDefinition_IsAFaultAtOnce()
+    {
+        var rig = BuildRig("beta", readOnlyIntent: true);
+        rig.Replica = new LongQueryTraceReplicaState(DefinitionExists: true, Running: false);
+        rig.Refusal = step => step == LongQueryTraceStep.Start ? NotVisible() : null;
+
+        await rig.ReconcileAsync();
+
+        Assert.Equal(new[] { LongQueryTraceStep.Check, LongQueryTraceStep.Start }, rig.Steps.Select(s => s.Step));
+        Assert.NotNull(rig.State.LongQueryTraceFault);
+        Assert.NotEmpty(rig.Loud());
     }
 
     /* ── Azure SQL Database: a drop stops the session over the replica, then drops the definition over the primary ── */

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Xml.Linq;
 
@@ -116,49 +117,49 @@ public static class DeadlockGraphProcessParser
 
             if (resourceList != null)
             {
-                var lockTypes = new[] { "objectlock", "pagelock", "keylock", "ridlock", "rowgrouplock" };
-                foreach (var lockType in lockTypes)
+                /* Every lock kind a graph can carry (DeadlockGraphParser's set): a row, page or object lock, and also an
+                   applicationlock (sp_getapplock), metadatalock, hobtlock, allocunitlock or filegrouplock. A parallel
+                   exchangeEvent or SyncPoint is in the set too; its owners and waiters carry no mode and no object name, so
+                   they add nothing here. */
+                foreach (var lockNode in resourceList.Elements().Where(e => DeadlockGraphParser.LockElementNames.Contains(e.Name.LocalName)))
                 {
-                    foreach (var lockNode in resourceList.Elements(lockType))
+                    var objectName = lockNode.Attribute("objectname")?.Value ?? "";
+
+                    /* Parse owners */
+                    foreach (var owner in lockNode.Descendants("owner"))
                     {
-                        var objectName = lockNode.Attribute("objectname")?.Value ?? "";
-
-                        /* Parse owners */
-                        foreach (var owner in lockNode.Descendants("owner"))
+                        var ownerId = owner.Attribute("id")?.Value ?? "";
+                        var ownerMode = owner.Attribute("mode")?.Value ?? "";
+                        if (!string.IsNullOrEmpty(ownerId) && !string.IsNullOrEmpty(ownerMode))
                         {
-                            var ownerId = owner.Attribute("id")?.Value ?? "";
-                            var ownerMode = owner.Attribute("mode")?.Value ?? "";
-                            if (!string.IsNullOrEmpty(ownerId) && !string.IsNullOrEmpty(ownerMode))
-                            {
-                                if (!processOwnerModes.ContainsKey(ownerId))
-                                    processOwnerModes[ownerId] = new HashSet<string>();
-                                processOwnerModes[ownerId].Add(ownerMode);
-                            }
-                            if (!string.IsNullOrEmpty(ownerId) && !string.IsNullOrEmpty(objectName))
-                            {
-                                if (!processObjectNames.ContainsKey(ownerId))
-                                    processObjectNames[ownerId] = new HashSet<string>();
-                                processObjectNames[ownerId].Add(objectName);
-                            }
+                            if (!processOwnerModes.ContainsKey(ownerId))
+                                processOwnerModes[ownerId] = new HashSet<string>();
+                            processOwnerModes[ownerId].Add(ownerMode);
                         }
-
-                        /* Parse waiters */
-                        foreach (var waiter in lockNode.Descendants("waiter"))
+                        if (!string.IsNullOrEmpty(ownerId) && !string.IsNullOrEmpty(objectName))
                         {
-                            var waiterId = waiter.Attribute("id")?.Value ?? "";
-                            var waiterMode = waiter.Attribute("mode")?.Value ?? "";
-                            if (!string.IsNullOrEmpty(waiterId) && !string.IsNullOrEmpty(waiterMode))
-                            {
-                                if (!processWaiterModes.ContainsKey(waiterId))
-                                    processWaiterModes[waiterId] = new HashSet<string>();
-                                processWaiterModes[waiterId].Add(waiterMode);
-                            }
-                            if (!string.IsNullOrEmpty(waiterId) && !string.IsNullOrEmpty(objectName))
-                            {
-                                if (!processObjectNames.ContainsKey(waiterId))
-                                    processObjectNames[waiterId] = new HashSet<string>();
-                                processObjectNames[waiterId].Add(objectName);
-                            }
+                            if (!processObjectNames.ContainsKey(ownerId))
+                                processObjectNames[ownerId] = new HashSet<string>();
+                            processObjectNames[ownerId].Add(objectName);
+                        }
+                    }
+
+                    /* Parse waiters */
+                    foreach (var waiter in lockNode.Descendants("waiter"))
+                    {
+                        var waiterId = waiter.Attribute("id")?.Value ?? "";
+                        var waiterMode = waiter.Attribute("mode")?.Value ?? "";
+                        if (!string.IsNullOrEmpty(waiterId) && !string.IsNullOrEmpty(waiterMode))
+                        {
+                            if (!processWaiterModes.ContainsKey(waiterId))
+                                processWaiterModes[waiterId] = new HashSet<string>();
+                            processWaiterModes[waiterId].Add(waiterMode);
+                        }
+                        if (!string.IsNullOrEmpty(waiterId) && !string.IsNullOrEmpty(objectName))
+                        {
+                            if (!processObjectNames.ContainsKey(waiterId))
+                                processObjectNames[waiterId] = new HashSet<string>();
+                            processObjectNames[waiterId].Add(objectName);
                         }
                     }
                 }
@@ -186,15 +187,15 @@ public static class DeadlockGraphProcessParser
                     DeadlockTime = row.DeadlockTime,
                     ProcessId = id,
                     IsVictim = victimIds.Contains(id),
-                    Spid = int.TryParse(proc.Attribute("spid")?.Value, out var spid) ? spid : 0,
+                    Spid = ParseInt(proc.Attribute("spid")?.Value),
                     DatabaseName = proc.Attribute("currentdbname")?.Value ?? "",
                     SqlText = proc.Element("inputbuf")?.Value?.Trim() ?? "",
                     WaitResource = proc.Attribute("waitresource")?.Value ?? "",
-                    WaitTime = long.TryParse(proc.Attribute("waittime")?.Value, out var wt) ? wt : 0,
+                    WaitTime = ParseLong(proc.Attribute("waittime")?.Value),
                     LockMode = proc.Attribute("lockMode")?.Value ?? "",
                     IsolationLevel = proc.Attribute("isolationlevel")?.Value ?? "",
-                    LogUsed = long.TryParse(proc.Attribute("logused")?.Value, out var lu) ? lu : 0,
-                    TransactionCount = int.TryParse(proc.Attribute("trancount")?.Value, out var tc) ? tc : 0,
+                    LogUsed = ParseLong(proc.Attribute("logused")?.Value),
+                    TransactionCount = ParseInt(proc.Attribute("trancount")?.Value),
                     ClientApp = proc.Attribute("clientapp")?.Value ?? "",
                     HostName = proc.Attribute("hostname")?.Value ?? "",
                     LoginName = proc.Attribute("loginname")?.Value ?? "",
@@ -204,10 +205,10 @@ public static class DeadlockGraphProcessParser
                     DeadlockType = deadlockType,
                     ProcName = procName,
                     TransactionName = proc.Attribute("transactionname")?.Value ?? "",
-                    Priority = int.TryParse(proc.Attribute("priority")?.Value, out var pri) ? pri : 0,
-                    LastTranStarted = DateTime.TryParse(proc.Attribute("lasttranstarted")?.Value, out var lts) ? lts : null,
-                    LastBatchStarted = DateTime.TryParse(proc.Attribute("lastbatchstarted")?.Value, out var lbs) ? lbs : null,
-                    LastBatchCompleted = DateTime.TryParse(proc.Attribute("lastbatchcompleted")?.Value, out var lbc) ? lbc : null,
+                    Priority = ParseInt(proc.Attribute("priority")?.Value),
+                    LastTranStarted = ParseDateTime(proc.Attribute("lasttranstarted")?.Value),
+                    LastBatchStarted = ParseDateTime(proc.Attribute("lastbatchstarted")?.Value),
+                    LastBatchCompleted = ParseDateTime(proc.Attribute("lastbatchcompleted")?.Value),
                     OwnerMode = processOwnerModes.TryGetValue(id, out var om) ? string.Join(", ", om) : "",
                     WaiterMode = processWaiterModes.TryGetValue(id, out var wm) ? string.Join(", ", wm) : "",
                     ObjectNames = processObjectNames.TryGetValue(id, out var on) ? string.Join(", ", on) : ""
@@ -222,4 +223,15 @@ public static class DeadlockGraphProcessParser
 
         return true;
     }
+
+    /* The graph's numbers and stamps are written by SQL Server in one invariant shape, so they are read invariant, as
+       DeadlockGraphParser reads them, whatever the thread culture is. */
+    private static int ParseInt(string? value) =>
+        int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : 0;
+
+    private static long ParseLong(string? value) =>
+        long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : 0;
+
+    private static DateTime? ParseDateTime(string? value) =>
+        DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out var v) ? v : null;
 }

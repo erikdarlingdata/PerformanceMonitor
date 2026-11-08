@@ -118,4 +118,15 @@ public static class AzureSweepScope
 
         return new List<string> { initialCatalog };
     }
+
+    /// <summary>
+    /// True for an Azure SQL Database registration of the logical SERVER (no catalog, or <c>master</c>), the shape
+    /// <see cref="OwnDatabaseOrEmpty"/> answers with an empty list. One predicate for both runners, so the deadlocks
+    /// collector's ring-buffer loss accounting (#8146) is skipped for the same registrations in Lite and Darling: a
+    /// logical-server registration's <c>master</c> item reads Azure's file-backed telemetry blob, which holds every deadlock a
+    /// ring buffer can evict (#2641), so an eviction there is not a lost deadlock and a loss note would be false. False for
+    /// every non-Azure target.
+    /// </summary>
+    public static bool IsLogicalServerRegistration(CollectorTargetInfo target, string? initialCatalog) =>
+        target.IsAzureSqlDb && OwnDatabaseOrEmpty(initialCatalog).Count == 0;
 }

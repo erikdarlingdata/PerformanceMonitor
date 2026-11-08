@@ -142,6 +142,95 @@ END;";
     public const string TruncationSelectSql = @"SELECT
     " + TruncationColumnsSql + ";";
 
+    /// <summary>
+    /// #8146. Declares what the ring-buffer position reads fill: the target header (<c>@ring_total</c>, <c>@ring_held</c>), the
+    /// session row (<c>@ring_created</c>, <c>@ring_dropped</c>) and the session's <c>max_events_limit</c> (<c>@ring_limit</c>).
+    /// The collector assigns <c>@ring_position_session</c> from its session-name literal before the session fragments run.
+    /// Holds no brace.
+    /// </summary>
+    public const string PositionDeclareSql = @"DECLARE
+    @ring_total bigint,
+    @ring_held bigint,
+    @ring_created datetime2(7),
+    @ring_dropped bigint,
+    @ring_limit bigint,
+    @ring_position_session sysname;";
+
+    /// <summary>
+    /// #8146. Reads the target header off the parsed <c>@ring_xml</c>, right after <see cref="TruncationSql"/>: how many events the
+    /// target has ever taken in (<c>totalEventsProcessed</c>) and how many it holds now (<c>eventCount</c>). A NULL
+    /// <c>@ring_xml</c> (no such target) leaves both NULL. Needs <see cref="PositionDeclareSql"/>.
+    /// </summary>
+    public const string HeaderSql = @"SELECT
+    @ring_total = @ring_xml.value('(RingBufferTarget/@totalEventsProcessed)[1]', 'bigint'),
+    @ring_held = @ring_xml.value('(RingBufferTarget/@eventCount)[1]', 'bigint');";
+
+    /// <summary>
+    /// #8146. The session row for a server-scoped session named <c>@ring_position_session</c>: when it was created (a restart
+    /// moves it), how many events it dropped before any target took them, and the ring_buffer target's
+    /// <c>max_events_limit</c> (1000 when the session carries no such field). Runs on every run, gated or not. Needs
+    /// <see cref="PositionDeclareSql"/>.
+    /// </summary>
+    public const string SessionPositionServerSql = @"SELECT
+    @ring_created = xes.create_time,
+    @ring_dropped = xes.dropped_event_count
+FROM sys.dm_xe_sessions AS xes
+WHERE xes.name = @ring_position_session
+OPTION(RECOMPILE);
+
+SET @ring_limit = 1000;
+
+SELECT
+    @ring_limit = ISNULL(TRY_CONVERT(bigint, sesf.value), 1000)
+FROM sys.server_event_sessions AS ses
+JOIN sys.server_event_session_targets AS sest
+  ON sest.event_session_id = ses.event_session_id
+JOIN sys.server_event_session_fields AS sesf
+  ON  sesf.event_session_id = sest.event_session_id
+  AND sesf.object_id = sest.target_id
+WHERE ses.name = @ring_position_session
+AND   sest.name = N'ring_buffer'
+AND   sesf.name = N'max_events_limit'
+OPTION(RECOMPILE);";
+
+    /// <summary>
+    /// #8146. <see cref="SessionPositionServerSql"/> for a database-scoped session (Azure SQL Database), from the
+    /// <c>sys.dm_xe_database_sessions</c> and <c>sys.database_event_session*</c> views.
+    /// </summary>
+    public const string SessionPositionDatabaseSql = @"SELECT
+    @ring_created = xes.create_time,
+    @ring_dropped = xes.dropped_event_count
+FROM sys.dm_xe_database_sessions AS xes
+WHERE xes.name = @ring_position_session
+OPTION(RECOMPILE);
+
+SET @ring_limit = 1000;
+
+SELECT
+    @ring_limit = ISNULL(TRY_CONVERT(bigint, sesf.value), 1000)
+FROM sys.database_event_sessions AS ses
+JOIN sys.database_event_session_targets AS sest
+  ON sest.event_session_id = ses.event_session_id
+JOIN sys.database_event_session_fields AS sesf
+  ON  sesf.event_session_id = sest.event_session_id
+  AND sesf.object_id = sest.target_id
+WHERE ses.name = @ring_position_session
+AND   sest.name = N'ring_buffer'
+AND   sesf.name = N'max_events_limit'
+OPTION(RECOMPILE);";
+
+    /// <summary>
+    /// The six columns <see cref="RingBufferObservation.Read"/> reads, as a select-list fragment (no leading comma): total, held,
+    /// created, dropped, limit and the read time. Safe where the header or session fragments never ran: every value but the
+    /// read time is NULL then.
+    /// </summary>
+    public const string PositionColumnsSql = @"ring_total = @ring_total,
+    ring_held = @ring_held,
+    ring_created = @ring_created,
+    ring_dropped = @ring_dropped,
+    ring_events_limit = @ring_limit,
+    ring_read_at = SYSUTCDATETIME()";
+
     /* The labels the health reads parse back (PerformanceMonitor.Common.RingBufferTruncationNote holds the same three). These stay
        string literals, not aliases of the Common constants: CollectorMeasurementSeamTests resolves each Measure( label to a
        `const string NAME = "..."` in this file and cannot follow a reference to another type. RingBufferTruncationSignalTests
@@ -172,15 +261,5 @@ END;";
         context.Measure(
             NewestVisibleAgeMeasurement,
             reader.IsDBNull(firstOrdinal + 2) ? 0 : System.Math.Max(0, reader.GetInt64(firstOrdinal + 2)));
-    }
-
-    /// <summary>Moves to the trailing <see cref="TruncationSelectSql"/> result and records it. No such result: nothing recorded.</summary>
-    public static async System.Threading.Tasks.ValueTask MeasureTrailingTruncationAsync(
-        System.Data.Common.DbDataReader reader, CollectorContext context, System.Threading.CancellationToken cancellationToken)
-    {
-        if (await reader.NextResultAsync(cancellationToken) && await reader.ReadAsync(cancellationToken))
-        {
-            MeasureTruncation(reader, 0, context);
-        }
     }
 }

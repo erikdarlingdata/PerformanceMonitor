@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+
 namespace PerformanceMonitor.Common;
 
 /// <summary>
@@ -24,7 +26,7 @@ public static class JobHistoryCap
         rowCount >= cap ? $"showing the newest {cap:N0}" : "";
 
     /// <summary>
-    /// The count text beside the grid (#4966): "N run(s)", with the cap label in brackets whenever the READ reached the cap,
+    /// The count text beside the grid (#4966): "12 runs", with the cap label in brackets whenever the READ reached the cap,
     /// and empty when the grid shows nothing. <paramref name="shownCount"/> is what the grid shows now, after the column
     /// filters; <paramref name="readCount"/> is what the read returned, after the Status and Category filters (the Job History read applies
     /// them ahead of its row cap, #5703) and before the column filters. The cap
@@ -32,13 +34,13 @@ public static class JobHistoryCap
     /// cut at the cap: every writer of the count text, the load and the column-filter handler alike, builds it here.
     /// </summary>
     public static string CountText(int shownCount, int readCount, int cap) =>
-        CountText(shownCount, readCount, cap, "run(s)");
+        CountText(shownCount, readCount, cap, "run");
 
     /// <summary>
-    /// <see cref="CountText(int, int, int)"/> for any list whose read is cut at a row cap, with the noun it counts
-    /// ("run(s)", "alert(s)"). The Alert History tab (D7 of the final walk) reads its newest 500 and said a bare
-    /// "500 alert(s)" at 24 hours and at 7 days, which reads as the whole answer; it now says "500 alert(s) (showing
-    /// the newest 500)" whenever the read reached the cap, however a column filter narrows the grid afterwards.
+    /// <see cref="CountText(int, int, int)"/> for any list whose read is cut at a row cap, with the noun it counts in the
+    /// singular ("run", "alert"); the count reads as a person says it ("1 alert", "500 alerts"). The Alert History tab reads
+    /// its newest 500, and a bare "500 alerts" reads as the whole answer, so the text says "500 alerts (showing the newest
+    /// 500)" whenever the read reached the cap, however a column filter narrows the grid afterwards.
     /// </summary>
     public static string CountText(int shownCount, int readCount, int cap, string noun)
     {
@@ -48,6 +50,15 @@ public static class JobHistoryCap
         }
 
         var label = Label(readCount, cap);
-        return label.Length > 0 ? $"{shownCount} {noun} ({label})" : $"{shownCount} {noun}";
+        var count = global::PerformanceMonitor.Common.CountText.Plural(shownCount, noun);
+        return label.Length > 0 ? $"{count} ({label})" : count;
     }
+
+    /// <summary>
+    /// #8133: the share of the All Servers read's cap each server gets, so one server that runs a job every minute cannot fill
+    /// the page with its own newest steps while the quieter servers' day goes unshown. The cap divided by the servers the read
+    /// can see, rounded up and never below one; the whole cap when no server count is known.
+    /// </summary>
+    public static int PerServerShare(int cap, int serverCount) =>
+        serverCount <= 0 ? cap : Math.Max(1, (cap + serverCount - 1) / serverCount);
 }
