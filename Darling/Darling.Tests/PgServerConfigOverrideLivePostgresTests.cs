@@ -13,8 +13,10 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using ModelContextProtocol.Protocol;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -110,6 +112,18 @@ public sealed class PgServerConfigOverrideLivePostgresTests
             }, overrides);
 
             Assert.Contains("ALTER DATABASE", withOverrides.GetProperty("database_overrides_note").GetString(), StringComparison.Ordinal);
+
+            /* #8320: the note is the product's own prose, so the host's statement filter passes the whole answer
+               through unchanged and a reader gets the explanation, not the withheld marker. */
+            var hostResult = new CallToolResult
+            {
+                Content = new List<ContentBlock> { new TextContentBlock { Text = withOverrides.GetRawText() } },
+            };
+            var swept = SensitiveStatementOutputFilter.Sweep(hostResult);
+            Assert.Equal(
+                withOverrides.GetProperty("database_overrides_note").GetString(),
+                JsonDocument.Parse(((TextContentBlock)swept.Content[0]).Text!).RootElement.GetProperty("database_overrides_note").GetString());
+            Assert.Same(hostResult, swept);
 
             /* Delete the two override rows and the answer must return to the earlier BYTES exactly — the
                section absent, not empty, and nothing else moved. */
