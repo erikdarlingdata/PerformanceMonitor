@@ -80,20 +80,49 @@ public partial class MainWindow : Window
     /// <summary>The server list and connection-status cache this window reads; the status bar is worded from it.</summary>
     internal ServerManager ServerManager => _serverManager;
 
+    /* #8304: what WordSelectedServerTabStatus last wrote, and the IsOnline it wrote it from. The connection check re-words the bar
+       only while it still shows that text, or once the cached IsOnline has moved on from it, so a message another path put there
+       (a failed refresh, the server-removal report, "Collecting data from X...") stands until the server's status changes. */
+    private string? _wordedStatusText;
+    private bool? _wordedStatusIsOnline;
+
     /// <summary>
-    /// Words the status bar for the selected server tab from its server's cached connection status and its collection suffix (#8304).
-    /// Called on a tab switch, when the tab's first collection ends, and on the 30-second connection check, so a server that goes
-    /// down while its tab is open reads Offline on the next check, and one that comes back reads Connected again. Another selected
-    /// tab (Overview, Alerts) leaves the bar as it is.
+    /// Words the status bar for the selected server tab from its server's cached connection status and its collection suffix (#8304),
+    /// on a tab switch and when the tab's first collection ends. Another selected tab (Overview, Alerts) leaves the bar as it is.
     /// </summary>
     internal void WordSelectedServerTabStatus()
     {
         if (ServerTabControl.SelectedItem is TabItem { Content: ServerTab serverTab })
         {
             _serverStatusSuffix.TryGetValue(serverTab.Server.Id, out var suffix);
-            StatusText.Text = ServerTabStatusText(_serverManager.GetConnectionStatus(serverTab.Server.Id).IsOnline, serverTab.Server.DisplayNameWithIntent, suffix);
+            _wordedStatusIsOnline = _serverManager.GetConnectionStatus(serverTab.Server.Id).IsOnline;
+            _wordedStatusText = ServerTabStatusText(_wordedStatusIsOnline, serverTab.Server.DisplayNameWithIntent, suffix);
+            StatusText.Text = _wordedStatusText;
         }
     }
+
+    /// <summary>
+    /// The connection check's half (#8304): re-words the selected server tab's status bar when the bar still shows the text
+    /// <see cref="WordSelectedServerTabStatus"/> last wrote, or when the server's cached IsOnline differs from the value that text
+    /// was worded from, so a server that goes down while its tab is open reads Offline on the next check and one that comes back
+    /// reads Connected again, while a message another path put on the bar stands until then.
+    /// </summary>
+    private void FollowSelectedServerTabStatus()
+    {
+        if (ServerTabControl.SelectedItem is not TabItem { Content: ServerTab serverTab })
+        {
+            return;
+        }
+
+        var isOnline = _serverManager.GetConnectionStatus(serverTab.Server.Id).IsOnline;
+        if (StatusText.Text == _wordedStatusText || isOnline != _wordedStatusIsOnline)
+        {
+            WordSelectedServerTabStatus();
+        }
+    }
+
+    /// <summary>Runs the connection check the status timer runs, for a test that flips a cached status and reads the bar.</summary>
+    internal void RunConnectionCheck() => CheckConnectionsAndNotify();
     private readonly Dictionary<string, (Action<int, int, DateTime?> AlertCounts, Action<PerformanceMonitor.Ui.TimeRangeSpec> ApplyTimeRange, Func<Task> ManualRefresh)> _tabEventHandlers = new();
     /* Server tab badge state for the non-blocking/deadlock conditions (#754/#749), keyed by the
        ServerConnection GUID (the same key as _openServerTabs). The alert sweep sets these; both the
@@ -1579,14 +1608,23 @@ public partial class MainWindow : Window
         // Then collect fresh data and refresh again
         if (_collectorService != null)
         {
-            StatusText.Text = $"Collecting data from {server.DisplayNameWithIntent}...";
+            var collecting = $"Collecting data from {server.DisplayNameWithIntent}...";
+            StatusText.Text = collecting;
             try
             {
                 await Task.Run(() => _collectorService.RunAllCollectorsForServerAsync(server));
                 _serverStatusSuffix[server.Id] = "Data loaded";
                 /* #8304: worded from the connection check, so a server the check could not reach is called offline, not connected:
-                   its collectors just ran and reached nothing, and the tab shows stored data. */
-                WordSelectedServerTabStatus();
+                   its collectors just ran and reached nothing, and the tab shows stored data. When the person has moved to another
+                   tab meanwhile, the collecting line is replaced only while it is still what the bar shows. */
+                if (ServerTabControl.SelectedItem == tabItem)
+                {
+                    WordSelectedServerTabStatus();
+                }
+                else if (StatusText.Text == collecting)
+                {
+                    StatusText.Text = ServerTabStatusText(_serverManager.GetConnectionStatus(server.Id).IsOnline, server.DisplayNameWithIntent, "Data loaded");
+                }
                 serverTab.RefreshData();
                 UpdateCollectorHealth();
                 _ = RefreshOverviewAsync();
@@ -2749,9 +2787,10 @@ public partial class MainWindow : Window
             AppLogger.Error("ConnectionAlerts", $"Connection check notify failed: {ex.Message}", ex);
         }
 
-        /* #8304: the selected server tab's status bar follows this check, from the cache it just refreshed: Offline when its
-           server went down, Connected when it came back. */
-        WordSelectedServerTabStatus();
+        /* #8304: the selected server tab's status bar follows the cached connection status this check reads (the collection loop's
+           CheckAllConnectionsAsync, the Refresh button and the connect-time check refresh it): Offline when its server went down,
+           Connected when it came back, and otherwise only while the bar still shows the text written for it. */
+        FollowSelectedServerTabStatus();
     }
 
     }

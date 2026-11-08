@@ -160,13 +160,8 @@ public sealed class OfflineServerStatusTextTests
         }
     }
 
-    /// <summary>The connection check the status timer runs, by name while it is the window's own private step.</summary>
-    private static void RunConnectionCheck(MainWindow w)
-    {
-        var method = typeof(MainWindow).GetMethod("CheckConnectionsAndNotify", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public, Type.EmptyTypes);
-        Assert.True(method is not null, "the window has no connection check");
-        method!.Invoke(w, null);
-    }
+    /// <summary>The connection check the status timer runs.</summary>
+    private static void RunConnectionCheck(MainWindow w) => w.RunConnectionCheck();
 
     /* The window is built the way the chrome tests build it: the app's three paths point at a folder of the test's own, and the
        window's content moves into a plain host window whose size the test sets. */
