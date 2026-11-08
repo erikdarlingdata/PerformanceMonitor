@@ -142,7 +142,7 @@ public static class SchemaWorkPlanner
             }
 
             /* The database joined or left an availability group: its history moves to the other key, where it starts again with a
-               baseline. The old key's versions age out with retention (DarlingRetention). */
+               baseline. The write closes the old key's current versions at the pass, and they age out with retention (DarlingRetention). */
             if ((state.HistoryServerId is not null || state.HistoryAgGroupId is not null)
                 && (state.HistoryServerId != key.ServerId || state.HistoryAgGroupId != key.AgGroupId))
             {

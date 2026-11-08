@@ -37,6 +37,12 @@ public sealed record SchemaDatabaseWrite(
     SchemaCaptureStateRow NewState)
 {
     public IReadOnlySet<int>? TargetedIds { get; init; }
+
+    /// <summary>
+    /// The key the database's history was kept under before it joined or left an availability group, when the read is the new key's first
+    /// baseline. Its current versions are closed in the same transaction, so they age out with the retention window.
+    /// </summary>
+    public SchemaHistoryKey? MovedFrom { get; init; }
 }
 
 /// <summary>What one <see cref="SchemaVersionStore.ApplyAsync"/> wrote: new versions (drops included) and how many of them were drops.</summary>
@@ -107,7 +113,13 @@ WHERE {keyPredicate} AND database_name = $2 AND valid_to IS NULL", c, tx) { Comm
         ArgumentNullException.ThrowIfNull(w);
 
         await using var tx = await c.BeginTransactionAsync(ct);
-        await LockHistoryAsync(c, tx, w, ct);
+        await LockHistoryAsync(c, tx, w.Key, w.DatabaseName, ct);
+        if (w.MovedFrom is { } moved && moved != w.Key)
+        {
+            await LockHistoryAsync(c, tx, moved, w.DatabaseName, ct);
+            await CloseMovedHistoryAsync(c, tx, w, moved, ct);
+        }
+
         var current = await LoadCurrentAsync(c, tx, w.Key, w.DatabaseName, ct);
         var readIds = new HashSet<int>(w.Read.Select(d => d.ObjectId));
         var claimed = new HashSet<int>();
@@ -194,14 +206,51 @@ WHERE {keyPredicate} AND database_name = $2 AND valid_to IS NULL", c, tx) { Comm
 
     /* One writer per (history key, database) at a time: two passes of one availability group's servers, or overlapping passes, would
        otherwise both load the same current rows and both write the next version. The lock is held to the transaction's end. */
-    private static async Task LockHistoryAsync(NpgsqlConnection c, NpgsqlTransaction tx, SchemaDatabaseWrite w, CancellationToken ct)
+    private static async Task LockHistoryAsync(NpgsqlConnection c, NpgsqlTransaction tx, SchemaHistoryKey key, string database, CancellationToken ct)
     {
-        var keyText = w.Key.AgGroupId is { } ag
-            ? "ag:" + ag.ToString("D") + "|" + w.DatabaseName
-            : "server:" + w.Key.ServerId?.ToString(System.Globalization.CultureInfo.InvariantCulture) + "|" + w.DatabaseName;
+        var keyText = key.AgGroupId is { } ag
+            ? "ag:" + ag.ToString("D") + "|" + database
+            : "server:" + key.ServerId?.ToString(System.Globalization.CultureInfo.InvariantCulture) + "|" + database;
         await using var cmd = new NpgsqlCommand("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", c, tx) { CommandTimeout = WriteCommandTimeoutSeconds };
         Param(cmd, NpgsqlDbType.Text, "schema_versions|" + keyText);
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /* The database's history moved to w.Key: the old key's current versions close at the detection time, their children stop being
+       current, and DarlingRetention ages them out over the window. An availability group's history is left open while another server's
+       capture state still writes it (the database left the group on this server only). */
+    private static async Task CloseMovedHistoryAsync(NpgsqlConnection c, NpgsqlTransaction tx, SchemaDatabaseWrite w, SchemaHistoryKey moved, CancellationToken ct)
+    {
+        var keyPredicate = moved.AgGroupId is not null
+            ? "o.server_id IS NULL AND o.ag_group_id = $1"
+            : "o.server_id = $1 AND o.ag_group_id IS NULL";
+        var keptElsewhere = moved.AgGroupId is not null
+            ? "s.history_ag_group_id = $1"
+            : "s.history_server_id = $1 AND s.history_ag_group_id IS NULL";
+        await using var cmd = new NpgsqlCommand($@"
+WITH closed AS (
+    UPDATE collect.schema_objects AS o SET valid_to = $3
+    WHERE {keyPredicate} AND o.database_name = $2 AND o.valid_to IS NULL
+    AND NOT EXISTS (SELECT 1 FROM collect.schema_capture_state AS s WHERE s.server_id <> $4 AND s.database_name = $2 AND {keptElsewhere})
+    RETURNING o.version_id),
+columns_closed AS (UPDATE collect.schema_columns SET is_current = FALSE WHERE version_id IN (SELECT version_id FROM closed) AND is_current),
+indexes_closed AS (UPDATE collect.schema_indexes SET is_current = FALSE WHERE version_id IN (SELECT version_id FROM closed) AND is_current),
+constraints_closed AS (UPDATE collect.schema_constraints SET is_current = FALSE WHERE version_id IN (SELECT version_id FROM closed) AND is_current),
+triggers_closed AS (UPDATE collect.schema_triggers SET is_current = FALSE WHERE version_id IN (SELECT version_id FROM closed) AND is_current)
+SELECT count(*) FROM closed", c, tx) { CommandTimeout = WriteCommandTimeoutSeconds };
+        if (moved.AgGroupId is { } group)
+        {
+            Param(cmd, NpgsqlDbType.Uuid, group);
+        }
+        else
+        {
+            Param(cmd, NpgsqlDbType.Integer, moved.ServerId);
+        }
+
+        Param(cmd, NpgsqlDbType.Text, w.DatabaseName);
+        Param(cmd, NpgsqlDbType.Timestamp, Naive(w.DetectedAtUtc));
+        Param(cmd, NpgsqlDbType.Integer, w.DetectedOnServerId);
+        await cmd.ExecuteScalarAsync(ct);
     }
 
     private static string NameKey(string schema, string name) => schema + "\u0001" + name;

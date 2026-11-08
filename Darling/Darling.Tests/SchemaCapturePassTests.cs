@@ -697,6 +697,11 @@ public sealed class SchemaCapturePassTests
             Assert.Equal("1", await rig.ScalarAsync("SELECT count(*) FROM collect.schema_capture_passes WHERE database_name = 'SalesDb' AND pass_kind = 'baseline' AND reason = 'history_key_changed'", ct));
             Assert.Equal(s_group.ToString(), await rig.ScalarAsync($"SELECT history_ag_group_id::text FROM collect.schema_capture_state WHERE server_id = {server.ServerId} AND database_name = 'SalesDb'", ct));
 
+            /* The server history's current versions are closed at the pass, children too, so they age out with the retention window. */
+            Assert.Equal("0", await Versions(rig, $"server_id = {server.ServerId} AND database_name = 'SalesDb' AND valid_to IS NULL", ct));
+            Assert.Equal("2", await Versions(rig, $"server_id = {server.ServerId} AND database_name = 'SalesDb' AND valid_to = (SELECT max(valid_from) FROM collect.schema_objects WHERE ag_group_id = '{s_group}')", ct));
+            Assert.Equal("0", await rig.ScalarAsync($"SELECT count(*) FROM collect.schema_columns c JOIN collect.schema_objects o USING (version_id) WHERE o.server_id = {server.ServerId} AND o.database_name = 'SalesDb' AND c.is_current", ct));
+
             /* Once: the pass after it has nothing to read. */
             rig.Source.Reads.Clear();
             await rig.PassAsync(server, ct);
@@ -724,6 +729,30 @@ public sealed class SchemaCapturePassTests
             Assert.Equal("2", await Versions(rig, $"server_id = {server.ServerId} AND change_kind = 'baseline' AND valid_to IS NULL", ct));
             Assert.Equal("1", await rig.ScalarAsync("SELECT count(*) FROM collect.schema_capture_passes WHERE database_name = 'SalesDb' AND pass_kind = 'baseline' AND reason = 'history_key_changed'", ct));
             Assert.Equal(server.ServerId.ToString(System.Globalization.CultureInfo.InvariantCulture), await rig.ScalarAsync($"SELECT history_server_id::text FROM collect.schema_capture_state WHERE server_id = {server.ServerId} AND database_name = 'SalesDb'", ct));
+            Assert.Equal("0", await Versions(rig, $"ag_group_id = '{s_group}' AND valid_to IS NULL", ct));
+        });
+    }
+
+    /// <summary>
+    /// A database that leaves the group on this server while another server of the group still writes the group's history: the group's
+    /// current versions are that server's live history, so this server leaves them open.
+    /// </summary>
+    [Fact]
+    public async Task Pass_DatabaseLeavesTheGroupHereWhileAnotherServerKeepsIt_LeavesTheGroupHistoryOpen()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            rig.Source.Probes.Add(Probe(Sales, 5, group: s_group, primary: true));
+            rig.Source.Catalog[Sales] = [Table(100, "Orders", "Id", "Total"), Table(101, "Customers", "Id")];
+            var server = rig.Server();
+            await rig.PassAsync(server, ct);
+            await rig.ScalarAsync($@"INSERT INTO collect.schema_capture_state (server_id, database_name, history_ag_group_id, last_seen_in_scope_at)
+VALUES ({server.ServerId + 1}, 'SalesDb', '{s_group}', now()) RETURNING 1", ct);
+
+            rig.Source.Probes[0] = Probe(Sales, 5);
+            await rig.PassAsync(server, ct);
+
+            Assert.Equal("2", await Versions(rig, $"ag_group_id = '{s_group}' AND valid_to IS NULL", ct));
         });
     }
 

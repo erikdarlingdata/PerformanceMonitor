@@ -192,4 +192,30 @@ VALUES ($1, $2, $3, $4, $5)", c);
             Assert.Equal("1:OpsDb,2:AgDb", await StateRowsAsync(c, ct));
         });
     }
+
+    /// <summary>
+    /// A database that joined or left an availability group: the pass closed the old key's current versions, and no state row points at
+    /// that key any more. The old history stays while a version of it closed inside the window, and its closed rows then age out
+    /// through the normal purge, not at the next daily purge.
+    /// </summary>
+    [Fact]
+    public async Task Purge_KeepsAMovedHistory_WhileAVersionOfItClosedInsideTheWindow()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            await SeedStateAsync(c, 1, "SalesDb", s_now, ct, group: s_group);
+
+            /* Moved yesterday: closed by the pass at the move. */
+            await SeedVersionAsync(c, "MovedYesterday", s_now.AddDays(-50), s_now.AddDays(-1), ct);
+            await SeedVersionAsync(c, "MovedYesterdayOlder", s_now.AddDays(-80), s_now.AddDays(-60), ct);
+
+            /* Moved 40 days ago: its last version closed outside the window. */
+            await SeedVersionAsync(c, "MovedLongAgo", s_now.AddDays(-50), s_now.AddDays(-40), ct, database: "OpsDb");
+
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, null, ct);
+
+            Assert.Equal("MovedYesterday", await ObjectNamesAsync(c, ct));
+            Assert.Equal(1L, await ColumnRowsAsync(c, ct));
+        });
+    }
 }

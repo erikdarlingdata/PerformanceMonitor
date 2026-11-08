@@ -1212,7 +1212,8 @@ public static class DarlingRetention
                Then the histories no pass saw for the whole window (the v1 spec's rule): every version, current too, of a
                (history key, database) that no collect.schema_capture_state row of any server points at with a last_seen_in_scope_at
                inside the window. That is a dropped or renamed database, a removed server, a database that left the collector's
-               scope, and the old key of a database that joined or left an availability group (the pass baselines the new key). An
+               scope. A history with a version closed inside the window stays until that version ages out: the old key of a database
+               that joined or left an availability group, whose current versions the pass closed at the move, goes that way. An
                availability group's history stays while any of its servers still sees it. One statement each, and the stale database
                state rows after the versions, so a failed version purge is retried by the next sweep (no fresh row points at it).
                The server rows (empty database name) stay: they hold the event session's position, which the drop of a disabled
@@ -1658,8 +1659,9 @@ public static class DarlingRetention
 
     /// <summary>
     /// #7643: every schema version of a (history key, database) that no capture-state row points at with a <c>last_seen_in_scope_at</c>
-    /// at or after <c>$1</c>. The key is written as <c>SchemaHistoryReader</c> writes it (a server key has no group, a group key no
-    /// server). Children go by ON DELETE CASCADE.
+    /// at or after <c>$1</c>, and none of whose versions closed at or after <c>$1</c>: a history moved to another key (the pass closed its
+    /// current versions at the move) ages out over the window through the closed-version purge. The key is written as
+    /// <c>SchemaHistoryReader</c> writes it (a server key has no group, a group key no server). Children go by ON DELETE CASCADE.
     /// </summary>
     internal const string StaleSchemaHistoryDeleteSql = @"
 DELETE FROM collect.schema_objects AS o
@@ -1672,6 +1674,16 @@ WHERE NOT EXISTS
     AND   s.last_seen_in_scope_at >= $1
     AND   ((o.ag_group_id IS NULL AND s.history_ag_group_id IS NULL AND s.history_server_id = o.server_id)
            OR (o.ag_group_id IS NOT NULL AND s.history_ag_group_id = o.ag_group_id))
+)
+AND NOT EXISTS
+(
+    SELECT
+        1
+    FROM collect.schema_objects AS v
+    WHERE v.database_name = o.database_name
+    AND   v.valid_to >= $1
+    AND   ((o.ag_group_id IS NULL AND v.ag_group_id IS NULL AND v.server_id = o.server_id)
+           OR (o.ag_group_id IS NOT NULL AND v.ag_group_id = o.ag_group_id))
 )";
 
     /// <summary>

@@ -491,6 +491,9 @@ public static class DarlingSchemaCapture
                 snapshot.Objects, plan.Attribution, state)
             {
                 TargetedIds = ids,
+                MovedFrom = string.Equals(plan.Reason, "history_key_changed", StringComparison.Ordinal) && existing is not null
+                    ? new SchemaHistoryKey(existing.HistoryServerId, existing.HistoryAgGroupId, null)
+                    : null,
             };
             var counts = await TimedStore(() => SchemaVersionStore.ApplyAsync(Store, write, _ct));
 
