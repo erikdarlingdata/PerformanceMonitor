@@ -618,6 +618,42 @@ internal static class TrendPayloads
     }
 
     /// <summary>
+    /// <c>get_perfmon_stats</c>' answer when the <c>counter_name</c> / <c>instance_name</c> filter matches nothing in the latest
+    /// snapshot (#8090), both SKUs. The caller has already ruled out an engine that does not collect counters and an empty
+    /// snapshot, so <c>counters: []</c> with no word would read as "nothing to report". A counter name no counter carries is
+    /// <c>not_collected</c> and lists the snapshot's counters, the word <c>get_perfmon_trend</c> answers for the same name; a
+    /// known counter whose <paramref name="counterInstances"/> hold no match for the instance filter is <c>empty</c> and lists
+    /// them. <c>captured_at</c> rides in the hints so the answer still says when the snapshot was taken.
+    /// </summary>
+    public static string PerfmonLatestMiss(
+        string? counterName, string? instanceName, string capturedAt, IReadOnlyList<string> collectedCounters, IReadOnlyList<string> counterInstances)
+    {
+        if (counterInstances.Count == 0)
+        {
+            return McpHelpers.Status(
+                "not_collected",
+                $"No counter named '{counterName}' is in the latest snapshot. It may not be a counter this server collects: hints.collected_counters lists {HintCount(collectedCounters)}.",
+                new { captured_at = capturedAt, collected_counters = collectedCounters.Take(PerfmonMissHintNames), collected_counters_total = collectedCounters.Count });
+        }
+
+        var scope = counterName is null ? "No counter in the latest snapshot has" : $"Counter '{counterName}' has no";
+        return McpHelpers.Status(
+            "empty",
+            $"{scope} an instance named '{instanceName}': hints.instance_names lists {HintCount(counterInstances)}.",
+            new { captured_at = capturedAt, instance_names = counterInstances.Take(PerfmonMissHintNames), instance_names_total = counterInstances.Count });
+    }
+
+    /// <summary>
+    /// How many names a <see cref="PerfmonLatestMiss"/> hint list carries (#8090). A busy instance holds hundreds of counters and, with
+    /// <c>instance_name</c> set and no <c>counter_name</c>, every instance of every counter, which would put the miss envelope over the
+    /// response target <see cref="PerfmonLatestReply"/> keeps (#6180). The list is cut here and its <c>*_total</c> says how many there are.
+    /// </summary>
+    public const int PerfmonMissHintNames = 100;
+
+    private static string HintCount(IReadOnlyList<string> names) =>
+        names.Count > PerfmonMissHintNames ? $"the first {PerfmonMissHintNames} of the {names.Count} there are" : $"the {names.Count} there are";
+
+    /// <summary>
     /// One row of <c>get_perfmon_stats</c>' latest snapshot, both SKUs. <c>value</c> is the stored counter (a rate
     /// counter's running total, a gauge's reading), <c>delta_value</c> its change over the last collection interval
     /// (null on a gauge, which stores none), and <c>counter_kind</c> the stored type's word

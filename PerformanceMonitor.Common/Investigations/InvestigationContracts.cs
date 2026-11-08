@@ -463,6 +463,10 @@ public static class AgentActionCodes
     /// <summary>The server-action gate: the action is not one of the fixed list.</summary>
     public const string UnknownServerAction = "unknown_server_action";
 
+    /// <summary>The shared server-action conditions (#7659): a Level 3 action on a chat request whose askers do not all hold <c>request_level_3</c>
+    /// with the action's kind for the server.</summary>
+    public const string AskerGrant = "asker_grant";
+
     /// <summary>The one <see cref="ClaimNotLive"/> message.</summary>
     public const string ClaimNotLiveMessage =
         "Your claim is not live: it lapsed, was released, its report was submitted, or another agent holds it. " +

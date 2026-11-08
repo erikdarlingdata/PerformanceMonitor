@@ -48,6 +48,9 @@ public sealed class InvestigationAlertStreakTests
     [InlineData(-1 * 24 * 60 + 29, 1)]                // 29 minutes after it, a day back
     [InlineData(-1 * 24 * 60 - 30, 1)]                // the window's edge counts
     [InlineData(-1 * 24 * 60 - 31, null)]             // one past it does not
+    [InlineData(-1 * 24 * 60 - 60, null)]             // an hour off with no zone is another time of day
+    [InlineData(-1 * 24 * 60 + 60, null)]
+    [InlineData(-1 * 24 * 60 - 75, null)]
     [InlineData(-3 * 24 * 60, 3)]
     [InlineData(-7 * 24 * 60, 7)]                     // exactly Days back is still inside the look-back
     [InlineData(-7 * 24 * 60 - 1, null)]              // one minute older is not
@@ -105,6 +108,97 @@ public sealed class InvestigationAlertStreakTests
         };
         Assert.Equal(2, InvestigationAlertStreak.ForAlert(Anchor, fires));
         Assert.Equal(0, InvestigationAlertStreak.ForAlert(Anchor, Array.Empty<DateTime>()));
+    }
+
+    /// <summary>A zone with the US rules and no dependence on the machine's zone data: UTC-5, an hour forward from 02:00 on the
+    /// second Sunday of March to 02:00 on the first Sunday of November.</summary>
+    private static readonly TimeZoneInfo Eastern = TimeZoneInfo.CreateCustomTimeZone("Test Eastern", TimeSpan.FromHours(-5), "Test Eastern", "Test Eastern",
+        "Test Eastern Daylight", new[]
+        {
+            TimeZoneInfo.AdjustmentRule.CreateAdjustmentRule(DateTime.MinValue.Date, DateTime.MaxValue.Date, TimeSpan.FromHours(1),
+                TimeZoneInfo.TransitionTime.CreateFloatingDateRule(new DateTime(1, 1, 1, 2, 0, 0), 3, 2, DayOfWeek.Sunday),
+                TimeZoneInfo.TransitionTime.CreateFloatingDateRule(new DateTime(1, 1, 1, 2, 0, 0), 11, 1, DayOfWeek.Sunday)),
+        });
+
+    /// <summary>A recurrence kept in a server's local clock moves an hour in UTC at a DST change. An Agent job at 02:00 Eastern
+    /// fires at 06:00 UTC after the second Sunday of March 2026 and at 07:00 UTC before it; on the Sunday itself the clock skips
+    /// 02:00, so the job runs at 03:00 local, which is 07:00 UTC again. In the server's zone the seven fires before a Thursday 02:00
+    /// alert are one streak; without the zone they are a streak of three with four fires an hour off.</summary>
+    [Fact]
+    public void ALocalClockRecurrence_KeepsItsStreak_AcrossASpringForwardSunday()
+    {
+        var anchor = new DateTime(2026, 3, 12, 6, 0, 0, DateTimeKind.Utc); // Thursday, 02:00 EDT
+        var fires = new[]
+        {
+            new DateTime(2026, 3, 11, 6, 0, 0, DateTimeKind.Utc), // day 1, 02:00 EDT
+            new DateTime(2026, 3, 10, 6, 0, 0, DateTimeKind.Utc), // day 2
+            new DateTime(2026, 3, 9, 6, 0, 0, DateTimeKind.Utc),  // day 3
+            new DateTime(2026, 3, 8, 7, 0, 0, DateTimeKind.Utc),  // day 4, the Sunday: no 02:00, the job ran at 03:00 EDT
+            new DateTime(2026, 3, 7, 7, 0, 0, DateTimeKind.Utc),  // day 5, 02:00 EST
+            new DateTime(2026, 3, 6, 7, 0, 0, DateTimeKind.Utc),  // day 6
+            new DateTime(2026, 3, 5, 7, 0, 0, DateTimeKind.Utc),  // day 7
+        };
+
+        Assert.Equal(7, InvestigationAlertStreak.ForAlert(anchor, fires, Eastern));
+        Assert.Equal(3, InvestigationAlertStreak.ForAlert(anchor, fires));
+    }
+
+    /// <summary>The fall back: before the first Sunday of November 2026 the 02:00 job fires at 06:00 UTC (EDT), from that Sunday on at
+    /// 07:00 UTC (EST). A Thursday 02:00 EST alert sees seven days in its zone, four without it.</summary>
+    [Fact]
+    public void ALocalClockRecurrence_KeepsItsStreak_AcrossAFallBackSunday()
+    {
+        var anchor = new DateTime(2026, 11, 5, 7, 0, 0, DateTimeKind.Utc); // Thursday, 02:00 EST
+        var fires = new[]
+        {
+            new DateTime(2026, 11, 4, 7, 0, 0, DateTimeKind.Utc),  // day 1, 02:00 EST
+            new DateTime(2026, 11, 3, 7, 0, 0, DateTimeKind.Utc),  // day 2
+            new DateTime(2026, 11, 2, 7, 0, 0, DateTimeKind.Utc),  // day 3
+            new DateTime(2026, 11, 1, 7, 0, 0, DateTimeKind.Utc),  // day 4, the Sunday: 02:00 EST, after the repeated hour
+            new DateTime(2026, 10, 31, 6, 0, 0, DateTimeKind.Utc), // day 5, 02:00 EDT
+            new DateTime(2026, 10, 30, 6, 0, 0, DateTimeKind.Utc), // day 6
+            new DateTime(2026, 10, 29, 6, 0, 0, DateTimeKind.Utc), // day 7
+        };
+
+        Assert.Equal(7, InvestigationAlertStreak.ForAlert(anchor, fires, Eastern));
+        Assert.Equal(4, InvestigationAlertStreak.ForAlert(anchor, fires));
+    }
+
+    /// <summary>The hour is allowed only across a change. A UTC recurrence 75 minutes off is not a streak, with or without the
+    /// zone; a fire an hour off in July, when both instants are on the same side of the change, is not one either; and the
+    /// window around the moved time is still 30 minutes, so an hour and 31 minutes across the change does not count.</summary>
+    [Fact]
+    public void TheHour_IsAllowedOnlyAcrossAChange()
+    {
+        var july = new DateTime(2026, 7, 16, 6, 0, 0, DateTimeKind.Utc);
+        Assert.Equal(0, InvestigationAlertStreak.ForAlert(july, new[] { july.AddDays(-1).AddMinutes(-75) }, Eastern));
+        Assert.Equal(0, InvestigationAlertStreak.ForAlert(july, new[] { july.AddDays(-1).AddMinutes(-75) }));
+        Assert.Null(InvestigationAlertStreak.DaysAgo(july, july.AddDays(-1).AddHours(-1), Eastern));
+        Assert.Null(InvestigationAlertStreak.DaysAgo(july, july.AddDays(-1).AddHours(1), Eastern));
+        Assert.Equal(1, InvestigationAlertStreak.DaysAgo(july, july.AddDays(-1), Eastern));
+
+        /* A 02:00 EDT anchor (06:00 UTC); five days earlier the job fired at 02:00 EST, which is 07:00 UTC: an hour later in UTC. */
+        var afterSpring = new DateTime(2026, 3, 12, 6, 0, 0, DateTimeKind.Utc);
+        Assert.Equal(5, InvestigationAlertStreak.DaysAgo(afterSpring, afterSpring.AddDays(-5).AddMinutes(60), Eastern));
+        Assert.Equal(5, InvestigationAlertStreak.DaysAgo(afterSpring, afterSpring.AddDays(-5).AddMinutes(60 + 30), Eastern)); // the moved window's edge
+        Assert.Null(InvestigationAlertStreak.DaysAgo(afterSpring, afterSpring.AddDays(-5).AddMinutes(60 + 31), Eastern));
+        Assert.Null(InvestigationAlertStreak.DaysAgo(afterSpring, afterSpring.AddDays(-5).AddMinutes(-60), Eastern));          // the wrong way
+        Assert.Null(InvestigationAlertStreak.DaysAgo(afterSpring, afterSpring.AddDays(-5).AddMinutes(60), TimeZoneInfo.Utc));  // no daylight rules
+    }
+
+    /// <summary>The skipped-hour reading is for a forward jump only. At the fall-back (2026-11-01, 02:00 EDT becomes 01:00 EST at
+    /// 06:00 UTC) nothing is skipped: a fire at 06:10 UTC is 01:10 EST, 50 minutes off a 02:00 EST anchor, both at the same offset,
+    /// and the half hour before it being EDT does not make it the anchor's time of day. The spring Sunday's 03:00 fire still is.</summary>
+    [Fact]
+    public void TheSkippedHour_IsReadOnlyAtAForwardJump()
+    {
+        var anchor = new DateTime(2026, 11, 5, 7, 0, 0, DateTimeKind.Utc); // Thursday, 02:00 EST
+        Assert.Null(InvestigationAlertStreak.DaysAgo(anchor, new DateTime(2026, 11, 1, 6, 10, 0, DateTimeKind.Utc), Eastern));
+        Assert.Null(InvestigationAlertStreak.DaysAgo(anchor, new DateTime(2026, 11, 1, 6, 29, 0, DateTimeKind.Utc), Eastern));
+        Assert.Equal(4, InvestigationAlertStreak.DaysAgo(anchor, new DateTime(2026, 11, 1, 7, 0, 0, DateTimeKind.Utc), Eastern));
+
+        var springAnchor = new DateTime(2026, 3, 12, 6, 0, 0, DateTimeKind.Utc); // Thursday, 02:00 EDT
+        Assert.Equal(4, InvestigationAlertStreak.DaysAgo(springAnchor, new DateTime(2026, 3, 8, 7, 0, 0, DateTimeKind.Utc), Eastern)); // 03:00 EDT, the landing
     }
 
     [Fact]

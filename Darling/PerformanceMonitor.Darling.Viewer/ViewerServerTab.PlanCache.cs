@@ -73,7 +73,7 @@ public partial class ViewerServerTab
         ApplyTheme(PlanCacheChart);
 
         var (startUtc, endUtc) = GetWindowUtc();
-        PlanCacheChart.Plot.YLabel("Plan Cache Size (MB)");
+        PlanCacheChart.Plot.YLabel("MB");
 
         double globalMax = 0;
         if (data.Count > 0)

@@ -101,7 +101,7 @@ public partial class ServerTab : UserControl
 
         LatchSpinlockRenderer.Render(LatchStatsChart, _latchStatsHover, data,
             d => d.CollectionTime, d => d.LatchClass, d => d.WaitTimeMsPerSecond,
-            "Latch Waits", "Wait Time (ms/sec)", ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
+            "Latch Waits", "ms/sec", ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
         KeepPlottedInView(LatchStatsChart, rangeStart, rangeEnd);
     }
 
@@ -123,7 +123,7 @@ public partial class ServerTab : UserControl
 
         LatchSpinlockRenderer.Render(SpinlockStatsChart, _spinlockStatsHover, data,
             d => d.CollectionTime, d => d.SpinlockName, d => d.CollisionsPerSecond,
-            "Spinlock Collisions", "Collisions/sec", ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
+            "Spinlock Collisions", "count/sec", ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
         KeepPlottedInView(SpinlockStatsChart, rangeStart, rangeEnd);
     }
 

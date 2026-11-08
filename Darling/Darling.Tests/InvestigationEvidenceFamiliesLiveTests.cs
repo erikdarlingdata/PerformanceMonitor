@@ -431,6 +431,30 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         });
     }
 
+    /// <summary>
+    /// #8090 item 5: when the cap leaves a report fewer characters than an opening element takes, the report is cut to nothing and
+    /// flagged, not to a fragment like <c>&lt;</c> that nothing parses. The room left is measured first: the longest prefix one report
+    /// can keep beside a flagged empty second row, less ten characters, fits whole and leaves the second row a few dozen bytes.
+    /// </summary>
+    [Fact]
+    public void ReportXml_WithLessThanAnElementsRoomLeft_IsCutToNothing_NotAFragment()
+    {
+        var huge = "<r>" + string.Concat(Enumerable.Repeat("<n>x</n>", 5_000)) + "</r>";
+        static List<JsonObject> Rows() => new() { new JsonObject { ["blocked_spid"] = 60, ["report_xml"] = null }, new JsonObject { ["blocked_spid"] = 61, ["report_xml"] = null } };
+
+        var probe = JsonNode.Parse(InvestigationEvidenceCapture.FitReportXml(WindowStart, WindowEnd, Rows(), new[] { huge, huge }))!["rows"]!.AsArray();
+        var longest = probe[0]!["report_xml"]!.GetValue<string>().Length;
+        Assert.InRange(longest, 1_000, huge.Length - 1);
+        var first = huge[..(longest - 10)];
+
+        var kept = JsonNode.Parse(InvestigationEvidenceCapture.FitReportXml(WindowStart, WindowEnd, Rows(), new[] { first, huge }))!["rows"]!.AsArray();
+        Assert.Equal(2, kept.Count);
+        Assert.Equal(first, kept[0]!["report_xml"]!.GetValue<string>());
+        Assert.Null(kept[0]!["report_xml_truncated"]);
+        Assert.True(kept[1]!["report_xml_truncated"]!.GetValue<bool>());
+        Assert.Equal("", kept[1]!["report_xml"]!.GetValue<string>());
+    }
+
     [Fact]
     public async Task AParallelSelfWaitReport_IsLeftOut_SoTheRealHeadStaysTheHead()
     {

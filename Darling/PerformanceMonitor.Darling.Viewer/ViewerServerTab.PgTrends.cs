@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Ui;
@@ -33,10 +34,10 @@ public partial class ViewerServerTab
 
     private sealed record PgTrendLine(string Label, double[] Times, double[] Values);
 
-    /// <summary>One chart of a trend: its key, y-axis label, hover unit, and the lines it draws.</summary>
+    /// <summary>One chart of a trend: its key, card title (<c>YLabel</c>), hover unit (also the Y axis title), and the lines it draws.</summary>
     private sealed record PgTrendPanel(string Key, string YLabel, string Unit, IReadOnlyList<PgTrendLine> Lines);
 
-    private (WpfPlot Chart, ChartHoverHelper Hover) PgTrendChart(Panel host, string key, string unit)
+    private (WpfPlot Chart, ChartHoverHelper Hover) PgTrendChart(Panel host, string key, string unit, string title)
     {
         if (_pgTrendCharts.TryGetValue(key, out var existing))
         {
@@ -48,7 +49,10 @@ public partial class ViewerServerTab
         chart.Refresh();
         var hover = new ChartHoverHelper(chart, unit, displayZone: ViewerTimeHelper.CurrentDisplayZone);
         BuildChartContextMenu(chart, key);
-        host.Children.Add(chart);
+        // #8151: the chart sits in a titled card; the Y axis shows only the unit.
+        var card = new PerformanceMonitor.Ui.ChartPanel { Title = title, Content = chart };
+        host.Children.Add(card);
+        ViewerChartCards.Attach(card);
         _pgTrendCharts[key] = (chart, hover);
         return _pgTrendCharts[key];
     }
@@ -68,7 +72,7 @@ public partial class ViewerServerTab
     {
         foreach (var panel in panels)
         {
-            var (chart, hover) = PgTrendChart(host, panel.Key, panel.Unit);
+            var (chart, hover) = PgTrendChart(host, panel.Key, panel.Unit, panel.YLabel);
             ClearChart(chart);
             hover.Clear();
             ApplyTheme(chart);
@@ -78,7 +82,7 @@ public partial class ViewerServerTab
                 /* The shared empty chart installs its own empty tick generators on a plain numeric axis. A date axis
                    refuses that ("Date axis must have a ITickGenerator generator"), which aborted the whole load and left
                    one oversized blank chart, so the date axis is set only for a chart that has lines (#6385). */
-                RefreshEmptyChart(chart, panel.YLabel, panel.YLabel);
+                RefreshEmptyChart(chart, panel.YLabel, panel.Unit);
                 continue;
             }
 
@@ -102,7 +106,7 @@ public partial class ViewerServerTab
 
             chart.Plot.Axes.SetLimitsX(ChartXStart(chart.Plot, startUtc, endUtc), endUtc.ToOADate());
             ReapplyAxisColors(chart);
-            chart.Plot.YLabel(panel.YLabel);
+            chart.Plot.YLabel(panel.Unit);
             SetChartYLimitsWithLegendPadding(chart, 0, max > 0 ? max : 1);
             ShowChartLegend(chart);
             chart.Refresh();
@@ -170,23 +174,33 @@ public partial class ViewerServerTab
         }, startUtc, endUtc);
     }
 
-    /// <summary>The Waits tab's Wait Trend: the window's dominant wait event over time.</summary>
+    /// <summary>The Waits tab's Wait Trend: the window's dominant wait event over time, from the arm this server's wait history
+    /// is on (#8074): the engine's cumulative counters (pg_wait_stats) on an Aurora target, the sampler (pg_wait_sampling)
+    /// elsewhere. The gate and the note name that arm's collector, so an Aurora target is never told the sampler's gap.</summary>
     private async Task LoadPgWaitTrendAsync(DateTime startUtc, DateTime endUtc)
     {
-        var gated = PgCollectorIsGatedOff("pg_wait_sampling");
+        var engineCounters = MonitoredEngineKind.IsAurora(_server.EngineKind);
+        var collector = engineCounters ? "pg_wait_stats" : "pg_wait_sampling";
+        var gated = PgCollectorIsGatedOff(collector);
         var trend = gated
             ? ViewerDataService.NoPgTrend<DarlingPgTrendReader.PgWaitTrendPoint>(0)
             : await _dataService.GetPgWaitTrendAsync(_server.ServerId, startUtc, endUtc);
         var p = trend.Points;
 
         ShowNote(PgWaitTrendNote, p.Count == 0
-            ? PanelNoteParts("pg_wait_sampling", 0,
-                "There are no wait samples to chart in this window.",
-                "No samples for a wait event in this window. A trend needs at least two snapshots to difference, so a short window is legitimately empty here even while the event is being sampled.")
-            : new PanelNoteText($"Wait Trend: {trend.Subject}, the event that dominates this window, over time. Estimates from a sampling profiler, so the shape is the finding.", null));
+            ? engineCounters
+                ? PanelNoteParts(collector, 0,
+                    "There is no wait time to chart in this window.",
+                    "No wait time for a wait event in this window on the engine's cumulative counters. A point needs a collection with a measured interval, so a window holding only an event's first collection is legitimately empty here even while the event is being counted.")
+                : PanelNoteParts(collector, 0,
+                    "There are no wait samples to chart in this window.",
+                    "No samples for a wait event in this window. A trend needs at least two snapshots to difference, so a short window is legitimately empty here even while the event is being sampled.")
+            : new PanelNoteText(engineCounters
+                ? $"Wait Trend: {trend.Subject}, the event that dominates this window, over time. Measured wait time from the engine's cumulative counters, per second of each collection interval."
+                : $"Wait Trend: {trend.Subject}, the event that dominates this window, over time. Estimates from a sampling profiler, so the shape is the finding.", null));
         RenderPgTrendPanels(PgWaitTrendHost, new[]
         {
-            new PgTrendPanel("PgWait_Trend", "Est. wait ms/sec", "ms/s", p.Count == 0 ? Array.Empty<PgTrendLine>() : new[]
+            new PgTrendPanel("PgWait_Trend", "Est. wait ms/sec", "ms/sec", p.Count == 0 ? Array.Empty<PgTrendLine>() : new[]
             {
                 new PgTrendLine(trend.Subject ?? "Wait", Times(p, x => x.CollectionTimeUtc), Values(p, x => x.EstimatedWaitMsPerSecond)),
             }),

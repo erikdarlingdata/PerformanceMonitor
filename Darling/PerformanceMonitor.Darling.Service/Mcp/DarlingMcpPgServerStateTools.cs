@@ -450,7 +450,7 @@ public sealed class DarlingMcpPgServerStateTools
         }
     }
 
-    [McpServerTool(Name = "get_pg_lock_stats"), Description("Gets PostgreSQL lock activity as SAMPLED by the collector: lock type, mode, whether it was granted, the relation involved, how many captures saw it and the worst wait observed. This is a SAMPLE, not an event log - the collector periodically photographs pg_locks, so a lock held briefly between two samples is invisible here and an absence is not proof nothing was locked. Ungranted rows are the ones that matter: a granted lock is normal operation, while a lock waiting to be granted is a session blocked behind another. For a blocking chain with the root blocker attributed, use get_pg_blocking instead - this tool answers which lock modes and relations are contended over time rather than who is blocking whom right now.")]
+    [McpServerTool(Name = "get_pg_lock_stats"), Description("Gets PostgreSQL lock activity as SAMPLED by the collector: lock type, mode, whether it was granted, the relation involved, how many captures saw it and the worst wait observed. This is a SAMPLE, not an event log - the collector periodically photographs pg_locks, so a lock held briefly between two samples is invisible here and an absence is not proof nothing was locked. Ungranted rows are the ones that matter: a granted lock is normal operation, while a lock waiting to be granted is a session blocked behind another. For a blocking chain with the root blocker attributed, use get_pg_blocking instead - this tool answers which lock modes and relations are contended over time rather than who is blocking whom right now. Each row carries relation_oid beside relation_name: pg_locks is cluster-wide and the collector names a relation only in the database it is connected to, so a null relation_name with a relation_oid is a relation in another database - database_name says which, and SELECT <oid>::regclass there resolves it. Rows that differ only in relation_oid are different relations.")]
     public static async Task<string> GetPgLockStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -521,6 +521,10 @@ public sealed class DarlingMcpPgServerStateTools
                 lock_type = r.LockType,
                 mode = r.Mode,
                 granted = r.Granted,
+                /* #8092: the oid beside the name. pg_locks is cluster-wide and the collector resolves the name
+                   only in the database it is connected to, so a relation in another database has an oid and a
+                   null name; the oid is what tells two such rows apart and what resolves in that database. */
+                relation_oid = r.RelationOid,
                 relation_name = r.RelationName,
                 captures = r.Captures,
                 /* The denominator: how many captures happened at all, so `captures` can be read as a rate

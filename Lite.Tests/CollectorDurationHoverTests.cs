@@ -190,21 +190,6 @@ public class CollectorDurationHoverTests
     }
 
     /// <summary>
-    /// The chart draws each bucket's slowest run, so its Y axis says that, in the words the Darling viewer's chart uses.
-    /// It used to say "Duration (ms)", which reads as the average a run takes.
-    /// </summary>
-    [Fact]
-    public void TheYAxisLabel_NamesTheSlowestRunPerBucket()
-    {
-        var (source, code) = UpdateCollectorDurationChartBody();
-        var literals = CSharpSourceWalker.StringLiteralBodies(source).Select(l => l.Text).ToList();
-
-        Assert.Contains("Plot.YLabel(", code, StringComparison.Ordinal);
-        Assert.Contains("Slowest run per bucket (ms)", literals);
-        Assert.DoesNotContain("Duration (ms)", literals);
-    }
-
-    /// <summary>
     /// A range with no points returns early, so the hover must be cleared before that return: it was cleared only on the way
     /// to drawing, and a tooltip registered by the range before was left on an empty chart.
     /// </summary>

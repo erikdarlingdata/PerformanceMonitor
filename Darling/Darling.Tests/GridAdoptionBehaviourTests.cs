@@ -117,7 +117,7 @@ public sealed class GridAdoptionBehaviourTests
         Assert.Equal(new[] { "api-one", "Fleet", "server 9", "web-one" }, Arr(r, "serverAsc"));
         Assert.Contains("\r\nFleet,fleet,", Str(r, "serverCsv"));
         Assert.Contains("\r\nserver 9,orphan,", Str(r, "serverCsv"));
-        Assert.StartsWith("Server,Item,State,Position,First seen,Last seen,Condition / evidence\r\nweb-one,disk,open,3 consecutive hits,2026-01-02T08:00:00", Str(r, "watchCsv"));
+        Assert.StartsWith("Server,Item,State,Position,First ever seen,Last seen,Condition / evidence\r\nweb-one,disk,open,3 consecutive hits in the current run,2026-01-02T08:00:00", Str(r, "watchCsv"));
     }
 
     [Fact]

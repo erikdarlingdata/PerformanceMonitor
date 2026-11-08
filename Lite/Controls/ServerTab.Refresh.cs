@@ -141,6 +141,7 @@ public partial class ServerTab : UserControl
     /// renderer plotted a point older than that start (#7386), and refreshes the chart.</summary>
     internal void KeepPlottedInView(ScottPlot.WPF.WpfPlot chart, DateTime startUtc, DateTime endUtc)
     {
+        MarkAllZero(chart); // #8144: the shared renderers do not go through ShowChartLegend here
         if (ChartAxisStart.WidenToPlotted(chart.Plot, startUtc.ToOADate(), endUtc.ToOADate(), ServerDataStartUtc))
         {
             chart.Refresh();
@@ -396,13 +397,11 @@ public partial class ServerTab : UserControl
             case 11: await RefreshConfigurationAsync(hoursBack, fromDate, toDate); break;
             case 12: await RefreshDailySummaryAsync(hoursBack, fromDate, toDate); break;
             case 13: await RefreshLatchSpinlockAsync(hoursBack, fromDate, toDate); break;
-            case 14: await RefreshCpuSchedulerAsync(hoursBack, fromDate, toDate); break;
-            case 15: await RefreshPlanCacheAsync(hoursBack, fromDate, toDate); break;
-            case 16: await RefreshSessionStatsAsync(hoursBack, fromDate, toDate); break;
-            case 17: await RefreshCollectionHealthAsync(hoursBack, fromDate, toDate, ct); break;
-            case 18: await RefreshSystemEventsAsync(hoursBack, fromDate, toDate); break;
-            case 19: await RefreshConfigChangesAsync(hoursBack, fromDate, toDate); break;
-            case 20: await RefreshLongQueriesAsync(hoursBack, fromDate, toDate); break;
+            case 14: await RefreshSessionStatsAsync(hoursBack, fromDate, toDate); break;
+            case 15: await RefreshCollectionHealthAsync(hoursBack, fromDate, toDate, ct); break;
+            case 16: await RefreshSystemEventsAsync(hoursBack, fromDate, toDate); break;
+            case 17: await RefreshConfigChangesAsync(hoursBack, fromDate, toDate); break;
+            case 18: await RefreshLongQueriesAsync(hoursBack, fromDate, toDate); break;
         }
         return failedReads;
     }
@@ -948,6 +947,8 @@ public partial class ServerTab : UserControl
             var cpuTask = Task.Run(() => _dataService.GetCpuUtilizationAsync(_serverId, hoursBack, fromDate, toDate, frame: CpuTimeFrame.Utc));
             await cpuTask;
             UpdateCpuChart(cpuTask.Result, hoursBack, fromDate, toDate);
+            /* #8169: CPU Scheduler is a sub-tab of CPU now; both sub-tabs load when CPU is shown, as in the Viewer. */
+            await RefreshCpuSchedulerAsync(hoursBack, fromDate, toDate);
         }
         catch (Exception ex)
         {
@@ -987,6 +988,9 @@ public partial class ServerTab : UserControl
                         /* #4966: where the stored events start, over the SAME UTC window the chart read. */
                         await RefreshMemoryPressureEventsBannerAsync(hoursBack, fromDate, toDate);
                         break;
+                    case 4: // Plan Cache (#8169: under Memory, as in the Viewer)
+                        await RefreshPlanCacheAsync(hoursBack, fromDate, toDate);
+                        break;
                 }
                 return;
             }
@@ -1009,6 +1013,7 @@ public partial class ServerTab : UserControl
             await RefreshMemoryPressureEventsBannerAsync(hoursBack, fromDate, toDate);
             PopulateMemoryClerkPicker(memoryClerkTypesTask.Result);
             await UpdateMemoryClerksChartFromPickerAsync();
+            await RefreshPlanCacheAsync(hoursBack, fromDate, toDate);
         }
         catch (Exception ex)
         {
@@ -1401,6 +1406,13 @@ public partial class ServerTab : UserControl
             foreach (var row in collectionLogTask.Result) row.Clock = tabClock;
 
             SkippedCyclesSummary.Text = (await skippedCyclesTask)?.SummaryLine(tabClock) ?? "Skipped cycles in 24 h: could not be read";
+            /* #8101: one connection failure that reached several collectors in one cycle is worded once above the grid, in the
+               rows' own zone, rather than left as one ERROR on each of their rows with nothing to join them. */
+            var connectionFailureLine = CollectionConnectionFailures.SummaryLine(
+                collectionHealthTask.Result.Select(row => new CollectorErrorSample(row.CollectorName, row.LastErrorTime, row.LastError, row.ErrorCount)),
+                utc => CollectionHealthTime.Format(utc, tabClock));
+            ConnectionFailureSummary.Text = connectionFailureLine ?? string.Empty;
+            ConnectionFailureSummary.Visibility = connectionFailureLine is null ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
             _collectionHealthFilterMgr!.UpdateData(collectionHealthTask.Result);
             _collectionLogFilterMgr!.UpdateData(collectionLogTask.Result);
             UpdateCollectorDurationChart(collectorDurationTask.Result, hoursBack, fromDate, toDate);

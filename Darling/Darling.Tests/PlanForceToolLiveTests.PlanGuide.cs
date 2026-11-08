@@ -423,4 +423,31 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal(reason, (string?)json["reason"]);
             Assert.Null(await GuideColumnAsync(c, "g_" + name, "name"));
         });
+
+    /// <summary>
+    /// An OBJECT guide on a module created WITH ENCRYPTION: the server gives no definition to find the statement in, so the create is refused as
+    /// statement_not_in_module, and the refusal says the module is encrypted and its statement text cannot be read, rather than telling the caller to copy the
+    /// statement from a definition the server will not show. Nothing is created and nothing is journaled as an action.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AnObjectGuideOnAnEncryptedModule_IsRefused_SayingTheModuleIsEncryptedAndItsTextCannotBeRead(bool dryRun)
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var name = "p_" + Guid.NewGuid().ToString("N")[..8];
+            await AdminExecAsync(c, $"CREATE PROCEDURE dbo.[{name}] WITH ENCRYPTION AS {GuideStatement};");
+            await TurnGuideOnAsync(c);
+
+            var json = Parse(await CreateGuideAsync(c, "g_" + name, dryRun, moduleOrBatch: "dbo." + name));
+            Assert.Equal("refused", (string?)json["status"]);
+            Assert.Equal("statement_not_in_module", (string?)json["reason"]);
+            var message = (string?)json["message"];
+            Assert.Contains("encrypted", message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("OBJECT_DEFINITION", message, StringComparison.Ordinal);
+            Assert.Null(await GuideColumnAsync(c, "g_" + name, "name"));
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+        });
+    }
 }

@@ -75,7 +75,7 @@ internal static class McpInstructions
 
         ## How Data Is Collected
 
-        Performance Monitor Lite collects into local DuckDB/Parquet, every 1-15 minutes by collector. Delta-based collectors (procedure stats, perfmon counters) need two cycles before non-zero values, a newly added server shows empty procedure stats for ~30 minutes, and `execution_count` 0 beside non-zero CPU/elapsed is that same delta artifact, not an error. `server_name` is used automatically when only one server is configured.
+        Performance Monitor Lite collects into local DuckDB/Parquet; collectors run every 1-15 minutes, some hourly or daily. Delta-based collectors (procedure stats, perfmon counters) need two cycles before non-zero values, a newly added server shows empty procedure stats for ~30 minutes, and `execution_count` 0 beside non-zero CPU/elapsed is the same artifact, not an error. `server_name` is optional when one server is configured.
 
         ## Tools
         """;

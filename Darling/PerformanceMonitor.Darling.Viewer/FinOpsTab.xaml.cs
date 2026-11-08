@@ -56,6 +56,8 @@ public partial class FinOpsTab : UserControl
     public FinOpsTab()
     {
         InitializeComponent();
+        DataGridNumberHeaders.Apply(this); // #8223: a number column's header on the same edge as its values
+        ViewerChartCards.Attach(this); // #8151: "0 throughout" in a card whose chart plots only zeros
 
         /* #5562: the shared time range pickers. The old combos opened on 24 hours (the heatmap on 30 days); the pickers
            open on the same, drawn in the display zone in force. Every FinOps read takes "hours back from now" (the heatmap

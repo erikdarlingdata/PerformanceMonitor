@@ -251,13 +251,13 @@ public sealed class DeltaSeriesShapingTests
         Assert.Equal("Δ per interval", DeltaSeriesShaping.YAxisLabel(new[] { DeltaBasis.PerInterval }));
         Assert.Equal("value (gauge)", DeltaSeriesShaping.YAxisLabel(new[] { DeltaBasis.Level, DeltaBasis.Level }));
 
-        Assert.Equal("per second (rates) · Δ per interval (others)",
+        Assert.Equal("per second · Δ per interval",
             DeltaSeriesShaping.YAxisLabel(new[] { DeltaBasis.PerInterval, DeltaBasis.PerSecond }));
-        Assert.Equal("per second (rates) · value (gauges)",
+        Assert.Equal("per second · value",
             DeltaSeriesShaping.YAxisLabel(new[] { DeltaBasis.Level, DeltaBasis.PerSecond }));
-        Assert.Equal("Δ per interval (others) · value (gauges)",
+        Assert.Equal("Δ per interval · value",
             DeltaSeriesShaping.YAxisLabel(new[] { DeltaBasis.Level, DeltaBasis.PerInterval }));
-        Assert.Equal("per second (rates) · Δ per interval (others) · value (gauges)",
+        Assert.Equal("per second · Δ per interval · value",
             DeltaSeriesShaping.YAxisLabel(new[] { DeltaBasis.Level, DeltaBasis.PerInterval, DeltaBasis.PerSecond, DeltaBasis.Level }));
     }
 

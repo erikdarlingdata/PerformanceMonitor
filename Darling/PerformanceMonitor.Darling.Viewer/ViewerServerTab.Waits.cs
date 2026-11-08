@@ -191,7 +191,7 @@ public partial class ViewerServerTab
             ApplyTheme(WaitStatsChart);
             _waitStatsHover?.Clear();
 
-            if (selected.Count == 0) { WaitStatsChart.Refresh(); return; }
+            if (selected.Count == 0) { RefreshEmptyChart(WaitStatsChart, "Wait Stats", ""); return; }
 
             bool useAvgPerWait = WaitStatsMetricCombo?.SelectedIndex == 1;
             if (_waitStatsHover != null) _waitStatsHover.Unit = useAvgPerWait ? "ms/wait" : "ms/sec";
@@ -229,7 +229,7 @@ public partial class ViewerServerTab
             var rangeEnd = endUtc;
             WaitStatsChart.Plot.Axes.SetLimitsX(ChartXStart(WaitStatsChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(WaitStatsChart);
-            WaitStatsChart.Plot.YLabel(useAvgPerWait ? "Avg Wait Time (ms/wait)" : "Wait Time (ms/sec)");
+            WaitStatsChart.Plot.YLabel(useAvgPerWait ? "ms/wait" : "ms/sec");
             SetChartYLimitsWithLegendPadding(WaitStatsChart, 0, globalMax > 0 ? globalMax : 100);
             ShowChartLegend(WaitStatsChart);
             WaitStatsChart.Refresh();

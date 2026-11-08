@@ -27,8 +27,11 @@ namespace PerformanceMonitor.Ui;
 /// Mechanism, the same one <see cref="LaneAxisAligner"/> chose: a FLOOR (<c>MinimumSize</c>) on one panel per edge, so
 /// the layout stays automatic and a chart that needs more room than the floor still gets it. Each edge's floor is
 /// the group's largest natural total on that edge, less what the chart's other panels there already take. The left, right
-/// and bottom floors sit on the axis, the top floor on the title panel. The legend panel is never touched: it belongs to
-/// <see cref="WrappedLegendLayout"/>, which sizes it for the width it wraps at.
+/// and bottom floors sit on the axis, the top floor on the title panel. The legend panel is never given a floor: it belongs to
+/// <see cref="WrappedLegendLayout"/>, which sizes it for the width it wraps at. One exception (#8086): a chart whose legend is on the
+/// right keeps its right-hand spare width in that engine's <see cref="WrappedLegendLayout.Spare"/>, so the blank space is
+/// beyond the legend and not between the legend and the plot. A chart that shows only its empty-state sentence has no
+/// plot rectangle and is not part of a group at all.
 /// </para>
 /// <para>
 /// This half takes plain <see cref="Plot"/> objects and renders in memory, so it runs headlessly. The WPF half
@@ -69,6 +72,38 @@ internal static partial class ChartGroupAligner
         plot.Axes.Right.MinimumSize = AxesExtensions.RightEdgePadFor(plot); // #7606: a time axis' own right gutter is not a floor to clear
         plot.Axes.Bottom.MinimumSize = 0f;
         plot.Axes.Title.MinimumSize = 0f;
+        if (plot.Layout.LayoutEngine is WrappedLegendLayout engine) engine.Spare = 0f; // #8086
+    }
+
+    /// <summary>#8220: the most of a chart's width that may be left empty beside a side legend when the group's legends differ in width.</summary>
+    internal const float MaxDeadStrip = 0.15f;
+
+    /// <summary>
+    /// False when the group has a legend beside its plot and either another chart whose legend is under its plot or a gutter on its right that is
+    /// wider than <see cref="MaxDeadStrip"/> of the chart (the deficit to the group's widest right edge). A group with no side legend, or one
+    /// whose side legends all match, agrees.
+    /// </summary>
+    private static bool LegendsAgree(IReadOnlyList<(Plot Plot, int Width, int Height)> charts, Frame[] natural, Frame target)
+    {
+        var sides = 0;
+        var under = 0;
+        var widestStrip = 0f;
+        for (var i = 0; i < charts.Count; i++)
+        {
+            if (charts[i].Plot.Layout.LayoutEngine is not WrappedLegendLayout engine) continue;
+            if (engine.Panel.Edge == Edge.Right)
+            {
+                sides++;
+                var figureWidth = charts[i].Plot.RenderManager.LastRender.Layout.FigureRect.Width; // the same unit as the frames
+                widestStrip = Math.Max(widestStrip, (target.Right - natural[i].Right) / Math.Max(1f, figureWidth));
+            }
+            else
+            {
+                under++;
+            }
+        }
+
+        return sides == 0 || (under == 0 && widestStrip <= MaxDeadStrip);
     }
 
     /// <summary>
@@ -86,22 +121,58 @@ internal static partial class ChartGroupAligner
             var anchors = new (float Left, float Right, float Bottom, float Top)[charts.Count];
             var target = default(Frame);
 
-            for (var i = 0; i < charts.Count; i++)
+            void MeasureNatural()
             {
-                var plot = charts[i].Plot;
-                ClearFloors(plot);
-                plot.RenderInMemory(Math.Clamp(charts[i].Width, 1, MaxPixels), Math.Clamp(charts[i].Height, 1, MaxPixels));
-                natural[i] = LastFrame(plot);
-                var sizes = plot.RenderManager.LastRender.Layout.PanelSizes;
-                anchors[i] = (Size(sizes, plot.Axes.Left), Size(sizes, plot.Axes.Right), Size(sizes, plot.Axes.Bottom), Size(sizes, plot.Axes.Title));
-                target = i == 0 ? natural[i] : target.Max(natural[i]);
+                for (var i = 0; i < charts.Count; i++)
+                {
+                    var plot = charts[i].Plot;
+                    ClearFloors(plot);
+                    plot.RenderInMemory(Math.Clamp(charts[i].Width, 1, MaxPixels), Math.Clamp(charts[i].Height, 1, MaxPixels));
+                    natural[i] = LastFrame(plot);
+                    var sizes = plot.RenderManager.LastRender.Layout.PanelSizes;
+                    anchors[i] = (Size(sizes, plot.Axes.Left), Size(sizes, plot.Axes.Right), Size(sizes, plot.Axes.Bottom), Size(sizes, plot.Axes.Title));
+                    target = i == 0 ? natural[i] : target.Max(natural[i]);
+                }
+            }
+
+            foreach (var chart in charts)
+            {
+                if (chart.Plot.Layout.LayoutEngine is WrappedLegendLayout engine) engine.ForceBottom = false;
+            }
+
+            MeasureNatural();
+
+            /* #8220: the plots of a group share one rectangle, so legends that do not agree leave blank space: a legend beside one plot
+               and under another makes each plot's chart carry the other's gutter as well, and a short legend beside a plot whose
+               neighbor's legend is wide is followed by a strip of nothing. When the group's legends are not all beside their plots, or the
+               strip would take more than MaxDeadStrip of a chart's width, every legend of the group goes under its plot. */
+            if (!LegendsAgree(charts, natural, target))
+            {
+                foreach (var chart in charts)
+                {
+                    if (chart.Plot.Layout.LayoutEngine is WrappedLegendLayout engine) engine.ForceBottom = true;
+                }
+
+                MeasureNatural();
             }
 
             for (var i = 0; i < charts.Count; i++)
             {
                 var plot = charts[i].Plot;
                 plot.Axes.Left.MinimumSize = Floor(anchors[i].Left, target.Left - natural[i].Left);
-                plot.Axes.Right.MinimumSize = Math.Max(AxesExtensions.RightEdgePadFor(plot), Floor(anchors[i].Right, target.Right - natural[i].Right));
+                var rightDeficit = target.Right - natural[i].Right;
+                if (plot.Layout.LayoutEngine is WrappedLegendLayout { Panel.Edge: Edge.Right } rightLegend)
+                {
+                    /* #8086: a right legend's chart gives its spare width to the legend panel, the outermost one, so the blank
+                       space falls to the right of the legend and not between the plot and the legend. */
+                    plot.Axes.Right.MinimumSize = AxesExtensions.RightEdgePadFor(plot);
+                    rightLegend.Spare = rightDeficit > 0.5f ? rightDeficit : 0f;
+                }
+                else
+                {
+                    plot.Axes.Right.MinimumSize = Math.Max(AxesExtensions.RightEdgePadFor(plot), Floor(anchors[i].Right, rightDeficit));
+                }
+
                 plot.Axes.Bottom.MinimumSize = Floor(anchors[i].Bottom, target.Bottom - natural[i].Bottom);
                 plot.Axes.Title.MinimumSize = Floor(anchors[i].Top, target.Top - natural[i].Top);
             }

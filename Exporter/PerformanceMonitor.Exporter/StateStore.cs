@@ -104,6 +104,13 @@ public sealed class StateStore : IDisposable
             "origin VARCHAR, executions BIGINT, cpu_us BIGINT, first_seen TIMESTAMP, last_seen TIMESTAMP, updated_utc TIMESTAMP)";
         createPlanFetchPending.ExecuteNonQuery();
 
+        // The days whose daily snapshot (a Daily-grain table, or the servers snapshot) a run has produced, so a later
+        // window of the same day knows whether the 00:00 window's part exists.
+        using var createDailySnapshots = connection.CreateCommand();
+        createDailySnapshots.CommandText =
+            "CREATE TABLE IF NOT EXISTS daily_snapshots (source_store VARCHAR, table_name VARCHAR, snapshot_day TIMESTAMP)";
+        createDailySnapshots.ExecuteNonQuery();
+
         return new StateStore(connection);
     }
 
@@ -1059,6 +1066,33 @@ public sealed class StateStore : IDisposable
         }
 
         transaction.Commit();
+    }
+
+    /// <summary>True when a run has recorded <paramref name="table"/>'s daily snapshot for the UTC date of <paramref name="dayUtc"/>.</summary>
+    public bool HasDailySnapshot(string sourceStore, string table, DateTime dayUtc)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText = "SELECT count(*) FROM daily_snapshots WHERE source_store = $store AND table_name = $table AND snapshot_day = $day";
+        command.Parameters.Add(new DuckDBParameter("store", sourceStore));
+        command.Parameters.Add(new DuckDBParameter("table", table));
+        command.Parameters.Add(new DuckDBParameter("day", DateTime.SpecifyKind(dayUtc.Date, DateTimeKind.Unspecified)));
+        return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) > 0;
+    }
+
+    /// <summary>Records that <paramref name="table"/>'s daily snapshot for the UTC date of <paramref name="dayUtc"/> is exported. Recording a day twice is a no-op.</summary>
+    public void RecordDailySnapshot(string sourceStore, string table, DateTime dayUtc)
+    {
+        if (HasDailySnapshot(sourceStore, table, dayUtc))
+        {
+            return;
+        }
+
+        using var command = _connection.CreateCommand();
+        command.CommandText = "INSERT INTO daily_snapshots (source_store, table_name, snapshot_day) VALUES ($store, $table, $day)";
+        command.Parameters.Add(new DuckDBParameter("store", sourceStore));
+        command.Parameters.Add(new DuckDBParameter("table", table));
+        command.Parameters.Add(new DuckDBParameter("day", DateTime.SpecifyKind(dayUtc.Date, DateTimeKind.Unspecified)));
+        command.ExecuteNonQuery();
     }
 
     private void DropTempTable(string tempTable)

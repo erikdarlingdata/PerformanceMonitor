@@ -108,7 +108,7 @@
                     Margin="8,0,0,0" Padding="10,4" MinWidth="90"
                     ToolTip="Manage the dashboards and notebooks the web dashboard shows: folders, edit, import and export."/>
             <TextBlock x:Name="AlertCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
-                       FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                       Style="{DynamicResource PanelSubtitleText}"/>
             <TextBlock x:Name="LastRefreshedIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center"
                        FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"/>
         </WrapPanel>
@@ -135,7 +135,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding ServerName}" Width="140">
+                    <DataGridTextColumn Binding="{Binding ServerName}" Width="Auto" MinWidth="140">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ServerName" Click="FilterButton_Click" Margin="0,0,4,0"/>

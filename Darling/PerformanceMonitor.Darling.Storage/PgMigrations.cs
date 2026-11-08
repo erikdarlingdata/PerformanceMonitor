@@ -2765,6 +2765,79 @@ BEGIN
 END
 $do$;";
 
+    /* V254 (#7659): the chat requests. chat_thread_of links a chat request to the thread's first request (follow_up_of allows one follow-up per
+       request, so a chat needs a column of its own). The asker table holds who asked in a chat request and the request level their grants gave,
+       so the stamp and a follow-up's copy read one table. The message table is the audit row of each person's message: its natural key is the
+       channel and ts, its text is the message with every mention of the bot removed, and its state says whether it waits, joined or opened a
+       chat request. The reverse index on the thread table serves the lookup from a reply's channel and thread ts to the request. Both tables are
+       owner-written: REVOKE ALL ... CASCADE from PUBLIC and each role that exists, SELECT back to admin alone; the mcp login reads neither, since a
+       person's text is not data an agent reads except through the claim answer. Managed provisioning section 10e7 and provision-roles.sql step 3j7
+       do the same after their blanket grants. */
+    private const string V254Sql = @"
+ALTER TABLE config.investigation_requests
+    ADD COLUMN IF NOT EXISTS chat_thread_of uuid REFERENCES config.investigation_requests(request_id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS ix_investigation_requests_chat_thread_of
+    ON config.investigation_requests (chat_thread_of) WHERE chat_thread_of IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS config.investigation_request_askers (
+    request_id uuid NOT NULL REFERENCES config.investigation_requests(request_id) ON DELETE CASCADE,
+    person_id bigint NOT NULL REFERENCES config.person(person_id) ON DELETE CASCADE,
+    identity text NOT NULL,
+    request_level smallint NOT NULL,
+    joined_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    PRIMARY KEY (request_id, person_id)
+);
+
+CREATE TABLE IF NOT EXISTS config.investigation_person_messages (
+    channel_id text NOT NULL,
+    ts text NOT NULL,
+    thread_ts text NOT NULL,
+    thread_request_id uuid NOT NULL REFERENCES config.investigation_requests(request_id) ON DELETE CASCADE,
+    request_id uuid REFERENCES config.investigation_requests(request_id) ON DELETE SET NULL,
+    person_id bigint REFERENCES config.person(person_id) ON DELETE SET NULL,
+    identity text NOT NULL,
+    message_text text NOT NULL,
+    state text NOT NULL,
+    received_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    PRIMARY KEY (channel_id, ts)
+);
+
+CREATE INDEX IF NOT EXISTS ix_investigation_person_messages_waiting
+    ON config.investigation_person_messages (thread_request_id, received_at) WHERE state = 'waiting';
+
+CREATE INDEX IF NOT EXISTS ix_investigation_person_messages_request
+    ON config.investigation_person_messages (request_id) WHERE request_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS ix_investigation_request_threads_channel_ts
+    ON config.investigation_request_threads (channel_id, thread_ts);
+
+REVOKE ALL ON config.investigation_request_askers FROM PUBLIC CASCADE;
+REVOKE ALL ON config.investigation_person_messages FROM PUBLIC CASCADE;
+
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'admin') THEN
+        REVOKE ALL ON config.investigation_request_askers FROM admin CASCADE;
+        REVOKE ALL ON config.investigation_person_messages FROM admin CASCADE;
+        GRANT SELECT ON config.investigation_request_askers TO admin;
+        GRANT SELECT ON config.investigation_person_messages TO admin;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'viewer') THEN
+        REVOKE ALL ON config.investigation_request_askers FROM viewer CASCADE;
+        REVOKE ALL ON config.investigation_person_messages FROM viewer CASCADE;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'web') THEN
+        REVOKE ALL ON config.investigation_request_askers FROM web CASCADE;
+        REVOKE ALL ON config.investigation_person_messages FROM web CASCADE;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'mcp') THEN
+        REVOKE ALL ON config.investigation_request_askers FROM mcp CASCADE;
+        REVOKE ALL ON config.investigation_person_messages FROM mcp CASCADE;
+    END IF;
+END
+$do$;";
+
     /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
@@ -3276,6 +3349,7 @@ $rung$;";
         new Migration(251, "compose-stamp-late-mark-offset-zero", V251Sql),
         new Migration(252, "slack-bot-threads", V252Sql),
         new Migration(253, "slack-cards", V253Sql),
+        new Migration(254, "slack-chat-requests", V254Sql),
     };
 
     /// <summary>
@@ -9994,16 +10068,17 @@ CREATE INDEX IF NOT EXISTS idx_index_object_stats_latest ON collect.index_object
     /// <c>create_hypertable</c> emits the advisory use-TIMESTAMPTZ WARNING — expected, exactly like the
     /// collector hypertables.</para>
     ///
-    /// <para><b>Compression.</b> Enabled + policy added mirroring <see cref="TimescaleSupport"/> for this one
-    /// table: segment by <c>server_id</c> (every read filters it first) and compress chunks older than the same
-    /// <see cref="TimescaleSupport.CompressAfterDays"/>, with the same <see cref="TimescaleSupport.ChunkIntervalDays"/>
-    /// chunk width — the constants are interpolated so the two never drift. <c>if_not_exists</c> on the policy
-    /// keeps it idempotent. Explicitly <c>collect.</c>-qualified like V21/V22.</para>
+    /// <para><b>Compression.</b> Enabled mirroring <see cref="TimescaleSupport"/> for this one table: segment by
+    /// <c>server_id</c> (every read filters it first), with the same <see cref="TimescaleSupport.ChunkIntervalDays"/>
+    /// chunk width, interpolated so the two never drift. V23 adds no compression policy:
+    /// <see cref="TimescaleSupport.EnsureCollectionLogHypertableAsync"/> adds it at runtime, on the hourly cadence at its
+    /// phase minute. Explicitly <c>collect.</c>-qualified like V21/V22.</para>
     /// </summary>
     private static string V23Sql =>
         $@"
-/* V23: best-effort UPGRADE fast-path that converts collect.collection_log to a TimescaleDB hypertable + compresses
-   it, mirroring the collector hypertables. GUARDED on the extension (plain PostgreSQL skips it, keeping the table a
+/* V23: best-effort UPGRADE fast-path that converts collect.collection_log to a TimescaleDB hypertable and enables
+   compression, mirroring the collector hypertables; the runtime path (EnsureCollectionLogHypertableAsync) adds the
+   phased compression policy. GUARDED on the extension (plain PostgreSQL skips it, keeping the table a
    heap with batched-DELETE retention) and wrapped in EXCEPTION WHEN OTHERS so it can NEVER abort the startup-critical
    migration. The AUTHORITATIVE conversion is TimescaleSupport.EnsureCollectionLogHypertableAsync at runtime (after
    CREATE EXTENSION), which is the proven-live path and self-heals a fresh store this guard skipped. collection_log is
@@ -10013,7 +10088,6 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
         PERFORM create_hypertable('collect.collection_log', by_range('collection_time', INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'), if_not_exists => true, migrate_data => true);
         ALTER TABLE collect.collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id');
-        PERFORM add_compression_policy('collect.collection_log', compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days', if_not_exists => true);
     END IF;
 EXCEPTION WHEN OTHERS THEN
     RAISE WARNING 'V23: deferred collection_log hypertable conversion to the runtime path (%): %', SQLSTATE, SQLERRM;

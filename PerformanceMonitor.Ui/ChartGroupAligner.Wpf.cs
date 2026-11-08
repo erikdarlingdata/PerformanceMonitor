@@ -50,6 +50,16 @@ internal static partial class ChartGroupAligner
     }
 
     private static readonly ConditionalWeakTable<Plot, object> s_attached = new();
+    private static readonly ConditionalWeakTable<Plot, object> s_empty = new();
+
+    /// <summary>
+    /// #8086: marks a plot that shows only its empty-state sentence. It has no axes and so no plot rectangle to share; it is left
+    /// out of the group, which would otherwise floor edges that are not drawn and never see its frame match. A chart whose data
+    /// comes back is reset by <c>ClearChart</c>, which makes a new plot and so drops the mark.
+    /// </summary>
+    internal static void MarkEmpty(Plot plot) => s_empty.AddOrUpdate(plot, new object());
+
+    internal static bool IsEmptyState(Plot plot) => s_empty.TryGetValue(plot, out _);
     private static readonly ConditionalWeakTable<FrameworkElement, GroupState> s_groups = new();
     private static bool s_aligning;
 
@@ -101,7 +111,7 @@ internal static partial class ChartGroupAligner
             var child = VisualTreeHelper.GetChild(node, i);
             if (child is WpfPlot chart)
             {
-                if (IsShown(chart) && chart.ActualWidth >= 1 && chart.ActualHeight >= 1 && chart.Plot.RenderManager.RenderCount > 0)
+                if (IsShown(chart) && !IsEmptyState(chart.Plot) && chart.ActualWidth >= 1 && chart.ActualHeight >= 1 && chart.Plot.RenderManager.RenderCount > 0)
                     into.Add(chart);
             }
             else
@@ -171,7 +181,7 @@ internal static partial class ChartGroupAligner
         var floor = 0.0;
         foreach (var m in members)
         {
-            if (ChartLayout.ChromeHeight(m.Plot) is { } chrome) floor = Math.Max(floor, Math.Ceiling(ChartLayout.RowMinHeightFor(chrome)));
+            if (ChartLayout.RowMinHeightFor(m.Plot) is { } min) floor = Math.Max(floor, Math.Ceiling(min));
         }
         if (Math.Abs(panel.ContentMinHeight - floor) > 0.5) panel.ContentMinHeight = floor;
     }

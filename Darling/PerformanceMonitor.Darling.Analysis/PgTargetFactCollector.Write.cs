@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -20,7 +21,10 @@ public sealed partial class PgTargetFactCollector
     /// <summary>
     /// The checkpointer and WAL counters of <c>pg_write_stats</c> (PG 14+, one-minute cadence) differenced over
     /// the window: requested and timed checkpoints, checkpoint write / sync time, buffers the checkpointer
-    /// wrote, WAL bytes and full-page images. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window.
+    /// wrote, WAL bytes and full-page images. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window, <c>$4</c>
+    /// <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/> (#8156: a difference whose own interval is longer
+    /// than the gap policy spans a collector outage and is left out of every sum, as the coverage witness leaves its
+    /// seconds out of the observed time the rates divide by).
     ///
     /// <para><b>The differencing is <c>DarlingPgDatabaseReader.PgDatabaseSql</c>'s, applied to this table's two
     /// reset stamps.</b> Per-sample <c>LAG</c> over the series, <c>GREATEST(raw, 0)</c> so a rewound counter
@@ -59,7 +63,7 @@ public sealed partial class PgTargetFactCollector
     /// ordinals did not move, and the fact carries it so the advice can say those intervals were left out.</para>
     /// </summary>
     public const string PgTargetCheckpointSql = $@"
-WITH sampled AS (
+WITH differenced AS (
     SELECT
         collection_time,
         num_requested              - LAG(num_requested)              OVER series AS raw_requested,
@@ -70,6 +74,7 @@ WITH sampled AS (
         wal_bytes                  - LAG(wal_bytes)                  OVER series AS raw_wal_bytes,
         wal_fpi                    - LAG(wal_fpi)                    OVER series AS raw_wal_fpi,
         wal_records                - LAG(wal_records)                OVER series AS raw_wal_records,
+        extract(epoch FROM (collection_time - LAG(collection_time) OVER series)) AS interval_sec,
         (ROW_NUMBER() OVER series > 1
          AND checkpointer_stats_reset IS DISTINCT FROM LAG(checkpointer_stats_reset) OVER series) AS ck_reset_here,
         (ROW_NUMBER() OVER series > 1
@@ -81,6 +86,25 @@ WITH sampled AS (
     AND   collection_time >= $2
     AND   collection_time <= $3
     WINDOW series AS (ORDER BY collection_time)
+),
+sampled AS (
+    /* #8156: a difference across an interval longer than the gap policy ($4) spans a collector outage and is left
+       out, as the coverage witness leaves its seconds out of the observed time. */
+    SELECT
+        collection_time,
+        ck_reset_here,
+        wal_reset_here,
+        wal_tracked,
+        restart_here,
+        CASE WHEN interval_sec <= $4 THEN raw_requested    END AS raw_requested,
+        CASE WHEN interval_sec <= $4 THEN raw_timed        END AS raw_timed,
+        CASE WHEN interval_sec <= $4 THEN raw_write_ms     END AS raw_write_ms,
+        CASE WHEN interval_sec <= $4 THEN raw_sync_ms      END AS raw_sync_ms,
+        CASE WHEN interval_sec <= $4 THEN raw_ckpt_buffers END AS raw_ckpt_buffers,
+        CASE WHEN interval_sec <= $4 THEN raw_wal_bytes    END AS raw_wal_bytes,
+        CASE WHEN interval_sec <= $4 THEN raw_wal_fpi      END AS raw_wal_fpi,
+        CASE WHEN interval_sec <= $4 THEN raw_wal_records  END AS raw_wal_records
+    FROM differenced
 )
 SELECT
     CAST(coalesce(SUM(GREATEST(raw_requested, 0)) FILTER (WHERE NOT restart_here), 0) AS bigint) AS checkpoints_requested,
@@ -246,6 +270,7 @@ SELECT
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        cmd.Parameters.AddWithValue(CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         if (!await reader.ReadAsync(context.CancellationToken)) return 0;

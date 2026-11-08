@@ -81,7 +81,7 @@ public partial class FinOpsTab
         var data = await _dataService.GetStorageGrowthAsync(_server.ServerId, SelectedDatabaseFilter);
         _finopsStorageGrowthFilterMgr!.UpdateData(data);
         FinOpsNoStorageGrowthMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsStorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
+        FinOpsStorageGrowthCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "database") : "";
 
         /* The Note column holds words only for a database whose size leaves its log out, so a server with none gets no
            empty column. */
@@ -175,7 +175,7 @@ public partial class FinOpsTab
         var orderedObjects = orderedKeys.Select(k => byKey[k]).ToList();
 
         FinOpsObjectGrowthDetailGrid.ItemsSource = orderedObjects;
-        FinOpsStorageGrowthCountIndicator.Text = orderedObjects.Count > 0 ? $"{orderedObjects.Count} object(s)" : "";
+        FinOpsStorageGrowthCountIndicator.Text = orderedObjects.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(orderedObjects.Count, "object") : "";
         FinOpsObjectGrowthNoDataMessage.Visibility = orderedObjects.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
         /* Heatmap rows are bottom-to-top: the renderer flips vertically (row 0 = bottom), so reverse the
@@ -195,7 +195,7 @@ public partial class FinOpsTab
     {
         var data = await _dataService.GetObjectIndexDetailAsync(_server.ServerId, databaseName, schemaName, tableName);
         FinOpsObjectIndexDetailGrid.ItemsSource = data;
-        FinOpsStorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} index(es)" : "";
+        FinOpsStorageGrowthCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "index", "indexes") : "";
         FinOpsObjectIndexNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 

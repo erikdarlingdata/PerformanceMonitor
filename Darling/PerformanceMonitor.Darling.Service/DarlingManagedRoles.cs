@@ -2151,6 +2151,13 @@ GRANT SELECT ON {config}.investigation_request_threads TO {admin};
 --       threads are, SELECT to admin alone. provision-roles.sql step 3j6 does the same.
 REVOKE ALL ON {config}.investigation_slack_posts FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
 GRANT SELECT ON {config}.investigation_slack_posts TO {admin};
+-- 10e7. The chat requests (V254, #7659): who asked in a chat request, and each person's message. Owner-written as the threads are, SELECT to
+--       admin alone. mcp reads neither: a person's text reaches an agent only through the claim answer the service composes.
+--       provision-roles.sql step 3j7 does the same.
+REVOKE ALL ON {config}.investigation_request_askers FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.investigation_request_askers TO {admin};
+REVOKE ALL ON {config}.investigation_person_messages FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.investigation_person_messages TO {admin};
 
 -- 10f. Phase C tables (V193, #5997): the evidence of a request, the daily deadlock signature counts and the signature
 --     merges. Only the store owner (the service) writes them. The default privileges would give admin INSERT/UPDATE/DELETE
@@ -4374,6 +4381,7 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
             .Append(InvestigationRequestStore.SlackThreadPosted)
             .Append(InvestigationRequestStore.SlackPressed)
             .Append(InvestigationRequestStore.AskerJournalEvent)
+            .Append(InvestigationRequestStore.AgentMessage)
             .Select(k => "'" + k + "'"));
 
     /// <summary>
@@ -5973,6 +5981,11 @@ internal interface IUnixDirectoryModes
 
     /// <summary>The user id this process runs as, for comparing with <see cref="UnixFileOwner.UserId"/>.</summary>
     uint EffectiveUserId => 0;
+
+    /// <summary>Whether the file at <paramref name="path"/>, every link followed, is a regular file (#8006): not a
+    /// directory, a device, a FIFO or a socket. Null when that cannot be told here (Windows, a stand-in that does not
+    /// model it).</summary>
+    bool? IsRegularFile(string path) => null;
 }
 
 /// <summary>Who owns a file and how many names it has (#5366).</summary>
@@ -5991,4 +6004,6 @@ internal sealed class PlatformUnixDirectoryModes : IUnixDirectoryModes
     public UnixFileOwner? OwnerOf(string path) => FileIdentity.UnixOwnerOf(path);
 
     public uint EffectiveUserId => FileIdentity.EffectiveUserId();
+
+    public bool? IsRegularFile(string path) => FileIdentity.UnixIsRegularFile(path);
 }

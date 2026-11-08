@@ -221,6 +221,9 @@ public sealed class ArchiveSpanReadTests : IDisposable
         await ExecuteAsync(Row(ServerId, older, 0), Row(ServerId, firstInWindow, 1));
         await _duckDb.CreateArchiveViewsAsync();
 
+        /* The write lock is process-wide and the classes running alongside park writers on it; a budgeted writer polls with
+           no queue position, so the holder here parks for its whole budget and its budget is the only bound on the wait (#8142). */
+        _duckDb.WriteLockParkTail = TimeSpan.FromMinutes(2);
         var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var move = new ManualResetEventSlim();
         var archivePath = Path.Combine(_archiveDir, "20260109_000000_query_store_stats.parquet").Replace("\\", "/");
@@ -244,7 +247,11 @@ public sealed class ArchiveSpanReadTests : IDisposable
             }
             _duckDb.CreateArchiveViewsCoreAsync().GetAwaiter().GetResult();
         }, TaskCreationOptions.LongRunning);
-        await signal.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        await Task.WhenAny(signal.Task, archiver);
+        if (archiver.IsFaulted)
+        {
+            await archiver;
+        }
 
         var read = Task.Run(() => _service.GetQueryWindowFloorAsync(
             QueryWindowRelation.QueryStoreStats, ServerId, start, end, cancellationToken: TestContext.Current.CancellationToken), TestContext.Current.CancellationToken);
@@ -252,7 +259,7 @@ public sealed class ArchiveSpanReadTests : IDisposable
         Assert.False(read.IsCompleted, "the read waits behind the archive move");
         move.Set();
         await archiver;
-        var floor = await read.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var floor = await read.WaitAsync(TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
 
         Assert.Equal(start, floor);
     }
@@ -300,7 +307,10 @@ public sealed class ArchiveSpanReadTests : IDisposable
         QueryLogger.SetThreshold(0);
         try
         {
-            /* A writer holds the lock for 400 ms with the read queued behind it. The read's own work is a few milliseconds. */
+            /* A writer holds the lock for 400 ms with the read queued behind it. The read's own work is a few milliseconds.
+               The holder parks for its whole budget rather than polling, and the 400 ms run from the read's own start, not
+               from its scheduling (#8142). */
+            _duckDb.WriteLockParkTail = TimeSpan.FromMinutes(2);
             var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             using var release = new ManualResetEventSlim();
             var holder = Task.Factory.StartNew(() =>
@@ -309,15 +319,24 @@ public sealed class ArchiveSpanReadTests : IDisposable
                 signal.SetResult();
                 release.Wait(TimeSpan.FromMinutes(2));
             }, TaskCreationOptions.LongRunning);
-            await signal.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            await Task.WhenAny(signal.Task, holder);
+            if (holder.IsFaulted)
+            {
+                await holder;
+            }
 
-            var read = Task.Run(() => _service.GetQueryWindowFloorAsync(
-                QueryWindowRelation.QueryStoreStats, ServerId, NowUtc.AddHours(-1), NowUtc), TestContext.Current.CancellationToken);
+            var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var read = Task.Run(() =>
+            {
+                started.SetResult();
+                return _service.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, ServerId, NowUtc.AddHours(-1), NowUtc);
+            }, TestContext.Current.CancellationToken);
+            await started.Task;
             await Task.Delay(400, TestContext.Current.CancellationToken);
             Assert.False(read.IsCompleted, "the read waits behind the writer");
             release.Set();
             await holder;
-            await read.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+            await read.WaitAsync(TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
         }
         finally
         {

@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -234,7 +235,8 @@ AND   a.alert_time <= $4";
         if (firing.Count == 0) return streaks;
 
         var pairs = firing.Select(r => (r.ServerId, r.MetricName)).Distinct().ToList();
-        var since = firing.Min(r => r.AlertTime).AddDays(-InvestigationAlertRecurrence.Days);
+        /* One day more than the look-back, so a fire a DST change moved an hour past it is read; DaysAgo applies the exact bound. */
+        var since = firing.Min(r => r.AlertTime).AddDays(-(InvestigationAlertRecurrence.Days + 1));
         var until = firing.Max(r => r.AlertTime);
 
         var fires = new Dictionary<(int, string), List<DateTime>>();
@@ -254,11 +256,15 @@ AND   a.alert_time <= $4";
             }
         }
 
+        /* Each server's own clock, so a schedule kept in its local time keeps its streak across a DST change; a server with no
+           stored clock is read in UTC. */
+        var clocks = await DarlingServerClocksReader.GetAsync(postgres, null, McpCommandDeadlines.ReadSeconds, cancellationToken);
+
         for (var i = 0; i < page.Count; i++)
         {
             if (AlertMetricClassifier.IsResolution(page[i].MetricName)) continue;
             streaks[i] = fires.TryGetValue((page[i].ServerId, page[i].MetricName), out var list)
-                ? InvestigationAlertStreak.ForAlert(page[i].AlertTime, list)
+                ? InvestigationAlertStreak.ForAlert(page[i].AlertTime, list, DarlingServerClocksReader.ClockFor(clocks, page[i].ServerId).AsTimeZone())
                 : 0;
         }
 
@@ -432,6 +438,45 @@ LIMIT 1";
         NpgsqlDataSource postgres, DateTime anchorUtc, DateTime untilUtc, int? serverId,
         string firingMetricName, DateTime? matchedAlertTimeUtc, CancellationToken cancellationToken = default) =>
         ReadFirstAlertAfterAsync(postgres, anchorUtc, untilUtc, serverId, new[] { firingMetricName }, matchedAlertTimeUtc, cancellationToken);
+
+    /// <summary>The "newest firing at or before an alert" read (#8095): the LATEST row no later than the anchor ($1) whose stored
+    /// <c>metric_name</c> is exactly $2, dismissed rows included, then <c>server_id = $3</c> when the server is known. The notebook
+    /// reads it for a row that is itself a resolution, to name the firing that row closed.</summary>
+    private const string NewestFiringAtOrBeforeHead = @"
+SELECT" + AlertHistorySelectColumns + @"
+FROM config_alert_log a
+LEFT JOIN servers s ON s.server_id = a.server_id
+WHERE a.alert_time <= $1
+AND   a.metric_name = $2";
+
+    private const string NewestFiringAtOrBeforeTail = @"
+ORDER BY alert_time DESC
+LIMIT 1";
+
+    /// <summary>
+    /// The NEWEST firing of a metric at or before an alert (#8095): the latest row no later than <paramref name="anchorUtc"/> whose
+    /// stored name is exactly <paramref name="firingMetricName"/>, dismissed rows included, scoped to <paramref name="serverId"/> only
+    /// when it is known. Null when there is none. The notebook's status reads it for a row that is itself a resolution ("Blocking
+    /// Cleared", "Server Restored"), whose only row of interest is the firing it closed.
+    /// </summary>
+    public static async Task<AlertHistoryReadRow?> GetNewestFiringAtOrBeforeAsync(
+        NpgsqlDataSource postgres, DateTime anchorUtc, int? serverId, string firingMetricName, CancellationToken cancellationToken = default)
+    {
+        var sql = serverId.HasValue
+            ? NewestFiringAtOrBeforeHead + "\nAND   a.server_id = $3" + NewestFiringAtOrBeforeTail
+            : NewestFiringAtOrBeforeHead + NewestFiringAtOrBeforeTail;
+        await using var command = postgres.CreateCommand(sql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddTimestamp(command, anchorUtc);
+        DarlingMcpReadParameters.AddNullableText(command, firingMetricName);
+        if (serverId.HasValue)
+        {
+            DarlingMcpReadParameters.AddInt(command, serverId.Value);
+        }
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken) ? ReadHistoryRow(reader) : null;
+    }
 
     private static async Task<AlertHistoryReadRow?> ReadFirstAlertAfterAsync(
         NpgsqlDataSource postgres, DateTime anchorUtc, DateTime untilUtc, int? serverId,

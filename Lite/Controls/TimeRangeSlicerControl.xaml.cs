@@ -41,6 +41,9 @@ public partial class TimeRangeSlicerControl : UserControl
     private const double HandleWidthPx = 8;
     private const double HandleGripWidthPx = 20;
     private const double MinRangeNorm = 0.02; // minimum ~2% of total span
+    /// <summary>The strip's height in a normal window, and in a short one (<see cref="ShortWindow"/>). 70 leaves 34 for the chart between the 16 and 20 paddings.</summary>
+    internal const double FullHeight = 130;
+    internal const double CompactHeight = 70;
     private const double ChartPaddingTop = 16;
     private const double ChartPaddingBottom = 20;
 
@@ -71,6 +74,8 @@ public partial class TimeRangeSlicerControl : UserControl
     {
         InitializeComponent();
         SlicerBorder.SizeChanged += (_, _) => Redraw();
+        // #8219: a short window (900x600) gets the compact strip; the handles and the time labels keep their room (the paddings below).
+        ShortWindow.Track(this, () => SlicerBorder.Height = ShortWindow.IsShort(this) ? CompactHeight : FullHeight);
         IsVisibleChanged += (_, _) => { if (IsVisible) Redraw(); };
     }
 
@@ -109,6 +114,7 @@ public partial class TimeRangeSlicerControl : UserControl
         _data = FillEmptyBuckets(data, requestedStartUtc, requestedEndUtc);
         _runs = StripGaps.RunsOverFilledBuckets(_data.Select(d => d.BucketTime).ToList(), data.Select(d => d.BucketTime).ToList());
         _emptyText = null;
+        ShowSlicer();
         _metricLabel = metricLabel;
 
         var carried = _data.Count >= 2 ? SlicerReloadSelection.Carry(prevStart, prevEnd, DataStartUtc, DataEndUtc) : null;
@@ -147,8 +153,38 @@ public partial class TimeRangeSlicerControl : UserControl
         _rangeStart = 0;
         _rangeEnd = 1.0;
         _emptyText = text;
+        /* #8197: with a message host the sentence shows once in the grid area and the slicer band goes; without one the slicer still draws it itself. */
+        if (EmptyMessage is { } host)
+        {
+            host.Text = text;
+            host.Visibility = Visibility.Visible;
+            Visibility = Visibility.Collapsed;
+        }
         UpdateRangeLabel();
         Redraw();
+    }
+
+    /// <summary>
+    /// #8197: the <c>EmptyHint</c> text in the grid area that shows the empty-window sentence instead of this slicer, which collapses while the
+    /// window is empty. Bound by element name, so a slicer without one keeps drawing its own sentence.
+    /// </summary>
+    public static readonly DependencyProperty EmptyMessageProperty =
+        DependencyProperty.Register(nameof(EmptyMessage), typeof(TextBlock), typeof(TimeRangeSlicerControl));
+
+    public TextBlock? EmptyMessage
+    {
+        get => (TextBlock?)GetValue(EmptyMessageProperty);
+        set => SetValue(EmptyMessageProperty, value);
+    }
+
+    /// <summary>Data is back: the slicer shows again and its message host goes away.</summary>
+    private void ShowSlicer()
+    {
+        Visibility = Visibility.Visible;
+        if (EmptyMessage is { } host)
+        {
+            host.Visibility = Visibility.Collapsed;
+        }
     }
 
     /// <summary>The empty-window text (null when the slicer holds data); exposed for the tests.</summary>
@@ -165,11 +201,10 @@ public partial class TimeRangeSlicerControl : UserControl
         {
             Text = _emptyText,
             FontSize = 12,
-            FontStyle = FontStyles.Italic,
             TextAlignment = TextAlignment.Center,
             TextWrapping = TextWrapping.Wrap,
-            MaxWidth = Math.Min(520, Math.Max(40, w - 16)),
-            Foreground = FindBrush("ForegroundDimBrush", "#C7CBD4"),
+            MaxWidth = Math.Max(40, w - 16),
+            Foreground = FindBrush("ForegroundMutedBrush", "#A8AEBA"),
             IsHitTestVisible = false,
         };
         tb.Measure(new Size(tb.MaxWidth, double.PositiveInfinity));
@@ -295,6 +330,7 @@ public partial class TimeRangeSlicerControl : UserControl
     public void Redraw()
     {
         SlicerCanvas.Children.Clear();
+        MetricLabel.Text = _data.Count < 1 ? "" : _metricLabel;
         if (_data.Count < 1) { DrawEmptyText(); return; }
 
         var w = SlicerBorder.ActualWidth;
@@ -353,25 +389,21 @@ public partial class TimeRangeSlicerControl : UserControl
         // X-axis labels — whole wall-clock hours of the display zone (#4766), skip if too close
         var labelBrush = FindBrush("SlicerLabelBrush", "#E4E6EB");
         const double minLabelSpacingPx = 90;
+        const double labelHalfWidth = 25;
         double lastLabelX = -minLabelSpacingPx;
         foreach (var (tickUtc, text) in SlicerLabels(DataStartUtc, DataEndUtc, w, minLabelSpacingPx, CurrentZone()))
         {
             var x = NormAtUtc(tickUtc) * w;
             if (x - lastLabelX < minLabelSpacingPx) continue;
-            if (x < 10 || x > w - 40) continue;
+            /* #8224: a label is centred on its hour, so one whose left edge would sit under the start handle at rest (the
+               handle's width from the left edge) is left out rather than cut; the right edge keeps the same room. */
+            if (x - labelHalfWidth < HandleWidthPx + 2 || x > w - 40) continue;
             var tb = new TextBlock { Text = text, FontSize = 9, Foreground = labelBrush };
-            Canvas.SetLeft(tb, x - 25);
+            Canvas.SetLeft(tb, x - labelHalfWidth);
             Canvas.SetTop(tb, chartBottom + 2);
             SlicerCanvas.Children.Add(tb);
             lastLabelX = x;
         }
-
-        // Metric label top-right
-        var metricBrush = FindBrush("SlicerToggleBrush", "#E4E6EB");
-        var metricTb = new TextBlock { Text = _metricLabel, FontSize = 13, FontWeight = FontWeights.SemiBold, Foreground = metricBrush };
-        Canvas.SetLeft(metricTb, w - 120);
-        Canvas.SetTop(metricTb, 2);
-        SlicerCanvas.Children.Add(metricTb);
 
         // Selection overlays
         var overlayBrush = FindBrush("SlicerOverlayBrush", "#99000000");

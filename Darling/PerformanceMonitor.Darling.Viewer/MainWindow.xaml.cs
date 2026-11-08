@@ -207,6 +207,8 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        /* #8221: a calm card's border is read from the theme when the card is bound, so a theme change binds the cards again. */
+        ThemeManager.ThemeChanged += _ => { if (_overviewCards.Count > 0) ApplyOverviewCardFilter(); };
         _preferences = _preferencesStore.Load();
         NoteUnreadableSettingsFile(_preferencesStore.FilePath, _preferencesStore.LastLoadState, _preferencesStore.LastLoadProblem,
             _preferencesStore.LastLoadUnreadableMembers);
@@ -834,7 +836,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        var body = $"{row.ServerName}: {ToastBody(row)}";
+        /* #8115: a resolution's stored message already opens with the server (the engine writes it that way for the delivery channels). */
+        var body = ViewerToastText.WithServer(row.ServerName, row.StoredServerName, ToastBody(row));
 
         if (row.IsResolved)
         {
@@ -1389,6 +1392,8 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            /* #8133: a failed fleet read must not leave the Overview saying it is loading. */
+            OverviewLoadingText.Visibility = Visibility.Collapsed;
             StatusText.Text = $"refresh failed: {ex.Message}";
         }
     }
@@ -1695,6 +1700,10 @@ public partial class MainWindow : Window
             return;
         }
 
+        /* #8133: the first read of a wide fleet can take tens of seconds, and an empty card area reads as an empty fleet. The
+           text clears when the cards land, when the Overview is emptied, or when the read fails. */
+        OverviewLoadingText.Visibility = FleetOverviewLoadingText.Shows(readInFlight: true, _overviewCards.Count) ? Visibility.Visible : Visibility.Collapsed;
+
         var service = _dataService;
         var nowUtc = DateTime.UtcNow;
         /* #3016: pool-many lanes, not fleet-many reads — see the inventory overlay in FinOpsTab.Loaders.
@@ -1791,6 +1800,7 @@ public partial class MainWindow : Window
         /* The full set is the authority; the grid shows whatever the needs-attention filter leaves of it. A
            refresh must not silently drop the filter, so this re-applies it rather than binding `cards` directly. */
         _overviewCards = cards;
+        OverviewLoadingText.Visibility = Visibility.Collapsed;
         ApplyOverviewCardFilter();
 
         /* Fleet-wide NOC roll-up above the cards — the cross-server totals SQL aggregate (the read only
@@ -1852,6 +1862,7 @@ public partial class MainWindow : Window
         _overviewCards = new List<ServerSummaryItem>();
         _overviewTotals = null;
         _overviewRegisteredCount = 0;
+        OverviewLoadingText.Visibility = Visibility.Collapsed;
         OverviewItemsControl.ItemsSource = null;
         FleetRollupContainer.Visibility = Visibility.Collapsed;
         ApplyOverviewAttentionCount(shown: 0);

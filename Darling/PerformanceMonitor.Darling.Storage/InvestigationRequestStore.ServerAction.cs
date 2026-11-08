@@ -210,6 +210,19 @@ public sealed partial class InvestigationRequestStore
             return (new AgentActionRefusal(AgentActionCodes.NotLevel3,
                 "This request is not Level 3: its routes do not let an agent act on a monitored server. Report what you would change instead."), null);
 
+        /* #7659: a Level 3 action on a chat request needs every asker to hold request_level_3 with this kind for this server. The stamp already
+           holds the request to the lowest asker's level; this is the kind check, which a level alone cannot carry. The asker table is the owner's
+           (V254 revokes it from the mcp login the tools' own data source connects as), so this one read runs on the owner's source, as the
+           action's own rows do, on a connection of its own: the row it reads is not the row the gate holds. */
+        if (live.TriggerKind == InvestigationTriggerKinds.Chat)
+        {
+            await using var owner = await AgentActionSource.OpenConnectionAsync(cancellationToken);
+            await using var askers = Command(owner, null, AskersHoldKindSql, P(live.RequestId), PText(serverAction), P(live.ServerId));
+            if (await askers.ExecuteScalarAsync(cancellationToken) is not true)
+                return (new AgentActionRefusal(AgentActionCodes.AskerGrant,
+                    "Not every person who asked in this request holds request_level_3 with this action's kind for this server, so the agent cannot propose or run it under their request. Report what you would change instead."), null);
+        }
+
         if (target.ServerId != live.ServerId)
             return (new AgentActionRefusal(AgentActionCodes.OtherServer,
                 $"This action targets {target.ServerName}; the request is for {live.ServerName}. An action runs only on the request's server."), null);
@@ -225,6 +238,23 @@ public sealed partial class InvestigationRequestStore
 
         return (null, routes.Approval);
     }
+
+    /* #7659: true when every asker of the chat request ($1) holds request_level_3 with the kind ($2) scoped to the fleet, the server ($3) or one of
+       its tags. A request with no askers passes. */
+    internal const string AskersHoldKindSql = @"
+SELECT NOT EXISTS (
+    SELECT 1
+    FROM config.investigation_request_askers AS a
+    WHERE a.request_id = $1
+      AND NOT EXISTS (
+          SELECT 1
+          FROM config.person_grant AS g
+          WHERE g.person_id = a.person_id
+            AND g.capability = 'request_level_3'
+            AND $2 = ANY (g.kinds)
+            AND (   (g.scope_server_id IS NULL AND g.scope_tag_id IS NULL)
+                 OR g.scope_server_id = $3
+                 OR g.scope_tag_id IN (SELECT m.tag_id FROM config.server_tag_map AS m WHERE m.server_id = $3))))";
 
     /// <summary>The resolve sweep's mark on a request (#7109): a <c>resolved</c> journal row, as the proposal sweep's kill void reads it.</summary>
     internal const string RequestResolvedSql =

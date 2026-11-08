@@ -105,7 +105,7 @@ public sealed class DarlingDeliveryModeTests
     }
 
     [Fact]
-    public async Task PerEvent_WithinCap_RecordsOneRowPerIncident_NoOverflow_WithPerIncidentNumerics()
+    public async Task PerEvent_WithinCap_RecordsOneRowPerIncident_NoOverflow_EveryRowKeepsTheMeasurement()
     {
         var config = new DarlingConfig();
         config.Alerts.DeliveryMode = AlertNotificationMode.PerEvent;
@@ -115,10 +115,10 @@ public sealed class DarlingDeliveryModeTests
         await deliverer.DeliverAsync(OutcomeWithIncidents(3), TestContext.Current.CancellationToken);
 
         Assert.Equal(3, history.Records.Count);
-        /* #1830: each per-event row stores its OWN incident's occurrence count as the numeric
-           (fixture counts are 1..n), with the outcome's threshold on every row — the old null
-           numerics left the store text-parsing, which coined 0 for the overflow trailer. */
-        Assert.Equal(new double?[] { 1, 2, 3 }, history.Records.Select(r => r.NumericCurrentValue).ToArray());
+        /* #8246: every per-event row keeps the alert's measurement as its numeric (the outcome's 3 here, not the fixture's
+           incident counts 1..n): the engine reads the newest open row's value back as the level it last announced. The
+           outcome's threshold is on every row. */
+        Assert.Equal(new double?[] { 3, 3, 3 }, history.Records.Select(r => r.NumericCurrentValue).ToArray());
         Assert.All(history.Records, r => Assert.Equal(1d, r.NumericThresholdValue));
         Assert.DoesNotContain(history.Records, r => r.CurrentValueText.Contains("more", StringComparison.Ordinal));
     }
@@ -136,9 +136,9 @@ public sealed class DarlingDeliveryModeTests
         /* 2 individual + 1 overflow batch = 3 rows; the overflow row carries "+3 more". */
         Assert.Equal(3, history.Records.Count);
         var overflowRow = Assert.Single(history.Records, r => r.CurrentValueText.Contains("+3 more", StringComparison.Ordinal));
-        /* #1830: the overflow row's text is unparseable by design, so its numeric MUST be carried
-           explicitly — this exact row is the one that silently stored 0. */
-        Assert.Equal(3d, overflowRow.NumericCurrentValue);
+        /* #1830: the overflow row's text is unparseable by design, so its numeric MUST be carried explicitly; this exact
+           row is the one that silently stored 0. #8246: it is the alert's measurement, like every other per-event row. */
+        Assert.Equal(5d, overflowRow.NumericCurrentValue);
     }
 
     [Fact]
