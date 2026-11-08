@@ -1083,11 +1083,17 @@ public sealed partial class DarlingWorker
            routes decide which channels this store owns. */
         /* #7658: the buttons. The listener's handler acts on the cards the poster saved, on the owner connection: the proposal presses, a person's
            undo, a verdict and a note decision, each answered to the presser alone and each edited into the card once decided. */
+        /* #7659: the mentions. A mention of the bot in a request thread of this store's channels opens, joins or waits on a chat request through the
+           owner connection; the bot's answers post through the same token as the threads. The chat sweep rides the event pass below. */
+        var slackChat = new PerformanceMonitor.Darling.Service.Chat.StoreSlackChatCommands(investigationStore, _logger);
         _slackListenerState?.Publish(() => alertSettings.SlackAppToken, () => alertSettings.SlackBotToken, () => alertSettings.NotificationRoutes,
-            () => new PerformanceMonitor.Darling.Service.Chat.SlackInteractionHandler(
-                investigationStore,
-                new PerformanceMonitor.Darling.Service.Chat.StoreSlackPressCommands(investigationPostgres, investigationStore, _logger),
-                slackBotPosts, _logger, dataDetail, () => alertSettings.TriageBaseUrl));
+            () => new PerformanceMonitor.Darling.Service.Chat.CompositeSlackEventHandlers(
+                new PerformanceMonitor.Darling.Service.Chat.SlackInteractionHandler(
+                    investigationStore,
+                    new PerformanceMonitor.Darling.Service.Chat.StoreSlackPressCommands(investigationPostgres, investigationStore, _logger),
+                    slackBotPosts, _logger, dataDetail, () => alertSettings.TriageBaseUrl),
+                new PerformanceMonitor.Darling.Service.Chat.SlackMentionHandler(slackChat, slackBotPosts, () => alertSettings.NotificationRoutes, _logger)));
+        var slackChatSweep = new PerformanceMonitor.Darling.Service.Chat.SlackChatSweep(slackChat, slackBotPosts, () => alertSettings.NotificationRoutes, _logger);
         var slackThreads = new PerformanceMonitor.Darling.Service.Chat.SlackThreadPass(
             investigationStore, investigationStore,
             new PerformanceMonitor.Darling.Service.Chat.SlackThreadPoster(
@@ -1105,7 +1111,7 @@ public sealed partial class DarlingWorker
             /* #6979: the report notice goes to the route's Slack and Teams destinations (the settings' channel when the route has none),
                masked at the level the MCP tools serve, with links only while the web dashboard serves (TriageBaseUrl is empty otherwise). */
             reportNotices: webhookAlertService, defaults: alertSettings, dataDetail: dataDetail,
-            baseUrl: () => alertSettings.TriageBaseUrl, slackThreads: slackThreads);
+            baseUrl: () => alertSettings.TriageBaseUrl, slackThreads: slackThreads, slackChat: slackChatSweep);
         /* #6234: the change watch rides the sweep's tick; its first pass runs at start, so a watch whose window ended while the service was down is evaluated then. */
         var changeWatchPass = new PerformanceMonitor.Darling.Service.ChangeWatch.ChangeWatchPass(
             postgres,
