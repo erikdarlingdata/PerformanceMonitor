@@ -19,6 +19,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Darling.Tests;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Analysis.Recommendations;
 using PerformanceMonitorLite.Controls;
@@ -332,17 +333,15 @@ public sealed class LitePanelCardsTests
         Assert.Equal(new[] { false, false, true }, section.Cards.Select(c => c.ShowTitle).ToArray());
     }
 
-    [Theory]
-    [InlineData("RESOURCE_MEMPHYSICAL_LOW", "Low physical memory")]
-    [InlineData("RESOURCE_MEMPHYSICAL_HIGH", "Physical memory recovered")]
-    [InlineData("RESOURCE_MEMVIRTUAL_LOW", "Low virtual memory")]
-    [InlineData("SOS_SCHEDULER_YIELD", "SOS_SCHEDULER_YIELD waits")]
-    [InlineData("Plan cache bloat", "Plan cache bloat")]
-    public void AFindingNamedByItsToken_ReadsAsWords(string title, string expected)
+    /// <summary>The words themselves are the shared <see cref="RecommendationTitleText"/>'s, tested once in Darling.Tests; the card and its section header read through it.</summary>
+    [Fact]
+    public void AFindingNamedByItsToken_ReadsAsWords_OnTheCardAndInTheHeader()
     {
-        var item = new LiteRecommendationItem { IncidentId = "i1", Severity = LiteRecommendationSeverity.Warning, RawSeverity = 2, Title = title, ServerName = "s" };
+        var item = new LiteRecommendationItem { IncidentId = "i1", Severity = LiteRecommendationSeverity.Warning, RawSeverity = 2, Title = "RESOURCE_MEMPHYSICAL_LOW", ServerName = "s" };
         var section = Assert.Single(LiteRecommendationsViewModel.FromItems(new[] { item }).Sections);
 
+        var expected = RecommendationTitleText.Readable("RESOURCE_MEMPHYSICAL_LOW");
+        Assert.NotEqual("RESOURCE_MEMPHYSICAL_LOW", expected);
         Assert.Equal(expected, Assert.Single(section.Cards).Title);
         Assert.StartsWith(expected, section.Header, StringComparison.Ordinal);
     }

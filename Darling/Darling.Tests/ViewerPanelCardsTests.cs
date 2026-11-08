@@ -18,6 +18,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Ui;
@@ -267,18 +268,79 @@ public sealed class ViewerPanelCardsTests
         Assert.Equal(new[] { false, false, true }, section.Cards.Select(c => c.ShowTitle).ToArray());
     }
 
-    [Theory]
-    [InlineData("RESOURCE_MEMPHYSICAL_LOW", "Low physical memory")]
-    [InlineData("RESOURCE_MEMPHYSICAL_HIGH", "Physical memory recovered")]
-    [InlineData("RESOURCE_MEMVIRTUAL_LOW", "Low virtual memory")]
-    [InlineData("SOS_SCHEDULER_YIELD", "SOS_SCHEDULER_YIELD waits")]
-    [InlineData("Plan cache bloat", "Plan cache bloat")]
-    public void AFindingNamedByItsToken_ReadsAsWords(string title, string expected)
+    /// <summary>The words themselves are the shared <see cref="RecommendationTitleText"/>'s (<see cref="RecommendationTitleTextTests"/>); the card and its section header read through it.</summary>
+    [Fact]
+    public void AFindingNamedByItsToken_ReadsAsWords_OnTheCardAndInTheHeader()
     {
-        var section = Assert.Single(RecommendationsViewModel.FromFindings(new List<ViewerFindingRow> { Row(1.8, title, "inc-A") }, "SQL2022").Sections);
+        var section = Assert.Single(RecommendationsViewModel.FromFindings(new List<ViewerFindingRow> { Row(1.8, "RESOURCE_MEMPHYSICAL_LOW", "inc-A") }, "SQL2022").Sections);
 
+        var expected = RecommendationTitleText.Readable("RESOURCE_MEMPHYSICAL_LOW");
+        Assert.NotEqual("RESOURCE_MEMPHYSICAL_LOW", expected);
         Assert.Equal(expected, Assert.Single(section.Cards).Title);
         Assert.StartsWith(expected, section.Header, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The FinOps tab loads a sub-tab's data by the positional index its <c>FinOps*SubTabIndex</c> constants name, so the constant for the
+    /// savings sub-tab must select the tab that holds the savings (recommendations) content, whatever that tab's header says.
+    /// </summary>
+    [Fact]
+    public void SelectingTheSavingsSubTab_ByItsIndexConstant_ShowsTheRecommendationsContent()
+    {
+        var problems = StaTestThread.Run(() => WithTheme("DarkTheme", _ =>
+        {
+            var found = new List<string>();
+            var tab = new FinOpsTab();
+            var window = Open(tab, PaneWidth(1280), 800);
+            try
+            {
+                var index = (int)typeof(FinOpsTab).GetField("FinOpsRecommendationsSubTabIndex", BindingFlags.NonPublic | BindingFlags.Static)!.GetRawConstantValue()!;
+                var subTabs = ChartLayoutProbe.Logical<TabControl>(tab).First();
+                subTabs.SelectedIndex = index;
+                Settle(window);
+
+                var selected = (TabItem)subTabs.SelectedItem;
+                if (selected.Header as string != "Cost Savings")
+                {
+                    found.Add($"the constant selects the '{selected.Header}' sub-tab, not Cost Savings");
+                }
+
+                var grid = Find<DataGrid>(tab, "FinOpsRecommendationsDataGrid");
+                var count = Find<TextBlock>(tab, "FinOpsRecommendationsCountIndicator");
+                foreach (var (element, name) in new (FrameworkElement, string)[] { (grid, "FinOpsRecommendationsDataGrid"), (count, "FinOpsRecommendationsCountIndicator") })
+                {
+                    if (!IsUnder(element, selected))
+                    {
+                        found.Add($"{name} is not on the selected sub-tab");
+                    }
+                    else if (!element.IsVisible)
+                    {
+                        found.Add($"{name} is not shown on the selected sub-tab");
+                    }
+                }
+            }
+            finally
+            {
+                window.Close();
+            }
+
+            return found;
+        }));
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    private static bool IsUnder(DependencyObject element, DependencyObject ancestor)
+    {
+        for (DependencyObject? up = element; up is not null; up = LogicalTreeHelper.GetParent(up))
+        {
+            if (ReferenceEquals(up, ancestor))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>A finding row the way the read returns one, with the title the finding is named by.</summary>
