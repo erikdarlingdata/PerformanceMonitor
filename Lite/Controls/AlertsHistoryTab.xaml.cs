@@ -486,7 +486,7 @@ public partial class AlertsHistoryTab : UserControl
 
         /* Archived rows are dismissed too (#7160): both paths hide them (the window write and the keyed write each put them in the
            dismissed_archive_alerts sidecar), so the count asked about is the count dismissed. */
-        var message = $"Dismiss {allAlerts.Count} alert(s)?\n\nDismissed alerts are hidden from this view but remain in the database.";
+        var message = $"Dismiss {CountText.Plural(allAlerts.Count, "alert")}?\n\nDismissed alerts are hidden from this view but remain in the database.";
 
         var result = ConfirmPrompt(
             message,

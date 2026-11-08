@@ -388,11 +388,11 @@ public partial class AlertsHistoryTab : UserControl
             if (LogDismissals)
             {
                 ViewerLogger.Info("AlertsHistory", affected < selected.Count
-                    ? $"Dismissed {affected} of {selected.Count} selected alert(s) (some were already dismissed)"
-                    : $"Dismissed {affected} selected alert(s)");
+                    ? $"Dismissed {affected} of {CountText.Plural(selected.Count, "selected alert")} (some were already dismissed)"
+                    : $"Dismissed {CountText.Plural(affected, "selected alert")}");
             }
             await LoadAlertsAsync();
-            StatusChanged?.Invoke($"dismissed {affected} alert(s) — {ViewerTimeHelper.RefreshedStamp()}");
+            StatusChanged?.Invoke($"dismissed {CountText.Plural(affected, "alert")} — {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
@@ -418,7 +418,7 @@ public partial class AlertsHistoryTab : UserControl
         var dismissShownRows = AlertDismissScope.UseShownRows(_filterManager?.AnyFilterActive == true, _lastReadRowCount, RowCap);
 
         var result = MessageBox.Show(
-            $"Dismiss {allAlerts.Count} alert(s)?\n\nDismissed alerts are hidden from this view but remain in the store.",
+            $"Dismiss {CountText.Plural(allAlerts.Count, "alert")}?\n\nDismissed alerts are hidden from this view but remain in the store.",
             "Dismiss All Alerts",
             MessageBoxButton.YesNo,
             MessageBoxImage.Question);
@@ -443,7 +443,7 @@ public partial class AlertsHistoryTab : UserControl
                 ViewerLogger.Info("AlertsHistory", $"Dismissed all {affected} visible alert(s) ({scope}, last {hoursBack}h)");
             }
             await LoadAlertsAsync();
-            StatusChanged?.Invoke($"dismissed {affected} alert(s) — {ViewerTimeHelper.RefreshedStamp()}");
+            StatusChanged?.Invoke($"dismissed {CountText.Plural(affected, "alert")} — {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
