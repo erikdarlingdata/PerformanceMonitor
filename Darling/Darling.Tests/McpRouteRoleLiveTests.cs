@@ -425,8 +425,7 @@ public sealed class McpRouteRoleLiveTests
             var created = await DarlingMcpAlertTools.CreateNotificationRoute(asMcp, "High CPU", cancellationToken: ct);
             Assert.Equal("created", Status(created));
 
-            await using var connection = new NpgsqlConnection(owner.ConnectionString);
-            await connection.OpenAsync(ct);
+            await using var connection = await owner.OpenConnectionAsync(ct);
             var routes = await StoreConfigProvider.ReadNotificationRoutesAsync(connection, null, ct);
             var route = Assert.Single(routes);
             Assert.Equal("", route.SlackUrl + route.TeamsUrl + route.GenericUrl + route.PagerDutyRoutingKey + route.SmtpRecipients);

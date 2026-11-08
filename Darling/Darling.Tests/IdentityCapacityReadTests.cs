@@ -162,13 +162,16 @@ public sealed class IdentityCapacityReadLiveTests
     private static readonly int PostgresId = ServerIdHelper.GetDeterministicHashCode(PostgresServer);
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+    /* Npgsql leaves the password out of the ConnectionString read back from a data source or an opened connection, so what the body opens by connection string comes from the scratch store's own string. */
+    private string _storeConnectionString = "";
 
-    private static async Task WithStoreAsync(Func<NpgsqlConnection, CancellationToken, Task> seed, Func<NpgsqlDataSource, CancellationToken, Task> body)
+    private async Task WithStoreAsync(Func<NpgsqlConnection, CancellationToken, Task> seed, Func<NpgsqlDataSource, CancellationToken, Task> body)
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to run the identity capacity read live tests (they mint their own scratch database).");
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        _storeConnectionString = scratch.ConnectionString;
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -354,7 +357,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             Assert.DoesNotContain(DisabledId, card.Keys);
             Assert.DoesNotContain(PostgresId, card.Keys);
 
-            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(postgres.ConnectionString);
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(_storeConnectionString);
             var viewerCard = await viewer.GetIdentityCapacityCardAsync(DataId, now, ct);
             Assert.Equal(worst.Value.WorstBand, viewerCard!.WorstBand);
             Assert.Equal(worst.Value.ColumnsAtBar, viewerCard.ColumnsAtBar);
@@ -607,7 +610,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             }
 
             /* The Viewer card and the fleet tile count Sales, Parked and Fresh, not Gone's 100 percent column too. */
-            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(postgres.ConnectionString);
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(_storeConnectionString);
             var viewerCard = await viewer.GetIdentityCapacityCardAsync(DataId, now, ct);
             Assert.Equal(3, viewerCard!.ColumnsAtBar);
             var fleet = await DarlingFleetReader.ReadIdentityCapacityAsync(postgres, now, ct);
