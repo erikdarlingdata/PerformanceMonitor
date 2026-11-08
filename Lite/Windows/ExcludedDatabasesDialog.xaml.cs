@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
+using System.Net.Sockets;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
@@ -42,6 +43,12 @@ public partial class ExcludedDatabasesDialog : Window
 
     public bool ExclusionsModified { get; private set; }
 
+    /// <summary>
+    /// Reads the server's user databases. Tests set a reader that fails, so the dialog's own wording of a failed load can be
+    /// checked without a server to fail against.
+    /// </summary>
+    internal Func<Task<List<string>>>? DatabaseListReader { get; set; }
+
     public ExcludedDatabasesDialog(ServerManager serverManager, ServerConnection server, bool xeSessionsMode = false)
     {
         InitializeComponent();
@@ -65,6 +72,8 @@ public partial class ExcludedDatabasesDialog : Window
         Loaded += async (_, _) => await LoadAsync();
     }
 
+    internal Task LoadForTestAsync() => LoadAsync();
+
     private async Task LoadAsync()
     {
         StatusText.Text = "Loading databases…";
@@ -73,7 +82,8 @@ public partial class ExcludedDatabasesDialog : Window
 
         try
         {
-            var liveDatabases = await GetUserDatabasesAsync();
+            var read = DatabaseListReader ?? new Func<Task<List<string>>>(GetUserDatabasesAsync);
+            var liveDatabases = await read();
             var existingExclusions = (_xeSessionsMode ? _server.XeSessionDatabases : _server.ExcludedDatabases) ?? new List<string>();
 
             var liveSet = new HashSet<string>(liveDatabases, StringComparer.OrdinalIgnoreCase);
@@ -116,13 +126,34 @@ public partial class ExcludedDatabasesDialog : Window
         }
         catch (Exception ex)
         {
-            StatusText.Text = $"Failed to load: {ex.Message}";
-            MessageBox.Show(this,
-                $"Could not read database list from '{_server.DisplayNameWithIntent}':\n\n{ex.Message}",
-                "Load Failed",
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+            /* One message, in the dialog's own status line: the exception's text goes to the log, not to the person. */
+            AppLogger.Error("ExcludedDatabasesDialog", $"Could not read the database list from {_server.DisplayNameWithIntent}", ex);
+            StatusText.Text = LoadFailureText(_server.DisplayNameWithIntent, ex);
         }
+    }
+
+    /// <summary>
+    /// The status line for a database list that could not be read, in plain words that say what to do: a server that cannot be
+    /// reached, a login the server refused, or any other failure, which points at the log. The exception's own text never
+    /// reaches the dialog.
+    /// </summary>
+    internal static string LoadFailureText(string serverName, Exception ex)
+    {
+        var sql = ex as SqlException ?? ex.InnerException as SqlException;
+        var unreachable = ex is SocketException or TimeoutException
+            || ex.InnerException is SocketException or TimeoutException
+            || (sql is not null && sql.Number is not (18456 or 18452 or 4060) && SqlErrorClassification.IsConnectionFailure(sql.Number));
+        if (unreachable)
+        {
+            return $"{serverName} can't be reached, so its database list can't load. Check that the server is up and that this computer can connect to it, then open this window again.";
+        }
+
+        if (sql is not null && sql.Number is 18456 or 18452 or 4060)
+        {
+            return $"{serverName} refused the login, so its database list can't load. Check the server's credentials in Edit SQL Server, then open this window again.";
+        }
+
+        return $"The database list for {serverName} could not be read. The log has the details.";
     }
 
     private async Task<List<string>> GetUserDatabasesAsync()

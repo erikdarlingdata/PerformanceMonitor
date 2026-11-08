@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -54,17 +55,34 @@ public partial class ColumnFilterPopup : UserControl
     /// <summary>The value list the popup shows now, or null for a column with no list. Exposed for tests.</summary>
     internal ColumnValueListModel? ListModel => _list;
 
+    /// <summary>
+    /// The header text of the column a filter button belongs to: the text beside the button in the column's header panel, or
+    /// null when there is none. The popup's heading shows this rather than the bound property name the button carries in its
+    /// Tag, so a filter on a Server column reads "Filter: Server" and not "Filter: ServerName".
+    /// </summary>
+    public static string? ColumnHeaderFor(Button filterButton)
+    {
+        if (filterButton.Parent is not Panel panel)
+        {
+            return null;
+        }
+
+        var text = panel.Children.OfType<TextBlock>().Select(t => t.Text).FirstOrDefault(t => !string.IsNullOrWhiteSpace(t));
+        return text?.Trim();
+    }
+
     /// <param name="columnName">The column's bound property name.</param>
     /// <param name="existingFilter">The column's filter now, if any.</param>
     /// <param name="valueCatalog">The column's values (#5565), or null when it gets no list.</param>
     /// <param name="gridHasFilters">The grid has an active filter, so "Clear all filters" is offered.</param>
-    public void Initialize(string columnName, ColumnFilterState? existingFilter, ColumnValueCatalog? valueCatalog = null, bool gridHasFilters = false)
+    /// <param name="columnHeader">The column's header text, which the popup's heading shows; null shows the property name.</param>
+    public void Initialize(string columnName, ColumnFilterState? existingFilter, ColumnValueCatalog? valueCatalog = null, bool gridHasFilters = false, string? columnHeader = null)
     {
         _suppressEvents = true;
         _columnName = columnName;
         _existing = existingFilter;
         _storedValuesCleared = false;
-        HeaderText.Text = $"Filter: {columnName}";
+        HeaderText.Text = $"Filter: {(string.IsNullOrWhiteSpace(columnHeader) ? columnName : columnHeader.Trim())}";
 
         if (_list is not null)
             _list.TicksChanged -= OnTicksChanged;

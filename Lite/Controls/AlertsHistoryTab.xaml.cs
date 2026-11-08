@@ -74,7 +74,9 @@ public partial class AlertsHistoryTab : UserControl
         RangePicker.Value = TimeRangePresets.FromLegacyHours(24)!; /* 24 hours, as the list opened */
         /* #5562 M1: typed times and calendar periods are read in the zone the Time column is worded in (the display mode), as the
            Darling Viewer's Alert History does with its display zone. */
-        RangePicker.ZoneProvider = () => ServerTimeHelper.CurrentDisplayZone;
+        RangePicker.ZoneProvider = () => ListSpansServers
+            ? PerformanceMonitor.Ui.MultiServerTime.MixedZone(ServerTimeHelper.CurrentDisplayMode)
+            : ServerTimeHelper.CurrentDisplayZone;
         /* R8: "All" is a span of 365 days, longer than anything Lite keeps (archive files are deleted by whole month, 3 months
            back, so rows older than 3 months survive until their month's file goes), through the shared control's longest choice. */
         RangePicker.SetLongestChoice(LiteTimeRange.AlertHistoryLongestChoice, "All");
@@ -98,6 +100,17 @@ public partial class AlertsHistoryTab : UserControl
         _staleDataTimer.Start();
     }
 
+    /// <summary>The distinct servers this tab's reads have listed. A list that has shown more than one server is a list of several
+    /// servers for the rest of its life, whatever one read returns.</summary>
+    private readonly HashSet<int> _serversSeen = new();
+
+    /// <summary>
+    /// True while the list spans servers: no server is picked in the Server filter and the reads have listed more than one. Such
+    /// a list reads on one clock (<see cref="PerformanceMonitor.Ui.MultiServerTime"/>), and the header, the range picker and the
+    /// rows all take it from here, so the clock does not change when a read comes back empty or the range changes.
+    /// </summary>
+    internal bool ListSpansServers => GetSelectedServerId() is null && _serversSeen.Count > 1;
+
     /// <summary>
     /// Refreshes the alert history data.
     /// </summary>
@@ -110,6 +123,16 @@ public partial class AlertsHistoryTab : UserControl
     /// rows the grid shows. Split out of the load so a test can drive it with rows (#5542 L6).</summary>
     internal int ShowAlerts(List<AlertHistoryRow> alerts)
     {
+        _serversSeen.UnionWith(alerts.Select(a => a.ServerId));
+        if (ListSpansServers)
+        {
+            /* One read of a list of several servers may hold one server's rows: they still draw on the list's clock. */
+            foreach (var row in alerts)
+            {
+                row.MixedServers = true;
+            }
+        }
+
         if (_filterManager != null)
             _filterManager.UpdateData(alerts);
         else
@@ -117,7 +140,8 @@ public partial class AlertsHistoryTab : UserControl
 
         var displayCount = AlertsDataGrid.ItemsSource is ICollection<AlertHistoryRow> coll ? coll.Count : alerts.Count;
         NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-        AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ServerTimeHelper.CurrentDisplayMode, alerts.Any(a => a.MixedServers)); // D5: the column names its clock
+        AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ServerTimeHelper.CurrentDisplayMode, ListSpansServers); // D5: the column names its clock
+        RangePicker.Refresh(); // the range label names the same clock
         DataGridHeaderFit.Apply(AlertsDataGrid); // #6136: the longer title widens its column
         /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
         _lastReadRowCount = alerts.Count;
@@ -322,7 +346,7 @@ public partial class AlertsHistoryTab : UserControl
 
         ColumnFilterState? existingFilter = null;
         _filterManager?.Filters.TryGetValue(columnName, out existingFilter);
-        _filterPopupContent!.Initialize(columnName, existingFilter);
+        _filterPopupContent!.Initialize(columnName, existingFilter, columnHeader: ColumnFilterPopup.ColumnHeaderFor(button));
 
         _filterPopup.PlacementTarget = button;
         _filterPopup.IsOpen = true;

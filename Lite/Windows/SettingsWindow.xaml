@@ -254,6 +254,8 @@
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.Name="Client timeouts, critical at" x:Name="AlertClientTimeoutsCriticalBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"
                                              ToolTip="Critical floor: client timeouts and cancels (attentions) per minute (same span as the Warning floor). Never below the Warning floor. Default 60. The bar is the higher of this floor and the Critical multiple times the server's own baseline."/>
+                                    <!-- One panel, so the two multiples and their baseline wrap as a pair instead of splitting across lines. -->
+                                    <StackPanel Orientation="Horizontal">
                                     <TextBlock Text="(floors), or" VerticalAlignment="Center" Margin="6,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.Name="Client timeouts, warning multiple" x:Name="AlertClientTimeoutsWarningMultipleBox" Width="45" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"
@@ -264,6 +266,7 @@
                                              ToolTip="Critical multiple: the Critical bar is at least this many times the server's own baseline. Never below the Warning multiple. Default 10."/>
                                     <TextBlock Text="x the server's own baseline" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
+                                    </StackPanel>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertLongRunningQueryCheckBox" Content="Long-running queries over" VerticalAlignment="Center"
@@ -792,8 +795,7 @@
                         <Border Background="{DynamicResource BackgroundLightBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,12">
                             <StackPanel>
                                 <!-- Automated Analysis -->
-                                <TextBlock Text="Automated Analysis" FontWeight="SemiBold" FontSize="12"
-                                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,14,0,4"/>
+                                <TextBlock Text="Automated Analysis" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <TextBlock Text="Periodically run the triage engine and record findings in the Alerts tab. Notifications below are optional — analysis runs and stores findings even with notifications off."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,4" TextWrapping="Wrap"/>
@@ -833,7 +835,7 @@
                                 <CheckBox x:Name="AnalysisUncorroboratedDigestCheckBox"
                                           Content="Only notify on corroborated findings (a lone uncorroborated fact is recorded, not delivered)"
                                           Margin="20,6,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
-                                <TextBlock Text="Requires SMTP or a webhook configured below for delivery; findings are recorded in the Alerts tab either way."
+                                <TextBlock Text="Requires SMTP or a webhook configured on the Delivery tab for delivery; findings are recorded in the Alerts tab either way."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,4,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
