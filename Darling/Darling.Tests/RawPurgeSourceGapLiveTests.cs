@@ -295,6 +295,11 @@ WHERE j.proc_name = 'policy_retention' AND j.hypertable_schema = 'collect' AND j
             Assert.SkipWhen(!enabled, "The live #7961 source-gap tests need TimescaleDB.");
             await TimescaleSupport.ConvertToHypertablesAsync(connection, null, default);
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, default);
+            /* The store's start holds every aggregate's materialization at one-day chunks. Without it the backfill
+               builds TimescaleDB's default ten-day chunks, aligned to the epoch, and the aggregate's 7-day drop then
+               keeps a chunk these tests expect gone on some calendar days. */
+            var narrowed = await TimescaleSupport.EnsureMaterializationChunkIntervalAsync(connection, null, default);
+            Assert.True(narrowed > 0, "the fresh store's aggregates must take one-day materialization chunks, as a store's start gives them");
             await ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()");
 
             await body(connection);
