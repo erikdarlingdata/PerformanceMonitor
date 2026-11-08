@@ -156,6 +156,12 @@ public partial class ExcludedDatabasesDialog : Window
         return $"The database list for {serverName} could not be read. The log has the details.";
     }
 
+    /// <summary>
+    /// Runs the database-list query against a connection string. Tests set a query that fails, so the fallback below is exercised
+    /// with no server to fail against.
+    /// </summary>
+    internal Func<string, Task<List<string>>>? DatabaseQuery { get; set; }
+
     private async Task<List<string>> GetUserDatabasesAsync()
     {
         var connectionString = _serverManager.CredentialResolver.GetConnectionString(_server);
@@ -167,38 +173,53 @@ public partial class ExcludedDatabasesDialog : Window
 
         try
         {
-            using var connection = new SqlConnection(builder.ConnectionString);
-            await connection.OpenAsync();
-
-            using var cmd = new SqlCommand(@"
-SELECT d.name
-FROM sys.databases AS d
-WHERE d.database_id > 4
-AND   d.state_desc = N'ONLINE'
-AND   d.database_id < 32761 /*exclude contained AG system databases*/
-ORDER BY d.name;", connection);
-            cmd.CommandTimeout = 30;
-
-            var names = new List<string>();
-            using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                names.Add(reader.GetString(0));
-            }
-            return names;
+            var query = DatabaseQuery ?? new Func<string, Task<List<string>>>(QueryUserDatabasesAsync);
+            return await query(builder.ConnectionString);
         }
         catch (SqlException ex) when (SqlErrorClassification.ShouldFallBackToSingleDatabase(ex.Number))
         {
             /* Azure database-level firewall (or a contained login without master rights): master cannot be
                enumerated, but the connected database is reachable. Fall back to it instead of failing the
                picker outright, mirroring the collectors' single-database fallback (#1631). The connected
-               database is the connection string's own catalog. */
-            _masterUnreachableFellBackToConnectedDb = true;
+               database is the connection string's own catalog. A connection that names no database, or
+               master, has nothing to fall back to: a refused login there is a failure for the status line to
+               word, not a one-database list. */
             var connectedDb = new SqlConnectionStringBuilder(connectionString).InitialCatalog;
-            return string.IsNullOrWhiteSpace(connectedDb)
-                ? new List<string>()
-                : new List<string> { connectedDb };
+            if (!CanFallBackToConnectedDatabase(connectedDb))
+            {
+                throw;
+            }
+
+            _masterUnreachableFellBackToConnectedDb = true;
+            return new List<string> { connectedDb };
         }
+    }
+
+    /// <summary>True when the connection's own catalog is a user database the picker can offer on its own; false for none or master.</summary>
+    internal static bool CanFallBackToConnectedDatabase(string? connectedDb) =>
+        !string.IsNullOrWhiteSpace(connectedDb) && !string.Equals(connectedDb, "master", StringComparison.OrdinalIgnoreCase);
+
+    private static async Task<List<string>> QueryUserDatabasesAsync(string connectionString)
+    {
+        using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        using var cmd = new SqlCommand(@"
+SELECT d.name
+FROM sys.databases AS d
+WHERE d.database_id > 4
+AND   d.state_desc = N'ONLINE'
+AND   d.database_id < 32761 /*exclude contained AG system databases*/
+ORDER BY d.name;", connection);
+        cmd.CommandTimeout = 30;
+
+        var names = new List<string>();
+        using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            names.Add(reader.GetString(0));
+        }
+        return names;
     }
 
     /// <summary>
