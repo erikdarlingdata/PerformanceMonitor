@@ -193,19 +193,21 @@ WITH NO DATA", ct);
 
     /// <summary>
     /// #3653 (A6 + the mechanical half of A10), proven live end to end on TimescaleDB: the legacy
-    /// <c>wait_stats_baseline</c> and its interval-honest successor built side by side over the SAME planted
-    /// history, the restart collection's fabricated zero IN the legacy sum and ABSENT from the successor, the
-    /// provider reading the legacy relation while the successor is shallower for this server and the successor
-    /// once it reaches as far, and the retirement sweep holding the legacy on day one and dropping it —
-    /// policies and all — once the clock says the successor covers the tier.
+    /// <c>wait_stats_interval_baseline</c> and its cadence successor built side by side over the SAME planted
+    /// history, the restart collection (every row interval 0) a row in NEITHER relation, the provider reading the
+    /// legacy relation while the successor is shallower for this server and the successor once it reaches as far,
+    /// and the retirement sweep holding the legacy on day one and dropping it — policies and all — once the clock
+    /// says the successor covers the tier. #8106: the pair under test is the newest; the provider no longer reads
+    /// <c>wait_stats_baseline</c>, which the sweep still retires.
     ///
-    /// <para><b>The planted history is chosen so the legacy read and the successor read DIFFER.</b> The
-    /// magnitude heuristic (<c>LAG &gt; 10000</c>) catches a restart zero only when the collection before it was
-    /// busy. Here the collection before the restart carries 5,000 ms — a real but quiet minute — so the
-    /// heuristic cannot see the restart, the legacy sum counts its zero as a sample (12 samples, mean 45,417),
-    /// and the successor, which dropped it on the collector's own interval-0 verdict, does not (11 samples, mean
-    /// 49,545). That difference is the A6 contamination made measurable, and it is what makes each supply choice
-    /// below observable rather than inferred. Twelve collections per hour, because the Full tier needs
+    /// <para><b>The planted history makes the restart collection's exclusion measurable.</b> The magnitude
+    /// heuristic (<c>LAG &gt; 10000</c>) catches a restart zero only when the collection before it was busy. Here the
+    /// collection before the restart carries 5,000 ms — a real but quiet minute — so the heuristic cannot see it;
+    /// both relations drop it on the collector's own interval-0 verdict instead, so hour 1 reads 11 samples with
+    /// mean 545,000 / 11 = 49,545 (60,000 × 9 + 5,000 + 0) from the legacy while the successor is shallower and
+    /// from the successor once it covers, where the pre-#3653 <c>wait_stats_baseline</c> counted the zero as a
+    /// twelfth sample (545,000 / 12 = 45,417). The supply choice is observed through coverage (<c>min(bucket)</c>),
+    /// not through a differing figure. Twelve collections per hour, because the Full tier needs
     /// <c>BaselineMath.CollapseThreshold</c> (10) samples in the bucket to be selected at all.</para>
     ///
     /// <para>Two hours are planted: one of measured-interval collections (a restart, a measured idle zero) and
@@ -215,7 +217,7 @@ WITH NO DATA", ct);
     /// tests' fallback-view runs and by <c>SupersededBaselineRelationDropsAt</c>'s pure pins.</para>
     /// </summary>
     [Fact]
-    public async Task Supersession_RestartZeroInLegacyNotSuccessor_ProviderFollowsCoverage_SweepWaitsForTheTier_AgainstDevPostgres()
+    public async Task Supersession_RestartZeroInNeitherRelation_ProviderFollowsCoverage_SweepWaitsForTheTier_AgainstDevPostgres()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
@@ -225,8 +227,10 @@ WITH NO DATA", ct);
         const int serverId = 9107; // own id — this test cleans its own rows
         const string serverName = "supersession-e2e";
         const string waitType = "SUPERSESSION_E2E_WAIT";
-        var legacy = TimescaleSupport.LegacyWaitStatsBaselineView;
-        var successor = TimescaleSupport.WaitStatsIntervalBaselineView;
+        /* #8106: the pair under test is the newest, wait_stats_interval_baseline -> wait_stats_cadence_baseline; the legacy is created by hand
+           from its retained CREATE text, as the ensure sweep no longer knows its name. */
+        var legacy = TimescaleSupport.WaitStatsIntervalBaselineView;
+        var successor = TimescaleSupport.WaitStatsCadenceBaselineView;
 
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);
@@ -275,24 +279,24 @@ WITH NO DATA", ct);
             }
 
             /* Both aggregates, side by side, from the SAME registered/legacy texts the product carries; the
-               legacy gets the refresh policy every pre-#3653 store gave it, so the drop can be shown to cascade
+               legacy gets the refresh policy the ensure sweep gave it, so the drop can be shown to cascade
                it. Legacy refreshed over everything; successor over hour 2 ONLY, so for this server it is one
                hour shallower than the legacy — the real-time union cannot fill hour 1 for it, because an
                un-materialized region BELOW the watermark is served by neither branch. */
-            await ExecuteAsync(connection, TimescaleSupport.LegacyCreateWaitStatsBaselineSql, ct);
             await ExecuteAsync(connection, TimescaleSupport.CreateWaitStatsIntervalBaselineSql, ct);
+            await ExecuteAsync(connection, TimescaleSupport.CreateWaitStatsCadenceBaselineSql, ct);
             await ExecuteAsync(connection,
                 /* #5416: initial_start a day out, so no refresh job races the day-forty DROP (see the first test). */
                 $"SELECT add_continuous_aggregate_policy('collect.{legacy}', start_offset => INTERVAL '1 day', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', initial_start => now() + INTERVAL '1 day', if_not_exists => true)", ct);
             await RefreshFromAsync(connection, legacy, hour1, ct);
             await RefreshFromAsync(connection, successor, hour2, ct);
 
-            /* ---- A6, measured: the restart collection is a total_wait_ms = 0 row in the legacy sum and no row
-                    at all in the successor; the successor carries the measured interval for hour 1 and NULL for
-                    the pre-column hour. */
+            /* ---- A6, measured: the restart collection is a row in NEITHER relation (both carry the collector's
+                    interval-0 verdict); the legacy carries the measured interval for hour 1 and NULL for the
+                    pre-column hour. */
             var restartAt = hour1.AddMinutes(10);
-            Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT total_wait_ms FROM collect.{legacy} WHERE server_id = {serverId} AND collection_time = $1", restartAt, ct));
-            Assert.Equal(24L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{legacy} WHERE server_id = {serverId}", null, ct));
+            Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{legacy} WHERE server_id = {serverId} AND collection_time = $1", restartAt, ct));
+            Assert.Equal(23L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{legacy} WHERE server_id = {serverId}", null, ct));
 
             /* min(bucket) for this server: the legacy reaches hour 1, the successor only hour 2 — the state the
                supply rule has to notice. */
@@ -302,13 +306,14 @@ WITH NO DATA", ct);
             var provider = new PgBaselineProvider(postgres);
             var analysisTime = hour1.AddDays(7);
 
-            /* ---- the provider reads the LEGACY relation while the successor is shallower: hour 1 is the
-                    contaminated statistic (12 samples, the unseen restart zero among them). Hour 2 is the same
+            /* ---- the provider reads the LEGACY relation while the successor is shallower: hour 1 is 11 samples
+                    (the restart collection is in neither relation), mean 545,000 / 11 = 49,545.45, which is
+                    60,000 × 9 + 5,000 + 0 over 11. Hour 2 is the same
                     on either supply (NULL-interval rows keep the heuristic, which drops c3's zero after a
                     120,000 collection and keeps c4's zero after a zero): 11 samples, mean 109,091. */
             var legacyRead = await provider.GetBaselineAsync(serverId, MetricNames.WaitStats, analysisTime);
-            Assert.Equal(12L, legacyRead.SampleCount);
-            Assert.Equal(545000.0 / 12.0, legacyRead.Mean, 0.01);
+            Assert.Equal(11L, legacyRead.SampleCount);
+            Assert.Equal(545000.0 / 11.0, legacyRead.Mean, 0.01);
             Assert.Equal(BaselineTier.Full, legacyRead.Tier);
 
             var hour2Read = await provider.GetBaselineAsync(serverId, MetricNames.WaitStats, analysisTime.AddHours(1));
@@ -321,7 +326,7 @@ WITH NO DATA", ct);
             var verdict = await TimescaleSupport.JudgeSupersededBaselineRelationAsync(connection, legacy, successor, DateTime.UtcNow, ct);
             Assert.Equal(TimescaleSupport.SupersededBaselineDecision.SuccessorShort, verdict.Decision);
             Assert.True(verdict.LegacyIsContinuousAggregate);
-            /* #4289: this legacy aggregate has the restart-zero row refreshed into it (line ~267), so it HOLDS
+            /* #4289: this legacy aggregate holds hour 1's eleven rows and hour 2's twelve, so it HOLDS
                rows — the state that still waits for the successor's coverage, unlike
                EmptySupersededBaselineLiveTests.EmptyLegacyAggregate_DropsOnSight_EvenWithAnEmptySuccessor_AgainstDevPostgres. */
             Assert.True(verdict.LegacyHoldsRows);
@@ -334,8 +339,9 @@ WITH NO DATA", ct);
             Assert.Equal(1L, await ScalarAsync<long>(connection, legacyPolicySql, null, ct));
 
             /* ---- the successor catches up (the backfill's forced refresh over the whole range): now it
-                    reaches as far as the legacy for this server and the provider switches to it — the restart
-                    zero is gone from the statistic. */
+                    reaches as far as the legacy for this server and the provider switches to it — the statistic is
+                    unchanged: both relations exclude the restart collection, and with one wait type per collection
+                    the cadence is the interval the legacy carried. */
             await RefreshFromAsync(connection, successor, hour1, ct, force: true);
             Assert.Equal(23L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{successor} WHERE server_id = {serverId}", null, ct));
             Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{successor} WHERE server_id = {serverId} AND collection_time = $1", restartAt, ct));
@@ -637,7 +643,7 @@ public sealed class EmptySupersededBaselineLiveTests
     /// cref="TimescaleSupport.BaselineRetentionSpan"/> horizon) and one 5 days back — and the LEGACY aggregate
     /// is never refreshed, so its real-time aggregation (<c>timescaledb.materialized_only = false</c>) unions in
     /// BOTH raw hours regardless of age, and it holds rows. The SUCCESSOR is refreshed ONLY from the 5-day-back
-    /// hour forward, the same trick <see cref="RetiredBaselineAggregateLiveTests.Supersession_RestartZeroInLegacyNotSuccessor_ProviderFollowsCoverage_SweepWaitsForTheTier_AgainstDevPostgres"/>
+    /// hour forward, the same trick <see cref="RetiredBaselineAggregateLiveTests.Supersession_RestartZeroInNeitherRelation_ProviderFollowsCoverage_SweepWaitsForTheTier_AgainstDevPostgres"/>
     /// uses to make a successor shallower than its legacy: the un-materialized 40-day-old hour sits BELOW the
     /// resulting watermark, so it is served by neither the materialization nor the real-time union, and the
     /// successor's own oldest bucket lands at the 5-day-back hour — newer than the horizon, i.e. short.</summary>
