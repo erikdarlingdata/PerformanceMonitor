@@ -356,4 +356,35 @@ public sealed class ViewerPageLayoutNitsTests
         using var paint = ScottPlot.Paint.NewDisposablePaint();
         return axis.TickLabelStyle.Measure(label, paint).Height;
     }
+
+    /// <summary>
+    /// The Running Jobs empty text names the last good collection in the Viewer's selected time mode, like the page's other times: the
+    /// page's own text, after the tab shows its not-current note for an instant, carries that wording to the second and not the UTC
+    /// form the MCP tools use.
+    /// </summary>
+    [Fact]
+    public void TheRunningJobsEmptyText_WordsTheLastGoodCollectionInTheViewersTimeMode()
+    {
+        var at = new DateTime(2026, 11, 4, 14, 0, 0);
+        var problems = WithServerTab("DarkTheme", PaneWidth(1280), 800, (tab, window) =>
+        {
+            var found = new List<string>();
+            var expected = ViewerTimeHelper.FormatForDisplay(at, "yyyy-MM-dd HH:mm:ss");
+            tab.ShowRunningJobsNotCurrent(at);
+            var message = Find<TextBlock>(tab, "RunningJobsNoDataMessage");
+            if (!message.Text.Contains(expected, StringComparison.Ordinal))
+            {
+                found.Add($"the page reads '{message.Text}'; the Viewer words that instant as '{expected}'");
+            }
+
+            if (message.Visibility != Visibility.Visible)
+            {
+                found.Add("the note is not shown");
+            }
+
+            return found;
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
 }

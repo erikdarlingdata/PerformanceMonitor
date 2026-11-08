@@ -135,33 +135,36 @@ public sealed class PageLayoutNitsTests
     }
 
     /// <summary>
-    /// The Running Jobs empty text names the last good collection the way the tab words its other times. The note comes from
-    /// <see cref="RunningJobsCurrency"/> with the tab's own formatter (the Collection Health one, on the tab's server clock), so the
-    /// overload that takes a formatter is looked up by its signature, which lets this build where the note still has only its UTC form.
+    /// The Running Jobs empty text names the last good collection the way the tab words its other times. The page's own text, after
+    /// the tab shows its not-current note for an instant, carries the Collection Health wording on the tab's server clock (UTC-8
+    /// here) and not the UTC form the MCP tools use.
     /// </summary>
     [Fact]
     public void TheRunningJobsEmptyText_WordsTheLastGoodCollectionInTheTabsTimeMode()
     {
         var at = new DateTime(2026, 11, 4, 14, 0, 0, DateTimeKind.Utc);
-        var withFormatter = typeof(RunningJobsCurrency).GetMethod("NotCurrentNote", new[] { typeof(DateTime), typeof(Func<DateTime, string>) });
-        Assert.True(withFormatter is not null, "the not-current note takes no time formatter, so it can only name the UTC instant");
-
         var problems = WithServerTab("DarkTheme", PaneWidth(1280), 800, Credentials(), (tab, window, _) =>
         {
             var found = new List<string>();
             var clock = typeof(ServerTab).GetField("_serverClock", Instance)!.GetValue(tab);
             var format = typeof(CollectionHealthTime).GetMethod("Format", Instance | System.Reflection.BindingFlags.Static)!;
-            Func<DateTime, string> tabsWords = utc => (string)format.Invoke(null, new[] { utc, clock })!;
-            var expected = tabsWords(at);
-            var note = (string)withFormatter.Invoke(null, new object[] { at, tabsWords })!;
+            var expected = (string)format.Invoke(null, new[] { at, clock })!;
+            tab.ShowRunningJobsNotCurrent(at);
+            var message = Find<TextBlock>(tab, "RunningJobsNoDataMessage");
+            var note = message.Text;
             if (!note.Contains(expected, StringComparison.Ordinal))
             {
-                found.Add($"the note reads '{note}'; the tab words that instant as '{expected}'");
+                found.Add($"the page reads '{note}'; the tab words that instant as '{expected}'");
             }
 
             if (note.Contains(" UTC", StringComparison.Ordinal) && !expected.Contains("UTC", StringComparison.Ordinal))
             {
-                found.Add($"the note still names the UTC clock: '{note}'");
+                found.Add($"the page still names the UTC clock: '{note}'");
+            }
+
+            if (message.Visibility != Visibility.Visible)
+            {
+                found.Add("the note is not shown");
             }
 
             return found;
