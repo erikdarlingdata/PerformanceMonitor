@@ -247,7 +247,7 @@ public sealed class LiteEmptyAndCountTextTests
                     Shoot(window, $"FinOpsLocking-{theme}-{width}x{height}.png");
 
                     /* Index Analysis: the input has a label, and the lower grid shows the one empty sentence. */
-                    var input = Find<TextBox>(tab, "IndexAnalysisDatabaseInput");
+                    var input = Find<ComboBox>(tab, "IndexAnalysisDatabaseInput");
                     Reveal(input);
                     Settle(window);
                     var inputBounds = Bounds(input, tab);

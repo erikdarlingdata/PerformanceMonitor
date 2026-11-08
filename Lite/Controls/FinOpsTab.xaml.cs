@@ -188,6 +188,39 @@ public partial class FinOpsTab : UserControl
     internal static IReadOnlyList<string>? DatabaseFilterOf(ServerConnection? server) =>
         server == null || server.ViewFilterDatabases.Count == 0 ? null : server.ViewFilterDatabases.ToList();
 
+    /// <summary>
+    /// The two Index Analysis grids are wider than the page, so a horizontal scroll bar is right only while they hold rows: on an empty
+    /// grid it would scroll a header row and nothing else.
+    /// </summary>
+    private void IndexAnalysisGridsHoldRows(bool hasRows)
+    {
+        var visibility = hasRows ? ScrollBarVisibility.Auto : ScrollBarVisibility.Hidden;
+        IndexAnalysisSummaryGrid.HorizontalScrollBarVisibility = visibility;
+        IndexAnalysisDetailGrid.HorizontalScrollBarVisibility = visibility;
+    }
+
+    /// <summary>
+    /// Lists the server's current databases in the Index Analysis picker, keeping whatever name is already typed. The box stays
+    /// usable as a free text field when the store knows no databases.
+    /// </summary>
+    private async System.Threading.Tasks.Task PopulateIndexAnalysisDatabasesAsync(int serverId)
+    {
+        if (_dataService == null) return;
+        var gen = _loads.Claim(nameof(PopulateIndexAnalysisDatabasesAsync));
+        try
+        {
+            var databases = await Task.Run(() => _dataService.GetCurrentDatabasesAsync(serverId));
+            if (_loads.Superseded(nameof(PopulateIndexAnalysisDatabasesAsync), gen)) return;
+            var typed = IndexAnalysisDatabaseInput.Text;
+            IndexAnalysisDatabaseInput.ItemsSource = databases ?? [];
+            IndexAnalysisDatabaseInput.Text = typed;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Failed to list databases for index analysis: {ex.Message}", ex);
+        }
+    }
+
     private int GetSelectedServerId()
     {
         if (ServerSelector.SelectedItem is ServerConnection server)
@@ -346,7 +379,8 @@ public partial class FinOpsTab : UserControl
             LoadWaitCategorySummaryAsync(serverId),
             LoadExpensiveQueriesAsync(serverId),
             LoadMemoryGrantEfficiencyAsync(serverId),
-            LoadHighImpactQueriesAsync(serverId)
+            LoadHighImpactQueriesAsync(serverId),
+            PopulateIndexAnalysisDatabasesAsync(serverId)
         );
     }
 
@@ -367,14 +401,16 @@ public partial class FinOpsTab : UserControl
             var gen = _loads.Claim(nameof(LoadRecommendationsAsync));
 
             /* #8115: while the read runs the sub-tab says so; empty headers under the caption are otherwise the same picture as no findings. */
-            RecommendationsCountIndicator.Text = "Loading recommendations…";
+            RecommendationsCountIndicator.Text = RecommendationsLoadingText;
             RecommendationsNoDataMessage.Visibility = Visibility.Collapsed;
 
-            var utilityConnectionString = _credentialResolver.GetUtilityConnectionString(selectedServer!);
+            /* The utility credential is resolved inside the guarded read: it can refuse (a host that is no longer the one confirmed for the
+               server), and a refusal after the loading text is painted must end the same way a failed read does. */
             (System.Collections.Generic.List<PerformanceMonitorLite.Services.RecommendationRow> Rows, string? SkippedNote)? read = null;
             Exception? failure = null;
             try
             {
+                var utilityConnectionString = _credentialResolver.GetUtilityConnectionString(selectedServer!);
                 read = await Task.Run(() => _dataService.GetRecommendationsWithNoteAsync(serverId, connectionString, utilityConnectionString, _currentServerMonthlyCost));
             }
             catch (Exception ex)
@@ -385,7 +421,7 @@ public partial class FinOpsTab : UserControl
             if (failure is not null)
             {
                 /* A failed read must not keep saying it is loading; the outer catch logs it. */
-                RecommendationsCountIndicator.Text = "Recommendations could not be read";
+                RecommendationsCountIndicator.Text = RecommendationsFailedText;
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
             }
             var (data, skippedNote) = read!.Value;
@@ -398,9 +434,18 @@ public partial class FinOpsTab : UserControl
         }
         catch (Exception ex)
         {
+            /* Whatever ended the load, the caption must not keep saying it is loading: the grid under it already shows the last rows it was given. */
+            if (RecommendationsCountIndicator.Text == RecommendationsLoadingText)
+            {
+                RecommendationsCountIndicator.Text = RecommendationsFailedText;
+            }
             AppLogger.Error("FinOps", $"Failed to load recommendations: {ex.Message}", ex);
         }
     }
+
+    /// <summary>What the Cost Savings caption says while its read runs, and when the read ends without rows to paint.</summary>
+    internal const string RecommendationsLoadingText = "Loading recommendations…";
+    internal const string RecommendationsFailedText = "Recommendations could not be read";
 
     private async System.Threading.Tasks.Task LoadUtilizationAsync(int serverId)
     {
@@ -1350,6 +1395,7 @@ public partial class FinOpsTab : UserControl
                 IndexAnalysisNoDataMessage.Visibility = Visibility.Collapsed;
                 _indexSummaryFilterMgr!.UpdateData(new List<IndexCleanupSummaryRow>());
                 _indexDetailFilterMgr!.UpdateData(new List<IndexCleanupResultRow>());
+                IndexAnalysisGridsHoldRows(false);
                 return;
             }
 
@@ -1369,6 +1415,7 @@ public partial class FinOpsTab : UserControl
 
             _indexSummaryFilterMgr!.UpdateData(summaries);
             _indexDetailFilterMgr!.UpdateData(details);
+            IndexAnalysisGridsHoldRows(details.Count > 0 || summaries.Count > 0);
             IndexAnalysisNoDataMessage.Visibility = details.Count == 0 && summaries.Count == 0
                 ? Visibility.Visible : Visibility.Collapsed;
             IndexAnalysisStatusText.Text = details.Count > 0

@@ -301,6 +301,15 @@ ORDER BY c.day";
             var p95Cpu = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3));
             var memRatio = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4));
 
+            var maxGrantWaiters = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
+            var grantTimeouts = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
+            var forcedGrants = reader.IsDBNull(7) ? 0L : ToInt64(reader.GetValue(7));
+            var maxWorkers = reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9));
+            var currentWorkers = reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10));
+            var engineEdition = reader.IsDBNull(11) ? (int?)null : Convert.ToInt32(reader.GetValue(11));
+            decimal? stolenMemoryPercent = reader.IsDBNull(14) || reader.IsDBNull(15)
+                ? null
+                : ProvisioningVerdict.StolenMemoryPercent(Convert.ToDouble(reader.GetValue(14)), Convert.ToDouble(reader.GetValue(15)));
             var status = ProvisioningVerdict.Evaluate(
                 avgCpu, maxCpu, p95Cpu,
                 maxGrantWaiters: reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5)),
@@ -324,7 +333,12 @@ ORDER BY c.day";
                 MaxCpuPct = maxCpu,
                 P95CpuPct = p95Cpu,
                 MemoryRatio = memRatio,
-                Status = status
+                Status = status,
+                StolenMemoryPct = stolenMemoryPercent,
+                /* The reason comes from the same place as the verdict, as the badge's does. */
+                StatusReason = status == ProvisioningVerdict.UnderProvisioned
+                    ? ProvisioningVerdict.UnderProvisionedReason(p95Cpu, maxGrantWaiters, grantTimeouts, forcedGrants, maxWorkers, currentWorkers, stolenMemoryPercent, engineEdition)
+                    : null
             });
         }
         return items;

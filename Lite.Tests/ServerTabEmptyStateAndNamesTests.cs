@@ -267,7 +267,7 @@ public class ServerTabEmptyStateAndNamesTests
     [InlineData("Lite/Controls/FinOpsTab.xaml", "StringFormat='{}{0:yyyy-MM-dd HH:mm:ss}'}\" Width=\"156\"")]
     [InlineData("Lite/Controls/FinOpsTab.xaml", "Binding=\"{Binding SkippedLowWaterMark, StringFormat='{}{0:N0}'}\" Width=\"171\"")]
     [InlineData("Lite/Controls/FinOpsTab.xaml", "Binding=\"{Binding DailyWriteOpsSaved}\" Width=\"166\"")]
-    [InlineData("Lite/Controls/FinOpsTab.xaml", "Header=\"Query Preview\" Width=\"350\"")]
+    [InlineData("Lite/Controls/FinOpsTab.xaml", "Header=\"Query Preview\" Width=\"*\" MinWidth=\"200\"")]
     [InlineData("Lite/Controls/FinOpsTab.xaml", "Binding=\"{Binding AvgLogicalReads, StringFormat='{}{0:N0}'}\" Width=\"161\"")]
     [InlineData("Lite/Controls/FinOpsTab.xaml", "Binding=\"{Binding CpuCount, StringFormat='{}{0:N0}'}\" Width=\"131\"")]
     [InlineData("Lite/Controls/JobHistoryTab.xaml", "Binding=\"{Binding RunStatusDesc}\" Width=\"100\"")]
