@@ -490,11 +490,14 @@ public sealed class DarlingObservabilityTests
         Assert.Contains("create_hypertable('collect.collection_log', by_range('collection_time', INTERVAL '1 days')", v23, StringComparison.Ordinal);
         Assert.Contains("migrate_data => true", v23, StringComparison.Ordinal);
         Assert.Contains("if_not_exists => true", v23, StringComparison.Ordinal);
-        /* V23's own compression text: segment by server_id, 1-day compress-after. Since #4951 the runtime path moves
-           collection_log to server_id and collector_name at first start; this text stays as written, because a
-           migration is never edited. */
+        /* V23's own compression text: segment by server_id, and no policy. Since #4951 the runtime path moves
+           collection_log to server_id and collector_name at first start. The policy comes only from the runtime
+           EnsureCollectionLogHypertableAsync, which puts it on the hourly cadence and its phase minute (#8275): a policy
+           added here with TimescaleDB's defaults ran on its creation minute within seconds, before the runtime converge
+           could phase it, and a store whose database already had the extension warned of an overrun with no clearance
+           on its first housekeeping pass. */
         Assert.Contains("ALTER TABLE collect.collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", v23, StringComparison.Ordinal);
-        Assert.Contains("add_compression_policy('collect.collection_log', compress_after => INTERVAL '1 days', if_not_exists => true)", v23, StringComparison.Ordinal);
+        Assert.DoesNotContain("add_compression_policy", v23, StringComparison.Ordinal);
 
         var v2 = PgMigrations.Scripts[1].Sql;
         Assert.Contains("CREATE TABLE IF NOT EXISTS servers (", v2, StringComparison.Ordinal);
