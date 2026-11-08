@@ -28,9 +28,7 @@ namespace PerformanceMonitorLite.Services;
 ///
 /// <para><b>The overlay is an optional extra and can never cost the grid a row.</b> Its read
 /// (<see cref="LocalDataService.GetServerMetricsAsync"/>) and its per-server merge are both guarded here: an
-/// exception in either leaves that overlay blank and is logged, and the rows still come back. The merge
-/// used to sit inside the per-server live-query catch, where any throw dropped the whole server from the
-/// inventory, and the read's catch swallowed its exception without a log line.</para>
+/// exception in either leaves that overlay blank and is logged, and the rows still come back.</para>
 ///
 /// <para><b>Servers come from the monitor's own list, not from the collected data.</b> The collected set
 /// also holds a server removed from the list until retention purges its rows; looking each listed server up
