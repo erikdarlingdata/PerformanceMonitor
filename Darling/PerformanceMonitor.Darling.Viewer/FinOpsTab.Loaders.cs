@@ -327,7 +327,7 @@ public partial class FinOpsTab
         /* Physical memory and the buffer pool's share of it come from memory_stats, which on an Azure SQL Database is the
            database's own (its memory limit, from committed_target_kb), not the host's RAM. So both are shown on every
            edition, and only the caption and the verdict's wording change there. */
-        FinOpsMemoryRatioText.Text = $"{bpPct:N0}%";
+        FinOpsMemoryRatioText.Text = $"{bpPct:N1}%";
         SetBar(FinOpsMemoryRatioBar, FinOpsMemRatioFilled, FinOpsMemRatioEmpty, bpPct);
 
         FinOpsPhysicalMemoryCaption.Text = ServerHardwareScope.PhysicalMemoryCaption(data.EngineEdition);

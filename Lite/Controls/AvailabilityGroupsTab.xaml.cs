@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Controls;
@@ -47,6 +48,30 @@ public partial class AvailabilityGroupsTab : UserControl
     public AvailabilityGroupsTab()
     {
         InitializeComponent();
+        AgCards.ItemsSource = _cards;
+        _boundTheme = ThemeManager.CurrentTheme;
+        Loaded += (_, _) =>
+        {
+            ThemeManager.ThemeChanged += OnThemeChanged;
+            if (_boundTheme != ThemeManager.CurrentTheme)
+            {
+                BindCardsAgain();
+            }
+        };
+        Unloaded += (_, _) => ThemeManager.ThemeChanged -= OnThemeChanged;
+    }
+
+    /// <summary>The theme the cards were last bound under.</summary>
+    private string _boundTheme;
+
+    private void OnThemeChanged(string _) => BindCardsAgain();
+
+    /// <summary>#8221: a card's severity brushes are read from the theme when it is bound (<see cref="SeverityBrushConverter"/>), so a
+    /// theme change binds the cards again; the collection and its cards are the same ones.</summary>
+    private void BindCardsAgain()
+    {
+        _boundTheme = ThemeManager.CurrentTheme;
+        AgCards.ItemsSource = null;
         AgCards.ItemsSource = _cards;
     }
 

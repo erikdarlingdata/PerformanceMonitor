@@ -104,6 +104,20 @@ public sealed class EmailSendCore
     }
 
     /// <summary>
+    /// Whether SMTP is configured well enough for an alert email to be attempted: enabled, with a server and a from address,
+    /// and somebody named to receive it (#4751: the default recipient list, or an enabled route's recipients; a route's
+    /// recipients alone are enough, because the host, from address and credentials still come from the parent). The one
+    /// expression that decides whether email is attempted, answers "is any channel configured at all", and says whether the
+    /// Email entry in <see cref="WebhookAlertService.GetChannelFailureCounts"/> still has a destination (#8245).
+    /// </summary>
+    public static bool SmtpConfigured(IAlertSettings settings) =>
+        settings.SmtpEnabled &&
+        !string.IsNullOrWhiteSpace(settings.SmtpServer) &&
+        !string.IsNullOrWhiteSpace(settings.SmtpFromAddress) &&
+        (!string.IsNullOrWhiteSpace(settings.SmtpRecipients) ||
+         NotificationRouter.AnyRouteConfiguresEmail(settings.NotificationRoutes));
+
+    /// <summary>
     /// Attempts email delivery (if SMTP is configured and outside the per-metric cooldown)
     /// and the webhook fan-out, and reports what happened so the caller can record its
     /// app-specific alert-history rows. Throws only the caller's own cancellation.
@@ -172,12 +186,7 @@ public sealed class EmailSendCore
            #4751: somebody has to be named to receive it — the default recipient list, or an enabled route's
            recipients. A route's recipients alone are enough: the host, from address and credentials still come
            from the parent, and which firing they cover is decided per firing below. */
-        var smtpConfigured =
-            _settings.SmtpEnabled &&
-            !string.IsNullOrWhiteSpace(_settings.SmtpServer) &&
-            !string.IsNullOrWhiteSpace(_settings.SmtpFromAddress) &&
-            (!string.IsNullOrWhiteSpace(_settings.SmtpRecipients) ||
-             NotificationRouter.AnyRouteConfiguresEmail(_settings.NotificationRoutes));
+        var smtpConfigured = SmtpConfigured(_settings);
 
         var anyChannelConfigured = smtpConfigured || _webhookAlertService.AnyWebhookConfigured;
 
@@ -261,7 +270,10 @@ public sealed class EmailSendCore
                    be blank — a firing no route covers, with no default list, has nobody to send to. */
                 emailRoute = NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings, NotificationRouter.ParseServerId(serverId),
                     AlertSeverity.RouteLevelOf(metricName, context?.SeverityOverride));
-                var recipients = emailRoute.Email.Destination ?? _settings.SmtpRecipients;
+                /* #8246: a route that turns email off for this firing means no email, not the default list, as the webhook
+                   fan-out reads an off channel. No route store writes Email into OffChannels today (a recipient list is not
+                   a secret that can fail to be read), so this arm is the fallback's safety, not a path an operator can set. */
+                var recipients = emailRoute.Email.IsOff ? null : emailRoute.Email.Destination ?? _settings.SmtpRecipients;
 
                 if (string.IsNullOrWhiteSpace(recipients))
                 {
@@ -273,8 +285,9 @@ public sealed class EmailSendCore
                        failed row and a consecutive-failure count. `emailRoute` stays set: it is the firing's
                        routing record for the alert log. */
                     _repeatBudget.Release(budget);
-                    _logger.LogDebug(
-                        $"Alert email for {metricName} on {serverName} skipped: no notification route covers it and no default recipients are set");
+                    _logger.LogDebug(emailRoute.Email.IsOff
+                        ? $"Alert email for {metricName} on {serverName} skipped: a notification route turns email off for it"
+                        : $"Alert email for {metricName} on {serverName} skipped: no notification route covers it and no default recipients are set");
                 }
                 else
                 {
@@ -300,6 +313,11 @@ public sealed class EmailSendCore
                         _consecutiveFailures = 0;
                         _lastFailureError = null;
 
+                        /* #8245: the Email entry of the shared channel ledger, which both hosts' "Notification Channel
+                           Failing" checks read beside the webhook destinations. One ledger per webhook service, so the
+                           alert core and the analysis-page core, which share a relay, share the entry. */
+                        _webhookAlertService.RecordEmailDelivered();
+
                         _logger.LogInformation($"Alert email sent for {metricName} on {serverName}");
                     }
                     catch (Exception ex)
@@ -312,6 +330,7 @@ public sealed class EmailSendCore
                         sendError = ex.Message;
                         _consecutiveFailures++;
                         _lastFailureError = ex.Message;
+                        _webhookAlertService.RecordEmailFailure(ex.Message);
 
                         if (_consecutiveFailures <= 3)
                         {

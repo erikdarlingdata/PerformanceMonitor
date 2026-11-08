@@ -310,7 +310,7 @@ public sealed class AzureSqlDatabaseMemoryScopeTests : IClassFixture<SharedDuckD
     {
         var tab = ReadRepoFile("Lite/Controls/FinOpsTab.xaml.cs");
 
-        Assert.Contains("MemoryRatioText.Text = $\"{bpPct:N0}%\";", tab, StringComparison.Ordinal);
+        Assert.Contains("MemoryRatioText.Text = $\"{bpPct:N1}%\";", tab, StringComparison.Ordinal);
         Assert.Contains("SetBar(MemoryRatioBar, MemRatioFilled, MemRatioEmpty, bpPct);", tab, StringComparison.Ordinal);
         Assert.Contains("PhysicalMemoryText.Text = $\"{data.PhysicalMemoryMb:N0} MB\";", tab, StringComparison.Ordinal);
         Assert.DoesNotContain("ServerHardwareScope.NotApplicable", tab, StringComparison.Ordinal);

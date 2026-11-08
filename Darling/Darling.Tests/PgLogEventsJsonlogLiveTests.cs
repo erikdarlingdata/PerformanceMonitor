@@ -97,12 +97,8 @@ public sealed class PgLogEventsJsonlogLiveTests
         {
             await DarlingMcpTestData.RegisterServerAsync(storeConnection, ServerId, ServerName, ct);
 
-            await SendForgedLoginAsync(target!, ForgedStderrUserName, ct);
-
             await using var targetConnection = new NpgsqlConnection(target);
             await targetConnection.OpenAsync(ct);
-
-            await PgLogLiveWait.WaitForTextAsync(targetConnection, "json", ct, "UTC [1] LOG:  forged");
 
             var usesJsonlog = await PgLogFormatCapability.IsJsonlogEnabledAsync(targetConnection, target!, ct);
             Assert.True(usesJsonlog, "the rig's log_destination must include jsonlog for this route to be exercised.");
@@ -110,40 +106,52 @@ public sealed class PgLogEventsJsonlogLiveTests
             var usesCsvlog = await PgLogFormatCapability.IsCsvlogEnabledAsync(targetConnection, target!, ct);
             Assert.False(usesCsvlog, "the rig's log_destination must not include csvlog for this to prove the jsonlog route alone.");
 
-            foreach (var binaryGranted in new[] { false, true })
-            {
-                var context = new CollectorContext
+            /* #8205: the forged login, the wait and the read go through the rotation-aware helper, so a log rotation between
+               the write and the read (midnight, log_rotation_size) has the login sent again into the file the collector tails. */
+            await PgLogLiveWait.ReadOwnRecordAcrossRotationAsync(targetConnection, "json", "UTC [1] LOG:  forged",
+                write: async () => await SendForgedLoginAsync(target!, ForgedStderrUserName, ct),
+                read: async () =>
                 {
-                    LogHashKey = TestLogHashKeys.Fixed,
-                    ServerId = ServerId, ServerName = ServerName,
-                    CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
-                    Deltas = new CollectorDeltaCalculator(),
-                    Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
-                    PgLogUsesJsonlog = true,
-                    PgReadBinaryFileGranted = binaryGranted,
-                };
+                    foreach (var binaryGranted in new[] { false, true })
+                    {
+                        var context = new CollectorContext
+                        {
+                            LogHashKey = TestLogHashKeys.Fixed,
+                            ServerId = ServerId, ServerName = ServerName,
+                            CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
+                            Deltas = new CollectorDeltaCalculator(),
+                            Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
+                            PgLogUsesJsonlog = true,
+                            PgReadBinaryFileGranted = binaryGranted,
+                        };
 
-                var definition = PgLogEventsCollector.Instance;
-                await using var command = PostgresTargetProvider.Instance.CreateCommand(definition.BuildQuery(context), targetConnection, 30);
-                await using var reader = await command.ExecuteReaderAsync(ct);
-                var rows = await definition.ReadAsync(reader, context, ct);
+                        var definition = PgLogEventsCollector.Instance;
+                        await using var command = PostgresTargetProvider.Instance.CreateCommand(definition.BuildQuery(context), targetConnection, 30);
+                        await using var reader = await command.ExecuteReaderAsync(ct);
+                        var rows = await definition.ReadAsync(reader, context, ct);
 
-                /* The forged text lands INSIDE the real FATAL auth-failure event's own message text — the
-                   record it was planted into — never as a separate line of its own. */
-                var fatalCount = rows.Count(r =>
-                    r.Severity == "FATAL"
-                    && r.Message != null
-                    && r.Message.Contains("forged", StringComparison.Ordinal));
-                Assert.True(fatalCount >= 1,
-                    $"expected at least the one forged FATAL event this run planted; got {fatalCount}.");
+                        /* The forged text lands INSIDE the real FATAL auth-failure event's own message text — the
+                           record it was planted into — never as a separate line of its own. No forged FATAL at all
+                           means the read saw no forged login: its record is not in the file the read tailed. */
+                        var fatalCount = rows.Count(r =>
+                            r.Severity == "FATAL"
+                            && r.Message != null
+                            && r.Message.Contains("forged", StringComparison.Ordinal));
+                        if (fatalCount == 0)
+                        {
+                            return false;
+                        }
 
-                /* No event was forged OUT of the planted newline: no pid 1, no severity LOG with message
-                   "forged" standing on its own. */
-                Assert.DoesNotContain(rows, r => r.Pid == 1);
-                Assert.DoesNotContain(rows, r => r.Severity == "LOG" && r.Message == "forged");
+                        /* No event was forged OUT of the planted newline: no pid 1, no severity LOG with message
+                           "forged" standing on its own. */
+                        Assert.DoesNotContain(rows, r => r.Pid == 1);
+                        Assert.DoesNotContain(rows, r => r.Severity == "LOG" && r.Message == "forged");
 
-                Assert.NotEmpty(rows);
-            }
+                        Assert.NotEmpty(rows);
+                    }
+
+                    return true;
+                }, ct);
 
             bodySucceeded = true;
         }

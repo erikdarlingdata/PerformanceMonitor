@@ -968,4 +968,18 @@ public class SameStatementPileupDetectorTests
         Assert.Empty(SameStatementPileupDetector.Evaluate(IncidentServer, [], JustAfterPileup));
         Assert.Empty(SameStatementPileupDetector.Evaluate(IncidentServer, null!, JustAfterPileup));
     }
+
+    /// <summary>#8157: a window reader that filled its row cap asks whether its rows still reach the baseline floor
+    /// <see cref="SameStatementPileupDetector.Evaluate"/> draws. The floor is strict. A row cap over newest-first rows cuts
+    /// mid-snapshot, so rows that stop exactly on the floor instant can be a partial snapshot, and the baseline keeps that
+    /// instant: only a row past the floor proves every baseline instant was read whole. No rows reach nothing.</summary>
+    [Fact]
+    public void ReachingTheBaselineFloor_TakesARowPastIt_NotOneOnIt()
+    {
+        var floor = PileupAt.AddMinutes(-SameStatementPileupDetector.BaselineLookbackMinutes);
+
+        Assert.False(SameStatementPileupDetector.ReachesBaselineFloor([Row(PileupAt, 649, 29_124), Row(floor, 300, 54)]));
+        Assert.True(SameStatementPileupDetector.ReachesBaselineFloor([Row(PileupAt, 649, 29_124), Row(floor.AddTicks(-1), 300, 54)]));
+        Assert.False(SameStatementPileupDetector.ReachesBaselineFloor([]));
+    }
 }
