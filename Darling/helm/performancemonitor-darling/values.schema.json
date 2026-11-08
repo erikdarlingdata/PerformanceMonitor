@@ -62,7 +62,7 @@
       "items": {
         "type": "object",
         "properties": {
-          "placeholder": { "type": "string", "minLength": 1 },
+          "placeholder": { "type": "string", "pattern": "^@@[A-Za-z0-9_]+@@$" },
           "secretKey": { "type": "string", "minLength": 1 }
         },
         "required": ["placeholder", "secretKey"]

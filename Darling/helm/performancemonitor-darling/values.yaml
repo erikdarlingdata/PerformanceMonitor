@@ -75,7 +75,7 @@ extraVolumeMounts: []
 # Strings may contain a placeholder listed in configSubstitutions; its secret value is written in when the pod starts.
 config: {}
 
-# A list of { placeholder, secretKey }. At pod start an init container replaces every occurrence of `placeholder` in darling.json
+# A list of { placeholder, secretKey }. A placeholder must look like @@NAME@@ (NAME: A-Z a-z 0-9 _). At pod start an init container replaces every occurrence of `placeholder` in darling.json
 # with the value of `secretKey` from the Secret below, so a secret such as a webhook URL never lands in a ConfigMap.
 # A value may only contain A-Z a-z 0-9 and : / . _ ~ % ? = & + # - ; anything else stops the pod from starting. One trailing
 # newline is dropped first (kubectl create secret --from-file keeps a file's last one); a newline anywhere else is refused.
@@ -95,6 +95,9 @@ passwordKey:
 secrets:
   # Name of a Secret you manage (GitOps installs must use this). Empty makes the chart create one from `values` plus generated tokens.
   existingSecret: ""
+  # The Darling container gets only the keys darling.json references as file:/run/secrets/darling/<key> (the token keys
+  # and the keys config names); a key used only by configSubstitutions is never mounted. So a server added later through
+  # the dashboard or MCP with a file: password must use a key darling.json already references, or a file from extraVolumes.
   # Extra keys of the chart-created Secret (key: value). A key set here wins over generation.
   values: {}
   # Key of the web dashboard token in the Secret. The chart generates it (40 random characters) when the key is not in
@@ -112,7 +115,8 @@ store:
     # The store image. Keep it equal to STORE_IMAGE in .github/workflows/darling-linux-store.yml, the image CI tests Darling against.
     image: timescale/timescaledb:2.31.0-pg17
     persistence:
-      # Size of the store's data volume.
+      # Size of the store's data volume. Changing it later makes helm upgrade fail (a StatefulSet's volumeClaimTemplates
+      # cannot change): resize the PVC itself (see the README's Upgrades).
       size: 10Gi
       # Storage class of the data volume. Empty uses the cluster default.
       storageClass: ""

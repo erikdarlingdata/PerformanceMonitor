@@ -503,3 +503,44 @@ grep -qF "kubectl get secret mine" <<<"${n}" || { echo "NOTES lack the token com
 grep -qF "{.data.web-token}" <<<"${n}" || { echo "NOTES do not name the web token key" >&2; exit 1; }
 n="$(notes --set secrets.existingSecret=mine --set secrets.webTokenKey=dash --set store.bundled.auth.existingSecret=x --set image.tag=1)"
 grep -qF "{.data.dash}" <<<"${n}" || { echo "NOTES do not name a custom web token key" >&2; exit 1; }
+
+t fail_network_block_in_another_case
+# The chart writes its own network block inside web and mcp; a Network block beside it would lose its tls or oidc settings.
+assert_fails "config.web.Network must be spelled config.web.network" --set config.web.Network.tls.certPath=cert.pem
+assert_fails "config.mcp.NETWORK must be spelled config.mcp.network" --set config.mcp.NETWORK.tls.certPath=cert.pem
+render --set config.web.network.tls.certPath=cert.pem
+assert_eq "$(config_json '.web.network.tls.certPath')" '"cert.pem"' "web.network.tls passes through"
+assert_eq "$(config_json '.web.network.token')" '"file:/run/secrets/darling/web-token"' "chart network keys kept beside it"
+
+t placeholder_must_be_at_tokens
+# A placeholder such as "darling" or "token" would rewrite chart-owned values (file:/run/secrets/darling/web-token).
+for p in darling token '@@a-b@@' '@@@@' 'x@@A@@'; do
+  assert_fails "Does not match pattern" --set "configSubstitutions[0].placeholder=${p}" --set 'configSubstitutions[0].secretKey=k'
+done
+render --set 'configSubstitutions[0].placeholder=@@Hook_1@@' --set 'configSubstitutions[0].secretKey=k'
+
+# The keys of the secrets volume's items, comma-joined; empty when the volume is not rendered.
+secret_items() {
+  dq '[.spec.template.spec.volumes[] | select(.name == "secrets") | .secret.items[] | .key + "=" + .path] | join(",")' | tr -d '"'
+}
+
+t secret_mount_only_referenced_keys
+# Only the keys darling.json references as file:/run/secrets/darling/<key> are mounted: a substitution-only key reaches the
+# init container through env and is never a file a server's password reference could name.
+render --set mcp.enabled=true \
+  --set-json 'config={"servers":[{"name":"a","host":"h","password":"file:/run/secrets/darling/sql-a"}],"webhooks":{"slackUrl":"@@HOOK@@"}}' \
+  --set 'configSubstitutions[0].placeholder=@@HOOK@@' --set 'configSubstitutions[0].secretKey=hook'
+assert_eq "$(secret_items)" "mcp-token=mcp-token,sql-a=sql-a,web-token=web-token" "mounted keys"
+assert_eq "$(dq '.spec.template.spec.initContainers[0].env[] | select(.name == "DARLING_SUBST_0_VALUE") | .valueFrom.secretKeyRef.key')" '"hook"' "hook still reaches the init container"
+render
+assert_eq "$(secret_items)" "web-token=web-token" "default: the web token only"
+render --set secrets.webTokenKey=dash
+assert_eq "$(secret_items)" "dash=dash" "custom token key"
+# Other mounts under /run/secrets are not the chart Secret's keys.
+render --set passwordKey.existingSecret=pk
+assert_eq "$(secret_items)" "web-token=web-token" "password key not in the chart Secret's items"
+# Nothing referenced: no secrets volume and no mount at all, never an empty items list.
+render --set web.enabled=false --set 'configSubstitutions[0].placeholder=@@HOOK@@' --set 'configSubstitutions[0].secretKey=hook' \
+  --set-json 'config={"webhooks":{"slackUrl":"@@HOOK@@"}}'
+assert_eq "$(dq '[.spec.template.spec.volumes[] | select(.name == "secrets")] | length')" "0" "no secrets volume"
+assert_eq "$(dq '[.spec.template.spec.containers[0].volumeMounts[] | select(.mountPath == "/run/secrets/darling")] | length')" "0" "no secrets mount"

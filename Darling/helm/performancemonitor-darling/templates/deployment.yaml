@@ -18,6 +18,7 @@ spec:
   selector:
     matchLabels:
       {{- include "performancemonitor-darling.selectorLabels" . | nindent 6 }}
+  {{- $secretKeys := include "performancemonitor-darling.referencedSecretKeys" . | fromJsonArray }}
   template:
     metadata:
       labels:
@@ -180,9 +181,11 @@ spec:
               mountPath: /usr/share/PerformanceMonitorDarling
             - name: tmp
               mountPath: /tmp
+            {{- if $secretKeys }}
             - name: secrets
               mountPath: /run/secrets/darling
               readOnly: true
+            {{- end }}
             {{- if and .Values.passwordKey.existingSecret (eq .Values.passwordKey.source "file") }}
             - name: password-key
               mountPath: /run/secrets/darling-password-key
@@ -229,10 +232,19 @@ spec:
         - name: config-template
           configMap:
             name: {{ include "performancemonitor-darling.fullname" . }}
+        {{- /* Only the keys darling.json references (file:/run/secrets/darling/<key>): a key that only configSubstitutions
+        uses reaches the init container through env and is never a file here, so no server can name it as a password. */}}
+        {{- if $secretKeys }}
         - name: secrets
           secret:
             secretName: {{ include "performancemonitor-darling.secretName" . }}
             defaultMode: 288
+            items:
+              {{- range $secretKeys }}
+              - key: {{ . | quote }}
+                path: {{ . | quote }}
+              {{- end }}
+        {{- end }}
         {{- if and .Values.passwordKey.existingSecret (eq .Values.passwordKey.source "file") }}
         - name: password-key
           secret:

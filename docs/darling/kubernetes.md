@@ -8,7 +8,7 @@ The repository carries a Helm chart for Darling: [`Darling/helm/performancemonit
 helm install darling Darling/helm/performancemonitor-darling --set-string image.tag=<release>
 ```
 
-Pin `image.tag` to a release, because `latest` moves. Use `--set-string` with `--set`, because a float-looking tag such as `3.10` loses digits otherwise.
+Pin `image.tag` to a release, because `latest` moves. Use `--set-string`, not `--set`, because a float-looking tag such as `3.10` loses digits otherwise.
 
 The chart README is the reference. It covers:
 

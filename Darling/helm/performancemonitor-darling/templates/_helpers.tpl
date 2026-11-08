@@ -118,6 +118,18 @@ darling.json, and Darling, which reads keys ignoring case, would read only one o
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- /* The same inside web and mcp: the chart writes its own network block there, and a Network block beside it would be
+dropped without a message (its tls or oidc settings with it). */ -}}
+{{- range $surface := list "web" "mcp" -}}
+{{- $block := get $.Values.config $surface -}}
+{{- if kindIs "map" $block -}}
+{{- range $key, $_ := $block -}}
+{{- if and (eq (lower $key) "network") (ne $key "network") -}}
+{{- fail (printf "config.%s.%s must be spelled config.%s.network: the chart writes its own network block, and Darling reads keys ignoring case, so it would read only one of the two" $surface $key $surface) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{/* A surface's effective network list as JSON: the per-surface override (web.network.<field>) when non-empty, else network.<field>.
@@ -240,6 +252,21 @@ Arguments: dict "ctx" <root> "surface" "web"|"mcp" "field" "allowFrom"|"trustedP
 {{- end -}}
 {{- end -}}
 {{- mergeOverwrite (deepCopy .Values.config) $owned | toPrettyJson -}}
+{{- end -}}
+
+{{/* The keys of the chart Secret that darling.json references as file:/run/secrets/darling/<key> (the chart's token keys
+included), as a sorted JSON list without duplicates. The secrets volume mounts only these keys, so a key that only
+configSubstitutions uses never reaches the Darling container as a file: it would otherwise resolve as a server's password
+reference. Darling trims the path after file:, so whitespace there still counts. */}}
+{{- define "performancemonitor-darling.referencedSecretKeys" -}}
+{{- $keys := list -}}
+{{- range regexFindAll `file:\s*/run/secrets/darling/[-._a-zA-Z0-9]+` (include "performancemonitor-darling.darlingJson" .) -1 -}}
+{{- $key := regexReplaceAll `^file:\s*/run/secrets/darling/` . "" -}}
+{{- if not (or (eq $key ".") (hasPrefix ".." $key)) -}}
+{{- $keys = append $keys $key -}}
+{{- end -}}
+{{- end -}}
+{{- toJson ($keys | uniq | sortAlpha) -}}
 {{- end -}}
 
 {{/* Name of the bundled store resources, at most 52 characters: the StatefulSet's pods get a controller-revision-hash label
