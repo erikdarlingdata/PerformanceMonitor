@@ -25,7 +25,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ViewerGridScrollBarThemeTests
 {
-    private sealed record Laid(bool VerticalShown, bool HorizontalShown, int ArrowButtons, double ThumbWidth, Color ThumbCenter, Color ThemeBorder,
+    private sealed record Laid(bool VerticalShown, bool HorizontalShown, int ArrowButtons, double ThumbWidth, Color ThumbCenter, Color ThemeThumb,
         double ColumnsTotal, double Viewport, double Scrollable);
 
     private static bool Shows(ScrollBar bar) => bar.Visibility == Visibility.Visible && bar.ActualWidth > 0 && bar.ActualHeight > 0;
@@ -73,7 +73,7 @@ public sealed class ViewerGridScrollBarThemeTests
                         || b.Command == ScrollBar.LineLeftCommand || b.Command == ScrollBar.LineRightCommand));
 
                 return new Laid(Shows(vertical), Shows(horizontal), arrows, vertical.ActualWidth, thumbColor,
-                    ((SolidColorBrush)grid.FindResource("BorderBrush")).Color, grid.Columns.Sum(c => c.ActualWidth), scroll.ViewportWidth, scroll.ScrollableWidth);
+                    ((SolidColorBrush)grid.FindResource("ScrollBarThumbBrush")).Color, grid.Columns.Sum(c => c.ActualWidth), scroll.ViewportWidth, scroll.ScrollableWidth);
             }
             finally
             {
@@ -104,7 +104,7 @@ public sealed class ViewerGridScrollBarThemeTests
         Assert.True(laid.VerticalShown);
         Assert.Equal(0, laid.ArrowButtons);
         Assert.True(laid.ThumbWidth <= 14, $"a thin scroll bar, got {laid.ThumbWidth}");
-        Assert.Equal((laid.ThemeBorder.R, laid.ThemeBorder.G, laid.ThemeBorder.B), (laid.ThumbCenter.R, laid.ThumbCenter.G, laid.ThumbCenter.B));
+        Assert.Equal((laid.ThemeThumb.R, laid.ThemeThumb.G, laid.ThemeThumb.B), (laid.ThumbCenter.R, laid.ThumbCenter.G, laid.ThumbCenter.B));
     }
 
     [Theory]

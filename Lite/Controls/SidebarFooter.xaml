@@ -17,7 +17,10 @@
             <ColumnDefinition Width="*"/>
             <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
+        <!-- Three rows for the 2x2 block and More; five when the rail stacks the buttons one per row (SetCompact). -->
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -56,7 +59,7 @@
         <Button x:Name="MoreButton" Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2" Padding="6,4" Margin="2" HorizontalContentAlignment="Left" Click="More_Click"
                 AutomationProperties.Name="More" ToolTip="Tags, import, logs, plan viewer and about">
             <Button.ContextMenu>
-                <ContextMenu x:Name="MoreMenu" Placement="Right">
+                <ContextMenu x:Name="MoreMenu" Placement="Custom">
                     <MenuItem x:Name="AddMultipleServersItem" AutomationProperties.Name="Add Multiple Servers…" Header="Add Multiple Servers…" Click="AddMultipleServers_Click"
                               ToolTip="Paste a list of servers and add them all at once with shared credentials"/>
                     <MenuItem x:Name="ManageTagsItem" AutomationProperties.Name="Manage Tags" Header="Manage Tags" Click="ManageTags_Click"/>
