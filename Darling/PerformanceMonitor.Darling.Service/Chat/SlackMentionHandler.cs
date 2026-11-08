@@ -161,6 +161,15 @@ public sealed class SlackMentionHandler : ISlackEventHandlers
             return;
         }
 
+        /* Routes may share a channel, and the channel's route above is only the ownership check: the thread's own route gives the cap its open is
+           counted against. A thread whose own route is gone or disabled stays silent, as an unowned channel does. */
+        route = _routes().FirstOrDefault(r => r.RouteId == thread.RouteId);
+        if (route is null || !route.Enabled)
+        {
+            _logger.LogDebug("Slack mention in the thread of request {ThreadRequestId}, whose route {RouteId} is gone or disabled; nothing is done", thread.ThreadRequestId, thread.RouteId);
+            return;
+        }
+
         if (IsTooOld(thread.OpenedAtUtc, now))
         {
             await RefuseAsync(thread.ThreadRequestId, thread.RouteId, thread.ServerId, thread.ChannelId, thread.ThreadTs, identity, identity, SlackChatAnswers.OldKind, SlackChatAnswers.OldRequest, inbound, now, cancellationToken);
@@ -308,7 +317,16 @@ internal static class SlackChatAnswering
             }
             else if (outcome == SlackChatOpenOutcome.ParentGone)
             {
-                logger.LogWarning("Slack mention could not open a chat request: the parent request {Parent} is gone", parentRequestId);
+                /* No request can open for these messages now or on any later pass, so they are refused (no post) rather than left waiting. */
+                logger.LogWarning("Slack mention could not open a chat request: the parent request {Parent} is gone; {Messages} message(s) are refused", parentRequestId, messages.Count);
+                foreach (var message in messages)
+                {
+                    await store.RefuseMessageAsync(message, cancellationToken);
+                }
+            }
+            else if (outcome == SlackChatOpenOutcome.NothingWaiting)
+            {
+                logger.LogDebug("Slack chat request open for the thread of request {ThreadRequestId} found its {Messages} message(s) already taken", thread.ThreadRequestId, messages.Count);
             }
         }
 
@@ -360,6 +378,15 @@ public sealed class SlackChatSweep
             var route = routes.FirstOrDefault(r => r.RouteId == waiting.RouteId);
             if (route is null || !route.Enabled)
             {
+                /* No request can open on a route that is gone or disabled, so the thread's waiting messages are refused (no post, no journal row)
+                   rather than holding a slot of every later batch ahead of threads that can open. */
+                foreach (var message in await _store.WaitingMessagesAsync(waiting.ThreadRequestId, cancellationToken))
+                {
+                    await _store.RefuseMessageAsync(message, cancellationToken);
+                }
+
+                _logger.LogInformation("Slack chat sweep refused the {Messages} waiting message(s) of the thread of request {ThreadRequestId}: its route {RouteId} is gone or disabled",
+                    waiting.Messages, waiting.ThreadRequestId, waiting.RouteId);
                 continue;
             }
 

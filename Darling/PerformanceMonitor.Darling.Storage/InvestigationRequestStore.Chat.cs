@@ -286,10 +286,24 @@ INSERT INTO config.investigation_request_askers (request_id, person_id, identity
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (request_id, person_id) DO UPDATE SET request_level = least(config.investigation_request_askers.request_level, EXCLUDED.request_level)";
 
+    /* A message joins a chat request only while it still waits: one already taken by an open or a join is left where it is, and the join is nothing. */
     internal const string AttachPersonMessageSql = @"
 UPDATE config.investigation_person_messages
 SET request_id = $3, state = $4
-WHERE channel_id = $1 AND ts = $2";
+WHERE channel_id = $1 AND ts = $2 AND state = 'waiting'";
+
+    /* An open takes its messages first, under the route lock, each only while it still waits: the handler's open and the sweep's for the same
+       message, in turn, cannot both take it, so one message opens one chat request. The request row does not exist yet (its id is a foreign key),
+       so the link is set by LinkPersonMessageSql once it does. */
+    internal const string TakePersonMessageSql = @"
+UPDATE config.investigation_person_messages
+SET state = 'opened'
+WHERE channel_id = $1 AND ts = $2 AND state = 'waiting'";
+
+    internal const string LinkPersonMessageSql = @"
+UPDATE config.investigation_person_messages
+SET request_id = $3
+WHERE channel_id = $1 AND ts = $2 AND state = 'opened' AND request_id IS NULL";
 
     /* The chat requests of the last hour, by thread (the link column) and by route, apart from alerts (CountRouteSql leaves them out). */
     internal const string ChatCountsSql = @"
@@ -471,6 +485,13 @@ FOR UPDATE";
         var now = Now();
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        /* The message first, only while it still waits: one an open or another join already took joins nothing, and the stamp is untouched. */
+        if (await ExecAsync(connection, transaction, AttachPersonMessageSql, cancellationToken, P(message.ChannelId), P(message.Ts), P(requestId), P(SlackPersonMessageStates.Joined)) == 0)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return false;
+        }
+
         int routeId = 0, serverId = 0;
         var joined = false;
         await using (var join = Command(connection, transaction, JoinChatRequestSql, P(requestId), P((short)asker.RequestLevel)))
@@ -491,7 +512,6 @@ FOR UPDATE";
         }
 
         await ExecAsync(connection, transaction, AddAskerSql, cancellationToken, P(requestId), P(asker.PersonId), P(asker.Identity), P((short)asker.RequestLevel), P(now));
-        await ExecAsync(connection, transaction, AttachPersonMessageSql, cancellationToken, P(message.ChannelId), P(message.Ts), P(requestId), P(SlackPersonMessageStates.Joined));
         await JournalAskerAsync(connection, transaction, now, requestId, routeId, serverId, asker, message, SlackPersonMessageStates.Joined, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return true;
@@ -515,8 +535,9 @@ FOR UPDATE";
 
     /// <summary>
     /// Opens a chat request (<see cref="ISlackChatStore.OpenChatRequestAsync"/>), under the route's advisory lock so two opens on one route count
-    /// in turn: the thread cap and <paramref name="routeMaxPerHour"/> first, then the copy of the parent with <c>trigger_kind</c> chat and the thread
-    /// link, the parent's alert rows, the askers, the messages moved to opened, one <c>opened</c> row and one <c>person_message</c> row per message.
+    /// in turn: the thread cap and <paramref name="routeMaxPerHour"/> first, then the messages taken while they still wait (none taken of those handed
+    /// over: <see cref="SlackChatOpenOutcome.NothingWaiting"/>, nothing opens), then the copy of the parent with <c>trigger_kind</c> chat and the
+    /// thread link, the parent's alert rows, the askers whose messages were taken, one <c>opened</c> row and one <c>person_message</c> row per message taken.
     /// <paramref name="loadRoutes"/> gives the live routes, so the stamp is the lowest of the parent's stamp, the level the routes give the parent's
     /// metrics (a metric whose route is gone reads 0, fail closed, as the gate reads it), and the lowest asker level.
     /// </summary>
@@ -529,6 +550,15 @@ FOR UPDATE";
         ArgumentNullException.ThrowIfNull(askers);
         ArgumentNullException.ThrowIfNull(messages);
         ArgumentNullException.ThrowIfNull(loadRoutes);
+        /* Every message names one of the askers: a message handed over with no asker would be journaled as nobody's, so it is refused before any write. */
+        foreach (var message in messages)
+        {
+            if (!askers.Any(a => a.PersonId == message.PersonId))
+            {
+                throw new ArgumentException("every message of a chat request open must belong to one of its askers; the message at " + message.Ts + " belongs to none", nameof(messages));
+            }
+        }
+
         var now = DateTime.SpecifyKind(nowUtc, DateTimeKind.Utc);
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -544,6 +574,29 @@ FOR UPDATE";
         {
             await transaction.RollbackAsync(cancellationToken);
             return new SlackChatOpenResult(SlackChatOpenOutcome.RouteCap, null);
+        }
+
+        /* The messages are taken under the lock, each only while it still waits. None taken out of some handed over: another open or join took
+           them first, and nothing opens, so the hour's count and the agents' long poll are left alone. The askers are then those whose messages
+           were taken (a list with no messages, a follow-up's shape, keeps the askers it was given). */
+        var taken = new List<SlackPersonMessage>(messages.Count);
+        foreach (var message in messages)
+        {
+            if (await ExecAsync(connection, transaction, TakePersonMessageSql, cancellationToken, P(message.ChannelId), P(message.Ts)) == 1)
+            {
+                taken.Add(message);
+            }
+        }
+
+        if (messages.Count > 0 && taken.Count == 0)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return new SlackChatOpenResult(SlackChatOpenOutcome.NothingWaiting, null);
+        }
+
+        if (messages.Count > 0)
+        {
+            askers = askers.Where(a => taken.Any(m => m.PersonId == a.PersonId)).ToList();
         }
 
         /* The level the live routes give the parent's metrics: the lowest wins, a metric with no route reads 0. A parent with no alert rows lowers nothing. */
@@ -600,14 +653,13 @@ FOR UPDATE";
             ["chat_thread_of"] = thread.ThreadRequestId.ToString("D"),
             ["parent"] = parentRequestId.ToString("D"),
             ["askers"] = askers.Count,
-            ["messages"] = messages.Count,
+            ["messages"] = taken.Count,
         };
         await JournalAsync(connection, transaction, now, requestId, routeId, serverId, InvestigationEvents.Opened, "service", firstMetric, detail.ToJsonString(), null, cancellationToken);
-        foreach (var message in messages)
+        foreach (var message in taken)
         {
-            await ExecAsync(connection, transaction, AttachPersonMessageSql, cancellationToken, P(message.ChannelId), P(message.Ts), P(requestId), P(SlackPersonMessageStates.Opened));
-            var asker = askers.FirstOrDefault(a => a.PersonId == message.PersonId) ?? new SlackAsker(message.PersonId ?? 0, message.Identity, askerLevel);
-            await JournalAskerAsync(connection, transaction, now, requestId, routeId, serverId, asker, message, SlackPersonMessageStates.Opened, cancellationToken);
+            await ExecAsync(connection, transaction, LinkPersonMessageSql, cancellationToken, P(message.ChannelId), P(message.Ts), P(requestId));
+            await JournalAskerAsync(connection, transaction, now, requestId, routeId, serverId, askers.First(a => a.PersonId == message.PersonId), message, SlackPersonMessageStates.Opened, cancellationToken);
         }
 
         await transaction.CommitAsync(cancellationToken);
