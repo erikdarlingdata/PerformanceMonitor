@@ -38,7 +38,7 @@ public sealed partial class SqlServerRemediationExecutor
     /// is this connection's own (<c>own_session</c>); no such session on this compute (<c>session_gone</c>); a different <c>login_time</c>
     /// (<c>session_reused</c>); the session is in another database (<c>session_in_other_database</c>); not a user session
     /// (<c>not_user_session</c>); the session has no login name, is the remediation login's with any program name, or has a Darling program name (<c>PerformanceMonitorDarling%</c>) AND the monitoring login (<c>tool_login_session</c>; with no monitoring login known, the program name alone); the login lacks
-    /// <c>KILL DATABASE CONNECTION</c> (<c>kill_permission_denied</c>). Then the a write whose <c>@expected_last_end</c> is not the session's <c>last_request_end_time</c>, when <c>@check_activity</c> is 1 (<c>session_changed</c>, #7109). Then the <c>KILL</c> unless <c>@dry</c>, built from the int parameter's
+    /// <c>KILL DATABASE CONNECTION</c> (<c>kill_permission_denied</c>). Then the a write whose <c>@expected_last_end</c> is not the session's <c>last_request_end_time</c>, when <c>@check_activity</c> is 1 (<c>session_changed</c>, #7109), and one whose <c>@expected_database_id</c> is not the session's <c>database_id</c> (<c>database_changed</c>). Then the <c>KILL</c> unless <c>@dry</c>, built from the int parameter's
     /// decimal form only, and the same TRY/CATCH read of the session's request after it as <see cref="KillSql"/>. The columns are
     /// <see cref="KillSql"/>'s, so the one reader serves both.
     /// </summary>
@@ -135,6 +135,9 @@ BEGIN
     ELSE IF @check_activity = 1
          AND NOT (@last_end = @expected_last_end OR (@last_end IS NULL AND @expected_last_end IS NULL))
         SET @outcome = 'session_changed';
+    ELSE IF @check_activity = 1
+         AND NOT (@session_database_id = @expected_database_id OR (@session_database_id IS NULL AND @expected_database_id IS NULL))
+        SET @outcome = 'database_changed';
     ELSE IF @dry = 1
         SET @outcome = 'dry_ok';
     ELSE
@@ -157,7 +160,8 @@ BEGIN
 END;
 SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actual, login_name = @login_name, host_name = @host_name,
        program_name = @program_name, status = @status, open_transaction_count = @open_tran, last_request_end_time = @last_end,
-       log_bytes_used = @log_bytes, rollback_command = @command, percent_complete = @percent, rollback_read = @rollback_read;";
+       log_bytes_used = @log_bytes, rollback_command = @command, percent_complete = @percent, rollback_read = @rollback_read,
+       database_id = @session_database_id, database_name = DB_NAME(@session_database_id);";
 
     /// <summary>The grants the remediation login's user needs in each database it may kill in, as the refusals and the README name them.</summary>
     internal const string AzureGrants = "GRANT VIEW DATABASE STATE TO <user>; GRANT KILL DATABASE CONNECTION TO <user>;";

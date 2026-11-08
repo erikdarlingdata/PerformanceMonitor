@@ -212,6 +212,7 @@ public static partial class DarlingWebEndpoints
            investigation reads only (/api/read). */
         "claim_investigation_request",
         "submit_investigation_report",
+        "post_investigation_message",
         "delete_notification_route",
         "create_mute_rule",
         "update_mute_rule",

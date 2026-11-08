@@ -949,7 +949,8 @@ LIMIT 1";
     internal static (string Legacy, string Successor)? SupersededSupplyFor(string metricName) => metricName switch
     {
         MetricNames.BatchRequests => (TimescaleSupport.LegacyPerfmonBaselineView, TimescaleSupport.PerfmonIntervalBaselineView),
-        MetricNames.WaitStats or MetricNames.WaitMsPerSec => (TimescaleSupport.LegacyWaitStatsBaselineView, TimescaleSupport.WaitStatsIntervalBaselineView),
+        /* #8106: the wait pair's legacy is now #3653's interval-honest aggregate, superseded by the cadence supply. */
+        MetricNames.WaitStats or MetricNames.WaitMsPerSec => (TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.WaitStatsCadenceBaselineView),
         _ => null,
     };
 
@@ -1593,7 +1594,7 @@ clean AS (
             MetricNames.WaitStats => @"
 WITH per_collection AS (
     SELECT collection_time, total_wait_ms, sample_interval_seconds
-    FROM wait_stats_interval_baseline
+    FROM wait_stats_cadence_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 ),
 with_lag AS (
@@ -1791,6 +1792,11 @@ WITH clean AS (
                collections, one pair in the same second: old text count 3 / mean 66.7, END alone count 3 /
                mean 100, this text count 2 / mean 100. The same-second row is unknowable, not idle, and a
                baseline has no honest bucket for it. */
+            /* #8106: the supply is wait_stats_cadence_baseline, whose sample_interval_seconds is the collection's CADENCE, the
+               shortest interval any of its rows measured, where wait_stats_interval_baseline carried the longest. The summed
+               delta over the cadence credits a wait type that returned after missing some passes whole, on the collection that
+               observed it, so its longer interval no longer divides its siblings' deltas and the baseline's total equals the
+               sum of its parts. The text is #3653's, FROM apart. */
             MetricNames.WaitMsPerSec => @"
 WITH per_collection AS (
     SELECT collection_time,
@@ -1800,7 +1806,7 @@ WITH per_collection AS (
                 THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
                 ELSE sample_interval_seconds
            END AS interval_sec
-    FROM wait_stats_interval_baseline
+    FROM wait_stats_cadence_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 ),
 with_rate AS (
@@ -1839,7 +1845,9 @@ clean AS (
     }
 
     /// <summary>
-    /// The pre-#3653 text of the three arms whose supply was superseded, VERBATIM but for one spelling, against
+    /// The text each superseded arm reads its LEGACY supply with. For WaitStats and WaitMsPerSec (#8106) that supply is
+    /// <c>wait_stats_interval_baseline</c>, so their text here is #3653's interval-honest text over it, gate included; the paragraphs
+    /// below describe the BatchRequests arm, the pre-#3653 text of the arm whose supply was superseded, VERBATIM but for one spelling, against
     /// the legacy relations (<c>perfmon_baseline</c>, <c>wait_stats_baseline</c>). Run by <see cref="ChooseSupplyAsync"/> only while a
     /// legacy relation still reaches further back into a server's window than its successor — on a store
     /// upgraded with the default 30-day raw horizon, roughly the first day after the upgrade — and never on a
@@ -1881,46 +1889,53 @@ clean AS (
     AND   interval_sec > 0
 )," + RobustTierScaffold,
 
+            /* #8106: the wait pair's legacy supply is wait_stats_interval_baseline, #3653's interval-honest aggregate, so these
+               two legacy texts are #3653's successor texts over it, NULL-interval gate included. The pre-#3653 texts over
+               wait_stats_baseline are gone with the provider's read of that relation; the drop sweep still retires it. */
             MetricNames.WaitStats => @"
 WITH per_collection AS (
-    SELECT collection_time, total_wait_ms
-    FROM wait_stats_baseline
+    SELECT collection_time, total_wait_ms, sample_interval_seconds
+    FROM wait_stats_interval_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 ),
 with_lag AS (
-    SELECT collection_time, total_wait_ms,
+    SELECT collection_time, total_wait_ms, sample_interval_seconds,
            COALESCE(LAG(total_wait_ms) OVER (ORDER BY collection_time), 0) AS prior_total_wait_ms
     FROM per_collection
 ),
 clean AS (
     SELECT collection_time, total_wait_ms AS v
     FROM with_lag
-    WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000)
+    WHERE NOT (total_wait_ms = 0 AND prior_total_wait_ms > 10000 AND sample_interval_seconds IS NULL)
 )," + RobustTierScaffold,
 
             MetricNames.WaitMsPerSec => @"
 WITH per_collection AS (
     SELECT collection_time,
            total_wait_ms::DOUBLE PRECISION AS total_wait_ms,
-           extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_sec
-    FROM wait_stats_baseline
+           sample_interval_seconds,
+           CASE WHEN sample_interval_seconds IS NULL
+                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                ELSE sample_interval_seconds
+           END AS interval_sec
+    FROM wait_stats_interval_baseline
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 ),
 with_rate AS (
-    SELECT collection_time,
+    SELECT collection_time, sample_interval_seconds,
            CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END AS ms_per_sec
     FROM per_collection
     WHERE interval_sec IS NOT NULL AND interval_sec > 0
 ),
 with_lag AS (
-    SELECT collection_time, ms_per_sec,
+    SELECT collection_time, ms_per_sec, sample_interval_seconds,
            COALESCE(LAG(ms_per_sec) OVER (ORDER BY collection_time), 0) AS prior_ms_per_sec
     FROM with_rate
 ),
 clean AS (
     SELECT collection_time, ms_per_sec AS v
     FROM with_lag
-    WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100)
+    WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100 AND sample_interval_seconds IS NULL)
 )," + RobustTierScaffold,
 
             _ => null

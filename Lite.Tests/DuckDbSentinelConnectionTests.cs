@@ -14,6 +14,7 @@ using System.IO;
 using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Darling.Tests;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -369,16 +370,28 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     }
 
     /// <summary>
+    /// A hang guard for the trim cycle's lock tries in the tests that must see one cycle complete. The store lock
+    /// is process-wide and the cycle's own tries wait zero in production, so a holder anywhere in the process at
+    /// the instant of the call (a reader left behind by an earlier test, a trim tick of an initializer that was
+    /// never disposed) would turn the cycle into a skip. With the wait set, the cycle defers to that holder and
+    /// completes once it lets go; the bound only stops a stuck test.
+    /// </summary>
+    private static readonly TimeSpan TrimLockHangGuard = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// #4262 round 3, my ruling. The tests above assert side effects that hold whether or not the cycle's
     /// SET statements ever ran (<c>memory_limit</c> round-trips either way if nothing touched it) — this
     /// asserts the run itself, through <see cref="DuckDbInitializer.CompletedTrimCycleCount"/>, which only
-    /// increments once both SET statements below it actually complete.
+    /// increments once both SET statements below it actually complete. The cycle waits for the store lock
+    /// through <see cref="DuckDbInitializer.TrimLockWaitForTests"/>, so a holder elsewhere in the process
+    /// cannot turn the one cycle into a skip.
     /// </summary>
     [Fact]
     public async Task RunMemoryTrimCycle_OverThreshold_IncrementsCompletedCycleCount()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
+        initializer.TrimLockWaitForTests = TrimLockHangGuard;
 
         var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
         DuckDbInitializer.TrimThresholdBytes = 1;
@@ -392,6 +405,67 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         }
         finally
         {
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+            initializer.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The count test above runs one cycle against two tries on the process-wide store lock, which wait zero in
+    /// production, so any holder anywhere in the process at that instant (a reader left behind by an earlier test,
+    /// a trim tick of an initializer that was never disposed) would turn the cycle into a skip and the count would
+    /// read 0. This test holds that precondition on purpose: another thread holds the read lock when the cycle is
+    /// called, and with <see cref="DuckDbInitializer.TrimLockWaitForTests"/> set the cycle must still complete
+    /// exactly one cycle. The hold is released only once the cycle is parked on the write lock, read through
+    /// <see cref="DuckDbInitializer.WaitingWriteCountForTests"/>, so the cycle has met the holder before the
+    /// holder lets go.
+    /// </summary>
+    [Fact]
+    public async Task RunMemoryTrimCycle_OverThreshold_ReadHoldAtTheCall_StillCompletesOneCycle()
+    {
+        using var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+        initializer.TrimLockWaitForTests = TrimLockHangGuard;
+
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = 1;
+        var readerReady = new ManualResetEventSlim();
+        var releaseReader = new ManualResetEventSlim();
+        var stopWatchingForTheParkedWriter = false;
+        try
+        {
+            var readerTask = Task.Run(() =>
+            {
+                using var readLock = initializer.AcquireReadLock();
+                readerReady.Set();
+                releaseReader.Wait(TimeSpan.FromSeconds(30));
+            });
+            Assert.True(readerReady.Wait(TimeSpan.FromSeconds(5)), "The reader never took the read lock");
+
+            /* Lets the reader go once the cycle is parked waiting for the write lock. On a cycle that skips at once
+               there is nothing to park, so the finally below releases the reader instead. */
+            var releaser = Task.Run(() =>
+            {
+                TestWait.TryWaitUntil(
+                    () => Volatile.Read(ref stopWatchingForTheParkedWriter) || DuckDbInitializer.WaitingWriteCountForTests > 0,
+                    TimeSpan.FromSeconds(30),
+                    TimeSpan.FromMilliseconds(1));
+                releaseReader.Set();
+            });
+
+            Assert.Equal(0, initializer.CompletedTrimCycleCount);
+
+            initializer.RunMemoryTrimCycle();
+
+            Assert.Equal(1, initializer.CompletedTrimCycleCount);
+
+            await releaser;
+            await readerTask;
+        }
+        finally
+        {
+            Volatile.Write(ref stopWatchingForTheParkedWriter, true);
+            releaseReader.Set();
             DuckDbInitializer.TrimThresholdBytes = originalThreshold;
             initializer.Dispose();
         }
@@ -696,32 +770,23 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         double? afterBytes = null;
         try
         {
-            /* #4262: RunMemoryTrimCycle's own contract is "never wait" — it takes s_dbLock's write lock
-               with TryEnterWriteLock(0) and silently skips this cycle if another writer holds it (any
-               concurrent test process-wide, since s_dbLock is static across every DuckDbInitializer
+            /* #4262: RunMemoryTrimCycle's own contract is "never wait" — in production it takes s_dbLock's
+               write lock with a zero wait and silently skips this cycle if another holder has it (any
+               concurrent caller process-wide, since s_dbLock is static across every DuckDbInitializer
                instance, not just this one), same as a real caller mid-archival. A skipped cycle reports
                beforeBytes == afterBytes with no error — exactly the "trim released nothing" failure this
                test chased intermittently on CI (one Windows run: 105906176 -> 105906176). That is lock
-               contention from an unrelated parallel test, not a broken trim. The first fix re-ran the
-               cycle 20 times 50 ms apart, which is still a one-second timing budget: a parallel test that
-               holds the lock longer than that skips every attempt and fails the same way (#5459 W5; a
-               planted three-second hold reproduces the CI numbers exactly). So the wait is for the one
-               thing that tells a skipped cycle from one that ran: CompletedTrimCycleCount, which moves
-               only after both SET statements ran. It is bounded by a 30 s hang backstop, not a budget.
-               The measurement is then taken ONCE, after a cycle that really ran, so a trim that ran and
-               released nothing fails the assertions below at once and is never retried into a pass. */
+               contention from an unrelated holder, not a broken trim. So the cycle's tries wait here,
+               through TrimLockWaitForTests, bounded by a hang guard rather than a budget, and the one
+               thing that tells a skipped cycle from one that ran is asserted: CompletedTrimCycleCount,
+               which moves only after both SET statements ran. The measurement is then taken ONCE, after
+               a cycle that really ran, so a trim that ran and released nothing fails the assertions
+               below at once and is never retried into a pass. */
+            initializer.TrimLockWaitForTests = TrimLockHangGuard;
             var cyclesBefore = initializer.CompletedTrimCycleCount;
-            var hangBackstop = Stopwatch.StartNew();
-            while (true)
-            {
-                initializer.RunMemoryTrimCycle();
-                if (initializer.CompletedTrimCycleCount != cyclesBefore)
-                    break;
-
-                Assert.True(hangBackstop.Elapsed < TimeSpan.FromSeconds(30),
-                    "RunMemoryTrimCycle did not complete a cycle within 30 s: the process-wide database lock stayed busy, or the cycle bailed out before its SET statements");
-                await Task.Delay(50);
-            }
+            initializer.RunMemoryTrimCycle();
+            Assert.True(initializer.CompletedTrimCycleCount == cyclesBefore + 1,
+                "RunMemoryTrimCycle did not complete a cycle: the process-wide database lock stayed busy past the hang guard, or the cycle bailed out before its SET statements");
 
             using (var measure = initializer.CreateConnection())
             {

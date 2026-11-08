@@ -390,12 +390,12 @@ public sealed class StoreSelfMetricsTests
             ["collect.plan_regression_daily_built"] = "per-day build and validity bookkeeping for the per-day plan totals, bytes too small to matter (V168 doc)",
             ["collect.query_store_top_daily_built"] = "per-day build bookkeeping for the daily summary, bytes too small to matter (V161 doc)",
             ["collect.collection_log_hourly"] = "the hourly rollup get_collection_health reads for closed hours, one row per server, collector and hour, pruned to a little over 7 days and derived from collection_log rather than collected (V186 doc)",
-            ["collect.schema_objects"] = "the versioned table and view definitions schema tracking keeps, pruned 30 days after a version closes, not collected monitoring data (V254 doc)",
-            ["collect.schema_columns"] = "the columns of a schema_objects version, a child of it and deleted with it (V254 doc)",
-            ["collect.schema_indexes"] = "the indexes of a schema_objects version, a child of it and deleted with it (V254 doc)",
-            ["collect.schema_constraints"] = "the check and foreign key constraints of a schema_objects version, a child of it and deleted with it (V254 doc)",
-            ["collect.schema_triggers"] = "the triggers of a schema_objects version, a child of it and deleted with it (V254 doc)",
-            ["collect.schema_capture_state"] = "the schema capture cursor, one row per server and database, bytes too small to matter (V254 doc)",
+            ["collect.schema_objects"] = "the versioned table and view definitions schema tracking keeps, pruned 30 days after a version closes, not collected monitoring data (V256 doc)",
+            ["collect.schema_columns"] = "the columns of a schema_objects version, a child of it and deleted with it (V256 doc)",
+            ["collect.schema_indexes"] = "the indexes of a schema_objects version, a child of it and deleted with it (V256 doc)",
+            ["collect.schema_constraints"] = "the check and foreign key constraints of a schema_objects version, a child of it and deleted with it (V256 doc)",
+            ["collect.schema_triggers"] = "the triggers of a schema_objects version, a child of it and deleted with it (V256 doc)",
+            ["collect.schema_capture_state"] = "the schema capture cursor, one row per server and database, bytes too small to matter (V256 doc)",
             ["collect.plan_force_actions"] = "the force-plan bot's append-only audit ledger, not collected monitoring data (V107 doc)",
         };
 

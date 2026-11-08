@@ -66,6 +66,7 @@ public partial class FinOpsTab : UserControl
     private DataGridFilterManager<ExpensiveQueryRow>? _expensiveQueriesFilterMgr;
     private DataGridFilterManager<MemoryGrantEfficiencyRow>? _memoryGrantFilterMgr;
     private DataGridFilterManager<IndexLockingRow>? _indexLockingFilterMgr;
+    private DataGridFilterManager<RecommendationRow>? _recommendationsFilterMgr;
 
     /* #2933: this tab has no load guard, and every grid above is shared across servers — one
        server switch during the fourteen-way fan-out in LoadPerServerDataAsync, or a per-grid Refresh
@@ -80,6 +81,7 @@ public partial class FinOpsTab : UserControl
     public FinOpsTab()
     {
         InitializeComponent();
+        DataGridNumberHeaders.Apply(this); // #8223: a number column's header on the same edge as its values
         /* #5562: every list opened on the last 24 hours (1d); the heatmap on 30 days (1mo). */
         /* R5: the lists and the heatmap read "hours back from now", so each picker is rolling only (the heatmap in whole days). */
         LiteTimeRange.ConfigureFinOpsPicker(ResourceUsageTimeRangePicker, RollingUnitRule.Hour);
@@ -384,12 +386,12 @@ public partial class FinOpsTab : UserControl
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
             }
             var (data, skippedNote) = read!.Value;
-            RecommendationsDataGrid.ItemsSource = data;
+            _recommendationsFilterMgr!.UpdateData(data);
             /* #5558: databases this server holds only as an Availability Group secondary copy are left to the primary's findings. */
             RecommendationsSecondaryNoteText.Text = skippedNote ?? "";
             RecommendationsSecondaryNoteText.Visibility = skippedNote is null ? Visibility.Collapsed : Visibility.Visible;
             RecommendationsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            RecommendationsCountIndicator.Text = data.Count > 0 ? $"{data.Count} recommendation(s)" : "";
+            RecommendationsCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "recommendation") : "";
         }
         catch (Exception ex)
         {
@@ -548,7 +550,7 @@ public partial class FinOpsTab : UserControl
            database's own (its memory limit, from committed_target_kb), not the host's RAM. So both are shown on every
            edition, and only the caption and the verdict's wording change there. */
         var azureSqlDb = ServerHardwareScope.HardwareIsTheHosts(data.EngineEdition);
-        MemoryRatioText.Text = $"{bpPct:N0}%";
+        MemoryRatioText.Text = $"{bpPct:N1}%";
         SetBar(MemoryRatioBar, MemRatioFilled, MemRatioEmpty, bpPct);
 
         PhysicalMemoryCaption.Text = ServerHardwareScope.PhysicalMemoryCaption(data.EngineEdition);
@@ -641,7 +643,7 @@ public partial class FinOpsTab : UserControl
             if (_loads.Superseded(nameof(LoadDatabaseResourcesAsync), gen)) return;
             _dbResourcesFilterMgr!.UpdateData(data);
             NoDatabaseResourcesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            DbResourcesCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
+            DbResourcesCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "database") : "";
         }
         catch (Exception ex)
         {
@@ -670,7 +672,7 @@ public partial class FinOpsTab : UserControl
             foreach (var row in data) row.Clock = clock;
             _appConnectionsFilterMgr!.UpdateData(data);
             NoAppConnectionsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            AppConnectionsCountIndicator.Text = data.Count > 0 ? $"{data.Count} application(s)" : "";
+            AppConnectionsCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "application") : "";
         }
         catch (Exception ex)
         {
@@ -809,7 +811,7 @@ public partial class FinOpsTab : UserControl
             _pvsStatsFilterMgr!.UpdateData(data);
 
             NoPvsStatsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            PvsCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
+            PvsCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "database") : "";
 
             /* #1984 stage 2: the trend beside the grid — "when did it start growing" on the same
                time axis family as Storage Growth. Top-5 databases by current PVS size, 7 days.
@@ -897,7 +899,7 @@ public partial class FinOpsTab : UserControl
         {
             _serverInventoryFilterMgr!.UpdateData(_serverInventoryCache);
             NoServerInventoryMessage.Visibility = _serverInventoryCache.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            ServerInventoryCountIndicator.Text = _serverInventoryCache.Count > 0 ? $"{_serverInventoryCache.Count} server(s)" : "";
+            ServerInventoryCountIndicator.Text = _serverInventoryCache.Count > 0 ? CountText.Plural(_serverInventoryCache.Count, "server") : "";
             return;
         }
 
@@ -926,7 +928,7 @@ public partial class FinOpsTab : UserControl
 
             _serverInventoryFilterMgr!.UpdateData(data);
             NoServerInventoryMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            ServerInventoryCountIndicator.Text = data.Count > 0 ? $"{data.Count} server(s)" : "";
+            ServerInventoryCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "server") : "";
         }
         catch (Exception ex)
         {
@@ -948,7 +950,7 @@ public partial class FinOpsTab : UserControl
             _storageGrowthFilterMgr!.UpdateData(data);
             _storageGrowthNeedReload = data.Count == 0;
             NoStorageGrowthMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            StorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} database(s)" : "";
+            StorageGrowthCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "database") : "";
 
             /* The Note column holds words only for a database whose size leaves its log out, so a server with none gets
                no empty column. */
@@ -993,7 +995,7 @@ public partial class FinOpsTab : UserControl
             _idleDbsFilterMgr!.UpdateData(data);
             IdleDatabasesNoDataMessage.Text = LocalDataService.IdleDatabasesEmptyText(covered);
             IdleDatabasesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            IdleDatabasesCountIndicator.Text = data.Count > 0 ? $"{data.Count} idle database(s)" : "";
+            IdleDatabasesCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "idle database") : "";
         }
         catch (Exception ex)
         {
@@ -1031,7 +1033,7 @@ public partial class FinOpsTab : UserControl
             if (_loads.Superseded(nameof(LoadHighImpactQueriesAsync), gen)) return;
             _highImpactFilterMgr!.UpdateData(data);
             HighImpactNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            HighImpactCountIndicator.Text = data.Count > 0 ? $"{data.Count} high-impact query(s)" : "";
+            HighImpactCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "high-impact query", "high-impact queries") : "";
         }
         catch (Exception ex)
         {
@@ -1096,7 +1098,7 @@ public partial class FinOpsTab : UserControl
 
             _expensiveQueriesFilterMgr!.UpdateData(data);
             ExpensiveQueriesNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            ExpensiveQueriesCountIndicator.Text = data.Count > 0 ? $"{data.Count} query(s)" : "";
+            ExpensiveQueriesCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "query", "queries") : "";
         }
         catch (Exception ex)
         {
@@ -1171,6 +1173,7 @@ public partial class FinOpsTab : UserControl
         _expensiveQueriesFilterMgr?.UpdateData(new List<ExpensiveQueryRow>());
         _memoryGrantFilterMgr?.UpdateData(new List<MemoryGrantEfficiencyRow>());
         _highImpactFilterMgr?.UpdateData(new List<HighImpactQueryRow>());
+        _recommendationsFilterMgr?.UpdateData(new List<RecommendationRow>());
     }
 
     private async void RefreshRecommendations_Click(object sender, RoutedEventArgs e)
@@ -1366,7 +1369,7 @@ public partial class FinOpsTab : UserControl
             IndexAnalysisNoDataMessage.Visibility = details.Count == 0 && summaries.Count == 0
                 ? Visibility.Visible : Visibility.Collapsed;
             IndexAnalysisStatusText.Text = details.Count > 0
-                ? $"{details.Count} index(es) found"
+                ? CountText.Plural(details.Count, "index", "indexes") + " found"
                 : "Analysis complete — no index issues found";
         }
         catch (Exception ex)
@@ -1437,6 +1440,7 @@ public partial class FinOpsTab : UserControl
         _expensiveQueriesFilterMgr = new DataGridFilterManager<ExpensiveQueryRow>(ExpensiveQueriesDataGrid);
         _memoryGrantFilterMgr = new DataGridFilterManager<MemoryGrantEfficiencyRow>(MemoryGrantEfficiencyDataGrid);
         _indexLockingFilterMgr = new DataGridFilterManager<IndexLockingRow>(IndexLockingDataGrid);
+        _recommendationsFilterMgr = new DataGridFilterManager<RecommendationRow>(RecommendationsDataGrid);
 
         _filterManagers[DatabaseResourcesDataGrid] = _dbResourcesFilterMgr;
         _filterManagers[StorageGrowthDataGrid] = _storageGrowthFilterMgr;
@@ -1453,6 +1457,7 @@ public partial class FinOpsTab : UserControl
         _filterManagers[ExpensiveQueriesDataGrid] = _expensiveQueriesFilterMgr;
         _filterManagers[MemoryGrantEfficiencyDataGrid] = _memoryGrantFilterMgr;
         _filterManagers[IndexLockingDataGrid] = _indexLockingFilterMgr;
+        _filterManagers[RecommendationsDataGrid] = _recommendationsFilterMgr;
     }
 
     /* Host/apply plumbing lives in the shared Ui controller. Lazy (a field initializer can't reference the

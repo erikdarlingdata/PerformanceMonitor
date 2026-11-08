@@ -1527,7 +1527,7 @@ public sealed partial class DarlingWorker
     /// field changed (per <see cref="ServerDefinitionEquals"/>), in which case the runtime is dropped so it
     /// reconnects with the new definition through the same startup path.
     /// </summary>
-    private void ReconcileServers(List<ServerLoopState> servers, IReadOnlyList<MonitoredServer> desired)
+    internal void ReconcileServers(List<ServerLoopState> servers, IReadOnlyList<MonitoredServer> desired)
     {
         var desiredById = new Dictionary<int, MonitoredServer>();
         foreach (var d in desired)

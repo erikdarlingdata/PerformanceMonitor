@@ -63,7 +63,7 @@ public sealed class ViewerCollectionHealthSeatGateTests
                 typeof(ViewerServerTab).GetField("_suppressDrillDownAutoRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(tab, true);
                 window = new Window { Content = tab, Width = 1800, Height = 1000 };
                 window.Show();
-                ((TabItem)tab.FindName("CollectionHealthTab")).IsSelected = true;
+                StaTestThread.Reveal((TabItem)tab.FindName("CollectionHealthTab"));
                 window.UpdateLayout();
 
                 var grid = (DataGrid)tab.FindName("CollectionHealthGrid");

@@ -74,6 +74,10 @@ public readonly record struct RoutedDestination(
 {
     /// <summary>Whether the channel is delivered at all for this firing.</summary>
     public bool IsDelivered => !string.IsNullOrWhiteSpace(Destination);
+
+    /// <summary>#8246: a route that matched this firing turns the channel off (<see cref="NotificationRoute.OffChannels"/>):
+    /// no destination, and no fall-through to a less specific route or to the settings row's own.</summary>
+    public bool IsOff => Destination is null && RouteId is not null;
 }
 
 /// <summary>

@@ -130,7 +130,7 @@ public class ServerTabEmptyStateAndNamesTests
     [Fact]
     public void EmptyState_TheGenericGridWording_MatchesTheThemesNoDataText()
     {
-        Assert.Equal("No data for the selected time range.", EmptyState.DefaultGridText);
+        Assert.Equal("No data in the selected time window.", EmptyState.DefaultGridText);
         foreach (var theme in new[] { "Lite/Themes/DarkTheme.xaml", "Lite/Themes/LightTheme.xaml", "Lite/Themes/CoolBreezeTheme.xaml",
             "Darling/PerformanceMonitor.Darling.Viewer/Themes/DarkTheme.xaml", "Darling/PerformanceMonitor.Darling.Viewer/Themes/LightTheme.xaml", "Darling/PerformanceMonitor.Darling.Viewer/Themes/CoolBreezeTheme.xaml" })
         {

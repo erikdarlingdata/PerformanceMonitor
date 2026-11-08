@@ -20,7 +20,7 @@ namespace Darling.Tests;
 /* #1776 own-store: each test mints its own scratch store database through ScratchPostgres. */
 
 /// <summary>
-/// #7643: the store rung that holds versioned table and view definitions (V254). The seven tables exist, a history key is exactly one of
+/// #7643: the store rung that holds versioned table and view definitions (V256). The seven tables exist, a history key is exactly one of
 /// a server or an availability group, deleting a version deletes its child rows, the pass table is the generator's output for its
 /// catalog definition, and running the rung again changes nothing.
 /// </summary>
@@ -64,7 +64,7 @@ RETURNING version_id", connection);
     }
 
     [Fact]
-    public async Task V254_CreatesTheSevenTables()
+    public async Task V256_CreatesTheSevenTables()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the schema tracking rung tests (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
@@ -81,7 +81,7 @@ RETURNING version_id", connection);
     }
 
     [Fact]
-    public async Task V254_RejectsARowWithBothOrNeitherHistoryKeys()
+    public async Task V256_RejectsARowWithBothOrNeitherHistoryKeys()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the schema tracking rung tests (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
@@ -100,7 +100,7 @@ RETURNING version_id", connection);
     }
 
     [Fact]
-    public async Task V254_DeletingAVersionCascadesToItsChildRows()
+    public async Task V256_DeletingAVersionCascadesToItsChildRows()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the schema tracking rung tests (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
@@ -135,7 +135,7 @@ INSERT INTO collect.schema_triggers (version_id, is_current, name, is_instead_of
     }
 
     [Fact]
-    public async Task V254_RunningTheRungAgain_ChangesNothing()
+    public async Task V256_RunningTheRungAgain_ChangesNothing()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the schema tracking rung tests (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
@@ -144,7 +144,7 @@ INSERT INTO collect.schema_triggers (version_id, is_current, name, is_instead_of
         await using var __ = connection;
 
         await InsertVersionAsync(connection, "1", "NULL", ct);
-        await using (var rerun = new NpgsqlCommand(PgMigrations.Scripts.Single(m => m.Version == 254).Sql, connection))
+        await using (var rerun = new NpgsqlCommand(PgMigrations.Scripts.Single(m => m.Version == 256).Sql, connection))
         {
             await rerun.ExecuteNonQueryAsync(ct);
         }
@@ -153,9 +153,9 @@ INSERT INTO collect.schema_triggers (version_id, is_current, name, is_instead_of
     }
 
     [Fact]
-    public void V254_PassTable_IsTheGeneratorsOutput()
+    public void V256_PassTable_IsTheGeneratorsOutput()
     {
-        var rung = PgMigrations.Scripts.Single(m => m.Version == 254).Sql.Replace("collect.", "", StringComparison.Ordinal);
+        var rung = PgMigrations.Scripts.Single(m => m.Version == 256).Sql.Replace("collect.", "", StringComparison.Ordinal);
         var generated = PgSchemaGenerator.CreateTable(SchemaObjectsCollector.Instance) + "\n\n" + PgSchemaGenerator.CreateIndex(SchemaObjectsCollector.Instance);
 
         static string Norm(string s) => string.Join(' ', s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));

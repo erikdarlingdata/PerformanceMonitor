@@ -185,6 +185,7 @@ public partial class ServerTab : UserControl
     {
         InitializeComponent();
         PerformanceMonitor.Ui.ChartPairLayout.Attach(CurrentWaitsScroll, CurrentWaitsGrid, CurrentWaitsFirstCard, CurrentWaitsSecondCard, CurrentWaitsGrid.RowDefinitions[2]); // #8219: side by side when the tab is too short for both stacked
+        DataGridNumberHeaders.Apply(this); // #8223: a number column's header on the same edge as its values
         // #7385: the chart groups scroll below their floor; the wheel over a chart stays that chart's zoom.
         ChartLayout.KeepWheelOnPlot(
             QueryDurationTrendChart, ProcDurationTrendChart, QueryStoreDurationTrendChart, ExecutionCountTrendChart,
@@ -195,7 +196,7 @@ public partial class ServerTab : UserControl
             CurrentWaitsDurationChart, CurrentWaitsBlockedChart, LatchStatsChart, SpinlockStatsChart,
             BadPagesChart, DumpRequestsChart, AccessViolationsChart, WriteAccessViolationsChart,
             NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart,
-            MemoryChart, CpuSchedulerChart);
+            MemoryChart, CpuSchedulerChart, CpuChart);
         QueryTagFilterCombo.ItemsSource = new[] { PerformanceMonitorLite.Helpers.QueryTagGrid.AllChoice };
         QueryTagFilterCombo.SelectedIndex = 0;
         SetupBarCellMaxes();

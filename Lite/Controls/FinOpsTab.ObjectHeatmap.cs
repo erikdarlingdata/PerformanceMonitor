@@ -151,7 +151,7 @@ public partial class FinOpsTab : UserControl
             var orderedObjects = orderedKeys.Select(k => byKey[k]).ToList();
 
             ObjectGrowthDetailGrid.ItemsSource = orderedObjects;
-            StorageGrowthCountIndicator.Text = orderedObjects.Count > 0 ? $"{orderedObjects.Count} object(s)" : "";
+            StorageGrowthCountIndicator.Text = orderedObjects.Count > 0 ? CountText.Plural(orderedObjects.Count, "object") : "";
             ObjectGrowthNoDataMessage.Visibility = orderedObjects.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
             // Heatmap rows are bottom-to-top: the renderer flips vertically (row 0 = bottom), so reverse
@@ -183,7 +183,7 @@ public partial class FinOpsTab : UserControl
             var data = await Task.Run(() => _dataService.GetObjectIndexDetailAsync(serverId, databaseName, schemaName, tableName));
             if (_loads.Superseded(nameof(LoadObjectIndexDetailAsync), gen)) return;
             ObjectIndexDetailGrid.ItemsSource = data;
-            StorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} index(es)" : "";
+            StorageGrowthCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "index", "indexes") : "";
             ObjectIndexNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
         catch (Exception ex)

@@ -201,11 +201,10 @@ public partial class TimeRangeSlicerControl : UserControl
         {
             Text = _emptyText,
             FontSize = 12,
-            FontStyle = FontStyles.Italic,
             TextAlignment = TextAlignment.Center,
             TextWrapping = TextWrapping.Wrap,
-            MaxWidth = Math.Min(520, Math.Max(40, w - 16)),
-            Foreground = FindBrush("ForegroundDimBrush", "#C7CBD4"),
+            MaxWidth = Math.Max(40, w - 16),
+            Foreground = FindBrush("ForegroundMutedBrush", "#A8AEBA"),
             IsHitTestVisible = false,
         };
         tb.Measure(new Size(tb.MaxWidth, double.PositiveInfinity));
@@ -331,6 +330,7 @@ public partial class TimeRangeSlicerControl : UserControl
     public void Redraw()
     {
         SlicerCanvas.Children.Clear();
+        MetricLabel.Text = _data.Count < 1 ? "" : _metricLabel;
         if (_data.Count < 1) { DrawEmptyText(); return; }
 
         var w = SlicerBorder.ActualWidth;
@@ -389,25 +389,21 @@ public partial class TimeRangeSlicerControl : UserControl
         // X-axis labels — whole wall-clock hours of the display zone (#4766), skip if too close
         var labelBrush = FindBrush("SlicerLabelBrush", "#E4E6EB");
         const double minLabelSpacingPx = 90;
+        const double labelHalfWidth = 25;
         double lastLabelX = -minLabelSpacingPx;
         foreach (var (tickUtc, text) in SlicerLabels(DataStartUtc, DataEndUtc, w, minLabelSpacingPx, CurrentZone()))
         {
             var x = NormAtUtc(tickUtc) * w;
             if (x - lastLabelX < minLabelSpacingPx) continue;
-            if (x < 10 || x > w - 40) continue;
+            /* #8224: a label is centred on its hour, so one whose left edge would sit under the start handle at rest (the
+               handle's width from the left edge) is left out rather than cut; the right edge keeps the same room. */
+            if (x - labelHalfWidth < HandleWidthPx + 2 || x > w - 40) continue;
             var tb = new TextBlock { Text = text, FontSize = 9, Foreground = labelBrush };
-            Canvas.SetLeft(tb, x - 25);
+            Canvas.SetLeft(tb, x - labelHalfWidth);
             Canvas.SetTop(tb, chartBottom + 2);
             SlicerCanvas.Children.Add(tb);
             lastLabelX = x;
         }
-
-        // Metric label top-right
-        var metricBrush = FindBrush("SlicerToggleBrush", "#E4E6EB");
-        var metricTb = new TextBlock { Text = _metricLabel, FontSize = 13, FontWeight = FontWeights.SemiBold, Foreground = metricBrush };
-        Canvas.SetLeft(metricTb, w - 120);
-        Canvas.SetTop(metricTb, 2);
-        SlicerCanvas.Children.Add(metricTb);
 
         // Selection overlays
         var overlayBrush = FindBrush("SlicerOverlayBrush", "#99000000");

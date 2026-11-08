@@ -223,6 +223,6 @@ public class ScreenReaderNamesTests
         var box = text.Substring(start, end - start);
 
         Assert.Contains("AutomationProperties.Name=\"Server\"", box, StringComparison.Ordinal);
-        Assert.Contains("<Setter Property=\"AutomationProperties.Name\" Value=\"{Binding DisplayNameWithIntent, Mode=OneTime}\"/>", box, StringComparison.Ordinal);
+        // The items' names are checked on the rendered containers: ThemeLeftoversRenderTests.TheServerBoxItems_AreNamedByTheServer_AfterARunTimeThemeSwitch.
     }
 }

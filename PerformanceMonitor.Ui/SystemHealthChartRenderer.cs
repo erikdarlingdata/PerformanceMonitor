@@ -92,9 +92,13 @@ internal sealed class SystemHealthChartRenderer
         chart.Refresh();
     }
 
+    /// <summary>How many spinlock types the Sick Spinlocks chart draws: the ones with the most backoffs in the window (#8187).</summary>
+    internal const int SickSpinlockSeriesLimit = 5;
+
     /// <summary>
-    /// Sick Spinlocks by Type: one series per distinct <c>SickSpinlockType</c> (top 5, to bound clutter)
-    /// plotting the spinlock backoffs over event time, with a bottom legend (backoffs, or 1 when absent).
+    /// Sick Spinlocks by Type: one series per <c>SickSpinlockType</c> for the <see cref="SickSpinlockSeriesLimit"/> types with the most
+    /// backoffs in the window, busiest first, plotting the spinlock backoffs over event time, with a bottom legend (backoffs, or 1 when
+    /// absent). The Y label says how many types there were when some were left out.
     /// </summary>
     internal void RenderSickSpinlocksChart(
         ScottPlot.WPF.WpfPlot chart, ChartHoverHelper? hover, List<SystemHealthRecord> data, double xMin, double xMax)
@@ -104,18 +108,15 @@ internal sealed class SystemHealthChartRenderer
         ChartStyle.ApplyThemeToChart(chart);
 
         double max = 0;
+        var typeCount = 0;
+        var spinlockTypes = new List<string>();
         if (data.Count == 0)
         {
             AddNoDataText(chart, xMin, xMax);
         }
         else
         {
-            var spinlockTypes = data
-                .Where(d => !string.IsNullOrEmpty(d.SickSpinlockType))
-                .Select(d => d.SickSpinlockType)
-                .Distinct()
-                .Take(5)
-                .ToList();
+            (spinlockTypes, typeCount) = TopSickSpinlockTypes(data, SickSpinlockSeriesLimit);
 
             int colorIdx = 0;
             foreach (var spinlockType in spinlockTypes)
@@ -130,8 +131,8 @@ internal sealed class SystemHealthChartRenderer
                 var scatter = chart.Plot.Add.TimeSeries(xs, ys);
                 scatter.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
                 ChartStyle.StyleScatter(scatter);
-                scatter.LegendText = spinlockType ?? "Unknown";
-                hover?.Add(scatter, spinlockType ?? "Unknown");
+                scatter.LegendText = spinlockType;
+                hover?.Add(scatter, spinlockType);
                 colorIdx++;
 
                 if (ys.Length > 0)
@@ -145,11 +146,32 @@ internal sealed class SystemHealthChartRenderer
         chart.Plot.Axes.DateTimeTicksBottomFor(_displayZone);
         ChartStyle.ReapplyAxisColors(chart);
         chart.Plot.Axes.SetLimitsX(xMin, xMax);
-        chart.Plot.YLabel("Sick Spinlocks (backoffs)");
+        chart.Plot.YLabel(SickSpinlocksYLabel(spinlockTypes.Count, typeCount));
         ChartStyle.UseCountAxis(chart); // #7606: a count, whole-number ticks
         ChartStyle.SetChartYLimitsWithLegendPadding(chart, 0, max);
         chart.Refresh();
     }
+
+    /// <summary>
+    /// #8187: the spinlock types in <paramref name="data"/> ranked by their total backoffs in the window (a record with no count plots
+    /// as 1, and counts as 1 here), busiest first and ties by name, cut to <paramref name="limit"/>; and how many types there were, so
+    /// the chart can say when it left some out. Records with no type are not a type.
+    /// </summary>
+    internal static (List<string> Top, int Total) TopSickSpinlockTypes(IEnumerable<SystemHealthRecord> data, int limit)
+    {
+        var ranked = data
+            .Where(d => !string.IsNullOrEmpty(d.SickSpinlockType))
+            .GroupBy(d => d.SickSpinlockType!, StringComparer.Ordinal)
+            .OrderByDescending(g => g.Sum(d => (double)(d.SpinlockBackoffs ?? 1)))
+            .ThenBy(g => g.Key, StringComparer.Ordinal)
+            .Select(g => g.Key)
+            .ToList();
+        return (ranked.Take(limit).ToList(), ranked.Count);
+    }
+
+    /// <summary>The Sick Spinlocks chart's Y label: its name, with "top 5 of N types" when the window had more types than it draws (#8187).</summary>
+    internal static string SickSpinlocksYLabel(int shown, int total)
+        => total > shown ? $"Sick Spinlocks (backoffs), top {shown} of {total} types" : "Sick Spinlocks (backoffs)";
 
     /// <summary>
     /// SQL CPU vs System CPU: two percent series over event time on a fixed 0-100 axis with a bottom legend

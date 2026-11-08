@@ -682,7 +682,7 @@ CROSS JOIN LATERAL (SELECT NULL::bigint AS n UNION ALL SELECT generate_series(1,
                about half of one percent of the rows (two databases, a capture every ten minutes, 200 forced plans each). The older test above has a 30-minute window and
                one marker row in 21, so it never got that plan; and a scratch store has no TimescaleDB extension until it is enabled, the plain-PostgreSQL planner never
                has a SkipScan to pick, so the extension is enabled here the way the product enables it (the table stays the plain table V195 makes). */
-            var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(h.Connection.ConnectionString, ct);
+            var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(h.ConnectionString, ct);
             Assert.True(timescaleEnabled, "TimescaleDB must be available on CI: the failure only exists under its planner");
             await ExecAsync(h.Connection, @"
 INSERT INTO collect.query_store_forced_plans (collection_id, collection_time, server_id, server_name, database_name, plan_id, query_id)

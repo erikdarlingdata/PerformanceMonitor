@@ -43,6 +43,7 @@ public partial class WebhookAlertService
         string? detailText,
         DateTime nowUtc,
         string? displayName = null,
+        TimeSpan postSpacing = default,
         CancellationToken cancellationToken = default)
     {
         var entries = EntriesNaming(settings, NotificationRouter.TeamsChannel, webhookUrl);
@@ -50,7 +51,8 @@ public partial class WebhookAlertService
         {
             var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc);
-            var error = await PostWebhookAsync(webhookUrl, payload, settings.TeamsProxyAddress, cancellationToken: cancellationToken, bodyLog: _logger);
+            var error = await PostPacedAsync(
+                NotificationRouter.TeamsChannel, webhookUrl, webhookUrl, payload, settings.TeamsProxyAddress, headers: null, signing: null, postSpacing, cancellationToken);
 
             if (error != null)
             {

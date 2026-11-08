@@ -11,6 +11,7 @@ using System.Globalization;
 using System.Windows.Data;
 using System.Windows.Media;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -34,13 +35,14 @@ public sealed class SeverityBrushConverter : IValueConverter
         return brush;
     }
 
-    /// <summary>The palette lookup, also callable directly from code-behind.</summary>
+    /// <summary>The palette lookup, also callable directly from code-behind. On Light and Cool Breeze each band takes the theme's own
+    /// status brush (#8221): the pale Dark tones read at 1.4:1 to 2.5:1 as card text there. The card is bound again after a theme change.</summary>
     public static SolidColorBrush BrushFor(HealthSeverity severity) => severity switch
     {
-        HealthSeverity.Critical => s_critical,
-        HealthSeverity.Warning => s_warning,
-        HealthSeverity.Healthy => s_healthy,
-        _ => s_unknown,
+        HealthSeverity.Critical => ThemedBandBrush.ForLightTheme("#E57373") ?? s_critical,
+        HealthSeverity.Warning => ThemedBandBrush.ForLightTheme("#FFD54F") ?? s_warning,
+        HealthSeverity.Healthy => ThemedBandBrush.ForLightTheme("#81C784") ?? s_healthy,
+        _ => ThemedBandBrush.ForLightTheme("#888888") ?? s_unknown,
     };
 
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>

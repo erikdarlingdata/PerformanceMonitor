@@ -55,9 +55,9 @@ public partial class WebhookAlertService : IReportNoticeSends
             entries = EntriesNaming(settings, channel, destination);
             var slack = channel == NotificationRouter.SlackChannel;
             var payload = slack ? BuildReportNoticeSlackPayload(content, _branding) : BuildReportNoticeTeamsPayload(content);
-            var error = await PostWebhookAsync(
-                destination, payload, slack ? settings.SlackProxyAddress : settings.TeamsProxyAddress,
-                cancellationToken: cancellationToken, bodyLog: _logger);
+            var error = await PostPacedAsync(
+                channel, destination, destination, payload, slack ? settings.SlackProxyAddress : settings.TeamsProxyAddress,
+                headers: null, signing: null, spacing: TimeSpan.Zero, cancellationToken);
             if (error is null)
             {
                 /* A delivered notice clears every entry that names the destination, as a delivered alert does. Not logged:

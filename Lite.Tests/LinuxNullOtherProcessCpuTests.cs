@@ -42,12 +42,16 @@ public sealed class LinuxNullOtherProcessCpuTests : IClassFixture<SharedDuckDbFi
 
     public void Dispose() => _seedConn?.Dispose();
 
-    private static DateTime Hour() => new(DateTime.UtcNow.Year, DateTime.UtcNow.Month, DateTime.UtcNow.Day, DateTime.UtcNow.Hour, 0, 0, DateTimeKind.Unspecified);
+    /* One reading of the clock (#5496), taken once per test: built from several reads on each call, the hour tears when a day or
+       an hour turns between them. */
+    private readonly DateTime _hour = HourOf(DateTime.UtcNow);
+
+    private static DateTime HourOf(DateTime utc) => new(utc.Year, utc.Month, utc.Day, utc.Hour, 0, 0, DateTimeKind.Unspecified);
 
     [Fact]
     public async Task ChartRead_AllNullOtherProcessCpu_ReturnsNullOtherAndTotal()
     {
-        var t1 = Hour().AddHours(-2);
+        var t1 = _hour.AddHours(-2);
         await SeedCpuAsync(t1, 40, null);
         await SeedCpuAsync(t1.AddMinutes(5), 50, null);
         await SeedCpuAsync(t1.AddMinutes(10), 60, null);
@@ -66,7 +70,7 @@ public sealed class LinuxNullOtherProcessCpuTests : IClassFixture<SharedDuckDbFi
     [Fact]
     public async Task ChartRead_MixedBucket_AveragesOnlyTheMeasuredSamples()
     {
-        var t1 = Hour().AddHours(-2);
+        var t1 = _hour.AddHours(-2);
         /* One 60 minute window is wider than the sample spacing, so all three land in one bucket when the
            window is wide enough; hoursBack 24 * 30 forces a wide bucket. */
         await SeedCpuAsync(t1, 20, null);
@@ -86,7 +90,7 @@ public sealed class LinuxNullOtherProcessCpuTests : IClassFixture<SharedDuckDbFi
     [Fact]
     public async Task ChartRead_UtcFrame_AllNullOtherProcessCpu_ReturnsNullOtherAndTotal()
     {
-        var t1 = Hour().AddHours(-2);
+        var t1 = _hour.AddHours(-2);
         await SeedCpuAsync(t1, 40, null, withUtcInstant: true);
         await SeedCpuAsync(t1.AddMinutes(5), 50, null, withUtcInstant: true);
 
@@ -105,7 +109,7 @@ public sealed class LinuxNullOtherProcessCpuTests : IClassFixture<SharedDuckDbFi
     [Fact]
     public async Task ChartRead_UtcFrame_MixedBucket_AveragesOnlyTheMeasuredSamples()
     {
-        var t1 = Hour().AddHours(-2);
+        var t1 = _hour.AddHours(-2);
         await SeedCpuAsync(t1, 20, null, withUtcInstant: true);
         await SeedCpuAsync(t1.AddMinutes(1), 40, 10, withUtcInstant: true);
         await SeedCpuAsync(t1.AddMinutes(2), 60, 20, withUtcInstant: true);
@@ -123,7 +127,7 @@ public sealed class LinuxNullOtherProcessCpuTests : IClassFixture<SharedDuckDbFi
     [Fact]
     public async Task McpBucketRead_AllNullBucket_ReturnsNullHostFigures_AndMixedBucketAveragesMeasuredRows()
     {
-        var hour = Hour().AddHours(-3);
+        var hour = _hour.AddHours(-3);
         /* Bucket one: every sample lacks the figure. Bucket two: a mix. */
         await SeedCpuAsync(hour, 30, null);
         await SeedCpuAsync(hour.AddMinutes(10), 50, null);

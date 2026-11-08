@@ -97,7 +97,7 @@ public sealed class SlackCardStoreLiveTests
             await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 252, ct);
             Assert.Equal("False", await ScalarAsync(connection, "SELECT to_regclass('config.investigation_slack_posts') IS NOT NULL", ct));
             await ExecAsync(connection, "DELETE FROM darling_schema_version WHERE version > 252", ct);
-            Assert.Equal(StorageVersion.SchemaVersion - 252, await PgMigrations.MigrateAsync(connection, ct));
+            Assert.Equal(PgMigrations.Scripts.Count(m => m.Version > 252), await PgMigrations.MigrateAsync(connection, ct));
             Assert.Equal("True", await ScalarAsync(connection, "SELECT to_regclass('config.investigation_slack_posts') IS NOT NULL", ct));
             Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));
         });
@@ -493,7 +493,7 @@ public sealed class SlackCardGrantLiveTests
                makes the table under the default privileges the batch left and takes it back itself. */
             await RungRewindArtifacts.DropSentinelsAboveAsync(owner, 252, ct);
             await SlackCardStoreLiveTests.ExecAsync(owner, "DELETE FROM darling_schema_version WHERE version > 252", ct);
-            Assert.Equal(StorageVersion.SchemaVersion - 252, await PgMigrations.MigrateAsync(owner, ct));
+            Assert.Equal(PgMigrations.Scripts.Count(m => m.Version > 252), await PgMigrations.MigrateAsync(owner, ct));
             await AssertCatalogAsync(owner, ct);
 
             await SlackCardStoreLiveTests.ExecAsync(owner,

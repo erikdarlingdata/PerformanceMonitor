@@ -139,6 +139,12 @@
                 <Setter Property="ContextMenu" Value="{StaticResource DataGridContextMenu}"/>
             </Style>
 
+            <!-- #8223: a text cell narrower than its text ends in an ellipsis and shows the whole text in a tooltip. -->
+            <Style x:Key="TrimmedCell" TargetType="TextBlock" BasedOn="{StaticResource DataGridCellText}">
+                <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                <Setter Property="ToolTip" Value="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+            </Style>
+
             <!-- Row style for the query grids that actually have plans (see DataGridPlanContextMenu). -->
             <Style x:Key="GridPlanRowStyle" TargetType="DataGridRow">
                 <Setter Property="ContextMenu" Value="{StaticResource DataGridPlanContextMenu}"/>
@@ -622,7 +628,7 @@
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
-                                    <DataGridTextColumn Header="Tag" Binding="{Binding QueryTag}" Width="140"/>
+                                    <DataGridTextColumn Binding="{Binding QueryTag}" Width="Auto"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryTag" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Tag" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding AvgCpuMs, StringFormat=N2}" ElementStyle="{StaticResource NumericCell}" Width="100">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgCpuMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg CPU (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
@@ -891,7 +897,7 @@
                                       Sorting="ProcedureStatsGrid_Sorting"
                                       MouseDoubleClick="ProcedureStatsGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Tag" Binding="{Binding QueryTag}" Width="140"/>
+                                    <DataGridTextColumn Binding="{Binding QueryTag}" Width="Auto"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryTag" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Tag" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="120">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
@@ -1101,7 +1107,7 @@
                                       Sorting="QueryStoreGrid_Sorting"
                                       MouseDoubleClick="QueryStoreGrid_MouseDoubleClick">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Tag" Binding="{Binding QueryTag}" Width="140"/>
+                                    <DataGridTextColumn Binding="{Binding QueryTag}" Width="Auto"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryTag" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Tag" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding DatabaseName}" Width="120">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
@@ -1496,7 +1502,10 @@
                             </Grid>
                         </TabItem>
                         <TabItem Header="Query Heatmap">
-                            <Grid>
+                            <!-- #8220: the tab scrolls when the chart card cannot keep a plot of 120 DIPs: the grid is as tall as the viewport but never under
+                                 MinHeight (the metric row, the banner and a 280 DIP card). -->
+                            <ScrollViewer x:Name="HeatmapScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                <Grid Height="{Binding ViewportHeight, ElementName=HeatmapScroll}" MinHeight="360">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
@@ -1523,6 +1532,7 @@
                                                         MouseLeave="HeatmapChart_MouseLeave"/>
                                 </ui:ChartPanel>
                             </Grid>
+                            </ScrollViewer>
                         </TabItem>
                     </TabControl>
                 </Grid>
@@ -1570,11 +1580,16 @@
             <TabItem Header="CPU">
                 <TabControl x:Name="CpuSubTabControl" Background="Transparent" BorderThickness="0" ui:TabStripOverflow.HeaderMargin="8,0,0,0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <TabItem Header="CPU Utilization">
-                        <Grid Margin="8">
-                            <ui:ChartPanel Title="CPU">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #8220: scrolls when the chart cannot keep its minimum height with its legend -->
+                        <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="300">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                            </Grid.RowDefinitions>
+                            <ui:ChartPanel Title="CPU" Grid.Row="0">
                                 <ScottPlot:WpfPlot x:Name="CpuChart"/>
                             </ui:ChartPanel>
                         </Grid>
+                        </ScrollViewer>
                     </TabItem>
 
                     <!-- CPU Scheduler sub-tab (#8169: under CPU, as in the Viewer) — the Lite port of Darling's CPU Scheduler surface
@@ -1813,7 +1828,7 @@
                                          report.plan_cache_bloat parity): a client-side CASE on single-use/total plans. -->
                                     <TextBlock Text="Bloat Level:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                     <TextBlock x:Name="PlanCacheBloatLevelText" Text="--" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,20,0"/>
-                                    <TextBlock x:Name="PlanCacheRecommendationText" Text="" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,20,0"/>
+                                    <TextBlock x:Name="PlanCacheRecommendationText" Text="" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,20,0"/>
                                     <TextBlock Text="Collected:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                     <TextBlock x:Name="PlanCacheCollectedText" Text="--" VerticalAlignment="Center"/>
                                 </WrapPanel>
@@ -1963,15 +1978,16 @@
                             </Grid></ScrollViewer>
                         </TabItem>
                         <TabItem Header="Current Waits">
+                            <Grid>
+                            <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                             <ScrollViewer x:Name="CurrentWaitsScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
-                            <!-- #8219: two columns so the charts sit side by side (ChartPairLayout) when the tab cannot give both a stacked row. MinHeight is one chart row with the banner and note; the stacked layout adds the second row's MinHeight to it. -->
+                            <!-- #8219: two columns so the charts sit side by side (ChartPairLayout) when the tab cannot give both a stacked row. MinHeight is one chart row with the banner; the stacked layout adds the second row's MinHeight to it. -->
                             <Grid x:Name="CurrentWaitsGrid" ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="260">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                     <RowDefinition x:Name="CurrentWaitsSecondRow" Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
-                                    <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
                                 <!-- Where the stored waiting-task rows start, when that is after the window's start (the same
                                      "Showing since <time>" the Queries grids carry; Lite twin of Darling's Current Waits notice). -->
@@ -1989,11 +2005,13 @@
                                         <ScottPlot:WpfPlot x:Name="CurrentWaitsBlockedChart"/>
                                     </ui:ChartPanel>
                                 </Border>
-                                <!-- Both charts read waiting_tasks, which stores a row only when a collection found a task waiting or blocked, so a quiet server draws few points and a gap means nothing was waiting. -->
-                                <TextBlock Grid.Row="3" Grid.ColumnSpan="2" x:Name="CurrentWaitsSparseNote" Padding="8,4" FontStyle="Italic" TextWrapping="Wrap"
-                                           Foreground="{DynamicResource ForegroundDimBrush}"
-                                           Text="Points appear only when a collection found waiting or blocked tasks. A gap means nothing was waiting at that time."/>
                             </Grid></ScrollViewer>
+                            <!-- Both charts read waiting_tasks, which stores a row only when a collection found a task waiting or blocked, so a quiet server draws few points and a gap means nothing was waiting.
+                                 The note sits under the scroll area, outside it, so it is read at every tab height, whatever the charts' layout does. -->
+                            <TextBlock Grid.Row="1" x:Name="CurrentWaitsSparseNote" Padding="8,4" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"
+                                       Text="Points appear only when a collection found waiting or blocked tasks. A gap means nothing was waiting at that time."/>
+                            </Grid>
                         </TabItem>
                         <TabItem Header="Blocked Process Reports">
                             <Grid>
@@ -2345,13 +2363,13 @@
                             </StackPanel>
                             <TextBox Grid.Row="3" x:Name="PerfmonSearchBox" TextChanged="PerfmonSearch_TextChanged"
                                      Margin="0,0,0,4" Padding="4,2"/>
-                            <ListBox Grid.Row="4" x:Name="PerfmonCountersList" Background="Transparent" BorderThickness="0">
+                            <ListBox Grid.Row="4" x:Name="PerfmonCountersList" Background="Transparent" BorderThickness="0" HorizontalContentAlignment="Stretch" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                                   Checked="PerfmonCounter_CheckChanged" Unchecked="PerfmonCounter_CheckChanged"
                                                   Foreground="{DynamicResource ForegroundBrush}" FontSize="11">
-                                            <TextBlock Text="{Binding DisplayName}"/>
+                                            <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" ToolTip="{Binding DisplayName}"/>
                                         </CheckBox>
                                     </DataTemplate>
                                 </ListBox.ItemTemplate>
@@ -2437,13 +2455,13 @@
                                           RowStyle="{StaticResource GridRowStyle}"
                                           HeadersVisibility="Column" GridLinesVisibility="Horizontal">
                                     <DataGrid.Columns>
-                                        <DataGridTextColumn Binding="{Binding ConfigurationName}" Width="300">
+                                        <DataGridTextColumn Binding="{Binding ConfigurationName}" ElementStyle="{StaticResource TrimmedCell}" Width="300">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ConfigurationName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Setting" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Binding="{Binding ValueConfigured}" Width="150">
+                                        <DataGridTextColumn Binding="{Binding ValueConfigured}" ElementStyle="{StaticResource NumericCell}" Width="150">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ValueConfigured" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Configured Value" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Binding="{Binding ValueInUse}" Width="130">
+                                        <DataGridTextColumn Binding="{Binding ValueInUse}" ElementStyle="{StaticResource NumericCell}" Width="130">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ValueInUse" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Value In Use" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding DynamicDisplay}" Width="95">
@@ -2563,16 +2581,16 @@
                                       RowStyle="{StaticResource GridRowStyle}"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding DatabaseName}" Width="200">
+                                    <DataGridTextColumn Binding="{Binding DatabaseName}" ElementStyle="{StaticResource TrimmedCell}" Width="140">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding ConfigurationName}" Width="300">
+                                    <DataGridTextColumn Binding="{Binding ConfigurationName}" ElementStyle="{StaticResource TrimmedCell}" Width="240">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ConfigurationName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Setting" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding Value}" Width="200">
+                                    <DataGridTextColumn Binding="{Binding Value}" ElementStyle="{StaticResource NumericCell}" Width="200">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Value" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Value" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding ValueForSecondary}" Width="200">
+                                    <DataGridTextColumn Binding="{Binding ValueForSecondary}" ElementStyle="{StaticResource NumericCell}" Width="200">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ValueForSecondary" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Value for Secondary" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                     </DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding CaptureTimeLocal}" Width="150" SortMemberPath="CaptureTime">
@@ -2692,8 +2710,8 @@
                     <!-- Toolbar -->
                     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6">
                         <Button Content="Refresh" Click="DailySummaryRefresh_Click" Margin="0,0,10,0" Padding="8,4" MinWidth="60"/>
-                        <TextBlock Text="Composite daily health - click a day for detail and drill-in (times in UTC)" VerticalAlignment="Center"
-                                   FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                        <TextBlock x:Name="DailySummaryHintText" Text="Composite daily health - click a day for detail and drill-in (times in UTC)" VerticalAlignment="Center"
+                                   Style="{DynamicResource PanelSubtitleText}"/>
                     </StackPanel>
 
                     <!-- Month heatmap + the shared day-detail panel (click a day: band header, why-this-day
@@ -3048,7 +3066,7 @@
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
                                 <TextBlock Text="Scheduler Issues" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
-                                <TextBlock x:Name="SchedulerIssuesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="SchedulerIssuesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                                 <TextBlock x:Name="SchedulerIssuesWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
@@ -3075,7 +3093,7 @@
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
                                 <TextBlock Text="Severe Errors (severity 19+)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
-                                <TextBlock x:Name="SevereErrorsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="SevereErrorsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                                 <TextBlock x:Name="SevereErrorsWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
@@ -3105,7 +3123,7 @@
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
                                 <TextBlock Text="Memory Conditions (low physical memory)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
-                                <TextBlock x:Name="MemoryConditionsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="MemoryConditionsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                                 <TextBlock x:Name="MemoryConditionsWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
@@ -3158,7 +3176,7 @@
                                 <!-- #8197: the tab is already named Memory Broker, so the panel keeps only what its tab cannot say. -->
                                 <TextBlock x:Name="MemoryBrokerSubtitle" Text="Target shrinks" Style="{DynamicResource PanelSubtitleText}" VerticalAlignment="Center"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
-                                <TextBlock x:Name="MemoryBrokerCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="MemoryBrokerCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                                 <TextBlock x:Name="MemoryBrokerWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
@@ -3166,8 +3184,8 @@
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Binding="{Binding EventTimeLocal}" Width="145" SortMemberPath="EventTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Event Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding BrokerId}" Width="80" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="BrokerId" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Broker ID" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                        <DataGridTextColumn Binding="{Binding Broker}" Width="210"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Broker" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Broker" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                        <DataGridTextColumn Binding="{Binding Notification}" Width="210"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Notification" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Notification" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding Broker}" ElementStyle="{StaticResource TrimmedCell}" Width="210"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Broker" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Broker" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding Notification}" ElementStyle="{StaticResource TrimmedCell}" Width="210"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Notification" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Notification" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding PoolMetadataId}" Width="105" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PoolMetadataId" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Pool Meta ID" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding DeltaTime, StringFormat=N0}" Width="100" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DeltaTime" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Delta Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding MemoryRatio, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MemoryRatio" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Mem Ratio" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3191,7 +3209,7 @@
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
                                 <TextBlock Text="Memory Node OOM" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
-                                <TextBlock x:Name="MemoryNodeOomCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="MemoryNodeOomCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                                 <TextBlock x:Name="MemoryNodeOomWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
@@ -3239,7 +3257,7 @@
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
                                 <TextBlock Text="Significant Waits (duration 500 ms+)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
-                                <TextBlock x:Name="SignificantWaitsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="SignificantWaitsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                                 <TextBlock x:Name="SignificantWaitsWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
@@ -3269,7 +3287,7 @@
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
                                 <TextBlock Text="CPU Tasks (WARNING with 10+ pending tasks)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
-                                <TextBlock x:Name="CpuTasksCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="CpuTasksCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                                 <TextBlock x:Name="CpuTasksWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
@@ -3300,7 +3318,7 @@
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
                                 <TextBlock Text="I/O Issues (WARNING with pending I/O)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
-                                <TextBlock x:Name="IoIssuesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="IoIssuesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                                 <TextBlock x:Name="IoIssuesWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
@@ -3328,7 +3346,7 @@
                             <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
                                 <TextBlock Text="Default Trace (auto-grow/shrink stalls, severe ErrorLog, schema DDL, security audits, memory change)" VerticalAlignment="Center" TextWrapping="Wrap" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
-                                <TextBlock x:Name="DefaultTraceCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="DefaultTraceCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                                 <TextBlock x:Name="DefaultTraceWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </WrapPanel>
                             <Grid Grid.Row="1">
@@ -3377,13 +3395,13 @@
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
                                 <TextBlock Text="Server Configuration Changes (sp_configure drift)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="ConfigChangesRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
-                                <TextBlock x:Name="ServerConfigChangesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="ServerConfigChangesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                                 <TextBlock x:Name="ServerConfigChangesWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
                                 <DataGrid x:Name="ServerConfigChangesGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                     <DataGrid.Columns>
-                                        <DataGridTextColumn Binding="{Binding ChangeTimeLocal}" Width="320" SortMemberPath="ChangeTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="First Seen" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding ChangeTimeLocal}" ElementStyle="{StaticResource TrimmedCell}" Width="160" SortMemberPath="ChangeTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="First Seen" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding ConfigurationName}" Width="260"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ConfigurationName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Configuration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding OldValueConfigured}" Width="110" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="OldValueConfigured" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Old Configured" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding NewValueConfigured}" Width="110" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="NewValueConfigured" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="New Configured" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3408,15 +3426,15 @@
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
                                 <TextBlock Text="Database Configuration Changes (recovery model, RCSI, compat level, etc.)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="ConfigChangesRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
-                                <TextBlock x:Name="DatabaseConfigChangesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="DatabaseConfigChangesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                                 <TextBlock x:Name="DatabaseConfigChangesWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
                                 <DataGrid x:Name="DatabaseConfigChangesGrid" AutoGenerateColumns="False" IsReadOnly="True" RowStyle="{StaticResource GridRowStyle}" HeadersVisibility="Column" GridLinesVisibility="Horizontal" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                     <DataGrid.Columns>
-                                        <DataGridTextColumn Binding="{Binding ChangeTimeLocal}" Width="320" SortMemberPath="ChangeTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="First Seen" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                        <DataGridTextColumn Binding="{Binding DatabaseName}" Width="180"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                        <DataGridTextColumn Binding="{Binding SettingName}" Width="230"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SettingName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Setting Name" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding ChangeTimeLocal}" ElementStyle="{StaticResource TrimmedCell}" Width="160" SortMemberPath="ChangeTime"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="First Seen" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding DatabaseName}" Width="150"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding SettingName}" Width="200"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SettingName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Setting Name" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding OldValue}" Width="160"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="OldValue" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Old Value" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding NewValue}" Width="160"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="NewValue" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="New Value" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                         <DataGridTextColumn Binding="{Binding ChangeDescription}" Width="*" MinWidth="250"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ChangeDescription" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Change Description" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -3434,7 +3452,7 @@
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
                                 <TextBlock Text="Trace Flag Changes (enabled / disabled / scope changed)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="ConfigChangesRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
-                                <TextBlock x:Name="TraceFlagChangesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="TraceFlagChangesCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                                 <TextBlock x:Name="TraceFlagChangesWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap" Background="#22FFAA00"/>
                             </StackPanel>
                             <Grid Grid.Row="1">
@@ -3505,11 +3523,12 @@
                             </Style>
                         </DataGrid.RowStyle>
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Tag" Binding="{Binding QueryTag}" Width="140"/>
+                            <DataGridTextColumn Binding="{Binding QueryTag}" Width="Auto"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="QueryTag" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Tag" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                             <DataGridTextColumn Binding="{Binding EventTimeLocal}" Width="150" SortMemberPath="EventTime">
                                 <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="EventTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Event Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTemplateColumn Header="Statement" Width="360">
+                            <DataGridTemplateColumn Width="360">
+                                <DataGridTemplateColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StatementText" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Statement" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTemplateColumn.Header>
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <TextBlock Text="{Binding StatementText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" ToolTip="{Binding StatementText}"/>

@@ -55,9 +55,10 @@ public sealed partial class PlanForceToolLiveTests
         await RunAsync(Without.Nothing, async c =>
         {
             var (query, planA, _) = await c.Sql.TwoPlansAsync("pf7108a", c.Ct);
+            await SeedCollectedPlanAsync(c, c.Sql.Database, query, planA);
             var permit = await PermitForAsync(c, DarlingMcpPlanForceTools.ForceToolName, ServerActionNames.ForcePlan, planA.ToString(CultureInfo.InvariantCulture), c.Sql.Database);
 
-            var prepared = await DarlingMcpPlanForceTools.PrepareForcePlanAsync(c.Source, c.Log, permit, 7, "srv-7", force: true, c.Sql.Database, query, planA, dryRun: true,
+            var prepared = await DarlingMcpPlanForceTools.PrepareForcePlanAsync(c.Source, c.Source, c.Log, permit, 7, "srv-7", force: true, c.Sql.Database, query, planA, dryRun: true,
                 static (_, _) => Task.CompletedTask, c.Ct);
             var facts = prepared.Facts!;
             Assert.Contains("\"dry_run\"", prepared.Answer, StringComparison.Ordinal);

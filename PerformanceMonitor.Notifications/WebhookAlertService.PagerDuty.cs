@@ -135,10 +135,10 @@ public partial class WebhookAlertService
         {
             NotificationRouter.TeamsChannel => await TrySendTeamsAlertAsync(
                 delivery, destination, title, serverName, "resolved", "", context: null, triageUrl, detailText, now,
-                displayName: null, cancellationToken),
+                displayName: null, cancellationToken: cancellationToken),
             NotificationRouter.SlackChannel => await TrySendSlackAlertAsync(
                 delivery, destination, title, serverName, "resolved", "", context: null, triageUrl, detailText, now,
-                displayName: null, cancellationToken),
+                displayName: null, cancellationToken: cancellationToken),
             /* #5998: a resolution names its destination, not its route, so its keys are found by URL. A destination that
                matches no configured generic URL while a signing key would not open may be the one whose key failed: it is
                not sent, rather than sent unsigned. */
@@ -172,10 +172,10 @@ public partial class WebhookAlertService
         {
             NotificationRouter.TeamsChannel => await TrySendTeamsAlertAsync(
                 delivery, destination, title, serverName, currentValue, "", context: null, triageUrl: null, detailText, now,
-                displayName: null, cancellationToken),
+                displayName: null, cancellationToken: cancellationToken),
             NotificationRouter.SlackChannel => await TrySendSlackAlertAsync(
                 delivery, destination, title, serverName, currentValue, "", context: null, triageUrl: null, detailText, now,
-                displayName: null, cancellationToken),
+                displayName: null, cancellationToken: cancellationToken),
             _ => $"{channel} does not carry a notice",
         };
     }
@@ -204,8 +204,9 @@ public partial class WebhookAlertService
         {
             /* #6456: an empty header set, not null. No configured headers are sent (they belong to the alert channel), but a non-null
                set is what puts the default User-Agent on a generic post, so an event carries the same sender identity as an alert. */
-            return await PostWebhookAsync(
-                url, payload, delivery.GenericWebhookProxyAddress, headers: new Dictionary<string, string>(), WebhookPostTimeout, signed, cancellationToken, _logger);
+            return await PostPacedAsync(
+                NotificationRouter.GenericChannel, url, url, payload, delivery.GenericWebhookProxyAddress, headers: new Dictionary<string, string>(), signed,
+                spacing: TimeSpan.Zero, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -261,6 +262,7 @@ public partial class WebhookAlertService
         string? displayName = null,
         bool resolveIncident = false,
         string? dedupKeyOverride = null,
+        TimeSpan postSpacing = default,
         CancellationToken cancellationToken = default)
     {
         var entries = EntriesNaming(settings, NotificationRouter.PagerDutyChannel, routingKey);
@@ -289,7 +291,8 @@ public partial class WebhookAlertService
             var endpoint = PagerDutyEndpoint(settings.PagerDutyUseEuRegion);
             var error = PostPagerDutyAsyncOverride is not null
                 ? await PostPagerDutyAsyncOverride(endpoint, payload)
-                : await PostWebhookAsync(endpoint, payload, settings.PagerDutyProxyAddress, cancellationToken: cancellationToken, bodyLog: _logger);
+                : await PostPacedAsync(
+                    NotificationRouter.PagerDutyChannel, routingKey, endpoint, payload, settings.PagerDutyProxyAddress, headers: null, signing: null, postSpacing, cancellationToken);
 
             if (error != null)
             {

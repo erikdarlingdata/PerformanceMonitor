@@ -121,7 +121,7 @@ public partial class AlertsHistoryTab : UserControl
         DataGridHeaderFit.Apply(AlertsDataGrid); // #6136: the longer title widens its column
         /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
         _lastReadRowCount = alerts.Count;
-        AlertCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap, "alert(s)");
+        AlertCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap, "alert");
         return displayCount;
     }
 
@@ -341,7 +341,7 @@ public partial class AlertsHistoryTab : UserControl
     internal void ApplyColumnFilter(ColumnFilterState filterState)
     {
         _filterManager?.SetFilter(filterState);
-        AlertCountIndicator.Text = JobHistoryCap.CountText(AlertsDataGrid.Items.Count, _lastReadRowCount, RowCap, "alert(s)");
+        AlertCountIndicator.Text = JobHistoryCap.CountText(AlertsDataGrid.Items.Count, _lastReadRowCount, RowCap, "alert");
     }
 
     private void FilterPopup_FilterCleared(object? sender, EventArgs e)
@@ -486,7 +486,7 @@ public partial class AlertsHistoryTab : UserControl
 
         /* Archived rows are dismissed too (#7160): both paths hide them (the window write and the keyed write each put them in the
            dismissed_archive_alerts sidecar), so the count asked about is the count dismissed. */
-        var message = $"Dismiss {allAlerts.Count} alert(s)?\n\nDismissed alerts are hidden from this view but remain in the database.";
+        var message = $"Dismiss {CountText.Plural(allAlerts.Count, "alert")}?\n\nDismissed alerts are hidden from this view but remain in the database.";
 
         var result = ConfirmPrompt(
             message,
