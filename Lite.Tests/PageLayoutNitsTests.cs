@@ -33,6 +33,10 @@ namespace PerformanceMonitorLite.Tests;
 [Collection("credential-manager")]
 public sealed class PageLayoutNitsTests
 {
+    private readonly ITestOutputHelper _output;
+
+    public PageLayoutNitsTests(ITestOutputHelper output) => _output = output;
+
     private static CredentialResolver Credentials() => new(new CredentialService(), null);
 
     [Fact]
@@ -361,29 +365,82 @@ public sealed class PageLayoutNitsTests
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
-    [Fact]
-    public void TheOverviewWaitLane_LeavesRoomAboveItsPlot_ForTheTopTickLabel()
+    public static TheoryData<string, int, int> ThemesAndWindows => new()
     {
-        var problems = WithServerTab("DarkTheme", PaneWidth(900), 600, Credentials(), (tab, window, _) =>
+        { "DarkTheme", 900, 600 }, { "LightTheme", 900, 600 }, { "CoolBreezeTheme", 900, 600 },
+        { "DarkTheme", 1280, 800 }, { "LightTheme", 1280, 800 }, { "CoolBreezeTheme", 1280, 800 },
+    };
+
+    /// <summary>
+    /// Item 16: every Overview lane's highest Y tick label is whole, with the plot still flush with the lane's top edge. A left-axis
+    /// label is centered on its tick, so a tick on the plot's top edge loses the label's upper half to the lane's edge. The empty
+    /// lane is the sharpest case (its 0 to 1 axis puts "1" on the edge), and the CPU lane's "100" sits close to it.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ThemesAndWindows))]
+    public void TheOverviewLanes_KeepTheirTopTickLabelWhole_WithThePlotFlushWithTheLanesTop(string theme, int width, int height)
+    {
+        var (measured, problems) = WithServerTab(theme, PaneWidth(width), height, Credentials(), (tab, window, _) =>
         {
+            var lines = new List<string>();
             var found = new List<string>();
             var lanes = Find<CorrelatedTimelineLanesControl>(tab, "CorrelatedLanes");
             Reveal(lanes);
             Settle(window);
             var t0 = new DateTime(2026, 11, 7, 0, 0, 0, DateTimeKind.Utc).ToOADate();
-            var data = Enumerable.Range(0, 48).Select(i => (t0 + i / 48.0, 1500.0 + 1000.0 * (i % 12) / 11.0)).ToList();
-            lanes.UpdateLane(lanes.WaitStatsChart, "Wait ms/sec", data, "#FFB74D");
+            List<(double, double)> Series(double lo, double hi) => Enumerable.Range(0, 48).Select(i => (t0 + i / 48.0, lo + (hi - lo) * (i % 12) / 11.0)).ToList();
+            lanes.UpdateCpuLane(Series(5, 90), Series(8, 95));
+            lanes.UpdateLane(lanes.WaitStatsChart, "Wait ms/sec", [], "#FFB74D");
+            lanes.UpdateBlockingLane(Series(1, 6), Series(0, 2).Take(5).ToList());
+            lanes.UpdateLane(lanes.MemoryChart, "Buffer Pool MB", Series(2000, 9000), "#4FC3F7");
+            lanes.UpdateLane(lanes.FileIoChart, "I/O Latency ms", Series(1, 40), "#81C784");
             lanes.SyncXAxes(24, null, null);
             Settle(window);
-            var layout = lanes.WaitStatsChart.Plot.RenderManager.LastRender.Layout;
-            if (layout.DataRect.Top < 7)
+            foreach (var (chart, name) in new[] { (lanes.CpuChart, "CPU"), (lanes.WaitStatsChart, "Wait"), (lanes.BlockingChart, "Blocking"), (lanes.MemoryChart, "Memory"), (lanes.FileIoChart, "I/O") })
             {
-                found.Add($"the plot starts {layout.DataRect.Top:0.#} px from the lane's top edge, so the top tick label is cut");
+                var last = chart.Plot.RenderManager.LastRender;
+                if (last.DataRect.Top > 2)
+                {
+                    found.Add($"the {name} lane holds {last.DataRect.Top:0.#} px above its plot");
+                }
+
+                var axis = chart.Plot.Axes.Left;
+                var drawn = axis.TickGenerator.Ticks
+                    .Where(t => t.IsMajor && !string.IsNullOrEmpty(t.Label))
+                    .Select(t => (t.Label, Y: axis.GetPixel(t.Position, last.DataRect), Height: TickLabelHeight(axis, t.Label)))
+                    .Where(t => t.Y >= last.DataRect.Top - 0.5 && t.Y <= last.DataRect.Bottom + 0.5)
+                    .OrderBy(t => t.Y)
+                    .ToList();
+                if (drawn.Count > 0)
+                {
+                    var top = drawn[0];
+                    lines.Add($"{name}: plot {last.DataRect.Height:0.#} px tall from y={last.DataRect.Top:0.#}; top label \"{top.Label}\" is centered at y={top.Y:0.#} and {top.Height:0.#} px tall, so it spans y={top.Y - top.Height / 2:0.#} to {top.Y + top.Height / 2:0.#}");
+                }
+
+                foreach (var (label, y, labelHeight) in drawn)
+                {
+                    if (y - labelHeight / 2 < -0.5)
+                    {
+                        found.Add($"the {name} lane's \"{label}\" label is centered {y:0.#} px below the lane's top edge and is {labelHeight:0.#} px tall, so its top is cut");
+                    }
+                }
             }
 
-            return found;
+            return (lines, found);
         });
 
+        foreach (var line in measured)
+        {
+            _output.WriteLine($"{theme} {width}x{height} {line}");
+        }
+
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>The height ScottPlot lays the tick label out at, from the axis's own label style.</summary>
+    private static float TickLabelHeight(ScottPlot.IAxis axis, string label)
+    {
+        using var paint = ScottPlot.Paint.NewDisposablePaint();
+        return axis.TickLabelStyle.Measure(label, paint).Height;
     }
 }
