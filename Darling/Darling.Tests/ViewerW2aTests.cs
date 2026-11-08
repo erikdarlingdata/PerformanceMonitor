@@ -427,7 +427,8 @@ public sealed class ViewerServerSummaryDisplayTests
 
         var calm = new ServerSummaryItem { LastCollectionTime = Now };
         calm.ApplyFreshness(Now);
-        Assert.Equal("#FF2A2D35", calm.CardBorderBrush.Color.ToString());
+        /* #8221: a calm card draws the current theme's neutral border, which the render test pins per theme (ViewerThemeLeftoversRenderTests); here it is only not a band colour. */
+        Assert.DoesNotContain(calm.CardBorderBrush.Color.ToString(), new[] { "#FFE57373", "#FFFFD54F", "#FFFFB74D" });
     }
 
     // ── Enrichment: per-metric severity bands (verbatim mirrors of ServerHealthStatus) ──────────────

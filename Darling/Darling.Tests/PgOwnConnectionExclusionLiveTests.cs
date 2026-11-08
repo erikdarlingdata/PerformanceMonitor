@@ -80,15 +80,32 @@ public sealed class PgOwnConnectionExclusionLiveTests
     };
 
     [Fact]
-    public async Task SessionStates_AndXminHorizon_LeaveOutTheServicesOwnConnections()
+    public Task SessionStates_AndXminHorizon_LeaveOutTheServicesOwnConnections() => RunAsync(anotherSessionHoldsAnOlderTransaction: false);
+
+    /* #8203: pg_stat_activity is cluster-wide, so a transaction another session holds anywhere on the server (a test in its
+       own database, an autovacuum worker) can be older than this test's application connection for the whole read. The
+       collector then rightly names that holder, and the service's own connections, older still, must stay out of it. */
+    [Fact]
+    public Task SessionStates_AndXminHorizon_LeaveOutTheServicesOwnConnections_WhenAnotherSessionHoldsAnOlderTransaction() =>
+        RunAsync(anotherSessionHoldsAnOlderTransaction: true);
+
+    private static async Task RunAsync(bool anotherSessionHoldsAnOlderTransaction)
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
 
         var ct = TestContext.Current.CancellationToken;
 
-        /* The service connections open first, so each holds the oldest transaction id: without the
-           exclusion the xmin horizon read names one of them, which is the defect. */
+        /* The older transaction another session on the cluster can hold: opened before the service connections, so it is
+           the oldest holder of all, and the collector names it over the application connection. */
+        await using var elsewhere = anotherSessionHoldsAnOlderTransaction ? await OpenAsync(connectionString!, "pm7381-elsewhere", ct) : null;
+        if (elsewhere is not null)
+        {
+            await HoldTransactionAsync(elsewhere, ct);
+        }
+
+        /* The service connections open before the application one, so each holds an older transaction id than it: without
+           the exclusion the xmin horizon read names one of them, which is the defect. */
         await using var monitoring = await OpenAsync(connectionString!, PgWaitSamplingCollector.ServiceApplicationName, ct);
         await using var remediation = await OpenAsync(connectionString!, PgWaitSamplingCollector.ServiceRemediationApplicationName, ct);
         await using var application = await OpenAsync(connectionString!, "pm7381-app", ct);
@@ -138,28 +155,63 @@ public sealed class PgOwnConnectionExclusionLiveTests
 
         Assert.True(found, "the test's own idle-in-transaction session was never reported in 30 s");
 
-        /* The cluster is shared with classes outside this collection, and one of their connections or an autovacuum worker
-           can hold an older xmin for a moment, so read again until the oldest holder is this test's own. The service's two
-           connections are older than it and must never be named, on any read. */
+        /* pg_stat_activity is cluster-wide, so the oldest holder the collector names can be a session this test does not own,
+           a test in its own database or an autovacuum worker on the same server, for as long as that session likes (#8203).
+           The proof does not need the holder to be this test's own connection. The service's two connections are the oldest
+           holders here by construction, so the collector left them out exactly when the holder it names is the application
+           connection or a session at least as old as it, measured the collector's way (the greater of its snapshot's and its
+           transaction id's age) in the same transaction as the collector's read, which keeps both reads on one
+           pg_stat_activity snapshot. A service connection is never the holder. */
         var horizon = PgXminHorizonCollector.Instance;
         var invariant = System.Globalization.CultureInfo.InvariantCulture;
-        var applicationHolder = applicationPid.ToString(invariant);
-        string? holder = null;
-        for (var attempt = 0; attempt < 60 && holder != applicationHolder; attempt++)
+        await using (var begin = new NpgsqlCommand("BEGIN", source))
         {
-            if (attempt > 0)
-            {
-                await Task.Delay(500, ct);
-            }
-
-            await using var command = new NpgsqlCommand(horizon.BuildQuery(context).Text, source);
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            var rows = await horizon.ReadAsync(reader, context, ct);
-            holder = rows.Single(r => r.Source == "session").Holder;
-            Assert.NotEqual(monitoringPid.ToString(invariant), holder);
-            Assert.NotEqual(remediationPid.ToString(invariant), holder);
+            await begin.ExecuteNonQueryAsync(ct);
         }
 
-        Assert.Equal(applicationHolder, holder);
+        string? holder;
+        await using (var command = new NpgsqlCommand(horizon.BuildQuery(context).Text, source))
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            var rows = await horizon.ReadAsync(reader, context, ct);
+            holder = rows.Single(r => r.Source == "session").Holder;
+        }
+
+        Assert.NotNull(holder);
+        Assert.NotEqual(monitoringPid.ToString(invariant), holder);
+        Assert.NotEqual(remediationPid.ToString(invariant), holder);
+        var holderPid = int.Parse(holder, invariant);
+        if (holderPid != applicationPid)
+        {
+            long? holderAge = null;
+            long? applicationAge = null;
+            await using var ages = new NpgsqlCommand(
+                "SELECT pid, greatest(coalesce(age(backend_xmin), 0), coalesce(age(backend_xid), 0))::bigint "
+                + "FROM pg_catalog.pg_stat_activity WHERE pid IN ($1, $2)", source);
+            ages.Parameters.AddWithValue(holderPid);
+            ages.Parameters.AddWithValue(applicationPid);
+            await using var reader = await ages.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                if (reader.GetInt32(0) == holderPid)
+                {
+                    holderAge = reader.GetInt64(1);
+                }
+                else
+                {
+                    applicationAge = reader.GetInt64(1);
+                }
+            }
+
+            Assert.True(holderAge is not null && applicationAge is not null,
+                $"the named holder {holder} or the application connection {applicationPid} is missing from the pg_stat_activity snapshot the collector read");
+            Assert.True(holderAge >= applicationAge,
+                $"the collector named {holder} (age {holderAge}) over the application connection {applicationPid} (age {applicationAge}), which holds the older transaction");
+        }
+
+        await using (var commit = new NpgsqlCommand("COMMIT", source))
+        {
+            await commit.ExecuteNonQueryAsync(ct);
+        }
     }
 }

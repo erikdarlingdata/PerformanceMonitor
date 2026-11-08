@@ -88,6 +88,10 @@
     <SolidColorBrush x:Key="BorderLightBrush" Color="{StaticResource BorderLightColor}"/>
     <!-- #7218: the Availability Groups cards draw their outline from this key. Same definition as the Darling Viewer light theme. -->
     <SolidColorBrush x:Key="CardBorderBrush" Color="{StaticResource BorderLightColor}"/>
+    <!-- #8221: the outline of a button, a text box and a combo box, and the track a bar sits on. 3:1 or better against the page and the card
+         on the two light themes, where the pale BorderBrush (a grid line) left them looking like no control at all. -->
+    <SolidColorBrush x:Key="ControlBorderBrush" Color="#7C8794"/>
+    <SolidColorBrush x:Key="BarTrackBrush" Color="#DDE2E8"/>
 
     <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}"/>
     <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}"/>
@@ -155,8 +159,8 @@
     <Style TargetType="Button">
         <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
         <Setter Property="Foreground" Value="#1A1D23"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
-        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="12,6"/>
         <Setter Property="Cursor" Value="Hand"/>
         <Setter Property="Template">
@@ -392,7 +396,7 @@
     <Style x:Key="FilterTextBoxStyle" TargetType="TextBox">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="#1A1D23"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="4,2"/>
         <Setter Property="CaretBrush" Value="#1A1D23"/>
@@ -449,7 +453,7 @@
     <Style TargetType="TextBox">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="6,4"/>
         <Setter Property="CaretBrush" Value="{StaticResource ForegroundBrush}"/>
@@ -484,7 +488,7 @@
     <Style TargetType="PasswordBox">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="6,4"/>
         <Setter Property="CaretBrush" Value="{StaticResource ForegroundBrush}"/>
@@ -524,7 +528,7 @@
             </Grid.ColumnDefinitions>
             <Border x:Name="Border" Grid.ColumnSpan="2"
                     Background="{StaticResource BackgroundDarkBrush}"
-                    BorderBrush="{StaticResource BorderBrush}"
+                    BorderBrush="{StaticResource ControlBorderBrush}"
                     BorderThickness="1" CornerRadius="2"/>
             <Border Grid.Column="0" Margin="1"
                     Background="{StaticResource BackgroundDarkBrush}"
@@ -542,7 +546,7 @@
     <Style TargetType="ComboBox">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="6,4"/>
         <Setter Property="Template">
@@ -632,6 +636,12 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+    </Style>
+
+    <!-- #8221: the server pickers name each item by the server (a screen reader would say the model type). It lives in the theme, not in the tab,
+         because a tab's BasedOn="{StaticResource {x:Type ComboBoxItem}}" is looked up once when the tab loads and keeps the theme it loaded under. -->
+    <Style x:Key="ServerSelectorItemStyle" TargetType="ComboBoxItem" BasedOn="{StaticResource {x:Type ComboBoxItem}}">
+        <Setter Property="AutomationProperties.Name" Value="{Binding DisplayNameWithIntent, Mode=OneTime}"/>
     </Style>
 
     <!-- ============================================ -->
@@ -914,8 +924,8 @@
         <Setter Property="HorizontalGridLinesBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="VerticalGridLinesBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="HeadersVisibility" Value="Column"/>
-        <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Visible"/>
-        <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Visible"/>
+        <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+        <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
     </Style>
 
     <!-- Column header resize gripper -->
@@ -994,6 +1004,12 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+        <!-- #8223: the blank header cell the grid draws after its last column (its filler header, no content) takes the header background without the cell border, so it reads as the rest of the header bar. -->
+        <Style.Triggers>
+            <Trigger Property="Content" Value="{x:Null}">
+                <Setter Property="BorderThickness" Value="0,0,0,1"/>
+            </Trigger>
+        </Style.Triggers>
     </Style>
 
     <!-- Column header style when filter is active - subtle blue highlight -->
@@ -1118,8 +1134,87 @@
     <!-- ============================================ -->
     <!-- ScrollBar Style                              -->
     <!-- ============================================ -->
+    <!-- #8223: the stock scroll bar showed the system thumb (pale grey), white arrows and a black track. A themed one: a thin rounded thumb in the border colour,
+         a little brighter on hover, no arrow buttons, and a track that is the grid's own background. Both orientations. -->
+    <Style x:Key="ScrollBarThumbStyle" TargetType="Thumb">
+        <Setter Property="Background" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="IsTabStop" Value="False"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Thumb">
+                    <Border x:Name="thumb" Background="{TemplateBinding Background}" CornerRadius="3" Margin="2"/>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="thumb" Property="Background" Value="{StaticResource BorderLightBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsDragging" Value="True">
+                            <Setter TargetName="thumb" Property="Background" Value="{StaticResource BorderLightBrush}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="ScrollBarPageButtonStyle" TargetType="RepeatButton">
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="IsTabStop" Value="False"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RepeatButton">
+                    <Border Background="Transparent"/>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <ControlTemplate x:Key="VerticalScrollBarTemplate" TargetType="ScrollBar">
+        <Border Background="{TemplateBinding Background}">
+            <Track x:Name="PART_Track" IsDirectionReversed="True" Orientation="Vertical">
+                <Track.DecreaseRepeatButton>
+                    <RepeatButton Style="{StaticResource ScrollBarPageButtonStyle}" Command="ScrollBar.PageUpCommand"/>
+                </Track.DecreaseRepeatButton>
+                <Track.Thumb>
+                    <Thumb Style="{StaticResource ScrollBarThumbStyle}" MinHeight="24"/>
+                </Track.Thumb>
+                <Track.IncreaseRepeatButton>
+                    <RepeatButton Style="{StaticResource ScrollBarPageButtonStyle}" Command="ScrollBar.PageDownCommand"/>
+                </Track.IncreaseRepeatButton>
+            </Track>
+        </Border>
+    </ControlTemplate>
+
+    <ControlTemplate x:Key="HorizontalScrollBarTemplate" TargetType="ScrollBar">
+        <Border Background="{TemplateBinding Background}">
+            <Track x:Name="PART_Track" Orientation="Horizontal">
+                <Track.DecreaseRepeatButton>
+                    <RepeatButton Style="{StaticResource ScrollBarPageButtonStyle}" Command="ScrollBar.PageLeftCommand"/>
+                </Track.DecreaseRepeatButton>
+                <Track.Thumb>
+                    <Thumb Style="{StaticResource ScrollBarThumbStyle}" MinWidth="24"/>
+                </Track.Thumb>
+                <Track.IncreaseRepeatButton>
+                    <RepeatButton Style="{StaticResource ScrollBarPageButtonStyle}" Command="ScrollBar.PageRightCommand"/>
+                </Track.IncreaseRepeatButton>
+            </Track>
+        </Border>
+    </ControlTemplate>
+
     <Style TargetType="ScrollBar">
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
+        <Setter Property="Stylus.IsFlicksEnabled" Value="False"/>
+        <Setter Property="MinWidth" Value="0"/>
+        <Setter Property="MinHeight" Value="0"/>
+        <Setter Property="Width" Value="12"/>
+        <Setter Property="Template" Value="{StaticResource VerticalScrollBarTemplate}"/>
+        <Style.Triggers>
+            <Trigger Property="Orientation" Value="Horizontal">
+                <Setter Property="Width" Value="Auto"/>
+                <Setter Property="Height" Value="12"/>
+                <Setter Property="Template" Value="{StaticResource HorizontalScrollBarTemplate}"/>
+            </Trigger>
+        </Style.Triggers>
     </Style>
 
     <!-- ============================================ -->
