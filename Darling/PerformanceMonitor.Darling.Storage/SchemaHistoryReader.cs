@@ -128,8 +128,9 @@ public static class SchemaHistoryReader
     }
 
     /// <summary>
-    /// The versions whose name is <paramref name="name"/> (and schema, when given), one per object id, newest first. <paramref name="at"/> null
-    /// takes the current ones; with <paramref name="at"/> the ones that held at that time; <paramref name="anyTime"/> every version ever.
+    /// For each object id, its newest version whose name is <paramref name="name"/> (and schema, when given), compared ignoring case; ordered by
+    /// object id. <paramref name="at"/> null takes the current versions; with <paramref name="at"/> the ones that held at that time (never a
+    /// dropped one); <paramref name="anyTime"/> considers every version, dropped included, so each id answers with its newest.
     /// </summary>
     public static async Task<IReadOnlyList<SchemaVersionStamp>> FindByNameAsync(
         NpgsqlConnection c, SchemaHistoryKey key, string database, string? schema, string name, DateTime? at, bool anyTime, CancellationToken ct)

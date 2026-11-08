@@ -2554,12 +2554,13 @@ ORDER BY server_name";
                        ages out of a window, so without a stamp beside it a healed episode from days ago and
                        one still in progress read identically. Exactly last_error's #3010 lesson.
 
-                       Round-trip "o", matching last_success / last_error_at / last_denied_at on the
-                       compact collector rows of this same response, which keep full precision. A raw
-                       DateTime would serialize to an ISO string too, but with trailing zeros trimmed, so
-                       two timestamps on one payload would carry different precision guarantees for no
-                       reason. The partial rows (the degraded read's) are the exception: they write
-                       whole-second, truncated times, which nothing reads below a second. */
+                       Round-trip "o", matching last_success / last_error_at / last_denied_at on the full
+                       collector rows and last_success on the compact rows of this same response, which keep
+                       full precision. A raw DateTime would serialize to an ISO string too, but with
+                       trailing zeros trimmed, so two timestamps on one payload would carry different
+                       precision guarantees for no reason. The partial rows (collectors that need a look)
+                       are the exception: they write whole-second, truncated times, which nothing reads
+                       below a second. */
                     last_failure_at = alertReads.LastFailureAtUtc?.ToString("o"),
                     last_failure_read = alertReads.LastFailureRead,
                     /* The classification term. The name says WHICH read went blind; this says whose deadline
