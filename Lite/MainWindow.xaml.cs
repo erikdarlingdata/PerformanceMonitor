@@ -2556,6 +2556,15 @@ public partial class MainWindow : Window
             ServerSearchRow.Visibility = Visibility.Visible;
             SidebarToggleButton.Content = "«";
         }
+
+        /* #8306: the rail is 40 px. The list and the footer draw closer to its edges, each server row keeps only the inset its status
+           dot needs and shows the dot alone, and the footer stacks its buttons as icons. The row template reads the two resources
+           through DynamicResource, so swapping them here restyles every row at once. */
+        ServerListView.Margin = collapsed ? new Thickness(4, 8, 4, 8) : new Thickness(8);
+        Resources["SidebarRowPadding"] = collapsed ? new Thickness(3, 6, 3, 6) : new Thickness(8, 6, 8, 6);
+        Resources["SidebarRowLabelVisibility"] = collapsed ? Visibility.Collapsed : Visibility.Visible;
+        SidebarFooterBorder.Padding = collapsed ? new Thickness(4, 8, 4, 8) : new Thickness(8, 8, 8, 8);
+        Sidebar.SetCompact(collapsed);
     }
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)

@@ -166,6 +166,11 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
     /// <summary>The grants the remediation login's user needs in each database it may kill in, as the refusals and the README name them.</summary>
     internal const string AzureGrants = "GRANT VIEW DATABASE STATE TO <user>; GRANT KILL DATABASE CONNECTION TO <user>;";
 
+    /// <summary>The refusal's tail when the remediation login cannot open the session's database. Prose the
+    /// statement filter (#4348) passes through, so it names the step without spelling a CREATE USER.</summary>
+    internal const string NoUserInDatabaseHint = "The kill connects to the session's own database, so the remediation login needs a user there "
+        + "(a user made for the login, or a contained user with a password), with " + AzureGrants + " Nothing was run.";
+
     /// <summary>
     /// Azure errors that say the service, not the statement, failed (#5632): a database that is not available now (40613, also a serverless
     /// database that is paused or resuming), a service error (40197), a busy service (40501), resource limits (49918 to 49920, 10928, 10929),
@@ -330,8 +335,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             catch (SqlException ex) when (ex.Number is 18456 or 4060 or 916)
             {
                 return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SignInFailed,
-                    $"The remediation login could not open database {database}: {ErrorText(ex, login)} The kill connects to the session's own database, so the "
-                    + $"remediation login needs a user there (CREATE USER <user> FROM LOGIN <login>, or a contained user with a password), with {AzureGrants} Nothing was run.");
+                    $"The remediation login could not open database {database}: {ErrorText(ex, login)} " + NoUserInDatabaseHint);
             }
             catch (SqlException ex) when (IsAzureTransient(ex))
             {

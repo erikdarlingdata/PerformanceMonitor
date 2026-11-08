@@ -656,8 +656,8 @@ public static class DarlingPgLoggingAudit
         "user" or "database" or "database user" =>
             $"source is '{row.Source}': this value came from a per-role or per-database override that the "
             + "monitoring connection resolved, so the server-wide value may differ, and every other backend "
-            + "logs under its OWN resolved value. get_pg_server_config shows the setting's source; ALTER ROLE "
-            + "/ ALTER DATABASE ... RESET removes the override.",
+            + "logs under its OWN resolved value. get_pg_server_config shows the setting's source; a scoped RESET "
+            + "(ALTER DATABASE ... RESET, or the same statement for a role) removes the override.",
         _ => null,
     };
 

@@ -1031,6 +1031,8 @@
     <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}"                Color="{StaticResource AccentForegroundColor}"/>
     <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}"   Color="{StaticResource AccentColor}"/>
     <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}" Color="{StaticResource AccentForegroundColor}"/>
+    <!-- #8306: the control grey the stock scroll viewer paints where its two bars meet (and any other stock chrome that reads it) takes the scroll track's colour. -->
+    <SolidColorBrush x:Key="{x:Static SystemColors.ControlBrushKey}"                       Color="{StaticResource BackgroundDarkColor}"/>
 
     <!-- Named base style for DataGridTextColumn ElementStyles that must set an explicit
          Foreground.  BasedOn this style; keep the unselected Foreground setter in the
@@ -1137,10 +1139,14 @@
     <!-- ============================================ -->
     <!-- ScrollBar Style                              -->
     <!-- ============================================ -->
-    <!-- #8223: the stock scroll bar showed the system thumb (pale grey), white arrows and a black track. A themed one: a thin rounded thumb in the border colour,
+    <!-- #8223: the stock scroll bar showed the system thumb (pale grey), white arrows and a black track. A themed one: a thin rounded thumb in the scroll thumb brush,
          a little brighter on hover, no arrow buttons, and a track that is the grid's own background. Both orientations. -->
+    <!-- #8306: the thumb reads against its track (at least 2:1) in every theme, and brightens to the muted text colour under the pointer. -->
+    <SolidColorBrush x:Key="ScrollBarThumbBrush" Color="#9AA3AE"/>
+    <SolidColorBrush x:Key="ScrollBarThumbHoverBrush" Color="{StaticResource ForegroundMutedColor}"/>
+
     <Style x:Key="ScrollBarThumbStyle" TargetType="Thumb">
-        <Setter Property="Background" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="Background" Value="{StaticResource ScrollBarThumbBrush}"/>
         <Setter Property="Focusable" Value="False"/>
         <Setter Property="IsTabStop" Value="False"/>
         <Setter Property="Template">
@@ -1149,10 +1155,10 @@
                     <Border x:Name="thumb" Background="{TemplateBinding Background}" CornerRadius="3" Margin="2"/>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="thumb" Property="Background" Value="{StaticResource BorderLightBrush}"/>
+                            <Setter TargetName="thumb" Property="Background" Value="{StaticResource ScrollBarThumbHoverBrush}"/>
                         </Trigger>
                         <Trigger Property="IsDragging" Value="True">
-                            <Setter TargetName="thumb" Property="Background" Value="{StaticResource BorderLightBrush}"/>
+                            <Setter TargetName="thumb" Property="Background" Value="{StaticResource ScrollBarThumbHoverBrush}"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -1218,6 +1224,87 @@
                 <Setter Property="Template" Value="{StaticResource HorizontalScrollBarTemplate}"/>
             </Trigger>
         </Style.Triggers>
+    </Style>
+
+    <!-- ============================================ -->
+    <!-- Expander Style                               -->
+    <!-- ============================================ -->
+    <!-- #8306: the header toggle is a plain chevron in the muted text colour (the accent under the pointer) with nothing behind it, so an expander on a
+         dark or tinted panel shows no stock white disc. Headers expand downward. -->
+    <Style x:Key="ExpanderHeaderToggleStyle" TargetType="ToggleButton">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Padding" Value="0,2"/>
+        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToggleButton">
+                    <Border Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="19"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Path x:Name="Chevron" Data="M 1,2 L 5,6 L 9,2" Stroke="{StaticResource ForegroundMutedBrush}" StrokeThickness="1.6"
+                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                  HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <ContentPresenter Grid.Column="1" Margin="4,0,0,0" VerticalAlignment="Center" RecognizesAccessKey="True"
+                                              HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"/>
+                        </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Chevron" Property="Data" Value="M 1,6 L 5,2 L 9,6"/>
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Chevron" Property="Stroke" Value="{StaticResource AccentBrush}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="Expander">
+        <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderBrush" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+        <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Expander">
+                    <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
+                        <DockPanel>
+                            <ToggleButton x:Name="HeaderSite" DockPanel.Dock="Top" Style="{StaticResource ExpanderHeaderToggleStyle}"
+                                          IsChecked="{Binding IsExpanded, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"
+                                          Content="{TemplateBinding Header}" ContentTemplate="{TemplateBinding HeaderTemplate}"
+                                          ContentTemplateSelector="{TemplateBinding HeaderTemplateSelector}" ContentStringFormat="{TemplateBinding HeaderStringFormat}"
+                                          Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"
+                                          FontWeight="{TemplateBinding FontWeight}" FontStyle="{TemplateBinding FontStyle}" FontStretch="{TemplateBinding FontStretch}"
+                                          MinWidth="0" MinHeight="0"/>
+                            <ContentPresenter x:Name="ExpandSite" DockPanel.Dock="Bottom" Visibility="Collapsed" Focusable="False"
+                                              HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+                        </DockPanel>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsExpanded" Value="True">
+                            <Setter TargetName="ExpandSite" Property="Visibility" Value="Visible"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- #8306: a splitter that sets no Background takes the scroll thumb's brush, the theme's grab-handle ink, which reads against the page
+         in every theme. The stock style paints it from the system control grey, which this theme maps to the scroll track's colour. -->
+    <Style TargetType="GridSplitter">
+        <Setter Property="Background" Value="{StaticResource ScrollBarThumbBrush}"/>
     </Style>
 
     <!-- ============================================ -->
@@ -1362,6 +1449,13 @@
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="CalendarItem">
+                    <ControlTemplate.Resources>
+                        <!-- The weekday header: the calendar fills its seven title cells from the template under this key, and draws none without it. -->
+                        <DataTemplate x:Key="{x:Static CalendarItem.DayTitleTemplateResourceKey}">
+                            <TextBlock Text="{Binding}" FontSize="11" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,6,0,4"
+                                       Foreground="{StaticResource ForegroundBrush}"/>
+                        </DataTemplate>
+                    </ControlTemplate.Resources>
                     <Border Background="{TemplateBinding Background}"
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}">
@@ -1697,6 +1791,17 @@
         <Setter Property="Background" Value="{StaticResource BorderBrush}"/>
         <Setter Property="Margin" Value="0,4"/>
         <Setter Property="Height" Value="1"/>
+    </Style>
+    <!-- A separator inside a menu takes this key, not the Separator style, and its stock template insets the line past an icon
+         column. This one spans the menu in the theme's separator brush. -->
+    <Style x:Key="{x:Static MenuItem.SeparatorStyleKey}" TargetType="Separator" BasedOn="{StaticResource {x:Type Separator}}">
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Separator">
+                    <Border Background="{TemplateBinding Background}" SnapsToDevicePixels="True"/>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
 
     <!-- ============================================ -->
