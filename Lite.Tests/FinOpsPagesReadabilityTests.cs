@@ -74,10 +74,14 @@ public sealed class FinOpsPagesReadabilityTests
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
-    [Fact]
-    public void ExpensiveQueriesAndCostSavings_KeepEveryColumnHeaderNamedAndInsideTheGrid_WhenMaximized()
+    /* The walk's maximized tab, and the tab a 1280 px window leaves beside the sidebar. The host is sized, not the window, so a small
+       screen cannot clamp the tab. */
+    [Theory]
+    [InlineData(MaximizedTabWidth)]
+    [InlineData(1000)]
+    public void ExpensiveQueriesAndCostSavings_KeepEveryColumnHeaderNamedAndInsideTheGrid_WhenMaximized(int width)
     {
-        var problems = StaTestThread.Run(() => WithTheme("Dark", () => WithTab(MaximizedTabWidth, 925, (tab, window) =>
+        var problems = StaTestThread.Run(() => WithTheme("Dark", () => WithTab(width, 925, (tab, window) =>
         {
             var found = new List<string>();
 
@@ -229,6 +233,60 @@ public sealed class FinOpsPagesReadabilityTests
                     await (Task)typeof(FinOpsTab).GetMethod("LoadHighImpactQueriesAsync", Instance)!.Invoke(tab, [12345])!;
                     Settle(window);
                     problems.AddRange(EmptySentences(grid, "High Impact"));
+                }
+                finally
+                {
+                    window.Close();
+                    RemoveTheme(app, added);
+                }
+            });
+
+            Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
+        }
+    }
+
+    [Fact]
+    public async Task VersionStore_HidesItsGrid_WhenItsOneMessageStands()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "FinOpsPvsEmpty_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(Path.Combine(dir, "config"));
+        try
+        {
+            using var duckDb = new DuckDbInitializer(Path.Combine(dir, "empty.duckdb"));
+            await duckDb.InitializeFromTemplateAsync();
+            var dataService = new LocalDataService(duckDb);
+            var serverManager = new ServerManager(Path.Combine(dir, "config"));
+
+            var problems = new List<string>();
+            StaTestThread.Run(async () =>
+            {
+                var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+                var added = AddTheme(app, "Dark");
+                var tab = new FinOpsTab();
+                typeof(FinOpsTab).GetField("_dataService", Instance)!.SetValue(tab, dataService);
+                typeof(FinOpsTab).GetField("_serverManager", Instance)!.SetValue(tab, serverManager);
+                var window = new Window { Content = tab, Width = MaximizedTabWidth, Height = 925, Left = 0, Top = 0 };
+                StaTestThread.ShowOffScreen(window);
+                try
+                {
+                    var grid = (DataGrid)tab.FindName("PvsStatsDataGrid");
+                    Reveal(grid);
+                    Settle(window);
+                    await (Task)typeof(FinOpsTab).GetMethod("LoadPvsStatsAsync", Instance)!.Invoke(tab, [12345])!;
+                    Settle(window);
+                    var message = (FrameworkElement)tab.FindName("NoPvsStatsMessage");
+                    if (!message.IsVisible)
+                    {
+                        problems.Add("the Version Store message is not shown over an empty store");
+                    }
+                    if (grid.IsVisible || grid.ActualHeight > 0.5)
+                    {
+                        problems.Add($"the Version Store grid stands {grid.ActualHeight:0} px tall under its one message");
+                    }
                 }
                 finally
                 {
@@ -424,7 +482,10 @@ public sealed class FinOpsPagesReadabilityTests
     private static List<string> WithTab(int width, int height, Func<FinOpsTab, Window, List<string>> body)
     {
         var tab = new FinOpsTab();
-        var window = new Window { Content = tab, Width = width, Height = height, Left = 0, Top = 0 };
+        /* The tab is laid out at exactly width x height by a sized host, whatever the screen allows the window itself. */
+        var host = new Grid { Width = width, Height = height, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
+        host.Children.Add(tab);
+        var window = new Window { Content = host, Width = width, Height = height, Left = 0, Top = 0 };
         StaTestThread.ShowOffScreen(window);
         try
         {

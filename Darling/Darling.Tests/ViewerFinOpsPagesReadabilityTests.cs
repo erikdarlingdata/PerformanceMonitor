@@ -66,10 +66,14 @@ public sealed class ViewerFinOpsPagesReadabilityTests
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
-    [Fact]
-    public void ExpensiveQueriesAndCostSavings_KeepEveryColumnHeaderNamedAndInsideTheGrid_WhenMaximized()
+    /* The walk's maximized tab, and the tab a 1280 px window leaves beside the sidebar. The host is sized, not the window, so a small
+       screen cannot clamp the tab. */
+    [Theory]
+    [InlineData(MaximizedTabWidth)]
+    [InlineData(1000)]
+    public void ExpensiveQueriesAndCostSavings_KeepEveryColumnHeaderNamedAndInsideTheGrid_WhenMaximized(int width)
     {
-        var problems = StaTestThread.Run(() => WithTheme(() => WithTab(MaximizedTabWidth, 925, (tab, window) =>
+        var problems = StaTestThread.Run(() => WithTheme(() => WithTab(width, 925, (tab, window) =>
         {
             var found = new List<string>();
 
@@ -182,6 +186,29 @@ public sealed class ViewerFinOpsPagesReadabilityTests
                 .Where(t => t.IsVisible && t.ActualWidth > 0 && t.Text.StartsWith("No ", StringComparison.Ordinal) && !Descendants(grid).Contains(t))
                 .Select(t => t.Text).ToList();
             return shown.Count == 1 ? [] : new List<string> { $"High Impact shows {shown.Count} empty sentences: {string.Join(" | ", shown)}" };
+        })));
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    [Fact]
+    public void VersionStore_HidesItsGrid_WhenItsOneMessageStands()
+    {
+        var problems = StaTestThread.Run(() => WithTheme(() => WithTab(MaximizedTabWidth, 925, (tab, window) =>
+        {
+            var grid = (DataGrid)tab.FindName("FinOpsPvsStatsDataGrid");
+            Reveal(grid);
+            Settle(window);
+            /* The two statements the loader runs for an empty read: the filter manager takes the empty list, and the page's sentence is shown. */
+            var manager = typeof(FinOpsTab).GetField("_finopsPvsStatsFilterMgr", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(tab)!;
+            var empty = Activator.CreateInstance(typeof(List<>).MakeGenericType(manager.GetType().GetGenericArguments()[0]))!;
+            manager.GetType().GetMethod("UpdateData")!.Invoke(manager, [empty]);
+            ((FrameworkElement)tab.FindName("FinOpsNoPvsStatsMessage")).Visibility = Visibility.Visible;
+            Settle(window);
+
+            return grid.IsVisible || grid.ActualHeight > 0.5
+                ? new List<string> { $"the Version Store grid stands {grid.ActualHeight:0} px tall under its one message" }
+                : [];
         })));
 
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
@@ -344,7 +371,10 @@ public sealed class ViewerFinOpsPagesReadabilityTests
     private static List<string> WithTab(int width, int height, Func<FinOpsTab, Window, List<string>> body)
     {
         var tab = new FinOpsTab();
-        var window = new Window { Content = tab, Width = width, Height = height, Left = 0, Top = 0 };
+        /* The tab is laid out at exactly width x height by a sized host, whatever the screen allows the window itself. */
+        var host = new Grid { Width = width, Height = height, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
+        host.Children.Add(tab);
+        var window = new Window { Content = host, Width = width, Height = height, Left = 0, Top = 0 };
         StaTestThread.ShowOffScreen(window);
         try
         {
