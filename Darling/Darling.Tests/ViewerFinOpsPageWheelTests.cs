@@ -112,14 +112,14 @@ public sealed class ViewerFinOpsPageWheelTests
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
-    /// <summary>Raises the wheel over <paramref name="target"/> as the input system does: the preview tunnels first; the bubbling event follows only when the preview was not handled.</summary>
+    /// <summary>Raises the wheel over <paramref name="target"/> as the input system does: the preview tunnels first; the bubbling event follows only when the preview was not handled. The timestamp is not read, so it is a constant.</summary>
     private static void Wheel(UIElement target, int delta)
     {
-        var preview = new MouseWheelEventArgs(Mouse.PrimaryDevice, Environment.TickCount, delta) { RoutedEvent = UIElement.PreviewMouseWheelEvent, Source = target };
+        var preview = new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, delta) { RoutedEvent = UIElement.PreviewMouseWheelEvent, Source = target };
         target.RaiseEvent(preview);
         if (!preview.Handled)
         {
-            target.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, Environment.TickCount, delta) { RoutedEvent = UIElement.MouseWheelEvent, Source = target });
+            target.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, delta) { RoutedEvent = UIElement.MouseWheelEvent, Source = target });
         }
     }
 
