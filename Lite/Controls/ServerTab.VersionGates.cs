@@ -33,8 +33,9 @@ public partial class ServerTab : UserControl
     };
 
     /// <summary>
-    /// Reads the server's major version from the store once, then words the two plan-correction grids for it. A store with no row, or a
-    /// read that fails, leaves the version unknown, which is assumed newest: the grids keep the sentences they have.
+    /// Reads the server's major version from the store once. A store with no row, or a read that fails, leaves the version unknown, which is
+    /// assumed newest. The grids are worded by <see cref="RefreshEngineEditionAsync"/>, after the edition is known too: an Azure SQL Database
+    /// or Managed Instance stores product version 12.0.x, so the version alone would read as SQL Server 2014.
     /// </summary>
     private async System.Threading.Tasks.Task RefreshSqlMajorVersionAsync()
     {
@@ -49,10 +50,8 @@ public partial class ServerTab : UserControl
         }
         catch (Exception)
         {
-            return;
+            /* Unknown stays unknown, and is assumed newest. */
         }
-
-        ApplyPlanCorrectionEmptyTexts(PlanCorrectionTarget());
     }
 
     /// <summary>
