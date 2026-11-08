@@ -192,6 +192,12 @@ public partial class JobHistoryTab : UserControl
                 return;
             }
 
+            /* The rows are bound, so the loading note comes down now, ahead of the agent-status read and the data-start note: each can
+               take a while, and neither may keep "Loading job history…" over rows a reader can already see. Like every other paint in
+               this method, the collapse sits behind this load's own supersession check. */
+            if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+            LoadingMessage.Visibility = Visibility.Collapsed;
+
             var choicesApplied = ApplyKnownChoicesAsync(choicesTask, choicesKey, gen, all);
 
             var displayCount = JobHistoryDataGrid.Items.Count;
@@ -212,8 +218,6 @@ public partial class JobHistoryTab : UserControl
 
             await UpdateAgentStatusAsync(serverId);
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
-
-            LoadingMessage.Visibility = Visibility.Collapsed;
 
             /* #4966: the rows are bound and the loading note is down; the probe is awaited last. This await settles it whether it
                succeeded or faulted, without throwing, so the supersede check lands before the note is written and the step below awaits a finished
