@@ -16,8 +16,19 @@ namespace Darling.Tests;
 /// database made them order-dependent (caught live: the V20 round-trip read the V3 defaults an
 /// earlier test seeded). Each such test gets its own database instead — created here, dropped on
 /// dispose with <c>WITH (FORCE)</c> so a lingering connection can never wedge the drop.
-/// <c>Pooling=false</c> on the scratch connection string keeps in-process pooled connections from
-/// pinning the database in the first place.
+///
+/// <para><b>The scratch connection string pools (#8231).</b> A test's connections and data sources on it reuse their
+/// physical connections, where an unpooled string opened a socket per statement and left it in TIME_WAIT, until a leg of
+/// live classes ran its runner out of ephemeral ports. The dispose clears this process's pools for the string before the
+/// drop, so no idle pooled backend is left for the FORCE to terminate and no dead physical connection stays in the pool
+/// behind it. The string also carries the store's <c>Search Path</c>, as every product store connection string does: a
+/// pooled physical connection keeps the session defaults its backend started with, so one opened before the test's
+/// <c>MigrateAsync</c> set the database default would resolve no bare table name on a later lease without it. Npgsql
+/// resets the rest of a session's state (its GUCs, role, temporary tables, advisory locks, prepared statements) when a
+/// connection is returned, and the string does not turn that off. A test that needs a session of its own (a backend it
+/// terminates, a session lock released by closing, a count of the database's backends) says so with
+/// <c>Pooling = false</c> on its own string. The factory's own statements on a scratch database run unpooled, so the
+/// only connections in a scratch string's pool are the test's.</para>
 ///
 /// <para><b>A scratch database must not outlive its run (#4981).</b> Each one that has the TimescaleDB extension
 /// holds a background-worker slot for its scheduler, and a long-lived local cluster has only a few, so databases
@@ -143,7 +154,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
             {
                 /* CREATE EXTENSION is what tells TimescaleDB's launcher to start a database's scheduler, and a clone never
                    runs it: its scheduler would otherwise not start, so its jobs would never run. */
-                await using var connection = new NpgsqlConnection(clone.ConnectionString);
+                await using var connection = new NpgsqlConnection(Unpooled(clone.ConnectionString));
                 await connection.OpenAsync(cancellationToken);
                 await using var start = new NpgsqlCommand("SELECT _timescaledb_functions.start_background_workers()", connection);
                 /* The call waits on TimescaleDB's launcher, which starts schedulers one at a time. With a parallel suite
@@ -172,7 +183,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
         {
             try
             {
-                scratch.TimescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, cancellationToken);
+                scratch.TimescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(Unpooled(scratch.ConnectionString), cancellationToken);
                 if (!scratch.TimescaleEnabled)
                 {
                     /* The cluster cannot load the library: do not pay a failed CREATE EXTENSION (it ends the backend) per database. */
@@ -216,10 +227,12 @@ internal sealed class ScratchPostgres : IAsyncDisposable
             throw;
         }
 
+        /* Pooled, with the store's search path the way every product store connection string carries it: see the class
+           summary. */
         var builder = new NpgsqlConnectionStringBuilder(baseConnectionString)
         {
             Database = databaseName,
-            Pooling = false,
+            SearchPath = PerformanceMonitor.Darling.Storage.DarlingStoreConnection.StoreSearchPath,
         };
 
         /* The base string can already carry the session pin (LiveStoreSessionTimeZone adds it to DARLING_TEST_PG),
@@ -273,7 +286,8 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     ///
     /// <para><b>What a clone does not inherit.</b> <c>CREATE DATABASE</c> copies neither the database's own settings nor
     /// its grants, so the database-default <c>search_path</c> arrives with the test's <c>MigrateAsync</c>, just as it does
-    /// on a fresh store. Rows a rung stamps with <c>now()</c> carry the template's time, and a rung's random row is the
+    /// on a fresh store (the scratch connection string carries the store's search path itself, so a bare name resolves on
+    /// it either way). Rows a rung stamps with <c>now()</c> carry the template's time, and a rung's random row is the
     /// same in every clone (<c>config.pseudonym_key</c>). A test that depends on either passes <c>emptyStore</c>.</para>
     /// </summary>
     internal static async Task<StoreTemplate> GetTemplateAsync(string baseConnectionString, CancellationToken cancellationToken)
@@ -311,7 +325,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
         var template = await CreateEmptyAsync(baseConnectionString, plainPostgres: false, TemplateCreator, CancellationToken.None);
         try
         {
-            await using (var connection = new NpgsqlConnection(template.ConnectionString))
+            await using (var connection = new NpgsqlConnection(Unpooled(template.ConnectionString)))
             {
                 await connection.OpenAsync();
                 await PerformanceMonitor.Darling.Storage.PgMigrations.MigrateAsync(connection);
@@ -342,6 +356,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// </summary>
     public async ValueTask DisposeAsync()
     {
+        ClearPools();
         for (var attempt = 1; attempt <= DropAttempts; attempt++)
         {
             try
@@ -360,6 +375,29 @@ internal sealed class ScratchPostgres : IAsyncDisposable
             }
         }
     }
+
+    /// <summary>
+    /// Closes this process's idle pooled connections on both scratch strings and dooms the ones a test still holds, so they
+    /// close when returned. Before the drop: an idle pooled backend would otherwise be what <c>WITH (FORCE)</c> terminates,
+    /// and its physical connection would then sit dead in the pool. A data source a test built on the string has a pool of
+    /// its own, which its dispose clears.
+    /// </summary>
+    private void ClearPools()
+    {
+        using var pinned = new NpgsqlConnection(ConnectionString);
+        NpgsqlConnection.ClearPool(pinned);
+        using var unpinned = new NpgsqlConnection(UnpinnedConnectionString);
+        NpgsqlConnection.ClearPool(unpinned);
+    }
+
+    /// <summary>
+    /// <paramref name="connectionString"/> with pooling off, for the factory's own statements on a scratch database (a
+    /// clone's scheduler start, the template's build, the extension probe). Each is one statement on a database no test has
+    /// touched yet, and a pooled one would leave an idle backend, named after the base string, in the pool the test's first
+    /// connection then draws from, and in the template's case a session the clone would refuse to copy from.
+    /// </summary>
+    private static string Unpooled(string connectionString) =>
+        new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString;
 
     /// <summary>True while this process still has a drop pending for <paramref name="databaseName"/>.</summary>
     internal static bool IsRemembered(string databaseName) => Remembered.ContainsKey(databaseName);
