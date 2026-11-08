@@ -70,9 +70,28 @@ public class ScreenReaderRowNamesTests
         return template;
     }
 
+    /// <summary>
+    /// A grid that takes none of the styles the process holds at application scope. A class that applies a Lite theme earlier
+    /// in the same process leaves its implicit DataGrid, row, cell and header styles merged there, and the theme's cell style
+    /// pads every cell by 8,6, so fewer rows fit a window and the recycled-row scroll visits fewer rows. Blank implicit styles
+    /// in the grid's own resources are the nearest ones, so the grid and everything it realizes keep WPF's defaults, and the
+    /// explicit font keeps the row height independent of whatever a theme or the host sets.
+    /// </summary>
     private static DataGrid NewGrid(IEnumerable<DataGridColumn> columns, IEnumerable<JobRow> rows, bool recycling = false)
     {
-        var grid = new DataGrid { AutoGenerateColumns = false, HeadersVisibility = DataGridHeadersVisibility.Column };
+        var grid = new DataGrid
+        {
+            AutoGenerateColumns = false,
+            HeadersVisibility = DataGridHeadersVisibility.Column,
+            FontFamily = new System.Windows.Media.FontFamily("Segoe UI"),
+            FontSize = 12,
+        };
+
+        foreach (var styled in new[] { typeof(DataGrid), typeof(DataGridRow), typeof(DataGridCell), typeof(System.Windows.Controls.Primitives.DataGridColumnHeader) })
+        {
+            grid.Resources[styled] = new Style(styled);
+        }
+
         foreach (var column in columns)
         {
             grid.Columns.Add(column);
