@@ -7331,6 +7331,123 @@ AND   ca.view_schema = 'collect'";
         return converged;
     }
 
+    /// <summary>
+    /// The <c>retry_period</c> every scheduled job this product creates carries (#8302): the hourly and daily
+    /// continuous-aggregate refresh policies, and the compression policies on the raw tables, on
+    /// <c>collection_log</c> and on the aggregates.
+    ///
+    /// <para><b>Why it must stay well under an hour.</b> After a crashed run (a worker killed between its start and
+    /// end marks: PostgreSQL stopped, a failover, a crash-restart) the scheduler does not run the job at its persisted
+    /// <c>next_start</c>. It recomputes the start in memory as <c>max(5 minutes, retry_period × consecutive_crashes)</c>
+    /// from the moment it last reloaded its job list, and it reloads that list on every <c>alter_job</c>, <c>add_job</c>
+    /// or <c>delete_job</c> anywhere on the store. <see cref="SetRawLastPurgeOutcomeSql"/> is an <c>alter_job</c> once
+    /// an hour, so a retry period at or over the hour is never reached: each reload moves the crashed job another retry
+    /// period out, and a daily refresh policy, whose default retry period is a day, never runs again until a person
+    /// starts it. Measured on a field store: one crash, 45 hours without a run, two daily buckets lost. At 15 minutes a
+    /// crashed job runs within about 15 minutes of the next reload whatever its schedule, three consecutive crashes
+    /// still fit inside the hour, and the value stays above the scheduler's five-minute floor, below which a shorter
+    /// one changes nothing.</para>
+    ///
+    /// <para><b>The constraint this leaves on the rest of the product.</b> Nothing may call <c>alter_job</c>,
+    /// <c>add_job</c> or <c>delete_job</c> more often than every <see cref="PolicyJobListReloadFloorSpan"/>, or a crashed
+    /// job never reaches its retry whatever this value is. Every converge in this file alters only a job whose stored
+    /// value differs, so a converged store issues none; the hourly purge record is the one frequent caller, and once an
+    /// hour is well clear of the floor.</para>
+    /// </summary>
+    public const string PolicyJobRetryPeriod = "15 minutes";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="PolicyJobRetryPeriod"/>, pinned equal to the string and
+    /// inside the floor and the hourly reload by TimescaleJobRetryAndDailyWindowTests.</summary>
+    public static readonly TimeSpan PolicyJobRetrySpan = TimeSpan.FromMinutes(15);
+
+    /// <summary>The scheduler's floor on a crashed job's wait: it re-runs the job no sooner than this after a job-list
+    /// reload, so no job alteration anywhere in this product may recur more often than this (#8302).</summary>
+    public static readonly TimeSpan PolicyJobListReloadFloorSpan = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Every scheduled policy job this product creates whose <c>retry_period</c> is not <see cref="PolicyJobRetryPeriod"/>:
+    /// the <c>collect</c> refresh policies and the compression policies (raw tables, <c>collection_log</c> and the
+    /// aggregates' materializations, so the compression arm is unscoped the way <see cref="StuckPolicyJobsSql"/>'s is).
+    /// Retention policies are left out: this product never schedules them (#4299), so the scheduler never computes a
+    /// retry for them. TimescaleDB's own jobs match neither arm. One catalog read per pass; a converged store returns
+    /// no rows.
+    /// </summary>
+    public static string PolicyJobRetryStateSql =>
+        $@"SELECT j.job_id, j.proc_name, j.hypertable_name, EXTRACT(EPOCH FROM j.retry_period)::bigint AS retry_seconds
+FROM timescaledb_information.jobs AS j
+WHERE (j.proc_name LIKE '%compression%'
+   OR  j.proc_name LIKE '%columnstore%'
+   OR (j.hypertable_schema = 'collect' AND j.proc_name = 'policy_refresh_continuous_aggregate'))
+AND   j.retry_period IS DISTINCT FROM INTERVAL '{PolicyJobRetryPeriod}'";
+
+    /// <summary>Sets ONE job's <c>retry_period</c> and nothing else: <c>$1</c> the job id (<c>::integer</c>, the #1586
+    /// trap). No <c>scheduled</c>, <c>config</c> or schedule argument is named, so this neither arms a paused job nor
+    /// moves a window or a phase.</summary>
+    public static string SetPolicyJobRetryPeriodSql =>
+        $"SELECT alter_job($1::integer, retry_period => INTERVAL '{PolicyJobRetryPeriod}')";
+
+    /// <summary>
+    /// Puts every scheduled job this product creates on <see cref="PolicyJobRetryPeriod"/> (#8302). Runs AFTER the
+    /// policies exist, on the start path and on the hourly store-maintenance tick, so a fresh store leaves setup with
+    /// it and a store made under a build without it converges on the first pass. Differ-only
+    /// (<see cref="PolicyJobRetryStateSql"/>), so a converged store issues no <c>alter_job</c>, which is what keeps this
+    /// step inside the <see cref="PolicyJobListReloadFloorSpan"/> constraint it exists to serve. Failure-isolated per
+    /// job, the #1775 shape: one that fails (often a least-privilege store whose login does not own the job) logs a
+    /// warning and leaves the rest. Returns how many it changed.
+    /// </summary>
+    public static async Task<int> ConvergePolicyJobRetryPeriodAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var stale = new List<(int JobId, string Proc, string? Relation, long? WasSeconds)>();
+        try
+        {
+            using var probe = new NpgsqlCommand(PolicyJobRetryStateSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                stale.Add((
+                    Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture),
+                    reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? (long?)null : reader.GetInt64(3)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Policy job retry-period converge: could not read the jobs: {Message}", ex.Message);
+            return 0;
+        }
+
+        var converged = 0;
+        foreach (var (jobId, proc, relation, wasSeconds) in stale)
+        {
+            try
+            {
+                using var alter = new NpgsqlCommand(SetPolicyJobRetryPeriodSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                alter.Parameters.AddWithValue(jobId);
+                await alter.ExecuteNonQueryAsync(cancellationToken);
+                converged++;
+
+                logger?.LogInformation(
+                    "TimescaleDB: job {JobId} ({Proc}{Relation}) now retries a crashed run after {Retry} (was {WasSeconds}s) - a crashed job runs again within about that long of the scheduler's next job-list reload instead of being pushed out by every hourly pass (#8302).",
+                    jobId, proc, string.IsNullOrEmpty(relation) ? "" : " on " + relation, PolicyJobRetryPeriod, wasSeconds);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not set job {JobId}'s ({Proc}{Relation}) retry_period to {Retry} - after a crash it keeps waiting its old retry period, which every hourly pass restarts (often a permission issue: the store login must own the job): {Message}",
+                    jobId, proc, string.IsNullOrEmpty(relation) ? "" : " on " + relation, PolicyJobRetryPeriod, ex.Message);
+            }
+        }
+
+        return converged;
+    }
+
     /// <summary>Raw-tier retention horizon: keep per-sweep raw ~4 days — comfortably past the hourly CAGG's own
     /// <see cref="HourlyRefreshStartOffset"/> refresh window, so the raw drop never outruns the aggregate that
     /// preserves it. The margin is three days since #3012 narrowed that window; it was one day before, and the
@@ -14513,8 +14630,10 @@ AND format('%I.%I', c.chunk_schema, c.chunk_name) = $1)",
     /// <c>last_finish = -infinity</c> (the view's <c>last_run_status IS NULL</c>) and <c>consecutive_crashes = 1</c>,
     /// and the scheduler holds it there, un-persisted, for
     /// <c>max(MIN_WAIT_AFTER_CRASH_MS, retry_period × crashes)</c> capped at five schedule intervals and
-    /// jittered ±13 %: at least FIVE MINUTES, and for a compression policy — whose <c>retry_period</c> defaults
-    /// to one hour, measured on 2.28.1 — about an hour. Then it re-runs the job itself. (#3575's rig read
+    /// jittered ±13 %: at least FIVE MINUTES, and for a policy on <see cref="PolicyJobRetryPeriod"/> about
+    /// fifteen minutes (a compression policy's own default is one hour, measured on 2.28.1). The wait runs from
+    /// the scheduler's last job-list reload, not from the crash, and every <c>alter_job</c> reloads the list
+    /// (#8302). Then it re-runs the job itself. (#3575's test cluster read
     /// exactly five minutes because its 10-second probe policy capped the retry term at 50 s; the five-minute
     /// floor is the whole backoff only when the retry term is smaller than it.) So on 2.26.4+ the row this
     /// product's dead-job arm fires on is a self-recovering condition, not a permanent one, and the alert's

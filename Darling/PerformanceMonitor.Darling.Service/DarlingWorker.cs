@@ -432,6 +432,13 @@ public sealed partial class DarlingWorker : BackgroundService
         new("aggregate compression", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.InPlace,
             (connection, logger, ct) => TimescaleSupport.EnsureAggregateCompressionAsync(connection, logger, ct)),
 
+        /* #8302: AFTER every policy this product schedules exists (the refresh policies from the aggregate ensure, the
+           compression policies from the raw, collection_log and aggregate steps). Selects only jobs whose retry_period
+           differs, so a converged store issues no alter_job; a crashed job is then re-run about 15 minutes after the
+           scheduler's next job-list reload instead of a day later, which the hourly purge record's reload never let it reach. */
+        new("policy job retry period converge", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.Delta,
+            (connection, logger, ct) => TimescaleSupport.ConvergePolicyJobRetryPeriodAsync(connection, logger, ct)),
+
         /* #2007/#3653: BEFORE the fallback ensure (hygiene — the retired names left the ensure list, so it
            could not recreate them anyway). Judges each superseded pair against the tier horizon, which is a
            TIME-dependent verdict: today it flips only on a restart, and this is the step that makes "drops
