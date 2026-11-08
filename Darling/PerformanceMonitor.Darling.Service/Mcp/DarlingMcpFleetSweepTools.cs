@@ -64,13 +64,15 @@ public sealed class DarlingMcpFleetSweepTools
         "web feed and the Viewer show), the newest sweep in full (per-server verdicts with band transitions " +
         "pre-computed, plus its would-have-paged ledger when one was taken), and the watch-item worklist with " +
         "its hysteresis position; pass sweep_id (as a STRING - the ids are too large for a JSON number to " +
-        "round-trip) to fetch one sweep in full instead. SIZE: the reply is cut to the shared 32 KB response budget " +
-        "in two steps - the timeline loses its oldest sweeps first (the newest sweep's entry always rides, document " +
-        "embedded), then the worklist loses items by standing (carried before open, oldest first, so the open items " +
-        "and the newest survive; the items kept ride in the worklist's usual order). truncated is true, " +
-        "sweeps_returned and watch_items_returned say how many of each count ride, and budget_note names what was " +
-        "cut. latest and the sweep_id read are never cut, so when latest alone is over the budget the reply is too, " +
-        "and budget_note then says OVER BUDGET rather than claiming a fit. Narrow hours_back or move as_of to see the " +
+        "round-trip) to fetch one sweep in full instead. SIZE: the newest sweep's document ships once, under latest; " +
+        "its timeline entry keeps the row counts (report.fleet.bands, report.watch, report.would_have_paged) and says " +
+        "report_under: latest. The reply is cut to the shared 32 KB response budget in two steps - the timeline loses " +
+        "its oldest sweeps first (the newest entry always rides), then the worklist loses items by standing (carried " +
+        "before open, oldest first, so the open items and the newest survive; the items kept ride in the worklist's " +
+        "usual order). truncated is true only when something was cut; sweeps_returned and watch_items_returned say how " +
+        "many of each count ride, and budget_note names what was cut. latest and the sweep_id read are never cut, so a " +
+        "reply can still be over the budget at its floor: then over_budget is true and budget_note says OVER BUDGET " +
+        "with the never-cut pieces' sizes, rather than claiming a fit. Narrow hours_back or move as_of to see the " +
         "older sweeps; pass watch_state for one state's worklist. Every sweep id the payload carries (sweep_id, previous_sweep_id, the watch items' " +
         "*_sweep_id anchors) is spelled as a JSON string for the same reason - pass one back verbatim. " +
         "Two honesty rules ride every payload, and both carry field-level meaning an agent must read. " +
@@ -162,14 +164,54 @@ public sealed class DarlingMcpFleetSweepTools
             var watchItemNames = await DarlingFleetSweepEndpoints.ReadWatchItemNamesAsync(
                 postgres, watchItems, logger, cancellationToken);
 
-            /* #8081: the timeline entries are the web feed's and the Viewer's own (the zero-drift rule, pinned
-               by ViewerFleetSweepsReadTests), each with its document embedded, so the budget is kept by the
-               cut below rather than by a thinner entry. The cut fields are seated here, beside sweeps, and
-               written by the fit. */
+            /* #8081: the timeline entries are the web feed's and the Viewer's own (BuildRunNode, compared field
+               for field by ViewerFleetSweepsReadTests), each older entry with its document embedded; the newest
+               entry's document rides under latest (#8318, below). The cut fields are seated here, beside sweeps,
+               and written by the fit. */
             var result = FleetSweepPresentation.BuildTimelineNode(runs, windowStart, windowEnd);
             var entries = ((JsonArray)result["sweeps"]!).ToList();
             var latestNode = await BuildDetailAsync(postgres, latest, cancellationToken);
             var latestBytes = Encoding.UTF8.GetByteCount(latestNode.ToJsonString());
+
+            /* #8318: the newest sweep's document ships once. latest carries it in full, with its verdicts, so the
+               timeline entry for the same sweep keeps its header facts and a slim report holding exactly the fields
+               the sweep rows draw from (fleet.bands, watch, and would_have_paged when the sweep ran muted), equal to
+               latest's, and names latest with report_under. Older entries keep their documents. The Viewer's and the
+               web feed's entry shape (BuildRunNode) is unchanged; ViewerFleetSweepsReadTests compares this reply's
+               newest entry with its document taken from latest, field for field. */
+            var latestId = latestNode["sweep_id"]?.GetValue<string>();
+            var newestEntryBytes = 0;
+            foreach (var entry in entries.OfType<JsonObject>())
+            {
+                if (latestId is null || entry["sweep_id"]?.GetValue<string>() != latestId)
+                {
+                    continue;
+                }
+
+                if (entry["report"] is JsonObject full)
+                {
+                    var slim = new JsonObject();
+                    if (full["fleet"] is JsonObject fleet && fleet["bands"] is JsonNode bands)
+                    {
+                        slim["fleet"] = new JsonObject { ["bands"] = bands.DeepClone() };
+                    }
+
+                    if (full["watch"] is JsonNode watch)
+                    {
+                        slim["watch"] = watch.DeepClone();
+                    }
+
+                    if (full["would_have_paged"] is JsonNode wouldHavePaged)
+                    {
+                        slim["would_have_paged"] = wouldHavePaged.DeepClone();
+                    }
+
+                    entry["report"] = slim;
+                }
+
+                entry["report_under"] = "latest";
+                newestEntryBytes = Encoding.UTF8.GetByteCount(entry.ToJsonString());
+            }
 
             /* The worklist node is the Viewer's and the web feed's own (BuildWatchItemsNode; the zero-drift rule
                ViewerFleetSweepsReadTests pins covers this reply's watch_items too), so its items keep the
@@ -189,6 +231,7 @@ public sealed class DarlingMcpFleetSweepTools
             result["sweeps_returned"] = null;
             result["watch_items_returned"] = null;
             result["truncated"] = null;
+            result["over_budget"] = null;
             result["budget_note"] = null;
             result["latest"] = latestNode;
             result["watch_state"] = watch_state ?? "open + carried (default)";
@@ -205,14 +248,15 @@ public sealed class DarlingMcpFleetSweepTools
                 worklist["items"] = new JsonArray(itemKeepOrder.Take(itemsKept).OrderBy(i => i).Select(i => itemNodes[i]?.DeepClone()).ToArray());
                 result["sweeps_returned"] = sweepsKept;
                 result["watch_items_returned"] = itemsKept;
-                result["truncated"] = sweepsCut || itemsCut || overAtFloor;
-                result["budget_note"] = BudgetNote(entries.Count, sweepsKept, itemNodes.Count, itemsKept, overAtFloor, latestBytes);
+                result["truncated"] = sweepsCut || itemsCut;
+                result["over_budget"] = overAtFloor;
+                result["budget_note"] = BudgetNote(entries.Count, sweepsKept, itemNodes.Count, itemsKept, overAtFloor, latestBytes, newestEntryBytes);
                 return result.ToJsonString();
             }
 
             /* #8318: two cuts to the shared response budget, in order. The timeline loses its OLDEST sweeps
-               first (the store's order is newest first), and the newest entry always rides, document embedded:
-               one sweep's document is answered whole, the single-item rule every budget read keeps. When the
+               first (the store's order is newest first), and the newest entry always rides (small, since its
+               document is under latest, which is answered whole - the single-item rule every budget read keeps). When the
                timeline at its floor still leaves the reply over the budget, the worklist loses items by
                standing (itemKeepOrder). count and watch_items.count still count the whole window and the whole
                worklist. latest is never cut, so a reply can be over the budget at the floor, and then the note
@@ -264,17 +308,22 @@ public sealed class DarlingMcpFleetSweepTools
         _ => 4,
     };
 
-    /// <summary>#8318: the <c>budget_note</c> for a reply, null when nothing was cut. It names what was cut
-    /// (sweeps, watch items, or both) and the reads that reach the rest, and when the reply at its floor is
-    /// still over the budget it says OVER BUDGET and why (latest is never cut), never that the reply fit.</summary>
-    private static string? BudgetNote(int sweepsInWindow, int sweepsKept, int itemsStanding, int itemsKept, bool overAtFloor, int latestBytes)
+    /// <summary>#8318: the <c>budget_note</c> for a reply, null when nothing was cut and the reply is under the
+    /// budget. It names what was cut (sweeps, watch items, or both) and the reads that reach the rest, and when
+    /// the reply at its floor is still over the budget it says OVER BUDGET and names the pieces that are never
+    /// cut with their sizes (latest, and the newest sweep's timeline entry when the window holds it), never that
+    /// the reply fit.</summary>
+    private static string? BudgetNote(int sweepsInWindow, int sweepsKept, int itemsStanding, int itemsKept, bool overAtFloor, int latestBytes, int newestEntryBytes)
     {
         var sweepsCut = sweepsKept < sweepsInWindow;
         var itemsCut = itemsKept < itemsStanding;
         if (overAtFloor)
         {
+            var newestEntry = newestEntryBytes > 0
+                ? string.Create(CultureInfo.InvariantCulture, $", and the newest sweep's timeline entry is {newestEntryBytes:#,0} bytes")
+                : string.Empty;
             return string.Create(CultureInfo.InvariantCulture,
-                $"OVER BUDGET: the reply is over the {McpResponseBudget.DefaultBytes:#,0}-byte response budget at its floor ({sweepsKept:#,0} of {sweepsInWindow:#,0} sweeps in the window and {itemsKept:#,0} of {itemsStanding:#,0} watch items), because latest ({latestBytes:#,0} bytes, the newest sweep's full document with its verdicts) is never cut. Pass sweep_id for one sweep, or watch_state for one state's worklist.");
+                $"OVER BUDGET: the reply is over the {McpResponseBudget.DefaultBytes:#,0}-byte response budget at its floor ({sweepsKept:#,0} of {sweepsInWindow:#,0} sweeps in the window and {itemsKept:#,0} of {itemsStanding:#,0} watch items). The pieces that are never cut leave no room under it: latest, the newest sweep's full document with its verdicts, is {latestBytes:#,0} bytes{newestEntry}. Pass sweep_id for one sweep, or watch_state for one state's worklist.");
         }
 
         if (sweepsCut && itemsCut)
