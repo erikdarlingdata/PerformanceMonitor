@@ -247,6 +247,27 @@ VALUES ($1, 3600, 'admin', 7010, 10, 250, 10, 100, 1, 0, 50, false, false, false
                 }
             }
 
+            /* #7643: the schema history of the SQL Server target: the capture state (a running session, TenantDb00 kept under the server),
+               one baseline version of dbo.Orders, and the pass log from the log's start on, so get_schema_changes answers over a pass log
+               that starts there and get_object_definition finds its object. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collect.schema_capture_state (server_id, database_name, session_create_time, last_seen_in_scope_at) VALUES ($1, '', $2, $3)",
+                ServerId, DarlingMcpTestData.Naive(now - LogFloorBack), DarlingMcpTestData.Naive(now - TimeSpan.FromMinutes(5)));
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collect.schema_capture_state (server_id, database_name, history_server_id, baseline_at, last_seen_in_scope_at) VALUES ($1, 'TenantDb00', $1, $2, $3)",
+                ServerId, DarlingMcpTestData.Naive(now - LogFloorBack), DarlingMcpTestData.Naive(now - TimeSpan.FromMinutes(5)));
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collect.schema_objects (server_id, database_name, object_id, schema_name, object_name, object_type, valid_from, change_kind, detected_by,
+                                    detected_on_server_id, definition_hash)
+VALUES ($1, 'TenantDb00', 100, 'dbo', 'Orders', 'U', $2, 'baseline', 'baseline', $1, '\x00')", ServerId, DarlingMcpTestData.Naive(now - LogFloorBack));
+            long passId = 0;
+            foreach (var back in new[] { LogFloorBack, TimeSpan.FromDays(2), TimeSpan.FromDays(1), TimeSpan.FromMinutes(40), TimeSpan.FromMinutes(5) })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO collect.schema_capture_passes (collection_id, collection_time, server_id, server_name, database_name, pass_kind, complete) VALUES ($1, $2, $3, $4, 'TenantDb00', 'targeted', TRUE)",
+                    -698700 - (++passId), DarlingMcpTestData.Naive(now - back), ServerId, ServerName);
+            }
+
             /* #7015: a registered PostgreSQL target with a few rows in each table PgSeededTables names, spread from the log's start
                (84 h back) to now so the store's data start holds. Only the columns a row cannot do without are filled (collection id, time,
                server, and any other NOT NULL column with no default, by type): the window-floor probe reads collection_time alone. */
@@ -439,6 +460,11 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
                 yield return new("plan_id", 9L);
                 break;
             case "get_query_fleet_summary": yield return new("query_hash", "0x0102030405060708"); break;
+            /* #7643: the schema history is kept per database; the seed holds dbo.Orders of TenantDb00. */
+            case "get_object_definition":
+                yield return new("database_name", "TenantDb00");
+                yield return new("object_name", "dbo.Orders");
+                break;
             case "get_query_store_query_history":
                 yield return new("database_name", "TenantDb00");
                 yield return new("query_id", 1000L);

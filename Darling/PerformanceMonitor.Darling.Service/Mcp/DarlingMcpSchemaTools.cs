@@ -417,14 +417,22 @@ public sealed class DarlingMcpSchemaTools
 
             var fetched = await SchemaHistoryReader.ReadChangesAsync(
                 connection, resolution.Keys, resolution.Database, schema, name, windowStart, windowEnd, include_baseline, limit + 1, offset, cancellationToken);
+
+            /* #6984: where the store's coverage of the window starts, on the schema passes' own log, so a window that reaches back before the
+               first pass says so (window_truncated) instead of reading as a quiet one. */
+            var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
+                postgres, "get_schema_changes", resolved.ServerName, windowStart, windowEnd, emptyAnswer: fetched.Count == 0, logger: null, cancellationToken);
             if (fetched.Count == 0)
             {
                 return await MissStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, resolution, true, cancellationToken)
-                    ?? McpHelpers.Status(
-                        "empty",
-                        $"No schema change was recorded in the {hours_back} hours ending {Utc(windowEnd)}"
-                        + (database is null ? string.Empty : " for " + database)
-                        + (include_baseline ? "." : ", apart from baseline versions (include_baseline lists them)."));
+                    ?? DarlingMcpWindowNotice.FinishEmpty(
+                        McpHelpers.Status(
+                            "empty",
+                            $"No schema change was recorded in the {hours_back} hours ending {Utc(windowEnd)}"
+                            + (database is null ? string.Empty : " for " + database)
+                            + (include_baseline ? "." : ", apart from baseline versions (include_baseline lists them)."),
+                            notice.AsHints()),
+                        notice);
             }
 
             var (rows, hasMore) = McpHelpers.BoundPage(fetched, limit);
@@ -454,11 +462,14 @@ public sealed class DarlingMcpSchemaTools
                     next_offset = more ? offset + shown.Count : (int?)null,
                     truncated = more,
                     budget_note = cut ? McpResponseBudget.PageCutNote(shapedRows.Count, shown.Count, "newest first", "changes") : null,
+                    effective_start = notice.EffectiveStart,
+                    window_truncated = notice.WindowTruncated,
+                    truncation_note = notice.TruncationNote,
                     changes = shown,
                 }, McpHelpers.JsonOptions);
             }
 
-            return McpResponseBudget.FitPrefix(shapedRows.Count, Build).Json;
+            return DarlingMcpWindowNotice.Finish(McpResponseBudget.FitPrefix(shapedRows.Count, Build).Json, notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

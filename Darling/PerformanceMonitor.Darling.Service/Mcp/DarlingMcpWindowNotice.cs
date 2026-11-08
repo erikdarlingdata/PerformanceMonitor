@@ -282,6 +282,8 @@ internal static class DarlingMcpWindowNotice
         new System.Collections.Generic.Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["get_pg_cpu_utilization"] = "pg_cpu_utilization",
+            /* #7643: the schema history's coverage is where the schema_objects passes start, so the pass log is the floor. */
+            ["get_schema_changes"] = "schema_capture_passes",
         };
 
     /// <summary>The table <paramref name="read"/> is named after in a notice: the web's table when it lists the read, else its own.</summary>
