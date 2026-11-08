@@ -146,6 +146,17 @@ internal static class TrendBuckets
     /// <summary><c>get_pg_query_duration_trend</c>: about 170 bytes a point.</summary>
     public const int PgQueryDurationMaxPoints = 1500;
 
+    /// <summary><c>get_pg_wait_trend</c> (#8319): about 170 bytes a point (a stamp, a count, a rate and its peak, a nullable
+    /// backend count and a flag), so a day at one-minute points stays under 256 KB.</summary>
+    public const int PgWaitTrendMaxPoints = 1500;
+
+    /// <summary><c>get_pg_wait_trend</c>'s own MCP auto-sizing target (#8319), narrower than the shared <see cref="McpPointBudget"/>
+    /// for the same reason as <see cref="PgIoMcpAutoPoints"/>: with its envelope (the two instrument notes run to about 3 KB) a
+    /// window whose ladder rung lands near 200 points (33 hours at 10-minute buckets is 199) would pass
+    /// <see cref="McpResponseBudget.DefaultBytes"/> (32 KB). 120 keeps every window under about 24 KB: a day is 15-minute points
+    /// (at most 97), four hours 5-minute ones, a week 2-hour ones, and an hour or less still auto-sizes to one-minute points.</summary>
+    public const int PgWaitTrendMcpAutoPoints = 120;
+
     /// <summary><c>get_pg_cpu_utilization</c> (#4193): about 500 bytes a point, the widest of the family — the
     /// CPU/ACU pair (each with its own peak), the capacity trio and the six V136 host-memory columns.</summary>
     public const int PgCpuMaxPoints = 500;
