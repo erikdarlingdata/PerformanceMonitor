@@ -730,7 +730,7 @@ public sealed class MigrationDataMovingRungCensusPins
     ///
     /// <para>V255 (#8106) builds the cadence wait baseline supply inside a <c>DO $$ ... $$</c> because the statement differs by store: on a store
     /// with the extension whose <c>wait_stats</c> is already a hypertable it creates the continuous aggregate <c>WITH NO DATA</c> (the ensure sweep
-    /// that follows on the same start materializes it), on a store without the extension the plain fallback view, and the hypertable read goes
+    /// that follows on the same start materializes it), everywhere else the plain fallback view, and the hypertable read goes
     /// through <c>EXECUTE</c> because <c>timescaledb_information</c> parses only where the extension exists. Both shapes are catalog-only: no
     /// row is read or rewritten, so there is no data-moving cost to declare, only the scan blind spot to name.</para>
     /// </summary>

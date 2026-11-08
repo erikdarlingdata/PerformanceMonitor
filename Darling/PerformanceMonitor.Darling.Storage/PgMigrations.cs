@@ -2846,7 +2846,7 @@ $do$;";
     /// catalog-only and transaction-safe; the ensure sweep that follows on the same start finds it, gives it the refresh, retention and
     /// compression policies of the position it took over from <c>wait_stats_interval_baseline</c>, and backfills it from raw. On a
     /// fresh TimescaleDB store the table is not yet a hypertable here (the conversion runs after the ladder), so this rung creates
-    /// nothing and the sweep creates the aggregate as it creates every other. <c>wait_stats_interval_baseline</c> is not touched: it
+    /// the plain view, which the sweep drops for the aggregate once the table is a hypertable, as on a store that gained the extension. <c>wait_stats_interval_baseline</c> is not touched: it
     /// keeps serving the baseline tier until the successor covers it, then retires through
     /// <c>TimescaleSupport.SupersededBaselineRelations</c>. Idempotent. <b>No Lite twin:</b> Lite has no rollup tier.
     /// </summary>
@@ -2857,16 +2857,18 @@ DECLARE
 BEGIN
     /* timescaledb_information only exists once the extension has been created; to_regclass probes it without raising, and
        the hypertable read goes through EXECUTE so the reference is parsed only when it runs. */
-    IF to_regclass('timescaledb_information.continuous_aggregates') IS NULL THEN
-        EXECUTE '" + TimescaleSupport.CreateBaselineFallbackViewSql(TimescaleSupport.WaitStatsCadenceBaselineView, TimescaleSupport.CreateWaitStatsCadenceBaselineSql).Replace("'", "''") + @"';
-        RETURN;
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NOT NULL THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = ''collect'' AND hypertable_name = ''wait_stats'')'
+        INTO v_hypertable;
     END IF;
 
-    EXECUTE 'SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = ''collect'' AND hypertable_name = ''wait_stats'')'
-    INTO v_hypertable;
-
+    /* The continuous aggregate where wait_stats is a hypertable; everywhere else the plain view over the same body, which the
+       ensure sweep drops for the aggregate once the table is a hypertable, as it does on a store that gained the extension. The
+       relation exists from this rung on, whatever shape the store is in, so the viewer's probe reads the rung. */
     IF v_hypertable THEN
         EXECUTE '" + TimescaleSupport.CreateWaitStatsCadenceBaselineSql.Replace("'", "''") + @"';
+    ELSE
+        EXECUTE '" + TimescaleSupport.CreateBaselineFallbackViewSql(TimescaleSupport.WaitStatsCadenceBaselineView, TimescaleSupport.CreateWaitStatsCadenceBaselineSql).Replace("'", "''") + @"';
     END IF;
 END $$;";
 

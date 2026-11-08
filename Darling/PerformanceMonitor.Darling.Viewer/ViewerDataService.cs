@@ -1510,8 +1510,8 @@ SELECT
     to_regclass('config.investigation_slack_posts') IS NOT NULL,
     /* V254 (#7659) adds the chat requests' message table. Found by catalog, as the line above is. */
     to_regclass('config.investigation_person_messages') IS NOT NULL,
-    /* V255 (#8106) adds the cadence wait baseline supply (a continuous aggregate, or the plain fallback view on a store
-       without TimescaleDB). Found by catalog, as the line above is. */
+    /* V255 (#8106) adds the cadence wait baseline supply (a continuous aggregate where wait_stats is a hypertable, else the
+       plain fallback view). Found by catalog, as the line above is. */
     to_regclass('collect.wait_stats_cadence_baseline') IS NOT NULL";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
