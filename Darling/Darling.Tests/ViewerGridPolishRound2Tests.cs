@@ -339,6 +339,71 @@ public sealed class ViewerGridPolishRound2Tests
         Empty(problems, "The Perfmon counter list:");
     }
 
+    /// <summary>The Viewer's twin of Lite's trimmed High Impact and Database Resources cells: a database name wider than its column ends in an ellipsis.</summary>
+    [Fact]
+    public void TheHighImpactAndDatabaseResourcesDatabaseCells_EndInAnEllipsis_WhenTheTextIsWiderThanTheColumn()
+    {
+        var problems = new List<string>();
+        foreach (var view in Views("FinOps",
+            new Case("FinOpsHighImpactDataGrid", typeof(HighImpactQueryRow), new() { ["DatabaseName"] = LongName }),
+            new Case("FinOpsDatabaseResourcesDataGrid", typeof(DatabaseResourceUsageRow), new() { ["DatabaseName"] = LongName })))
+        {
+            var col = Col(view, "Database");
+            if (col.ValueNaturalWidth > col.CellWidth - 16 && !col.Trimmed)
+            {
+                problems.Add($"{view.Grid} at {view.Label}: 'Database' shows '{col.Value}' ({col.ValueNaturalWidth:0} px) in a {col.CellWidth:0} px cell with no ellipsis");
+            }
+        }
+
+        Empty(problems, "Cut text without an ellipsis:");
+    }
+
+    /// <summary>
+    /// #8223: a number header is the text header beside it with only its alignment changed, in every theme, including after a live switch in Settings
+    /// (<c>ThemeManager.Apply</c>): the tab is built under Dark, then switched to Light and Cool Breeze, and each number header's rendered background, text
+    /// colour and padding are compared with the "Setting" header of the same grid. The Viewer's text headers use the grid's own DarkGridHeader style.
+    /// </summary>
+    [Fact]
+    public void NumberHeaders_LookLikeTheTextHeaderBesideThem_AfterALiveThemeSwitch()
+    {
+        var passes = StaTestThread.Run(() => WithTheme("DarkTheme", () =>
+        {
+            var previous = ThemeManager.CurrentTheme;
+            ThemeManager.ThemeUriProvider = name => new Uri($"pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/{name}Theme.xaml");
+            try
+            {
+                /* As the app starts: the theme comes in through ThemeManager.Apply (with the shared styles), then the tab is built. */
+                ThemeManager.Apply("Dark");
+                var grid = GridColumnLayoutProbe.Detach(NewServerTab(), "ServerConfigGrid");
+                var rows = GridPolishProbe.Rows(typeof(ServerConfigRow), 3, new Dictionary<string, object?> { ["ValueConfigured"] = 5L, ["ValueInUse"] = 5L });
+                return GridPolishProbe.HeaderLooksAfterThemeSwitches(grid, rows, GridWidth(1280), "Dark", new[] { "Light", "CoolBreeze" },
+                    theme => GridPolishProbe.PngPath("ViewerServer", "ServerConfigGrid-after-switch", theme, 1280));
+            }
+            finally
+            {
+                ThemeManager.Apply(previous);
+                ThemeManager.ThemeUriProvider = ThemeManager.ThemeUri;
+            }
+        }));
+
+        var problems = new List<string>();
+        foreach (var (theme, looks) in passes)
+        {
+            var text = looks.First(l => l.Header == "Setting");
+            foreach (var name in new[] { "Configured Value", "Value In Use" })
+            {
+                var number = looks.First(l => l.Header == name);
+                if (number.Background != text.Background || number.Foreground != text.Foreground || number.Padding != text.Padding)
+                {
+                    problems.Add($"{theme}: '{name}' paints {number.Background} / {number.Foreground} / {number.Padding}, 'Setting' paints {text.Background} / {text.Foreground} / {text.Padding}");
+                }
+            }
+        }
+
+        Assert.NotEqual(passes[0].Looks.First(l => l.Header == "Setting").Background, passes[1].Looks.First(l => l.Header == "Setting").Background);
+        Empty(problems, "Number headers that do not match the text header after a theme switch:");
+    }
+
     private static object? ToolTipOf(DependencyObject block)
     {
         for (var p = System.Windows.Media.VisualTreeHelper.GetParent(block); p is not null; p = System.Windows.Media.VisualTreeHelper.GetParent(p))

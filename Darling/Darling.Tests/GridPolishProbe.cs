@@ -18,6 +18,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using PerformanceMonitor.Ui;
 
 namespace Darling.Tests;
 
@@ -166,6 +167,58 @@ internal static class GridPolishProbe
         }
 
         return found;
+    }
+
+    /// <summary>What a column header paints with: the header control's own background, text colour and padding, as rendered.</summary>
+    internal sealed record HeaderLook(string Header, string Background, string Foreground, Thickness Padding);
+
+    private static string Paint(Brush? brush) => brush is SolidColorBrush solid ? solid.Color.ToString(CultureInfo.InvariantCulture) : brush?.GetType().Name ?? "none";
+
+    private static List<HeaderLook> ReadHeaderLooks(DataGrid grid) =>
+        ClippedTextProbe.Descendants(grid).OfType<DataGridColumnHeader>().Where(h => h.Column is not null).OrderBy(h => h.Column.DisplayIndex)
+            .Select(h => new HeaderLook(
+                ClippedTextProbe.Descendants(h).OfType<TextBlock>().FirstOrDefault(b => b.Text.Length > 0 && !ClippedTextProbe.Descendants(h).OfType<Button>().Any(x => IsInside(b, x)))?.Text ?? h.Content?.ToString() ?? "",
+                Paint(h.Background), Paint(h.Foreground), h.Padding))
+            .ToList();
+
+    /// <summary>
+    /// Shows <paramref name="grid"/> alone with <paramref name="rows"/> bound, as built under the theme already loaded, then switches the live theme
+    /// through <see cref="ThemeManager.Apply"/> to each of <paramref name="switchTo"/> in turn (what Settings does), reading every header's look after each
+    /// one. The first entry is the grid as built. The caller sets <see cref="ThemeManager.ThemeUriProvider"/> to its app's theme files first.
+    /// </summary>
+    internal static List<(string Theme, List<HeaderLook> Looks)> HeaderLooksAfterThemeSwitches(DataGrid grid, IList rows, double width, string built, IEnumerable<string> switchTo, Func<string, string?>? png = null)
+    {
+        var window = new Window { Content = grid, Width = width, Height = 600, Left = 0, Top = 0 };
+        window.Show();
+        try
+        {
+            ClippedTextProbe.Settle(window);
+            grid.ItemsSource = rows;
+            ClippedTextProbe.Settle(window);
+            var found = new List<(string, List<HeaderLook>)> { (built, ReadHeaderLooks(grid)) };
+            if (png?.Invoke(built) is { } builtPng)
+            {
+                Png(grid, builtPng);
+            }
+
+            foreach (var theme in switchTo)
+            {
+                ThemeManager.Apply(theme);
+                ClippedTextProbe.Settle(window);
+                found.Add((theme, ReadHeaderLooks(grid)));
+                if (png?.Invoke(theme) is { } themePng)
+                {
+                    Png(grid, themePng);
+                }
+            }
+
+            return found;
+        }
+        finally
+        {
+            window.Content = null;
+            window.Close();
+        }
     }
 
     /// <summary>The visible width of the grid's cells: columns whose left edge is at or past this are off screen until the grid scrolls.</summary>

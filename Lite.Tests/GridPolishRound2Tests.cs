@@ -61,18 +61,7 @@ public sealed class GridPolishRound2Tests
             {
                 views.AddRange(StaTestThread.Run(() => WithTheme(theme, () =>
                 {
-                    FrameworkElement tab;
-                    if (tabKind == "FinOps")
-                    {
-                        tab = new FinOpsTab();
-                    }
-                    else
-                    {
-                        var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "grid-polish", DisplayName = "grid-polish", IsEnabled = true };
-                        var serverTab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
-                        typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", Instance)!.SetValue(serverTab, true);
-                        tab = serverTab;
-                    }
+                    var tab = BuildTab(tabKind, duckDb);
 
                     var found = new List<View>();
                     foreach (var c in cases)
@@ -97,6 +86,19 @@ public sealed class GridPolishRound2Tests
         }
 
         return views;
+    }
+
+    private static FrameworkElement BuildTab(string tabKind, DuckDbInitializer duckDb)
+    {
+        if (tabKind == "FinOps")
+        {
+            return new FinOpsTab();
+        }
+
+        var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "grid-polish", DisplayName = "grid-polish", IsEnabled = true };
+        var serverTab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
+        typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", Instance)!.SetValue(serverTab, true);
+        return serverTab;
     }
 
     private static T WithTheme<T>(string theme, Func<T> body)
@@ -241,6 +243,62 @@ public sealed class GridPolishRound2Tests
         }
 
         Empty(problems, "Numbers and headers on different edges:");
+    }
+
+    /// <summary>
+    /// #8223: a number header is the text header beside it with only its alignment changed, in every theme, including after a live switch in Settings
+    /// (<c>ThemeManager.Apply</c>): the tab is built under Dark, then switched to Light and Cool Breeze, and each number header's rendered background, text
+    /// colour and padding are compared with the "Setting" header of the same grid.
+    /// </summary>
+    [Fact]
+    public void NumberHeaders_LookLikeTheTextHeaderBesideThem_AfterALiveThemeSwitch()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "GridPolish_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        try
+        {
+            using var duckDb = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
+            var passes = StaTestThread.Run(() => WithTheme("DarkTheme", () =>
+            {
+                var previous = ThemeManager.CurrentTheme;
+                ThemeManager.ThemeUriProvider = name => new Uri($"pack://application:,,,/PerformanceMonitorLite;component/Themes/{name}Theme.xaml");
+                try
+                {
+                    /* As the app starts: the theme comes in through ThemeManager.Apply (with the shared styles), then the tab is built. */
+                    ThemeManager.Apply("Dark");
+                    var grid = GridColumnLayoutProbe.Detach(BuildTab("Server", duckDb), "ServerConfigGrid");
+                    var rows = GridPolishProbe.Rows(typeof(ServerConfigRow), 3, new Dictionary<string, object?> { ["ValueConfigured"] = 5L, ["ValueInUse"] = 5L });
+                    return GridPolishProbe.HeaderLooksAfterThemeSwitches(grid, rows, GridWidth(1280), "Dark", new[] { "Light", "CoolBreeze" },
+                        theme => GridPolishProbe.PngPath("Server", "ServerConfigGrid-after-switch", theme, 1280));
+                }
+                finally
+                {
+                    ThemeManager.Apply(previous);
+                    ThemeManager.ThemeUriProvider = ThemeManager.ThemeUri;
+                }
+            }));
+
+            var problems = new List<string>();
+            foreach (var (theme, looks) in passes)
+            {
+                var text = looks.First(l => l.Header == "Setting");
+                foreach (var name in new[] { "Configured Value", "Value In Use" })
+                {
+                    var number = looks.First(l => l.Header == name);
+                    if (number.Background != text.Background || number.Foreground != text.Foreground || number.Padding != text.Padding)
+                    {
+                        problems.Add($"{theme}: '{name}' paints {number.Background} / {number.Foreground} / {number.Padding}, 'Setting' paints {text.Background} / {text.Foreground} / {text.Padding}");
+                    }
+                }
+            }
+
+            Assert.NotEqual(passes[0].Looks.First(l => l.Header == "Setting").Background, passes[1].Looks.First(l => l.Header == "Setting").Background);
+            Empty(problems, "Number headers that do not match the text header after a theme switch:");
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
+        }
     }
 
     [Fact]
@@ -429,6 +487,11 @@ public sealed class GridPolishRound2Tests
         }
 
         foreach (var view in Views("FinOps", new Case("HighImpactDataGrid", typeof(HighImpactQueryRow), new() { ["DatabaseName"] = LongName })))
+        {
+            Check(view, "Database");
+        }
+
+        foreach (var view in Views("FinOps", new Case("DatabaseResourcesDataGrid", typeof(DatabaseResourceUsageRow), new() { ["DatabaseName"] = LongName })))
         {
             Check(view, "Database");
         }
