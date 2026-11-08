@@ -128,6 +128,9 @@ public enum SlackChatOpenOutcome
 
     /// <summary>The parent request is gone.</summary>
     ParentGone,
+
+    /// <summary>None of the messages handed over was still waiting: another open or join took them first, so nothing opened.</summary>
+    NothingWaiting,
 }
 
 /// <summary>#7659: the answer of a chat request open.</summary>

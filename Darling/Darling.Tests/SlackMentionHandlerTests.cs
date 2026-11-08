@@ -132,12 +132,20 @@ public sealed class SlackMentionHandlerTests
             Task.FromResult<IReadOnlyList<SlackWaitingThread>>(Waiting.Take(limit).ToList());
 
         public Task<IReadOnlyList<SlackPersonMessage>> WaitingMessagesAsync(Guid threadRequestId, CancellationToken ct) =>
-            Task.FromResult<IReadOnlyList<SlackPersonMessage>>(WaitingMessages.TryGetValue(threadRequestId, out var m) ? m : []);
+            Task.FromResult<IReadOnlyList<SlackPersonMessage>>(WaitingMessages.TryGetValue(threadRequestId, out var m) ? m.ToList() : []);
 
         public Task RefuseMessageAsync(SlackPersonMessage message, CancellationToken ct)
         {
             Calls++;
             Refused.Add(message);
+            /* A refused message no longer waits: the next pass's reads leave it, and a thread with nothing left waiting, out. */
+            if (WaitingMessages.TryGetValue(message.ThreadRequestId, out var list))
+            {
+                list.RemoveAll(m => m.Ts == message.Ts);
+                if (list.Count == 0)
+                    Waiting.RemoveAll(w => w.ThreadRequestId == message.ThreadRequestId);
+            }
+
             return Task.CompletedTask;
         }
 
@@ -535,6 +543,45 @@ public sealed class SlackMentionHandlerTests
 
         Assert.Single(store.Opens);
         Assert.Empty(posts.Posts);
+        /* The message is refused, not left waiting for a sweep that could never open it. */
+        Assert.Equal("1700000000.000200", Assert.Single(store.Refused).Ts);
+        Assert.Empty(store.Journal);
+    }
+
+    /// <summary>Routes may share a bot channel; the channel's first enabled route is only the ownership check. Once the thread is found, its own
+    /// route gives the cap the open is counted against, and a thread whose own route is gone or disabled stays silent.</summary>
+    [Fact]
+    public async Task AMention_InAChannelTwoRoutesShare_UsesTheThreadsOwnRoute_ForTheCapAndTheOpen()
+    {
+        var store = new FakeChatStore();
+        var posts = new RecordingPosts();
+        store.People[Team + ":" + User] = Erik;
+        store.Levels[Erik.PersonId] = 1;
+        var routes = new List<NotificationRoute>
+        {
+            new(RouteId, "Blocking", "", "", "", "", "", Enabled: true) { SlackBotChannel = Channel, AgentMaxPerHour = 10 },
+            new(8, "CPU", "", "", "", "", "", Enabled: true) { SlackBotChannel = Channel, AgentMaxPerHour = 4 },
+        };
+        var handler = new SlackMentionHandler(store, posts, () => routes, NullLogger.Instance, () => Now);
+        store.Threads[Channel + "|" + ThreadTs] = new SlackChatThread(First, 8, ServerId, Channel, ThreadTs, Now.AddHours(-2));
+        store.Newest = new SlackChatNewest(Newest, "reported", InvestigationTriggerKinds.Alert, Now.AddHours(-1));
+
+        await handler.HandleEventAsync(Event(SlackMentionHandler.AppMention, "<@U0BOT> hi"), CancellationToken.None);
+        Assert.Equal(4, Assert.Single(store.Opens).RouteMax);
+
+        /* The thread route's cap, counted on the thread's route: at it, the route-cap answer and no open. */
+        store.Opens.Clear();
+        store.Counts = new SlackChatCounts(1, 4);
+        await handler.HandleEventAsync(Event(SlackMentionHandler.AppMention, "<@U0BOT> again", ts: "1700000000.000201"), CancellationToken.None);
+        Assert.Empty(store.Opens);
+        Assert.Equal(SlackChatAnswers.RouteCap, Assert.Single(posts.Posts).Text);
+
+        /* The thread's own route disabled: silent, nothing saved, while the channel's other route still owns the channel. */
+        routes[1] = routes[1] with { Enabled = false };
+        await handler.HandleEventAsync(Event(SlackMentionHandler.AppMention, "<@U0BOT> third", ts: "1700000000.000202"), CancellationToken.None);
+        Assert.Empty(store.Opens);
+        Assert.Single(posts.Posts);
+        Assert.Equal(2, store.Messages.Count);
     }
 
     /* ───────── the sweep ───────── */
@@ -636,6 +683,44 @@ public sealed class SlackMentionHandlerTests
         Assert.Single(store.Refused);
     }
 
+    /// <summary>A thread whose route is gone or disabled cannot open, so its waiting messages are refused without a post or a journal row instead of
+    /// holding a batch slot for ever: with a batch of them ahead, a live thread behind them is still reached on the next pass.</summary>
+    [Fact]
+    public async Task TheSweep_RefusesTheWaitingMessagesOfAThreadWhoseRouteIsGoneOrDisabled_WithoutAPost_SoALiveThreadBehindABatchOfThemIsReached()
+    {
+        var store = new FakeChatStore();
+        var posts = new RecordingPosts();
+        var routes = new List<NotificationRoute>
+        {
+            new(RouteId, "Blocking", "", "", "", "", "", Enabled: true) { SlackBotChannel = Channel, AgentMaxPerHour = 10 },
+            new(8, "CPU", "", "", "", "", "", Enabled: false) { SlackBotChannel = Channel, AgentMaxPerHour = 10 },
+        };
+        var sweep = new SlackChatSweep(store, posts, () => routes, NullLogger.Instance, () => Now);
+        store.Levels[7] = 1;
+        store.Newest = new SlackChatNewest(Newest, "reported", InvestigationTriggerKinds.Alert, Now.AddMinutes(-10));
+        for (var i = 1; i <= SlackChatSweep.BatchSize + 1; i++)
+        {
+            /* Odd threads on the disabled route, even ones on a route no longer configured; every one older than the live thread. */
+            var dead = Guid.Parse("76590000-0000-0000-0000-" + i.ToString("x12"));
+            var ts = "1700000000." + i.ToString("D6");
+            store.Waiting.Add(new SlackWaitingThread(dead, i % 2 == 1 ? 8 : 99, ServerId, Channel, ts, 1, Now.AddHours(-3)));
+            store.WaitingMessages[dead] = [new SlackPersonMessage(Channel, ts + "1", ts, dead, 7, "slack:" + Team + ":U7", "dead " + i, SlackPersonMessageStates.Waiting)];
+        }
+
+        store.Waiting.Add(new SlackWaitingThread(First, RouteId, ServerId, Channel, ThreadTs, 1, Now.AddHours(-2)));
+        store.WaitingMessages[First] = [Waiting("1700000000.000601", 7, "live")];
+
+        /* The first pass clears a batch of dead threads; the second clears the last one and reaches the live thread. */
+        Assert.Equal((0, 0), await sweep.RunOnceAsync(CancellationToken.None));
+        Assert.Equal(SlackChatSweep.BatchSize, store.Refused.Count);
+        Assert.Equal((1, 0), await sweep.RunOnceAsync(CancellationToken.None));
+        Assert.Equal(SlackChatSweep.BatchSize + 1, store.Refused.Count);
+        Assert.All(store.Refused, m => Assert.StartsWith("dead ", m.Text, StringComparison.Ordinal));
+        Assert.Equal("live", Assert.Single(Assert.Single(store.Opens).Messages).Text);
+        Assert.Empty(posts.Posts);
+        Assert.Empty(store.Journal);
+    }
+
     /// <summary>The sweep applies the handler's age limit: a thread whose first request opened more than seven days ago opens nothing, and every
     /// waiting message of it is refused as the handler refuses a mention there, each person answered once.</summary>
     [Fact]
@@ -664,7 +749,8 @@ public sealed class SlackMentionHandlerTests
         });
 
         /* A thread at the limit, not past it, still opens. */
-        store.Waiting[0] = new SlackWaitingThread(First, RouteId, ServerId, Channel, ThreadTs, 1, Now.AddDays(-7));
+        store.Waiting.Clear();
+        store.Waiting.Add(new SlackWaitingThread(First, RouteId, ServerId, Channel, ThreadTs, 1, Now.AddDays(-7)));
         store.Refused.Clear();
         store.WaitingMessages[First] = [Waiting("1700000000.000604", 7, "in time")];
         Assert.Equal((1, 0), await sweep.RunOnceAsync(CancellationToken.None));

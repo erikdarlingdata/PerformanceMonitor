@@ -617,6 +617,57 @@ public sealed class SlackChatStoreLiveTests
         });
     }
 
+    /// <summary>A message is taken for a chat request only while it still waits (#7659): the handler's open and the sweep's for the same message, in
+    /// turn under the route lock, open one request, not two; a join of a message already taken joins nothing and lowers nothing; a mixed list takes
+    /// the waiting message alone and stamps by the askers whose messages were taken; a list with no messages still opens; and a message whose asker
+    /// is not among the askers is refused before any write.</summary>
+    [Fact]
+    public async Task AMessageAlreadyTaken_IsNotTakenAgain_SoASecondOpenForItOpensNothing_AndAJoinOfItJoinsNothing()
+    {
+        await WithStoreAsync(async (connection, _, store, seed, ct) =>
+        {
+            var message = Message("1700000000.001201", seed.Erik, "U0ERIK", "once");
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(message, ct));
+            var erik = new SlackAsker(seed.Erik, message.Identity, 1);
+            var first = await store.OpenChatRequestAsync(Thread(seed.RouteId), s_parent, [erik], [message], 10, DateTime.UtcNow, RoutesAt(2), ct);
+            Assert.Equal(SlackChatOpenOutcome.Opened, first.Outcome);
+
+            /* The same message again: no second request, no second opened row, the hour's count unchanged, the message still with the first. */
+            var second = await store.OpenChatRequestAsync(Thread(seed.RouteId), s_parent, [erik], [message], 10, DateTime.UtcNow, RoutesAt(2), ct);
+            Assert.Equal(SlackChatOpenOutcome.NothingWaiting, second.Outcome);
+            Assert.Null(second.RequestId);
+            Assert.Equal("1", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_requests WHERE trigger_kind = 'chat'", ct));
+            Assert.Equal("1", await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'opened' AND request_id <> '" + s_parent + "'", ct));
+            Assert.Equal("opened|" + first.RequestId, await ScalarAsync(connection, "SELECT state || '|' || request_id::text FROM config.investigation_person_messages WHERE ts = '1700000000.001201'", ct));
+            Assert.Equal(new SlackChatCounts(1, 1), await store.ChatCountsAsync(s_parent, seed.RouteId, DateTime.UtcNow, ct));
+
+            /* A join of the taken message into another unclaimed chat request: nothing joins, the stamp and the askers are untouched. */
+            var other = (await store.OpenChatRequestAsync(Thread(seed.RouteId), s_parent, [], [], 10, DateTime.UtcNow, RoutesAt(3), ct)).RequestId!.Value;
+            Assert.False(await store.JoinChatRequestAsync(other, erik, message, ct));
+            Assert.Equal("3|0", await ScalarAsync(connection, $"SELECT r.autonomy_level || '|' || (SELECT count(*) FROM config.investigation_request_askers AS a WHERE a.request_id = r.request_id) FROM config.investigation_requests AS r WHERE r.request_id = '{other}'", ct));
+            Assert.Equal("opened|" + first.RequestId, await ScalarAsync(connection, "SELECT state || '|' || request_id::text FROM config.investigation_person_messages WHERE ts = '1700000000.001201'", ct));
+
+            /* A mixed list: the taken message stays where it is, the waiting one opens, and the stamp and asker rows follow the message taken. */
+            var fresh = Message("1700000000.001202", seed.Dana, "U0DANA", "fresh");
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(fresh, ct));
+            var third = await store.OpenChatRequestAsync(Thread(seed.RouteId), s_parent, [erik, new SlackAsker(seed.Dana, fresh.Identity, 3)], [message, fresh], 10, DateTime.UtcNow, RoutesAt(3), ct);
+            Assert.Equal(SlackChatOpenOutcome.Opened, third.Outcome);
+            Assert.Equal("opened|" + third.RequestId, await ScalarAsync(connection, "SELECT state || '|' || request_id::text FROM config.investigation_person_messages WHERE ts = '1700000000.001202'", ct));
+            Assert.Equal("opened|" + first.RequestId, await ScalarAsync(connection, "SELECT state || '|' || request_id::text FROM config.investigation_person_messages WHERE ts = '1700000000.001201'", ct));
+            Assert.Equal("3|" + seed.Dana, await ScalarAsync(connection, $"SELECT r.autonomy_level || '|' || (SELECT string_agg(a.person_id::text, ',') FROM config.investigation_request_askers AS a WHERE a.request_id = r.request_id) FROM config.investigation_requests AS r WHERE r.request_id = '{third.RequestId}'", ct));
+            Assert.Equal("1", await ScalarAsync(connection, $"SELECT count(*) FROM config.investigation_journal WHERE request_id = '{third.RequestId}' AND event = '{InvestigationRequestStore.AskerJournalEvent}'", ct));
+
+            /* No message at all still opens (a follow-up's shape); a message whose asker is not among the askers is refused before any write. */
+            Assert.Equal(SlackChatOpenOutcome.Opened, (await store.OpenChatRequestAsync(Thread(seed.RouteId), s_parent, [], [], 10, DateTime.UtcNow, RoutesAt(2), ct)).Outcome);
+            var stray = Message("1700000000.001203", seed.Erik, "U0ERIK", "stray");
+            Assert.Equal(SlackPersonMessageSaved.Saved, await store.SavePersonMessageAsync(stray, ct));
+            var requests = await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_requests", ct);
+            await Assert.ThrowsAsync<ArgumentException>(() => store.OpenChatRequestAsync(Thread(seed.RouteId), s_parent, [new SlackAsker(seed.Dana, "slack:T:U", 3)], [stray], 10, DateTime.UtcNow, RoutesAt(2), ct));
+            Assert.Equal(requests, await ScalarAsync(connection, "SELECT count(*) FROM config.investigation_requests", ct));
+            Assert.Equal("waiting", await ScalarAsync(connection, "SELECT state FROM config.investigation_person_messages WHERE ts = '1700000000.001203'", ct));
+        });
+    }
+
     /// <summary>The claim answer's person_requests (#7659), through the claim tool with the owner store: exactly the granted askers' texts, with
     /// their names and grants, and the rule beside them; a message row for a disabled person or for one with no grant reaching the server is left
     /// out; an alert request nobody asked in carries neither key.</summary>
