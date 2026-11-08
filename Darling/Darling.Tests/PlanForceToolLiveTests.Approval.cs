@@ -10,6 +10,7 @@ using System;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service.Investigations;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -373,6 +374,33 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal("unknown", await ProposalStateAsync(c, proposalId));
             Assert.Empty(await RowsAsync(c, "action_done"));
             Assert.Empty(await RowsAsync(c, "action_failed"));
+        }, approval: "required");
+    }
+
+    /// <summary>
+    /// A proposal to kill a session whose database is excluded by the time a person presses it ends superseded as a refusal that names the database, not as a
+    /// read failure that leaves the proposal waiting. Nothing is killed and no action row is written.
+    /// </summary>
+    [Fact]
+    public async Task AnApprovedKill_OfASessionWhoseDatabaseIsNowExcluded_EndsSupersededAsARefusal_NotAsAReadFailure()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            await SinglePersonAsync(c);
+            var offset = await SeedClockAsync(c);
+            var victim = await OpenVictimAsync(c);
+            await using var _ = victim.Connection;
+            var proposalId = ProposalIdOf(await KillAsync(c, victim.SessionId, UtcText(victim, offset), dryRun: false));
+            await PgExecAsync(c.Connection, $"UPDATE config.config_monitored_servers SET excluded_databases = ARRAY['{c.Sql.Database}'] WHERE server_id = 7", c.Ct);
+
+            var first = await Press(c).FirstPressAsync(proposalId, Approver, c.Ct);
+            Assert.True("superseded" == first.Status, first.Code + " " + first.Message);
+            Assert.Equal(DarlingMcpPlanForceTools.AzureDatabaseExcluded, first.Code);
+            Assert.Contains(c.Sql.Database, first.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("could not be read", first.Message, StringComparison.Ordinal);
+            Assert.Equal("superseded", await ProposalStateAsync(c, proposalId));
+            Assert.True(await SessionAliveAsync(c, victim));
+            Assert.Equal(0, await JournalActionRowsAsync(c));
         }, approval: "required");
     }
 }

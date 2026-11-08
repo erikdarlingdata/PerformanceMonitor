@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -39,10 +40,11 @@ public sealed partial class DarlingMcpPlanForceTools
 
     /// <summary>
     /// The facts that decide a SQL Server or Azure kill. Times are UTC, with the server-local value the kill batch compares kept beside it.
-    /// <see cref="LoginTimeServerLocal"/> is the value the dry run matched, and the write sends it unchanged.
+    /// <see cref="LoginTimeServerLocal"/> is the value the dry run matched, and the write sends it unchanged. <see cref="DatabaseId"/> is the database the
+    /// dry run read the session in; the write sends it too, so a session whose running request moved it to another database is refused by the batch.
     /// </summary>
     internal sealed record SqlKillBinding(int SessionId, DateTime LoginTimeUtc, DateTime LoginTimeServerLocal, DateTime? LastRequestEndTimeUtc,
-        DateTime? LastRequestEndTimeServerLocal, string? Status, int? OpenTransactionCount);
+        DateTime? LastRequestEndTimeServerLocal, string? Status, int? OpenTransactionCount, int? DatabaseId = null);
 
     /// <summary>The facts that decide a PostgreSQL kill. <see cref="BackendStartEpoch"/> is the start second the statement compares.</summary>
     internal sealed record PgKillBinding(int Pid, string? BackendId, long BackendStartEpoch, DateTime? XactStartUtc, DateTime? StateChangeUtc, string? State);
@@ -74,7 +76,8 @@ public sealed partial class DarlingMcpPlanForceTools
             : executor.KillAzureSessionAsync(permit, sessionId, loginServerLocal, dryRun, ct, expected);
 
     /// <summary>
-    /// Prepare step, SQL Server and Azure SQL Database: the server's clock, its settings row, the Azure database checks and the dry-run batch.
+    /// Prepare step, SQL Server and Azure SQL Database: the server's clock, its settings row, the Azure database checks, the dry-run batch and, on SQL Server, the
+    /// exclusion list against the database the batch read the session in.
     /// <paramref name="postgres"/> is the store's read data source and <paramref name="owner"/> the store owner's. The caller records
     /// <see cref="KillPrepareStop.RecordReason"/> as a refusal on its request, then answers <see cref="KillPrepareStop.FixedAnswer"/>, or renders
     /// <see cref="KillPrepareStop.NotDone"/> with its own dry-run flag.
@@ -120,6 +123,14 @@ public sealed partial class DarlingMcpPlanForceTools
         }
 
         var facts = dry.Session;
+
+        /* SQL Server: the session's current database, read in the batch that bound login_time. A database the server's entry excludes is one Darling does not act in,
+           and the kill batch runs server-wide, so the exclusion list is applied here to the database the session is in, on a dry run and before a write alike; a
+           database the login cannot name is refused too while the entry excludes any. Azure SQL Database checked the database it was asked about before the batch
+           ran, and the batch itself refuses a session in another database. */
+        if (!azure && SqlKillDatabaseRefusal(row.ExcludedDatabases, facts, sessionId) is { } databaseRefusal)
+            return new SqlKillPrepared(null, executor, clock, dry, null, [], DarlingAgentActionGate.RefusalAnswer(databaseRefusal), databaseRefusal.Reason, null);
+
         var binding = new SqlKillBinding(
             sessionId,
             facts?.LoginTime is { } login ? clock.ToUtc(login) : loginUtc,
@@ -127,19 +138,45 @@ public sealed partial class DarlingMcpPlanForceTools
             facts?.LastRequestEndTime is { } ended ? clock.ToUtc(ended) : null,
             facts?.LastRequestEndTime,
             facts?.Status,
-            facts?.OpenTransactionCount);
+            facts?.OpenTransactionCount,
+            facts?.DatabaseId);
         return new SqlKillPrepared(binding, executor, clock, dry, KillSessionImage(facts, clock), KillWarnings(facts), null, null, null);
     }
 
     /// <summary>
+    /// SQL Server: the refusal the session's current database earns, or null when the kill may go on. A database on the server's exclusion list is one
+    /// Darling does not act in (<c>database_excluded</c>). A database the remediation login cannot name (<c>DB_NAME</c> is NULL when VIEW ANY DATABASE is
+    /// denied and the login has no user there) is refused whenever the entry excludes any database (<c>session_database_unknown</c>): the kill cannot show
+    /// that the database is not an excluded one, so it does not run. With no exclusions there is nothing the name could be on, and the kill goes on.
+    /// </summary>
+    internal static AgentActionRefusal? SqlKillDatabaseRefusal(string[]? excludedDatabases, KillSessionFacts? facts, int sessionId)
+    {
+        if (facts?.DatabaseName is { } database)
+        {
+            return IsExcludedDatabase(excludedDatabases, database)
+                ? ExcludedDatabaseRefusal(database, $"Session {sessionId} is connected to that database, so it is not killed from here.")
+                : null;
+        }
+
+        if (excludedDatabases is null || !excludedDatabases.Any(e => !string.IsNullOrWhiteSpace(e)))
+            return null;
+
+        var id = facts?.DatabaseId is { } databaseId ? $" (database_id {databaseId})" : "";
+        return new AgentActionRefusal(SessionDatabaseUnknown,
+            $"The database session {sessionId} is in{id} could not be named: the remediation login cannot see it, as when VIEW ANY DATABASE is denied and the login has no user in that database. "
+            + "This server's entry excludes databases, so the kill does not run until the session's database is known not to be one of them. "
+            + "A person can run GRANT VIEW ANY DATABASE TO <remediation login>, or give the login a user in that database. Nothing was run.");
+    }
+
+    /// <summary>
     /// Write step, SQL Server and Azure SQL Database: sends the kill batch for the session the binding names. The batch checks the session id, the
-    /// login time and <c>last_request_end_time</c> (a NULL equals only a NULL), and kills nothing when the last end time changed. The caller wraps
-    /// this in its journal.
+    /// login time, <c>last_request_end_time</c> and the session's <c>database_id</c> (a NULL equals only a NULL), and kills nothing when the last end
+    /// time or the database changed. The caller wraps this in its journal.
     /// </summary>
     internal static Task<RemediationResult> WriteKillSessionAsync(SqlServerRemediationExecutor executor, ServerActionPermit permit, bool azure,
         SqlKillBinding binding, CancellationToken ct) =>
         KillSqlBatchAsync(executor, permit, azure, binding.SessionId, binding.LoginTimeServerLocal, dryRun: false, ct,
-            new KillExpectedActivity(binding.LastRequestEndTimeServerLocal));
+            new KillExpectedActivity(binding.LastRequestEndTimeServerLocal, binding.DatabaseId));
 
     /// <summary>
     /// Prepare step, PostgreSQL: the settings row and the dry-run read of the backend (gone, own session, start time, reused, client session, and

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -39,8 +40,10 @@ public sealed partial class DarlingMcpPlanForceTools
     /// <summary>
     /// What a prepare step returns. <see cref="Facts"/> is set when every check passed; <see cref="Executor"/> is the executor the write step uses.
     /// <see cref="Answer"/> is the answer the tool gives now: always set for a refusal or a failure, and set for a passed dry run when the caller asked for one.
+    /// <see cref="Permit"/> is the permit the write runs with when the prepare step changed it: a force or unforce runs in the database as the store spells it,
+    /// so a caller's spelling that differs by case alone is replaced. Null when the permit passed in is the one to write with.
     /// </summary>
-    internal sealed record PlanPrepared<T>(T? Facts, SqlServerRemediationExecutor? Executor, string? Answer) where T : class
+    internal sealed record PlanPrepared<T>(T? Facts, SqlServerRemediationExecutor? Executor, string? Answer, ServerActionPermit? Permit = null) where T : class
     {
         internal static PlanPrepared<T> End(string answer) => new(null, null, answer);
     }
@@ -60,22 +63,25 @@ public sealed partial class DarlingMcpPlanForceTools
     /// <summary>Plan guide drop. Binding: <see cref="Guide"/>, the full definition read, which the drop itself checks again on the server.</summary>
     internal sealed record DropPlanGuideFacts(string Database, string GuideName, PlanGuideDefinition Guide, bool Disabled, string Statement, object Before);
 
-    /// <summary>Reads the server row, refuses an excluded database (when <paramref name="database"/> is set) and builds the executor, in the order the tools always did.</summary>
-    private static async Task<(SqlServerRemediationExecutor? Executor, string? Answer)> OpenExecutorAsync(NpgsqlDataSource owner, ILogger logger, int serverId,
+    /// <summary>
+    /// Reads the server row, refuses an excluded database (when <paramref name="database"/> is set) and builds the executor, in the order the tools always did.
+    /// <c>ExcludedDatabases</c> is the server entry's exclusion list, for a prepare step that names other databases to the caller.
+    /// </summary>
+    private static async Task<(SqlServerRemediationExecutor? Executor, string? Answer, string[]? ExcludedDatabases)> OpenExecutorAsync(NpgsqlDataSource owner, ILogger logger, int serverId,
         string serverDisplayName, string? database, PlanRefusalSink onRefusal, CancellationToken ct)
     {
         var row = await ReadServerRowAsync(owner, serverId, ct);
         if (row is null)
-            return (null, Answer("failed", "server_row_missing", $"{serverDisplayName} has no row in the monitored-server settings."));
+            return (null, Answer("failed", "server_row_missing", $"{serverDisplayName} has no row in the monitored-server settings."), null);
 
         /* A database the server's entry excludes is one Darling does not act in (#5632). Refused before the dry run reads anything. */
         if (database is not null && IsExcludedDatabase(row.ExcludedDatabases, database))
         {
             await onRefusal(AzureDatabaseExcluded, ct);
-            return (null, DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database)));
+            return (null, DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database)), row.ExcludedDatabases);
         }
 
-        return (new SqlServerRemediationExecutor(serverId, row.Server, row.UserName, row.SecretSlot, logger), null);
+        return (new SqlServerRemediationExecutor(serverId, row.Server, row.UserName, row.SecretSlot, logger), null, row.ExcludedDatabases);
     }
 
     /// <summary>The refusal the executor's dry run gave, journaled, and its answer. A failure is only answered.</summary>
@@ -93,12 +99,89 @@ public sealed partial class DarlingMcpPlanForceTools
 
     // ---- force and unforce ----
 
-    internal static async Task<PlanPrepared<ForcePlanFacts>> PrepareForcePlanAsync(NpgsqlDataSource owner, ILogger logger, ServerActionPermit permit, int serverId,
+    /// <summary>A force or unforce names a database, query_id and plan_id that no Query Store row Darling collected for that server holds together. Nothing is run.</summary>
+    internal const string PlanNotCollected = "plan_not_collected";
+
+    /// <summary>
+    /// The databases of one server whose collected Query Store rows hold the (query_id, plan_id) pair: the raw <c>query_store_stats</c> rows and the
+    /// <c>query_store_interval_wide</c> table, which keeps <see cref="QueryStoreIntervalPartitions.WideHorizonDays"/> days. A pair whose rows have aged out of both is not collected.
+    /// </summary>
+    internal const string CollectedPlanDatabasesSql = @"
+SELECT database_name FROM collect.query_store_stats WHERE server_id = $1 AND query_id = $2 AND plan_id = $3
+UNION
+SELECT database_name FROM collect.query_store_interval_wide WHERE server_id = $1 AND query_id = $2 AND plan_id = $3
+ORDER BY database_name";
+
+    internal static async Task<IReadOnlyList<string>> ReadCollectedPlanDatabasesAsync(NpgsqlDataSource postgres, int serverId, long queryId, long planId, CancellationToken ct)
+    {
+        await using var connection = await postgres.OpenConnectionAsync(ct);
+        await using var command = new NpgsqlCommand(CollectedPlanDatabasesSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint });
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = planId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint });
+        var names = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            names.Add(reader.GetString(0));
+        return names;
+    }
+
+    /// <summary>
+    /// The collected spelling of <paramref name="database"/> among <paramref name="collected"/>: the name that matches exactly, else the one name that matches
+    /// without regard to case. Null when none matches, and when two or more match by case alone and none exactly: on a server whose collation is case-sensitive
+    /// those are two databases, and the caller's spelling picks neither.
+    /// </summary>
+    internal static string? CollectedSpelling(IReadOnlyList<string> collected, string database)
+    {
+        if (collected.Contains(database, StringComparer.Ordinal))
+            return database;
+        var byCase = SpelledAsByCase(collected, database);
+        return byCase.Count == 1 ? byCase[0] : null;
+    }
+
+    private static List<string> SpelledAsByCase(IReadOnlyList<string> collected, string database) =>
+        collected.Where(name => string.Equals(name, database, StringComparison.OrdinalIgnoreCase)).ToList();
+
+    /// <summary>
+    /// The refusal's message: the collected spellings that differ from the caller's by case alone, when there are two or more; else the databases the store
+    /// does hold the pair for, when it holds it for any; else that the rows may have aged out.
+    /// </summary>
+    internal static string PlanNotCollectedMessage(string serverDisplayName, string database, long queryId, long planId, IReadOnlyList<string> collected)
+    {
+        var byCase = SpelledAsByCase(collected, database);
+        if (byCase.Count > 1)
+            return $"Darling has collected plan {planId} for query {queryId} on {serverDisplayName} in {string.Join(" and ", byCase)}, which differ from {database} by case alone. On a server whose collation is case-sensitive those are different databases, and the same pair names an unrelated plan of an unrelated query in each. Pass database_name spelled exactly as the get_query_store_top row the ids came from spells it. Nothing was run.";
+        return collected.Count > 0
+            ? $"Darling has collected plan {planId} for query {queryId} on {serverDisplayName} in {string.Join(", ", collected)}, not in {database}. Query Store ids are per-database sequences, so the same pair names an unrelated plan of an unrelated query in another database. Pass the database_name of the get_query_store_top row the ids came from. Nothing was run."
+            : $"Darling has not collected plan {planId} for query {queryId} in {database} on {serverDisplayName}: no Query Store row Darling collected for that server holds that database, query_id and plan_id together. The store keeps those rows for about {QueryStoreIntervalPartitions.WideHorizonDays} days after the plan was last collected, so a plan last seen before that has aged out and cannot be checked here. Pass the three values from one get_query_store_top row. Nothing was run.";
+    }
+
+    /// <summary>
+    /// <paramref name="postgres"/> is the store's read data source: its collected Query Store rows decide whether <paramref name="database"/>, <paramref name="queryId"/> and
+    /// <paramref name="planId"/> name one plan Darling collected on this server, before the server is read. The server is then read, and written, in the database
+    /// as the store spells it: the returned <see cref="PlanPrepared{T}.Permit"/> carries that spelling when the caller's differs from it by case alone.
+    /// </summary>
+    internal static async Task<PlanPrepared<ForcePlanFacts>> PrepareForcePlanAsync(NpgsqlDataSource postgres, NpgsqlDataSource owner, ILogger logger, ServerActionPermit permit, int serverId,
         string serverDisplayName, bool force, string database, long queryId, long planId, bool dryRun, PlanRefusalSink onRefusal, CancellationToken ct)
     {
-        var (executor, ended) = await OpenExecutorAsync(owner, logger, serverId, serverDisplayName, database, onRefusal, ct);
+        var (executor, ended, excluded) = await OpenExecutorAsync(owner, logger, serverId, serverDisplayName, database, onRefusal, ct);
         if (ended is not null)
             return PlanPrepared<ForcePlanFacts>.End(ended);
+
+        /* The store's own rows decide whether the three values name one collected plan. Query Store ids are per-database sequences from 1, so the pair alone exists in
+           nearly every database on the server, and the server's check (the pair exists in the named database) cannot tell a wrong database from the right one.
+           A database the server's entry excludes is one Darling does not act in, so it is not among the names the refusal offers. */
+        var collected = (await ReadCollectedPlanDatabasesAsync(postgres, serverId, queryId, planId, ct)).Where(name => !IsExcludedDatabase(excluded, name)).ToList();
+        if (CollectedSpelling(collected, database) is not { } spelling)
+        {
+            await onRefusal(PlanNotCollected, ct);
+            return PlanPrepared<ForcePlanFacts>.End(Answer("refused", PlanNotCollected, PlanNotCollectedMessage(serverDisplayName, database, queryId, planId, collected), new { dry_run = dryRun }));
+        }
+
+        /* The server is read and written in the database as the store spells it. On a server whose collation is case-sensitive, Sales and SALES are two databases,
+           and the collected row came from the one the store names; the caller's spelling, in the permit and the statement, would reach the other. */
+        var changedPermit = string.Equals(spelling, database, StringComparison.Ordinal) ? null : permit.WithDatabase(spelling);
+        permit = changedPermit ?? permit;
 
         /* The before state, read on the server. */
         var before = await executor!.ReadPlanStateAsync(permit, queryId, planId, ct);
@@ -119,27 +202,27 @@ public sealed partial class DarlingMcpPlanForceTools
         var statement = PlanForceStatement.For(beforeState.Database, queryId, planId, force);
         var facts = new ForcePlanFacts(force, beforeState.Database, queryId, planId, statement, beforeState.ForcedPlan?.PlanId, beforeState.RequestedPlan!.IsForced, beforeState);
         if (!dryRun)
-            return new PlanPrepared<ForcePlanFacts>(facts, executor, null);
+            return new PlanPrepared<ForcePlanFacts>(facts, executor, null, changedPermit);
 
         /* A dry run runs the executor's own checks and journals nothing. */
         var dry = force
             ? await executor.ForcePlanAsync(permit, queryId, planId, dryRun: true, ct)
             : await executor.UnforcePlanAsync(permit, queryId, planId, dryRun: true, ct);
-        return ForceDryRunPrepared(dry, facts, executor);
+        return ForceDryRunPrepared(dry, facts, executor, changedPermit);
     }
 
     /// <summary>
     /// The prepare result after a force or unforce dry run. A dry run that does not pass ends with its answer and no facts or executor, as the other prepares
-    /// do, so a caller cannot key on facts of a change that was refused or failed.
+    /// do, so a caller cannot key on facts of a change that was refused or failed. <paramref name="permit"/> is the permit the prepare step changed, when it did.
     /// </summary>
-    internal static PlanPrepared<ForcePlanFacts> ForceDryRunPrepared(RemediationResult dry, ForcePlanFacts facts, SqlServerRemediationExecutor executor)
+    internal static PlanPrepared<ForcePlanFacts> ForceDryRunPrepared(RemediationResult dry, ForcePlanFacts facts, SqlServerRemediationExecutor executor, ServerActionPermit? permit = null)
     {
         var state = facts.Before;
         if (dry.Outcome != RemediationOutcome.Done)
             return PlanPrepared<ForcePlanFacts>.End(Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message,
                 new { dry_run = true, statement = facts.Statement, before = state }));
         return new PlanPrepared<ForcePlanFacts>(facts, executor,
-            Answer("dry_run", null, dry.Message, new { dry_run = true, statement = dry.Statement ?? facts.Statement, before = state }));
+            Answer("dry_run", null, dry.Message, new { dry_run = true, statement = dry.Statement ?? facts.Statement, before = state }), permit);
     }
 
     /// <summary>
@@ -165,7 +248,7 @@ public sealed partial class DarlingMcpPlanForceTools
     internal static async Task<PlanPrepared<EvictPlanFacts>> PrepareEvictPlanAsync(NpgsqlDataSource postgres, NpgsqlDataSource owner, ILogger logger, ServerActionPermit permit,
         int serverId, string serverDisplayName, string handle, bool dryRun, PlanRefusalSink onRefusal, CancellationToken ct)
     {
-        var (executor, ended) = await OpenExecutorAsync(owner, logger, serverId, serverDisplayName, null, onRefusal, ct);
+        var (executor, ended, _) = await OpenExecutorAsync(owner, logger, serverId, serverDisplayName, null, onRefusal, ct);
         if (ended is not null)
             return PlanPrepared<EvictPlanFacts>.End(ended);
 
@@ -205,7 +288,7 @@ public sealed partial class DarlingMcpPlanForceTools
     internal static async Task<PlanPrepared<RecompileModuleFacts>> PrepareRecompileModuleAsync(NpgsqlDataSource owner, ILogger logger, ServerActionPermit permit, int serverId,
         string serverDisplayName, string database, string module, bool dryRun, PlanRefusalSink onRefusal, CancellationToken ct)
     {
-        var (executor, ended) = await OpenExecutorAsync(owner, logger, serverId, serverDisplayName, database, onRefusal, ct);
+        var (executor, ended, _) = await OpenExecutorAsync(owner, logger, serverId, serverDisplayName, database, onRefusal, ct);
         if (ended is not null)
             return PlanPrepared<RecompileModuleFacts>.End(ended);
         var statement = ModuleRecompileStatement.For(database, module);
@@ -244,7 +327,7 @@ public sealed partial class DarlingMcpPlanForceTools
     internal static async Task<PlanPrepared<CreatePlanGuideFacts>> PrepareCreatePlanGuideAsync(NpgsqlDataSource owner, ILogger logger, ServerActionPermit permit, int serverId,
         string serverDisplayName, string database, PlanGuideDefinition definition, bool dryRun, PlanRefusalSink onRefusal, CancellationToken ct)
     {
-        var (executor, ended) = await OpenExecutorAsync(owner, logger, serverId, serverDisplayName, database, onRefusal, ct);
+        var (executor, ended, _) = await OpenExecutorAsync(owner, logger, serverId, serverDisplayName, database, onRefusal, ct);
         if (ended is not null)
             return PlanPrepared<CreatePlanGuideFacts>.End(ended);
         var statementText = PlanGuideStatement.Create(database, definition);
@@ -285,7 +368,7 @@ public sealed partial class DarlingMcpPlanForceTools
     internal static async Task<PlanPrepared<DropPlanGuideFacts>> PrepareDropPlanGuideAsync(NpgsqlDataSource owner, ILogger logger, ServerActionPermit permit, int serverId,
         string serverDisplayName, string database, string guideName, bool dryRun, PlanRefusalSink onRefusal, CancellationToken ct)
     {
-        var (executor, ended) = await OpenExecutorAsync(owner, logger, serverId, serverDisplayName, database, onRefusal, ct);
+        var (executor, ended, _) = await OpenExecutorAsync(owner, logger, serverId, serverDisplayName, database, onRefusal, ct);
         if (ended is not null)
             return PlanPrepared<DropPlanGuideFacts>.End(ended);
         var statementText = PlanGuideStatement.Drop(database, guideName);
