@@ -35,6 +35,7 @@ on:
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingStoreHostProfile.cs'
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingPasswordKey*.cs'
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingSecretSource.cs'
+      - 'Darling/PerformanceMonitor.Darling.Service/Hosting/DarlingHealthHostService.cs'
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingServiceKeyFile.cs'
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingFileSecurity.cs'
       - 'Darling/PerformanceMonitor.Darling.Service/DarlingOwnedSecrets.cs'
@@ -175,12 +176,14 @@ jobs:
             "postgres": { "managed": false, "connectionString": "env:DARLING_STORE_CONNECTION" },
             "servers": [],
             "web": { "enabled": false },
-            "mcp": { "enabled": false }
+            "mcp": { "enabled": false },
+            "health": { "enabled": true, "listen": "0.0.0.0" }
           }
           JSON
           echo "DARLING_CONFIG_DIR=${config_dir}" >> "$GITHUB_ENV"
 
           docker run -d --name darling --network darling-store-net \
+            -p 127.0.0.1:5154:5154 \
             -e DARLING_STORE_CONNECTION \
             -v "${config_dir}/darling.json:/config/darling.json:ro" \
             "${DARLING_IMAGE}"
@@ -201,6 +204,36 @@ jobs:
           echo "::error::The service did not log its startup retention pass in 180 seconds."
           docker logs darling 2>&1 | tail -n 60
           exit 1
+
+      # #8184: the health port, over the real network hop. /readyz must reach 200 once the service has reported collecting (the
+      # step above only waits for the retention pass, which comes just before that report), and /livez must then say ok.
+      - name: Check the health port
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready=""
+          for _ in $(seq 1 30); do
+            ready="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5154/readyz || true)"
+            if [ "${ready}" = "200" ]; then
+              break
+            fi
+            sleep 2
+          done
+          echo "/readyz: ${ready}"
+          if [ "${ready}" != "200" ]; then
+            echo "::error::/readyz answered '${ready}', not 200, 60 seconds after the retention pass."
+            docker logs darling 2>&1 | tail -n 60
+            exit 1
+          fi
+
+          live="$(curl -fsS http://127.0.0.1:5154/livez)"
+          echo "/livez: ${live}"
+          if [ "${live}" != "ok" ]; then
+            echo "::error::/livez answered '${live}', not 'ok'."
+            docker logs darling 2>&1 | tail -n 60
+            exit 1
+          fi
 
       # A rollup short of its source: raw query_stats rows 9 to 12 days old, written straight into the raw table, so no
       # refresh covers them (the INSERT of RollupBackfillLiveTests.SeedHourlyQueryStatsAsync, over a fixed window). The

@@ -300,3 +300,63 @@ A front door (see [The front door](front-door.md)) opens its own connections to 
 - When a store serves `https` with a certificate from an internal authority, the system's trust decides. For a self-signed certificate, set `certificateSha256` for that store in the front door's `frontDoor` block. The front door then accepts only that exact certificate.
 - A plain `http` address to a host that is not the front door's own machine works. The front door logs one warning for it, because the store's token crosses the network in clear text.
 - The front door follows no redirects.
+
+## The health port
+
+The health port is for Kubernetes and other orchestrators ([#8184](https://github.com/erikdarlingdata/PerformanceMonitor/issues/8184)). It is off by default. Turn it on with a `health` block in `darling.json`, and restart the service. See [`health`](configuration.md#health-object-optional) for the three settings (`enabled`, `port` 5154 and `listen`).
+
+```json
+"health": { "enabled": true }
+```
+
+With `listen` empty, the port binds `0.0.0.0` inside a container and `127.0.0.1` everywhere else. The port serves two routes, one word each:
+
+| Route | HTTP | Body | When |
+|---|---|---|---|
+| `GET /livez` | 200 | `ok`, `starting`, `degraded` or `stopped` | Always. The word is the current state. A stopped service is still alive. |
+| `GET /readyz` | 200 | `ok` | The collection loop is running. |
+| `GET /readyz` | 503 | `starting` | The service has not reached a verdict yet. |
+| `GET /readyz` | 503 | `degraded` | A startup step failed and the service retries it. |
+| `GET /readyz` | 503 | `stopped` | A startup step failed for good, or the configuration has problems. |
+
+The body is `text/plain; charset=utf-8` and holds only that word. The words are the `status` values of [`/api/ping`](web-dashboard.md). A front door (see [The front door](front-door.md)) runs no collector, so its `/readyz` answers what its `/api/ping` answers: 503 `stopped` when its own `darling.json` was refused, 503 `degraded` when every store is unusable, and 200 `ok` otherwise. Its `/livez` is still 200.
+
+Any other path gets a 404 with an empty body. Any method other than GET on the two routes gets a 405 with an empty body.
+
+### What the port never returns
+
+No server name, no database name, no step name, no failure detail, no attempt count, no version, no metric and no store content. There is no JSON, no cookie, and no header beyond the ones Kestrel adds itself.
+
+### Why it has no token and no `allowFrom`
+
+A kubelet cannot hold a secret, and probes come from the node, not from a client you can list. So the port does not use the token gate, `allowFrom`, TLS or the bind ladder that the MCP and web endpoints use. The answer is one word that says whether the service is up and collecting, and nothing else. Keep the port off the networks you do not trust: in Kubernetes it is reachable by pods in the cluster unless a network policy blocks it, and the Dockerfile does not `EXPOSE` it.
+
+### It starts before migrations
+
+The listener starts before the worker, so before the store migrations and before any ownership check. A long migration answers `/livez` 200 and `/readyz` 503 `starting`, so a startup probe on `/livez` never kills it. A start that is refused (for example, a configuration with problems) answers `/livez` 200 and `/readyz` 503 `stopped`.
+
+### What the port cannot cover
+
+Two cases leave the port off. In each, the service logs one Error line and keeps running:
+
+- **A `darling.json` that cannot be loaded.** The health listener reads its own block, so it cannot know the block when the file is unparsable, empty, unreadable or access-denied.
+- **A bind failure.** The port is taken by another process, or `health.listen` is not an address on this machine.
+
+If an I/O error stops the file from loading, the listener does not retry, so the port stays off for the life of that process. Restart the service after you fix the file.
+
+### Kubernetes probes
+
+```yaml
+startupProbe:
+  httpGet: { path: /livez, port: 5154 }
+  periodSeconds: 5
+  failureThreshold: 60
+livenessProbe:
+  httpGet: { path: /livez, port: 5154 }
+  periodSeconds: 10
+readinessProbe:
+  httpGet: { path: /readyz, port: 5154 }
+  periodSeconds: 10
+```
+
+Never use `/readyz` for liveness. A service that stopped on a configuration problem answers `/readyz` 503 `stopped` until someone fixes the file. A liveness probe on it would restart the pod in a loop, and the restart cannot fix the file.
