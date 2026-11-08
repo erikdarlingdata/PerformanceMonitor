@@ -73,14 +73,10 @@ public sealed class DarlingHostStoreSearchPathLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await OpenStoreWithNoDatabaseDefaultPathAsync();
         var applicationName = host == "mcp" ? DarlingManagedPostgres.McpApplicationName : DarlingManagedPostgres.WebApplicationName;
-        /* The string as an operator gives it carries no Search Path; the scratch string carries the store's, so it goes. */
-        var asGivenBuilder = new NpgsqlConnectionStringBuilder(scratch.UnpinnedConnectionString);
-        asGivenBuilder.Remove("Search Path");
-        var asGivenConnectionString = asGivenBuilder.ConnectionString;
-        Assert.DoesNotContain("Search Path", asGivenConnectionString, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Search Path", scratch.UnpinnedConnectionString, StringComparison.OrdinalIgnoreCase);
 
         /* The premise: the string as the operator gave it cannot see the store's tables. */
-        await using (var asGiven = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(asGivenConnectionString)))
+        await using (var asGiven = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(scratch.UnpinnedConnectionString)))
         {
             var refused = await Assert.ThrowsAsync<PostgresException>(async () =>
             {
@@ -90,7 +86,7 @@ public sealed class DarlingHostStoreSearchPathLiveTests
             Assert.Equal("42P01", refused.SqlState);
         }
 
-        await using var postgres = DarlingWorker.CreateHostStoreDataSource(asGivenConnectionString, applicationName);
+        await using var postgres = DarlingWorker.CreateHostStoreDataSource(scratch.UnpinnedConnectionString, applicationName);
         await using (var command = postgres.CreateCommand("SELECT count(*) FROM servers"))
         {
             Assert.Equal(1L, Convert.ToInt64(await command.ExecuteScalarAsync(ct)));

@@ -21,14 +21,15 @@ namespace Darling.Tests;
 /// physical connections, where an unpooled string opened a socket per statement and left it in TIME_WAIT, until a leg of
 /// live classes ran its runner out of ephemeral ports. The dispose clears this process's pools for the string before the
 /// drop, so no idle pooled backend is left for the FORCE to terminate and no dead physical connection stays in the pool
-/// behind it. The string also carries the store's <c>Search Path</c>, as every product store connection string does: a
-/// pooled physical connection keeps the session defaults its backend started with, so one opened before the test's
-/// <c>MigrateAsync</c> set the database default would resolve no bare table name on a later lease without it. Npgsql
-/// resets the rest of a session's state (its GUCs, role, temporary tables, advisory locks, prepared statements) when a
-/// connection is returned, and the string does not turn that off. A test that needs a session of its own (a backend it
-/// terminates, a session lock released by closing, a count of the database's backends) says so with
-/// <c>Pooling = false</c> on its own string. The factory's own statements on a scratch database run unpooled, so the
-/// only connections in a scratch string's pool are the test's.</para>
+/// behind it. The database's default <c>search_path</c> is set at mint, before any test connection exists: a pooled
+/// physical connection keeps the session defaults its backend started with, so one opened before the test's
+/// <c>MigrateAsync</c> set that default would resolve no bare table name on a later lease. The connection string itself
+/// stays bare, as an operator's would be. Npgsql resets the rest of a session's state (its GUCs, role, temporary tables,
+/// advisory locks, prepared statements) when a connection is returned, and the string does not turn that off. A test that
+/// needs a session of its own (a backend it terminates, a session lock released by closing, a count of the database's
+/// backends, state set in a physical connection initializer) says so with <c>Pooling = false</c> on its own string, and a
+/// test that drops and recreates a database under one name clears that name's pool first. The factory's own statements on
+/// a scratch database run unpooled, so the only connections in a scratch string's pool are the test's.</para>
 ///
 /// <para><b>A scratch database must not outlive its run (#4981).</b> Each one that has the TimescaleDB extension
 /// holds a background-worker slot for its scheduler, and a long-lived local cluster has only a few, so databases
@@ -220,6 +221,16 @@ internal sealed class ScratchPostgres : IAsyncDisposable
                 : $"CREATE DATABASE \"{databaseName}\"",
                 admin.Connection);
             await create.ExecuteNonQueryAsync(cancellationToken);
+
+            /* The store's database-default search_path, set before any test connection exists (#8231). MigrateAsync sets the
+               same default, idempotently, but a pooled physical connection keeps the session defaults its backend started
+               with, so a connection a test opened before its MigrateAsync ran would resolve no bare table name on a later
+               lease. Set here, every backend of the database starts with it. The connection string itself stays bare, as an
+               operator's would be: a test that must see no default resets it on the database. */
+            await using var searchPath = new NpgsqlCommand(
+                $"ALTER DATABASE \"{databaseName}\" SET search_path = {PerformanceMonitor.Darling.Storage.PgSchemaGenerator.SearchPath}",
+                admin.Connection);
+            await searchPath.ExecuteNonQueryAsync(cancellationToken);
         }
         catch
         {
@@ -227,12 +238,10 @@ internal sealed class ScratchPostgres : IAsyncDisposable
             throw;
         }
 
-        /* Pooled, with the store's search path the way every product store connection string carries it: see the class
-           summary. */
+        /* Pooled: see the class summary. */
         var builder = new NpgsqlConnectionStringBuilder(baseConnectionString)
         {
             Database = databaseName,
-            SearchPath = PerformanceMonitor.Darling.Storage.DarlingStoreConnection.StoreSearchPath,
         };
 
         /* The base string can already carry the session pin (LiveStoreSessionTimeZone adds it to DARLING_TEST_PG),
@@ -285,9 +294,9 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// sweep refuse or skip a database that has it, so a killed run's template would stay.</para>
     ///
     /// <para><b>What a clone does not inherit.</b> <c>CREATE DATABASE</c> copies neither the database's own settings nor
-    /// its grants, so the database-default <c>search_path</c> arrives with the test's <c>MigrateAsync</c>, just as it does
-    /// on a fresh store (the scratch connection string carries the store's search path itself, so a bare name resolves on
-    /// it either way). Rows a rung stamps with <c>now()</c> carry the template's time, and a rung's random row is the
+    /// its grants; the factory sets the database-default <c>search_path</c> itself at mint (see <see cref="MintAsync"/>), and
+    /// the grants arrive with the test's <c>MigrateAsync</c>, just as they do on a fresh store. Rows a rung stamps with
+    /// <c>now()</c> carry the template's time, and a rung's random row is the
     /// same in every clone (<c>config.pseudonym_key</c>). A test that depends on either passes <c>emptyStore</c>.</para>
     /// </summary>
     internal static async Task<StoreTemplate> GetTemplateAsync(string baseConnectionString, CancellationToken cancellationToken)
