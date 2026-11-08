@@ -14,6 +14,7 @@ using System.Reflection;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Collectors;
@@ -69,6 +70,32 @@ public sealed class OlderSkuEmptyStatesTests
         var expected = PlanCorrectionCollector.NoRowsMessage(new CollectorTargetInfo { SqlMajorVersion = 15 });
         var texts = await EmptyTextsAfterRefresh("15.0.4335.1");
 
+        Assert.Equal(expected, texts.AutomaticTuning);
+        Assert.Equal(QuietWindow, texts.PlanCorrections);
+    }
+
+    /// <summary>
+    /// An Azure SQL Database (engine edition 5) or Managed Instance (8) stores product version 12.0.x. A tab opened while the connection check
+    /// failed learns the edition and the version from the same stored row, and words both grids for an engine that has automatic tuning: the
+    /// Automatic Tuning grid says no cycle is stored, Plan Corrections keeps its quiet-window sentence, and neither takes the sentence for
+    /// SQL Server 2014.
+    /// </summary>
+    [Theory]
+    [InlineData(CollectorEngineCapability.AzureSqlDatabaseEngineEdition)]
+    [InlineData(CollectorEngineCapability.AzureManagedInstanceEngineEdition)]
+    public async Task OnAnAzureEngineReachedOffline_TheGridsNeverTakeTheVersionSentence(int engineEdition)
+    {
+        var versionSentence = PlanCorrectionCollector.NoRowsMessage(new CollectorTargetInfo { SqlMajorVersion = 12 });
+        var expected = PlanCorrectionCollector.NoRowsMessage(new CollectorTargetInfo
+        {
+            IsAzureSqlDb = engineEdition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition,
+            IsAzureManagedInstance = engineEdition == CollectorEngineCapability.AzureManagedInstanceEngineEdition,
+            SqlMajorVersion = 12,
+        });
+        var texts = await EmptyTextsAfterRefresh("12.0.2000.8", engineEdition);
+
+        Assert.NotEqual(versionSentence, texts.AutomaticTuning);
+        Assert.NotEqual(versionSentence, texts.PlanCorrections);
         Assert.Equal(expected, texts.AutomaticTuning);
         Assert.Equal(QuietWindow, texts.PlanCorrections);
     }
@@ -167,6 +194,67 @@ public sealed class OlderSkuEmptyStatesTests
     }
 
     /// <summary>
+    /// With one Total row beside it, the Avg card's content is only as tall as the taller card, and the sentence sits below the Avg grid's column
+    /// headers, not across them. Laid out in a host sized 1000 px wide, so the measure does not depend on the screen.
+    /// </summary>
+    [Fact]
+    public void FinOpsTopAvg_TheSentence_SitsBelowTheColumnHeaders()
+    {
+        var problems = StaTestThread.Run(() => WithTheme("DarkTheme", _ =>
+        {
+            var found = new List<string>();
+            var tab = new FinOpsTab();
+            var host = new Grid { Width = 1000, Height = 740 };
+            host.Children.Add(tab);
+            var window = Open(host, 1000, 740);
+            try
+            {
+                var total = Find<DataGrid>(tab, "TopTotalGrid");
+                var avg = Find<DataGrid>(tab, "TopAvgGrid");
+                total.ItemsSource = new List<TopResourceConsumerRow> { new() { DatabaseName = "Sales", CpuTimeMs = 0, ExecutionCount = 0, IoTotalMb = 12m } };
+                avg.ItemsSource = new List<TopResourceConsumerRow>();
+                var card = Find<FrameworkElement>(tab, "TopAvgCard");
+                StaTestThread.Reveal(card);
+                StaTestThread.Settle(window);
+
+                var message = Find<TextBlock>(tab, "TopAvgNoDataMessage");
+                var headers = Descendants(avg).OfType<DataGridColumnHeadersPresenter>().FirstOrDefault();
+                if (headers is null)
+                {
+                    found.Add("the Avg grid has no column headers presenter");
+                    return found;
+                }
+
+                if (!message.IsVisible)
+                {
+                    found.Add("the sentence is not visible");
+                    return found;
+                }
+
+                var messageBounds = message.TransformToAncestor(card).TransformBounds(new Rect(0, 0, message.ActualWidth, message.ActualHeight));
+                var headerBounds = headers.TransformToAncestor(card).TransformBounds(new Rect(0, 0, headers.ActualWidth, headers.ActualHeight));
+                if (messageBounds.Top < headerBounds.Bottom)
+                {
+                    found.Add($"the sentence spans y {messageBounds.Top:0.#}..{messageBounds.Bottom:0.#} in the card while the column headers span y {headerBounds.Top:0.#}..{headerBounds.Bottom:0.#}");
+                }
+
+                if (messageBounds.Bottom > card.ActualHeight)
+                {
+                    found.Add($"the sentence runs to y {messageBounds.Bottom:0.#} in a card {card.ActualHeight:0.#} px tall");
+                }
+
+                return found;
+            }
+            finally
+            {
+                window.Close();
+            }
+        }));
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>
     /// The collapsed "CPU by database" expander above the Top Queries grid reads as a control, not as the grid's title: its header says what
     /// it does, and a gap separates it from the grid's column headers.
     /// </summary>
@@ -209,10 +297,11 @@ public sealed class OlderSkuEmptyStatesTests
     // ── helpers ──────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Seeds one server_properties row for the tab's server with <paramref name="productVersion"/>, lets the tab learn the server's engine
-    /// facts the way a tab load does, binds an empty list to both grids, and reads the sentence each shows.
+    /// Seeds one server_properties row for the tab's server with <paramref name="productVersion"/> and <paramref name="engineEdition"/>, lets the
+    /// tab learn the server's engine facts the way a tab load does, binds an empty list to both grids, and reads the sentence each shows. The tab
+    /// is opened without a connection check's edition, the way a tab opens while the server is unreachable.
     /// </summary>
-    private static async Task<(string? AutomaticTuning, string? PlanCorrections)> EmptyTextsAfterRefresh(string productVersion)
+    private static async Task<(string? AutomaticTuning, string? PlanCorrections)> EmptyTextsAfterRefresh(string productVersion, int engineEdition = 3)
     {
         var dir = Path.Combine(Path.GetTempPath(), "OlderSku_" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
@@ -222,7 +311,7 @@ public sealed class OlderSkuEmptyStatesTests
             await duckDb.InitializeAsync();
             var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "older-sku-test", DisplayName = "older-sku-test", IsEnabled = true };
             var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
-            await SeedServerPropertiesAsync(duckDb, serverId, productVersion);
+            await SeedServerPropertiesAsync(duckDb, serverId, productVersion, engineEdition);
 
             (string?, string?) texts = default;
             StaTestThread.Run(async () =>
@@ -262,7 +351,7 @@ public sealed class OlderSkuEmptyStatesTests
         }
     }
 
-    private static async Task SeedServerPropertiesAsync(DuckDbInitializer duckDb, int serverId, string productVersion)
+    private static async Task SeedServerPropertiesAsync(DuckDbInitializer duckDb, int serverId, string productVersion, int engineEdition)
     {
         using var readLock = duckDb.AcquireReadLock();
         using var connection = duckDb.CreateConnection();
@@ -272,10 +361,11 @@ public sealed class OlderSkuEmptyStatesTests
             (collection_id, collection_time, server_id, server_name,
              edition, product_version, product_level, engine_edition,
              cpu_count, hyperthread_ratio, physical_memory_mb, utc_offset_minutes, time_zone_id)
-            VALUES (-1, $1, $2, 'older-sku-test', 'Enterprise Edition', $3, 'RTM', 3, 8, 1, 16384, 0, 'UTC')";
+            VALUES (-1, $1, $2, 'older-sku-test', 'Enterprise Edition', $3, 'RTM', $4, 8, 1, 16384, 0, 'UTC')";
         command.Parameters.Add(new DuckDBParameter { Value = At });
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = productVersion });
+        command.Parameters.Add(new DuckDBParameter { Value = engineEdition });
         await command.ExecuteNonQueryAsync();
     }
 

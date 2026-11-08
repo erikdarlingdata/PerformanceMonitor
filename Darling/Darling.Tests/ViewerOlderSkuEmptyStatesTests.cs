@@ -12,6 +12,7 @@ using System.Linq;
 using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Viewer;
@@ -152,6 +153,67 @@ public sealed class ViewerOlderSkuEmptyStatesTests
                 avg.ItemsSource = new List<TopResourceConsumerRow> { new() { DatabaseName = "Sales", AvgCpuMs = 1.5m, ExecutionCount = 10 } };
                 StaTestThread.Settle(window);
                 if (message.IsVisible) found.Add("the sentence stays visible once the Avg card has rows");
+                return found;
+            }
+            finally
+            {
+                window.Close();
+            }
+        }));
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>
+    /// With one Total row beside it, the Avg card's content is only as tall as the taller card, and the sentence sits below the Avg grid's column
+    /// headers, not across them. Laid out in a host sized 1000 px wide, so the measure does not depend on the screen.
+    /// </summary>
+    [Fact]
+    public void FinOpsTopAvg_TheSentence_SitsBelowTheColumnHeaders()
+    {
+        var problems = StaTestThread.Run(() => WithTheme("DarkTheme", _ =>
+        {
+            var found = new List<string>();
+            var tab = new FinOpsTab();
+            var host = new Grid { Width = 1000, Height = 740 };
+            host.Children.Add(tab);
+            var window = Open(host, 1000, 740);
+            try
+            {
+                var total = Find<DataGrid>(tab, "FinOpsTopTotalGrid");
+                var avg = Find<DataGrid>(tab, "FinOpsTopAvgGrid");
+                total.ItemsSource = new List<TopResourceConsumerRow> { new() { DatabaseName = "Sales", CpuTimeMs = 0, ExecutionCount = 0, IoTotalMb = 12m } };
+                avg.ItemsSource = new List<TopResourceConsumerRow>();
+                var card = Find<FrameworkElement>(tab, "FinOpsTopAvgCard");
+                StaTestThread.Reveal(card);
+                StaTestThread.Settle(window);
+
+                var message = Find<TextBlock>(tab, "FinOpsTopAvgNoDataMessage");
+                var headers = Descendants(avg).OfType<DataGridColumnHeadersPresenter>().FirstOrDefault();
+                if (headers is null)
+                {
+                    found.Add("the Avg grid has no column headers presenter");
+                    return found;
+                }
+
+                if (!message.IsVisible)
+                {
+                    found.Add("the sentence is not visible");
+                    return found;
+                }
+
+                var messageBounds = message.TransformToAncestor(card).TransformBounds(new Rect(0, 0, message.ActualWidth, message.ActualHeight));
+                var headerBounds = headers.TransformToAncestor(card).TransformBounds(new Rect(0, 0, headers.ActualWidth, headers.ActualHeight));
+                if (messageBounds.Top < headerBounds.Bottom)
+                {
+                    found.Add($"the sentence spans y {messageBounds.Top:0.#}..{messageBounds.Bottom:0.#} in the card while the column headers span y {headerBounds.Top:0.#}..{headerBounds.Bottom:0.#}");
+                }
+
+                if (messageBounds.Bottom > card.ActualHeight)
+                {
+                    found.Add($"the sentence runs to y {messageBounds.Bottom:0.#} in a card {card.ActualHeight:0.#} px tall");
+                }
+
                 return found;
             }
             finally
