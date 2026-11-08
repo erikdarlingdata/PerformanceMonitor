@@ -4886,7 +4886,7 @@ public sealed class DarlingSelfAlertTests
             Assert.Equal(metric, fired.MetricName);
             Assert.Equal(key, fired.ServerKey);
             Assert.Contains("still in crash backoff", fired.ShortMessage, StringComparison.Ordinal);
-            Assert.Contains("#9360", fired.DetailText, StringComparison.Ordinal);
+            Assert.Contains("retry_period", fired.DetailText, StringComparison.Ordinal);
         }
     }
 

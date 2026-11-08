@@ -15121,7 +15121,16 @@ AND format('%I.%I', c.chunk_schema, c.chunk_name) = $1)",
     /// comes from; how long the backoff is, and what the re-arm does to it, is the evaluator's detail text.
     /// </summary>
     public const string NextStartNegativeInfinityCrashBackoffReason =
-        "next_start is -infinity — a crashed run left the job in the scheduler's crash backoff, which the scheduler clears on its own (TimescaleDB 2.26.4+, upstream #9360)";
+        "a crashed run left the job in the scheduler's crash backoff: it is re-run max(5 minutes, retry_period x consecutive_crashes) after the scheduler last reloaded its job list, and every alter_job on the store reloads that list (TimescaleDB 2.26.4+)";
+
+    /// <summary>
+    /// <see cref="NextStartNegativeInfinityCrashBackoffReason"/> with the crash count the row carries (#8302), or the
+    /// bare sentence when the count is not known (a row built without one).
+    /// </summary>
+    public static string CrashBackoffReasonFor(long consecutiveCrashes)
+        => consecutiveCrashes > 0
+            ? string.Format(CultureInfo.InvariantCulture, "{0} ({1} consecutive crash{2})", NextStartNegativeInfinityCrashBackoffReason, consecutiveCrashes, consecutiveCrashes == 1 ? "" : "es")
+            : NextStartNegativeInfinityCrashBackoffReason;
 
     /// <summary>
     /// <see cref="ClassifyPolicyJob(bool, string?, DateTime?, TimeSpan?, DateTime, out string)"/> with the
@@ -15140,13 +15149,32 @@ AND format('%I.%I', c.chunk_schema, c.chunk_name) = $1)",
         DateTime nowUtc,
         Version? timescaleVersion,
         out string reason)
+        => ClassifyPolicyJob(nextStartIsNegativeInfinity, consecutiveCrashes: 0, jobStatus, lastRunStartedAtUtc, scheduleInterval, nowUtc, timescaleVersion, out reason);
+
+    /// <summary>
+    /// <see cref="ClassifyPolicyJob(bool, string?, DateTime?, TimeSpan?, DateTime, Version?, out string)"/> with the
+    /// row's <c>consecutive_crashes</c> (#8302). The crash arm trips on EITHER input: a persisted <c>-infinity</c>, or a
+    /// standing crash count with a finite <c>next_start</c>. The second is what a job looks like after <c>CALL run_job</c>
+    /// has run it by hand: the run does not clear the count, and the scheduler still computes the job's start from the
+    /// count on every job-list reload, so the job is as stuck as it was. A count that returns to zero (a scheduler-run
+    /// finished) clears the arm, which is what lets the alert resolve when the job really runs again.
+    /// </summary>
+    public static StuckPolicyJobArm ClassifyPolicyJob(
+        bool nextStartIsNegativeInfinity,
+        long consecutiveCrashes,
+        string? jobStatus,
+        DateTime? lastRunStartedAtUtc,
+        TimeSpan? scheduleInterval,
+        DateTime nowUtc,
+        Version? timescaleVersion,
+        out string reason)
     {
         var isRunning = string.Equals(jobStatus, "Running", StringComparison.OrdinalIgnoreCase);
 
-        if (nextStartIsNegativeInfinity && !isRunning)
+        if ((nextStartIsNegativeInfinity || consecutiveCrashes > 0) && !isRunning)
         {
             reason = SchedulerRecoversNegativeInfinity(timescaleVersion)
-                ? NextStartNegativeInfinityCrashBackoffReason
+                ? CrashBackoffReasonFor(consecutiveCrashes)
                 : NextStartNegativeInfinityPermanentReason;
             return StuckPolicyJobArm.NextStartNegativeInfinity;
         }
@@ -15277,9 +15305,11 @@ SELECT
     j.proc_name,
     j.scheduled,
     js.last_run_status,
-    js.total_failures
+    js.total_failures,
+    COALESCE(bs.consecutive_crashes, 0)         AS consecutive_crashes
 FROM timescaledb_information.job_stats AS js
 JOIN timescaledb_information.jobs      AS j USING (job_id)
+LEFT JOIN _timescaledb_internal.bgw_job_stat AS bs ON bs.job_id = js.job_id
 WHERE j.proc_name LIKE '%compression%'
    OR j.proc_name LIKE '%columnstore%'
    OR (j.hypertable_schema = 'collect'
@@ -15328,7 +15358,7 @@ WHERE j.proc_name LIKE '%compression%'
     /// confirm only makes that settle sooner: the mid-run marker it used to have to wait out is now judged
     /// twice and cleared inside one call instead of surfacing as a flagged poll.</para>
     /// </summary>
-    public static Task<StorePolicyJobHealth> ReadStuckPolicyJobsAsync(
+    public static async Task<StorePolicyJobHealth> ReadStuckPolicyJobsAsync(
         NpgsqlConnection connection, DateTime nowUtc, ILogger? logger, CancellationToken cancellationToken = default)
     {
         if (connection is null)
@@ -15336,13 +15366,131 @@ WHERE j.proc_name LIKE '%compression%'
             throw new ArgumentNullException(nameof(connection));
         }
 
-        return ReadStuckPolicyJobsAsync(
+        var health = await ReadStuckPolicyJobsAsync(
             ct => ReadPolicyJobStatRowsAsync(connection, ct),
             Task.Delay,
             nowUtc,
             logger,
             cancellationToken,
             ct => ReadTimescaleVersionAsync(connection, logger, ct));
+
+        /* #8302: the stale daily rollups ride the same pass and the same list, under each rollup's refresh job, so the
+           evaluator's one machine (first sight, escalation, recovery) and the alert family's surfaces serve them. A job
+           already flagged by a stat-row arm keeps that arm: a crashed job's rollup is stale BECAUSE it crashed. A pass
+           whose stat read failed (no census) is left as it is, so "could not read" keeps its shape. */
+        if (health.Jobs.Count == 0)
+        {
+            return health;
+        }
+
+        var stale = await ReadStaleDailyRollupsAsync(connection, nowUtc, logger, cancellationToken);
+        if (stale.Count == 0)
+        {
+            return health;
+        }
+
+        var flagged = new HashSet<long>(health.Stuck.Select(s => s.JobId));
+        return new StorePolicyJobHealth(health.Stuck.Concat(stale.Where(s => flagged.Add(s.JobId))).ToList(), health.Jobs);
+    }
+
+    /// <summary>
+    /// Every <c>collect</c> continuous aggregate's refresh job with the aggregate's watermark (the end of its newest
+    /// materialized bucket, through the same catalog function <c>CollectionHealthRollupSupport.WatermarkSql</c> reads)
+    /// and the job's status (#8302). The watermark is NULL while nothing is materialized, and the extension's own
+    /// "nothing yet" sentinel is the minimum finite timestamp, which the <c>2000-01-01</c> floor catches. The join
+    /// matches either identity a refresh job reports, as <see cref="ContinuousAggregateRefreshStateSql"/> does and for
+    /// the same measured reason. Paused jobs are left out: a held rollup is not a missed one.
+    /// </summary>
+    public const string DailyRollupWatermarkSql = @"
+SELECT
+    j.job_id,
+    cagg.user_view_name,
+    CASE WHEN isfinite(w.mark) AND w.mark >= '2000-01-01'::timestamp THEN w.mark END AS watermark,
+    js.job_status
+FROM _timescaledb_catalog.continuous_agg AS cagg
+JOIN timescaledb_information.continuous_aggregates AS ca
+  ON  ca.view_schema = cagg.user_view_schema
+  AND ca.view_name = cagg.user_view_name
+JOIN timescaledb_information.jobs AS j
+  ON  j.proc_name = 'policy_refresh_continuous_aggregate'
+  AND ((j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name)
+    OR (j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name))
+LEFT JOIN timescaledb_information.job_stats AS js ON js.job_id = j.job_id
+CROSS JOIN LATERAL (SELECT _timescaledb_functions.to_timestamp_without_timezone(_timescaledb_functions.cagg_watermark(cagg.mat_hypertable_id)) AS mark) AS w
+WHERE cagg.user_view_schema = 'collect'
+AND   j.scheduled";
+
+    /// <summary>
+    /// The daily rollups whose newest materialized bucket ended longer ago than their own refresh window
+    /// (<see cref="DailyRefreshStartSpanFor"/>), each as a <see cref="StuckPolicyJob"/> on
+    /// <see cref="StuckPolicyJobArm.DailyRollupStale"/> under its refresh job (#8302).
+    ///
+    /// <para><b>Why the window is the threshold.</b> A daily policy refreshes the whole buckets inside
+    /// <c>[now - window, now - 1 day]</c> once a day on finish-to-start scheduling, so on a healthy store the newest
+    /// bucket's end is between one and about three days old at any instant: a day old just after a run, and three days
+    /// plus the run's own length just before the next. Older than the window means at least one daily run did not happen
+    /// and the window has moved past a day the policy will not refresh on its own. A rollup with nothing materialized
+    /// yet is not stale (a fresh store), a rollup whose job is Running is not judged mid-run, and only the daily tier is
+    /// read: an hourly rollup that stops is caught within hours by the hourly arms.</para>
+    ///
+    /// <para>Failure-isolated: a store without TimescaleDB, or a read that fails, yields an empty list and a Debug
+    /// line, never a throw.</para>
+    /// </summary>
+    public static async Task<IReadOnlyList<StuckPolicyJob>> ReadStaleDailyRollupsAsync(
+        NpgsqlConnection connection, DateTime nowUtc, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var stale = new List<StuckPolicyJob>();
+        try
+        {
+            using var command = new NpgsqlCommand(DailyRollupWatermarkSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var view = reader.GetString(1);
+                if (reader.IsDBNull(2) || !DailyAggregates.Any(a => string.Equals(a.View, view, StringComparison.Ordinal)))
+                {
+                    continue;
+                }
+
+                var status = reader.IsDBNull(3) ? null : reader.GetString(3);
+                if (string.Equals(status, "Running", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var watermark = reader.GetDateTime(2);
+                var window = DailyRefreshStartSpanFor(view);
+                var age = nowUtc - watermark;
+                if (age <= window)
+                {
+                    continue;
+                }
+
+                stale.Add(new StuckPolicyJob(
+                    Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
+                    view,
+                    string.Format(
+                        CultureInfo.InvariantCulture,
+                        "newest materialized bucket ended {0:F1} days ago, longer than the policy's {1} refresh window — a daily run was missed, and any day the window has moved past needs refresh_continuous_aggregate by hand",
+                        age.TotalDays,
+                        DailyRefreshStartOffsetFor(view)),
+                    SchedulerRetries: false,
+                    Family: StorePolicyJobFamily.Refresh,
+                    Scheduled: true,
+                    Arm: StuckPolicyJobArm.DailyRollupStale));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Daily rollup staleness check: could not read the aggregate watermarks: {Message}", ex.Message);
+        }
+
+        return stale;
     }
 
     /// <summary>
@@ -15550,7 +15698,7 @@ WHERE j.proc_name LIKE '%compression%'
             }
 
             var arm = ClassifyPolicyJob(
-                row.NextStartIsNegativeInfinity, row.JobStatus, row.LastRunStartedAtUtc, row.ScheduleInterval, nowUtc, timescaleVersion, out var reason);
+                row.NextStartIsNegativeInfinity, row.ConsecutiveCrashes, row.JobStatus, row.LastRunStartedAtUtc, row.ScheduleInterval, nowUtc, timescaleVersion, out var reason);
             if (arm != StuckPolicyJobArm.None)
             {
                 flagged.Add(new ClassifiedPolicyJob(
@@ -15597,9 +15745,14 @@ WHERE j.proc_name LIKE '%compression%'
             string? lastRunStatus = reader.IsDBNull(8) ? null : reader.GetString(8);
             long totalFailures = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9), CultureInfo.InvariantCulture);
 
+            /* #8302: the crash count is the crash arm's own input. A crashed job's persisted next_start can read finite
+               (CALL run_job runs it without clearing the count) while the scheduler still computes its start from the
+               count on every reload, so the count, not the sentinel, is what says the job is in crash backoff. */
+            long consecutiveCrashes = reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10), CultureInfo.InvariantCulture);
+
             rows.Add(new PolicyJobStatRow(
                 jobId, negInfinity, jobStatus, lastRunStartedAt, scheduleInterval, hypertable,
-                procName, scheduled, lastRunStatus, totalFailures));
+                procName, scheduled, lastRunStatus, totalFailures, consecutiveCrashes));
         }
 
         return rows;
@@ -16663,6 +16816,12 @@ public enum StuckPolicyJobArm
     /// <summary><c>Running</c> since before <see cref="TimescaleSupport.StuckRunningBound"/>: the hung-run
     /// arm.</summary>
     RunningPastBound,
+
+    /// <summary>A daily rollup whose newest materialized bucket ended longer ago than its refresh window
+    /// (<see cref="TimescaleSupport.DailyRefreshStartSpanFor"/>, #8302): a daily run was missed, and the days the
+    /// window has moved past are not refreshed by the policy on its own. Judged from the aggregate's watermark, not
+    /// from the job's stat row, and reported under the rollup's refresh job.</summary>
+    DailyRollupStale,
 }
 
 /// <summary>
@@ -16686,7 +16845,8 @@ internal sealed record PolicyJobStatRow(
     string? ProcName = null,
     bool Scheduled = true,
     string? LastRunStatus = null,
-    long TotalFailures = 0)
+    long TotalFailures = 0,
+    long ConsecutiveCrashes = 0)
 {
     /// <summary>This row's family (#3816), from <see cref="TimescaleSupport.ClassifyPolicyJobFamily"/>. A row
     /// built by a pre-#3816 pin carries no <c>proc_name</c> and therefore reads

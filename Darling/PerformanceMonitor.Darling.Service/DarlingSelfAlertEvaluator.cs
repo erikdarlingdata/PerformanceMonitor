@@ -9140,7 +9140,7 @@ WHERE c.is_enabled";
     /// one is NOT re-armed and NOT paged: it is logged at Information and remembered as
     /// <c>AwaitingSchedulerRetry</c>. If the same job is still on the arm an hour later — the scheduler's own
     /// retry has not cleared it, because the jittered backoff fell just past the check cadence or because the
-    /// job crashed AGAIN and its backoff doubled — it escalates: one Critical page naming a crash the operator
+    /// job crashed AGAIN and its backoff grew by another retry period — it escalates: one Critical page naming a crash the operator
     /// should read the PostgreSQL log for, no re-arm, and the cooldown re-fires of the escalated state. A job
     /// that clears while awaiting the retry is dropped silently, since nothing was paged for it to recover
     /// from. Stores below 2.26.4, and stores whose version could not be read, keep every #1581 semantic
@@ -9244,7 +9244,7 @@ WHERE c.is_enabled";
                        same argument for a refresh or a retention job. */
                     _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.AwaitingSchedulerRetry, job.Family);
                     _logger?.LogInformation(
-                        "TimescaleDB {Label} read {Reason}; the scheduler re-runs a crashed job by itself after its crash backoff (at least five minutes, about an hour for a policy's default retry period), and a re-arm would reset that backoff rather than shorten it — not re-armed, not alerted; escalates if still there next check (#3591)",
+                        "TimescaleDB {Label} read {Reason}; the scheduler re-runs a crashed job by itself max(5 minutes, retry_period x consecutive_crashes) after its last job-list reload (about fifteen minutes on this service's retry period), and a re-arm would restart that wait rather than shorten it — not re-armed, not alerted; escalates if still there next check (#3591, #8302)",
                         label, job.Reason);
                     continue;
                 }
@@ -9299,7 +9299,7 @@ WHERE c.is_enabled";
             else if (episode.State == PolicyJobHealth.AwaitingSchedulerRetry)
             {
                 /* #3591: an hour on and the scheduler's own retry has not cleared it. Either the jittered backoff
-                   landed just past this check, or the job crashed AGAIN and its backoff doubled — both are worth a
+                   landed just past this check, or the job crashed AGAIN and its backoff grew by another retry period — both are worth a
                    human reading the PostgreSQL log, and neither is helped by alter_job (which would reset the
                    backoff once more). Escalate: page once now (#5493: a repeat only per connection_refire_minutes), never re-arm. */
                 _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
@@ -9309,12 +9309,15 @@ WHERE c.is_enabled";
                     StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                     job.Reason, "running on schedule",
                     detail: $"TimescaleDB {label} has sat in the scheduler's crash backoff ({job.Reason}) since at least the previous " +
-                        "hourly check, and the scheduler's own retry has not cleared it. A crashed background worker means the " +
+                        "hourly check, and the scheduler has not re-run it. A crashed background worker means the " +
                         "PostgreSQL cluster crash-restarted, failed over, or the worker was killed mid-run — read the PostgreSQL log " +
-                        "around the job's last_run_started_at for the cause, and check whether it has crashed more than once (each " +
-                        "consecutive crash doubles the backoff). The service did NOT re-arm it: on TimescaleDB 2.26.4+ (upstream " +
-                        "#9360) alter_job(next_start => now()) against a job in crash backoff resets the backoff instead of " +
-                        $"shortening it. {band.Stalled}",
+                        "around the job's last_run_started_at for the cause. The scheduler re-runs a crashed job " +
+                        "max(5 minutes, retry_period x consecutive_crashes) after it last reloaded its job list, and every alter_job on " +
+                        "the store reloads that list, so a job whose retry_period is an hour or more is pushed out again by each hourly " +
+                        $"pass and never runs. Every job this service schedules carries a {TimescaleSupport.PolicyJobRetryPeriod} retry_period " +
+                        "and converges onto it at startup; a job still on a longer one runs again after SELECT alter_job(<job_id>, " +
+                        $"retry_period => INTERVAL '{TimescaleSupport.PolicyJobRetryPeriod}'). The service did NOT re-arm it: " +
+                        $"alter_job(next_start => now()) against a job in crash backoff restarts the wait instead of shortening it. {band.Stalled}",
                     severity: band.Severity,
                     shortMessage: $"{label} still in crash backoff an hour on — escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,

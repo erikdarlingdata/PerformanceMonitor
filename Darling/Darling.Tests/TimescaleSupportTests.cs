@@ -394,7 +394,7 @@ public sealed class TimescaleSupportTests
         Assert.Equal(StuckPolicyJobArm.NextStartNegativeInfinity, arm);
         Assert.Equal(TimescaleSupport.NextStartNegativeInfinityCrashBackoffReason, reason);
         Assert.Contains("crash backoff", reason, StringComparison.Ordinal);
-        Assert.Contains("#9360", reason, StringComparison.Ordinal);
+        Assert.Contains("retry_period", reason, StringComparison.Ordinal);
         Assert.Contains("2.26.4", reason, StringComparison.Ordinal);
         Assert.DoesNotContain("never", reason, StringComparison.Ordinal);
 
