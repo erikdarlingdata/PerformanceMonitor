@@ -23,6 +23,7 @@
  * tool own that knob, and this page has no write affordance at all.
  */
 
+import { countWord } from "../plain-text.js";
 import { el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, localTime, relTime, parseUtc, rollupTextId,
          fmtInt, fmtMb, fmtMs, fmtPct, fmtBool, fmtText, bandClass, disclosure, localizeIsoText } from "../util.js";
 import { gridTable } from "../panels.js";
@@ -306,7 +307,7 @@ function livenessBlock(d, lv) {
       el("td", { class: r[2] || null, text: r[1] }),
     ])),
     faults.length
-      ? el("div", { class: "sweep-line sev-Critical", text: faults.length + " server read fault(s): "
+      ? el("div", { class: "sweep-line sev-Critical", text: countWord(faults.length, "server read fault") + ": "
           + faults.map((f) => f.server + " (" + f.error + ")").join("; ") })
       : null,
     notes.length

@@ -23,6 +23,7 @@
  * every 60s. Sort order, filters and every rendered field are unchanged.
  */
 
+import { countWord } from "../plain-text.js";
 import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, noticeStrip, disclosure,
          ALERT_STATE_LABELS, applyFormat, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder, storeHash, NO_MESSAGE_TEXT_PREFIX } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf, gridRowShown } from "../panels.js";
@@ -606,7 +607,7 @@ function buildDismissBar(state) {
     if (!rows.length) return;
     /* The prompt the Viewer asks before Dismiss All. Unlike the Viewer, which dismisses every live alert in the
        window, this page dismisses only the rows it lists, so a truncated page says the rest stay live. */
-    let ask = "Dismiss " + rows.length + " alert(s)?\n\nDismissed alerts are hidden from this view but remain in the store.";
+    let ask = "Dismiss " + countWord(rows.length, "alert") + "?\n\nDismissed alerts are hidden from this view but remain in the store.";
     if (state.truncated) ask += "\n\nMore alerts exist than the " + state.alerts.length + " listed; only the listed ones are dismissed and the rest stay live.";
     if (typeof globalThis.confirm === "function" && !globalThis.confirm(ask)) return;
     dismissRows(state, rows);
