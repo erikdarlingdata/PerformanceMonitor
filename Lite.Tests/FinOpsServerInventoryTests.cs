@@ -110,7 +110,8 @@ public sealed class FinOpsServerInventoryTests : IDisposable
             : () => throw new InvalidOperationException("planted overlay read failure");
 
         AppLogger.DrainBufferedLines();
-        var rows = await FinOpsServerInventory.BuildAsync(new[] { first, second }, Live, NoCollected, failingRead);
+        var build = await FinOpsServerInventory.BuildAsync(new[] { first, second }, Live, NoCollected, failingRead);
+        var rows = build.Rows;
         var log = AppLogger.DrainBufferedLines();
 
         Assert.Equal(new[] { first.DisplayName, second.DisplayName }, rows.Select(r => r.ServerName));
@@ -130,11 +131,12 @@ public sealed class FinOpsServerInventoryTests : IDisposable
         var second = Server("inv-merge-second");
 
         AppLogger.DrainBufferedLines();
-        var rows = await FinOpsServerInventory.BuildAsync(
+        var build = await FinOpsServerInventory.BuildAsync(
             new[] { first, second },
             Live,
             NoCollected,
             () => Task.FromResult<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>(new MetricsThatThrowWhenLookedUp()));
+        var rows = build.Rows;
         var log = AppLogger.DrainBufferedLines();
 
         Assert.Equal(new[] { first.DisplayName, second.DisplayName }, rows.Select(r => r.ServerName));
@@ -160,13 +162,14 @@ public sealed class FinOpsServerInventoryTests : IDisposable
         };
 
         AppLogger.DrainBufferedLines();
-        var rows = await FinOpsServerInventory.BuildAsync(
+        var build = await FinOpsServerInventory.BuildAsync(
             new[] { healthy, unreachable },
             server => server == unreachable
                 ? throw new InvalidOperationException("planted live failure")
                 : Live(server),
             NoCollected,
             () => Task.FromResult<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>(metrics));
+        var rows = build.Rows;
         var log = AppLogger.DrainBufferedLines();
 
         var only = Assert.Single(rows);
@@ -197,13 +200,14 @@ public sealed class FinOpsServerInventoryTests : IDisposable
         };
 
         AppLogger.DrainBufferedLines();
-        var rows = await FinOpsServerInventory.BuildAsync(
+        var build = await FinOpsServerInventory.BuildAsync(
             new[] { healthy, offline },
             server => server == offline
                 ? throw new InvalidOperationException("planted live failure")
                 : Live(server),
             server => Task.FromResult<ServerPropertiesRow?>(server == offline ? Collected() : null),
             () => Task.FromResult<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>(metrics));
+        var rows = build.Rows;
         var log = AppLogger.DrainBufferedLines();
 
         Assert.Equal(new[] { healthy.DisplayName, offline.DisplayName }, rows.Select(r => r.ServerName));
@@ -279,29 +283,66 @@ public sealed class FinOpsServerInventoryTests : IDisposable
         var offline = Server("inv-offline-failing-store-read");
 
         AppLogger.DrainBufferedLines();
-        var rows = await FinOpsServerInventory.BuildAsync(
+        var build = await FinOpsServerInventory.BuildAsync(
             new[] { healthy, offline },
             server => server == offline
                 ? throw new InvalidOperationException("planted live failure")
                 : Live(server),
             server => throw new InvalidOperationException("planted collected read failure"),
             () => Task.FromResult<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>(new Dictionary<int, LocalDataService.ServerMetricsRow>()));
+        var rows = build.Rows;
         var log = AppLogger.DrainBufferedLines();
 
         var only = Assert.Single(rows);
         Assert.Equal(healthy.DisplayName, only.ServerName);
+        Assert.Equal(2, build.ListedServers);
+        Assert.Equal(1, build.UnreadableServers);
+        Assert.Null(build.EmptyText);
         Assert.Contains(log, l => l.Contains("Failed to read the collected server properties for " + offline.DisplayName, StringComparison.Ordinal)
             && l.Contains("planted collected read failure", StringComparison.Ordinal));
     }
 
-    /// <summary>The sentence under an empty grid: nothing collected when no server is listed, and that the listed servers could
-    /// not be reached and have nothing collected when every one of them was left out for that reason.</summary>
+    /// <summary>The sentence under an empty grid: nothing collected when no server is listed; the listed servers could not be
+    /// reached and have nothing collected when every one was left out for that reason; and that their collected properties
+    /// could not be read, for as many as that is true of, when a collected read threw.</summary>
     [Fact]
-    public void TheEmptySentence_SaysNothingWasCollected_OnlyWhenNoServerIsListed()
+    public void TheEmptySentence_SaysNothingWasCollected_OnlyWhenNoServerIsListed_AndSaysWhenTheStoreCouldNotBeRead()
     {
-        Assert.Equal("No server property data collected yet", FinOpsServerInventory.EmptyText(0));
-        Assert.Equal("1 server could not be reached and has no collected properties yet", FinOpsServerInventory.EmptyText(1));
-        Assert.Equal("3 servers could not be reached and have no collected properties yet", FinOpsServerInventory.EmptyText(3));
+        Assert.Equal("No server property data collected yet", FinOpsServerInventory.EmptyText(0, 0));
+        Assert.Equal("1 server could not be reached and has no collected properties yet", FinOpsServerInventory.EmptyText(1, 0));
+        Assert.Equal("3 servers could not be reached and have no collected properties yet", FinOpsServerInventory.EmptyText(3, 0));
+        Assert.Equal("1 server could not be reached and its collected properties could not be read", FinOpsServerInventory.EmptyText(1, 1));
+        Assert.Equal("2 servers could not be reached and their collected properties could not be read", FinOpsServerInventory.EmptyText(2, 2));
+        Assert.Equal("3 servers could not be reached: the collected properties of 1 could not be read and 2 have none yet", FinOpsServerInventory.EmptyText(3, 1));
+        Assert.Equal("3 servers could not be reached: the collected properties of 2 could not be read and 1 has none yet", FinOpsServerInventory.EmptyText(3, 2));
+    }
+
+    /// <summary>Built with every live read failing and every collected read throwing, the result has no row and its empty
+    /// sentence says the collected properties could not be read; a build with rows has no empty sentence.</summary>
+    [Fact]
+    public async Task ABuildWhoseCollectedReadsThrow_HasNoRows_AndAnEmptySentenceThatSaysSo()
+    {
+        var first = Server("inv-unreadable-first");
+        var second = Server("inv-unreadable-second");
+        Func<Task<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>> noMetrics =
+            () => Task.FromResult<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>(new Dictionary<int, LocalDataService.ServerMetricsRow>());
+
+        AppLogger.DrainBufferedLines();
+        var unreadable = await FinOpsServerInventory.BuildAsync(
+            new[] { first, second },
+            server => throw new InvalidOperationException("planted live failure"),
+            server => throw new InvalidOperationException("planted collected read failure"),
+            noMetrics);
+        AppLogger.DrainBufferedLines();
+
+        Assert.Empty(unreadable.Rows);
+        Assert.Equal(2, unreadable.ListedServers);
+        Assert.Equal(2, unreadable.UnreadableServers);
+        Assert.Equal("2 servers could not be reached and their collected properties could not be read", unreadable.EmptyText);
+
+        var withRows = await FinOpsServerInventory.BuildAsync(new[] { first }, Live, NoCollected, noMetrics);
+        Assert.Single(withRows.Rows);
+        Assert.Null(withRows.EmptyText);
     }
 
     /// <summary>
@@ -334,11 +375,12 @@ public sealed class FinOpsServerInventoryTests : IDisposable
 
         var service = new LocalDataService(initializer);
 
-        var rows = await FinOpsServerInventory.BuildAsync(
+        var build = await FinOpsServerInventory.BuildAsync(
             new[] { offline, neverCollected },
             server => throw new InvalidOperationException("planted live failure"),
             server => service.GetLatestServerPropertiesAsync(IdOf(server)),
             async () => await service.GetServerMetricsAsync());
+        var rows = build.Rows;
 
         var only = Assert.Single(rows);
         Assert.Equal(offline.DisplayName, only.ServerName);
@@ -387,11 +429,12 @@ public sealed class FinOpsServerInventoryTests : IDisposable
         Assert.True(collected.ContainsKey(IdOf(removed)));
         Assert.Equal(80m, collected[IdOf(removed)].AvgCpuPct);
 
-        var rows = await FinOpsServerInventory.BuildAsync(
+        var build = await FinOpsServerInventory.BuildAsync(
             new[] { listed },
             Live,
             NoCollected,
             async () => await service.GetServerMetricsAsync());
+        var rows = build.Rows;
 
         var only = Assert.Single(rows);
         Assert.Equal(listed.DisplayName, only.ServerName);

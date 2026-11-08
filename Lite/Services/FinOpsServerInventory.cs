@@ -38,23 +38,45 @@ internal static class FinOpsServerInventory
 {
     /// <summary>
     /// What the grid says when it is empty. With no server listed, nothing was collected. With servers listed, every one
-    /// of them is missing for the one reason a server is left out: its live read failed and the store holds no row for it.
+    /// of them is missing because its live read failed and no collected row stood in: the store holds none for it, or, for
+    /// <paramref name="unreadableServers"/> of them, the collected read itself threw, which the sentence says rather than
+    /// claiming nothing was collected.
     /// </summary>
-    internal static string EmptyText(int listedServers) =>
-        listedServers == 0
-            ? "No server property data collected yet"
-            : $"{CountText.Plural(listedServers, "server")} could not be reached and {(listedServers == 1 ? "has" : "have")} no collected properties yet";
+    internal static string EmptyText(int listedServers, int unreadableServers)
+    {
+        if (listedServers == 0) return "No server property data collected yet";
+
+        var servers = CountText.Plural(listedServers, "server");
+        if (unreadableServers == 0)
+            return $"{servers} could not be reached and {(listedServers == 1 ? "has" : "have")} no collected properties yet";
+        if (unreadableServers >= listedServers)
+            return $"{servers} could not be reached and {(listedServers == 1 ? "its" : "their")} collected properties could not be read";
+
+        var none = listedServers - unreadableServers;
+        return $"{servers} could not be reached: the collected properties of {unreadableServers} could not be read and {none} {(none == 1 ? "has" : "have")} none yet";
+    }
+
+    /// <summary>What <see cref="BuildAsync"/> produced: the rows, and the counts behind the sentence an empty grid shows.</summary>
+    /// <param name="Rows">One row per server that answered live or had a collected row, in list order.</param>
+    /// <param name="ListedServers">The servers the monitor lists.</param>
+    /// <param name="UnreadableServers">The servers left out because their collected read threw after the live read failed.</param>
+    internal sealed record InventoryBuild(List<ServerPropertyRow> Rows, int ListedServers, int UnreadableServers)
+    {
+        /// <summary>The sentence under the grid when it has no row, or null when it has rows.</summary>
+        public string? EmptyText => Rows.Count == 0 ? FinOpsServerInventory.EmptyText(ListedServers, UnreadableServers) : null;
+    }
 
     /// <summary>
-    /// The inventory rows for <paramref name="servers"/>, in list order. A server whose live read fails is logged and
-    /// built from its collected row, marked last known; with no collected row it is left out. A failing overlay read or
+    /// The inventory rows for <paramref name="servers"/>, in list order, with the counts behind the empty sentence. A
+    /// server whose live read fails is logged and built from its collected row, marked last known; with no collected row
+    /// it is left out, and so is one whose collected read throws, which the result counts. A failing overlay read or
     /// merge is logged and leaves the overlay blank.
     /// </summary>
     /// <param name="servers">The servers the monitor lists. Only these can produce a row.</param>
     /// <param name="readLive">One server's live properties (a real network call to the monitored server).</param>
     /// <param name="readCollected">One server's newest collected <c>server_properties</c> row, or null when the store holds none.</param>
     /// <param name="readCollectedMetrics">The fleet-wide collected overlay, keyed by the storage-name hash id.</param>
-    public static async Task<List<ServerPropertyRow>> BuildAsync(
+    public static async Task<InventoryBuild> BuildAsync(
         IEnumerable<ServerConnection> servers,
         Func<ServerConnection, Task<ServerPropertyRow>> readLive,
         Func<ServerConnection, Task<ServerPropertiesRow?>> readCollected,
@@ -72,8 +94,9 @@ internal static class FinOpsServerInventory
             catch (Exception ex)
             {
                 AppLogger.Error("FinOps", $"Failed to query {server.DisplayName}: {ex.Message}", ex);
-                item = await ReadLastKnownAsync(server, readCollected);
-                if (item == null) return null;
+                var (lastKnown, readFailed) = await ReadLastKnownAsync(server, readCollected);
+                if (lastKnown == null) return (Row: (ServerPropertyRow?)null, ReadFailed: readFailed);
+                item = lastKnown;
             }
 
             item.ServerName = server.DisplayName;
@@ -83,19 +106,23 @@ internal static class FinOpsServerInventory
                own (see ApplyCollectedMetrics), so it cannot cost the row above its place. */
             ApplyCollectedMetrics(item, server, fleetMetrics);
 
-            return item;
+            return (Row: item, ReadFailed: false);
         });
 
         var results = await Task.WhenAll(tasks);
-        return results.Where(r => r != null).Cast<ServerPropertyRow>().ToList();
+        return new InventoryBuild(
+            results.Where(r => r.Row != null).Select(r => r.Row!).ToList(),
+            ListedServers: results.Length,
+            UnreadableServers: results.Count(r => r.ReadFailed));
     }
 
     /// <summary>
-    /// The last-known row for a server whose live read failed: its newest collected properties, or null when the store
-    /// holds none or the read throws. Either way the server is left out, and the log says which; the throw never
-    /// propagates, so it costs the grid no other row.
+    /// The last-known row for a server whose live read failed: its newest collected properties, or no row when the store
+    /// holds none (<c>ReadFailed</c> false) or the read throws (<c>ReadFailed</c> true), which the empty sentence tells
+    /// apart. Either way the server is left out and the log says which; the throw never propagates, so it costs the grid
+    /// no other row.
     /// </summary>
-    internal static async Task<ServerPropertyRow?> ReadLastKnownAsync(
+    internal static async Task<(ServerPropertyRow? Row, bool ReadFailed)> ReadLastKnownAsync(
         ServerConnection server,
         Func<ServerConnection, Task<ServerPropertiesRow?>> readCollected)
     {
@@ -105,14 +132,14 @@ internal static class FinOpsServerInventory
             if (collected == null)
             {
                 AppLogger.Warn("FinOps", $"{server.DisplayName} has no collected server properties to show in its place, so it is left out of the Server Inventory.");
-                return null;
+                return (null, false);
             }
-            return FromCollected(collected);
+            return (FromCollected(collected), false);
         }
         catch (Exception ex)
         {
             AppLogger.Error("FinOps", $"Failed to read the collected server properties for {server.DisplayName}, so it is left out of the Server Inventory: {ex.Message}", ex);
-            return null;
+            return (null, true);
         }
     }
 
