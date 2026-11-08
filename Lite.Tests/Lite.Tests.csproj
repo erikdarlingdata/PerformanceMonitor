@@ -117,4 +117,8 @@
     <None Include="..\Lite\App.xaml.cs" Link="Fixtures\App.xaml.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Lite\Mcp\McpSettings.cs" Link="Fixtures\McpSettings.cs" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Lite's windows name their icon by a root-relative URI, which resolves against the entry assembly, this one, when a test builds a window. -->
+    <Resource Include="..\Lite\EDD.ico" Link="EDD.ico" />
+  </ItemGroup>
 </Project>
