@@ -194,7 +194,7 @@ public sealed class StoreDatabaseSizeEstimateLiveTests
     /// #7303: the hourly assertion counts calls of the sweep's statement, not of every statement that names
     /// <c>pg_database_size</c>. A second caller on the database (a scheduler job, another connection) bumps the unscoped count
     /// between two reads, which made the "no call in the hourly sweep" assertion fail with Expected 1, Actual 2 on a run where the
-    /// sweep itself made no call. This runs such a caller and shows the unscoped count moves while the sweep-scoped one does not.
+    /// sweep itself made no call. This runs such callers and shows the unscoped count moves while the sweep-scoped one does not.
     /// </summary>
     [Fact]
     public async Task CallCount_IgnoresAPgDatabaseSizeCallFromAnotherCaller()
@@ -252,7 +252,10 @@ public sealed class StoreDatabaseSizeEstimateLiveTests
                 await size.ExecuteScalarAsync(ct);
             }
 
-            Assert.Equal(anyBefore + 1, await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct, sweepStatementOnly: false));
+            /* The unscoped count moves with every caller on the database, these two and any other in the window, so it is
+               held to have moved at all. The sweep-scoped count is what the hourly assertion reads, and it does not move. */
+            var anyAfter = await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct, sweepStatementOnly: false);
+            Assert.True(anyAfter >= anyBefore + 1, $"the unscoped count was {anyBefore} before the other callers and {anyAfter} after");
             Assert.Equal(sweepBefore, await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct));
 
             bodySucceeded = true;
