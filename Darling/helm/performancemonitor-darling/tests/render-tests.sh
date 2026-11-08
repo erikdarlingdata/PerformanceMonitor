@@ -169,3 +169,10 @@ n="$(notes)"
 grep -qF 'moves' <<<"${n}" || { echo "NOTES lack the moving-tag warning for the latest tag" >&2; exit 1; }
 n="$(notes --set image.tag=3.13.0)"
 if grep -qF 'moves' <<<"${n}"; then echo "NOTES warn about a pinned tag" >&2; exit 1; fi
+
+t fail_owned_key_in_config_any_case
+assert_fails "config.postgres.connectionString is owned by the chart" --set config.Postgres.connectionString=x
+assert_fails "config.postgres.connectionString is owned by the chart" --set config.POSTGRES.CONNECTIONSTRING=x
+assert_fails "config.web.network.token is owned by the chart" --set config.web.Network.token=x
+assert_fails "config.web.port is owned by the chart" --set config.Web.Port=1
+assert_fails "config.health is owned by the chart" --set config.HEALTH.port=1

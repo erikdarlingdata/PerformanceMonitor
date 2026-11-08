@@ -51,13 +51,23 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- default (include "performancemonitor-darling.fullname" .) .Values.secrets.existingSecret -}}
 {{- end -}}
 
-{{/* Prints "true" when the key path (a list of keys) exists in the map. Arguments: dict "cfg" <map> "path" <list>. */}}
+{{/* Prints "true" when the key path (a list of keys) exists in the map. Keys compare case-insensitively at every level,
+because Darling reads darling.json case-insensitively. Arguments: dict "cfg" <map> "path" <list>. */}}
 {{- define "performancemonitor-darling.pathPresent" -}}
 {{- $cur := .cfg -}}
 {{- $ok := true -}}
 {{- range .path -}}
-{{- if and $ok (kindIs "map" $cur) (hasKey $cur .) -}}
-{{- $cur = index $cur . -}}
+{{- $want := lower . -}}
+{{- $next := dict -}}
+{{- if and $ok (kindIs "map" $cur) -}}
+{{- range $k, $v := $cur -}}
+{{- if eq (lower $k) $want -}}
+{{- $_ := set $next "v" $v -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if hasKey $next "v" -}}
+{{- $cur = get $next "v" -}}
 {{- else -}}
 {{- $ok = false -}}
 {{- end -}}
