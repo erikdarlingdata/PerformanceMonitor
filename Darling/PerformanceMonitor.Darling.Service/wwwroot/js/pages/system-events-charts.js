@@ -18,7 +18,7 @@
  * two sentences differ because "was not reported" is false for a collected 0. One bucket above 0 draws the chart. server-tabs.js appends systemEventsChartSpecs() to the fanout
  * that already makes the CPU chart, so every chart here shares that one fetch.
  */
-import { emptyStrip } from "../util.js";
+import { captionStrip, el, emptyStrip } from "../util.js";
 import { VIZ } from "../panels.js";
 
 /** The counter charts, in the viewer's order. `key` is the chart read's per-bucket field. `empty` is the sentence for a counter no bucket carried, `zero` the one for a counter every bucket carried as 0. */
@@ -66,11 +66,23 @@ VIZ.healthCounter = (data, desc) => {
   return VIZ.line(data, { ...desc, format: "int", allZeroText: desc.zeroText });
 };
 
-/* "Spinlocks" viz: a line per sick spinlock type the read named, or the empty text when none was reported. */
+/** #8187: the sentence under the sick spinlock chart when the read named fewer types than the window had, the web twin of the
+    Viewer's "Sick Spinlocks (backoffs), top 5 of N types" Y label: `sick_spinlock_type_count` against the series drawn. Null when
+    the read named every type, or when an older read carries no count. */
+export function spinlockTopCaption(data, shown) {
+  const total = data && data.sick_spinlock_type_count;
+  if (total == null || !Number.isFinite(Number(total)) || Number(total) <= shown) return null;
+  return "Sick spinlocks by backoffs, top " + shown + " of " + Number(total) + " types in this window.";
+}
+
+/* "Spinlocks" viz: a line per sick spinlock type the read named (the busiest, #8187), with a caption saying how many types there were
+   when some were left out, or the empty text when none was reported. */
 VIZ.healthSpinlocks = (data, desc) => {
   const { points, series } = spinlockPoints(data);
   if (!series.length) return emptyStrip(desc.emptyText);
-  return VIZ.line({ spinlocks: points }, { ...desc, rowsKey: "spinlocks", series, format: "int" });
+  const chart = VIZ.line({ spinlocks: points }, { ...desc, rowsKey: "spinlocks", series, format: "int" });
+  const caption = spinlockTopCaption(data, series.length);
+  return caption ? el("div", {}, [chart, captionStrip(caption)]) : chart;
 };
 
 /** The sentence over the counter charts. It is shown only while a chart is drawn (#6439): on an Azure SQL Database, or a server

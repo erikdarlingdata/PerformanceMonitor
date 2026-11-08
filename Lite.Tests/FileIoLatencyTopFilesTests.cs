@@ -41,7 +41,10 @@ public sealed class FileIoLatencyTopFilesTests : IClassFixture<SharedDuckDbFixtu
 
     public void Dispose() => _conn?.Dispose();
 
-    private readonly DateTime _anchor = new(DateTime.UtcNow.Year, DateTime.UtcNow.Month, DateTime.UtcNow.Day, DateTime.UtcNow.Hour, DateTime.UtcNow.Minute, 0, DateTimeKind.Utc);
+    /* One reading of the clock (#5496): built from several reads, the anchor tears when a minute, hour, day or year turns between them. */
+    private readonly DateTime _anchor = MinuteOf(DateTime.UtcNow);
+
+    private static DateTime MinuteOf(DateTime utc) => new(utc.Year, utc.Month, utc.Day, utc.Hour, utc.Minute, 0, DateTimeKind.Utc);
 
     private async Task SeedAsync(string db, string file, string fileType, int minutesAgo, long reads, long writes, long stallReadMs, long stallWriteMs)
     {

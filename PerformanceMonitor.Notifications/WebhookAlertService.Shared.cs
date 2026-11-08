@@ -202,6 +202,22 @@ public partial class WebhookAlertService
         }
     }
 
+    /// <summary>
+    /// #8245: an alert email that the relay refused, counted against the Email entry (<see cref="NotificationRouter.EmailChannel"/>,
+    /// no route: every route's email goes through the one relay the settings row names). Not logged here: the email core logs
+    /// its own failures at its own cadence.
+    /// </summary>
+    internal void RecordEmailFailure(string error)
+    {
+        var health = HealthOf(NotificationRouter.EmailChannel, null);
+        Interlocked.Increment(ref health.Failures);
+        health.LastError = error;
+    }
+
+    /// <summary>#8245: an alert email the relay accepted: the Email entry's count and last error are cleared.</summary>
+    internal void RecordEmailDelivered() =>
+        ClearDestination(NotificationRouter.EmailChannel, new List<int?> { null });
+
     /// <summary>A send that succeeded: clear every entry that names its destination (<see cref="ClearDestination"/>),
     /// and say so for each one that ends a run of failures. Other destinations of the channel are not touched, and a
     /// destination with no entry has nothing to clear. The log line names the route, never the URL.</summary>
