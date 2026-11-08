@@ -196,14 +196,14 @@ public static partial class PgTargetScorer
         [
             new AmplifierDefinition
             {
-                Description = "ANOMALY_PG_IO_LATENCY co-fired — this window's read latency is far above this server's own hour-of-week routine, not its storage's normal",
+                Description = "ANOMALY_PG_IO_LATENCY co-fired: this window's read latency is far above this server's own hour-of-week routine, not its storage's normal",
                 /* unmeasured: IoCorroborationBoost (see the constant). */
                 Boost = IoCorroborationBoost,
                 Predicate = facts => facts.TryGetValue(PgTargetFactKeys.AnomalyIoLatency, out var anomaly) && anomaly.BaseSeverity > 0,
             },
             new AmplifierDefinition
             {
-                Description = "An IO wait (the IO rollup or a named IO: standout) crossed its own threshold — backends spent measurable time waiting on these slow operations",
+                Description = "An IO wait (the IO rollup or a named IO: standout) crossed its own threshold, backends spent measurable time waiting on these slow operations",
                 /* unmeasured: IoCorroborationBoost (see the constant). */
                 Boost = IoCorroborationBoost,
                 Predicate = facts =>
@@ -219,7 +219,7 @@ public static partial class PgTargetScorer
             },
             new AmplifierDefinition
             {
-                Description = "PG_BUFFER_CACHE_PRESSURE fired — the cache is measurably short for this working set, so the misses are what is reaching this slow storage",
+                Description = "PG_BUFFER_CACHE_PRESSURE fired: the cache is measurably short for this working set, so the misses are what is reaching this slow storage",
                 /* unmeasured: IoCorroborationBoost (see the constant). */
                 Boost = IoCorroborationBoost,
                 Predicate = facts => facts.TryGetValue(PgTargetFactKeys.BufferCachePressure, out var pressure) && pressure.BaseSeverity > 0,

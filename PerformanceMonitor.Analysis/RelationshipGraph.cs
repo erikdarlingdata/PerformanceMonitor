@@ -101,32 +101,32 @@ public class RelationshipGraph
     {
         // SOS_SCHEDULER_YIELD → CXPACKET (parallelism contributing to CPU)
         AddEdge("SOS_SCHEDULER_YIELD", "CXPACKET", "cpu_pressure",
-            "CXPACKET significant — parallelism consuming schedulers",
+            "CXPACKET significant: parallelism consuming schedulers",
             facts => HasFact(facts, "CXPACKET") && facts["CXPACKET"].Severity >= 0.5);
 
         // SOS_SCHEDULER_YIELD → THREADPOOL (escalating to thread exhaustion)
         AddEdge("SOS_SCHEDULER_YIELD", "THREADPOOL", "cpu_pressure",
-            "THREADPOOL waits present — escalating to thread exhaustion",
+            "THREADPOOL waits present: escalating to thread exhaustion",
             facts => HasFact(facts, "THREADPOOL") && facts["THREADPOOL"].Severity > 0);
 
         // CXPACKET → SOS (CPU starvation from parallelism)
         AddEdge("CXPACKET", "SOS_SCHEDULER_YIELD", "parallelism",
-            "SOS_SCHEDULER_YIELD elevated — CPU starvation from parallelism",
+            "SOS_SCHEDULER_YIELD elevated: CPU starvation from parallelism",
             facts => HasFact(facts, "SOS_SCHEDULER_YIELD") && facts["SOS_SCHEDULER_YIELD"].Value >= 0.25);
 
         // CXPACKET → THREADPOOL (thread exhaustion cascade)
         AddEdge("CXPACKET", "THREADPOOL", "parallelism",
-            "THREADPOOL waits present — thread exhaustion cascade",
+            "THREADPOOL waits present: thread exhaustion cascade",
             facts => HasFact(facts, "THREADPOOL") && facts["THREADPOOL"].Severity > 0);
 
         // THREADPOOL → CXPACKET (parallel queries consuming thread pool)
         AddEdge("THREADPOOL", "CXPACKET", "thread_exhaustion",
-            "CXPACKET significant — parallel queries consuming thread pool",
+            "CXPACKET significant: parallel queries consuming thread pool",
             facts => HasFact(facts, "CXPACKET") && facts["CXPACKET"].Severity >= 0.5);
 
         // THREADPOOL → LCK (blocking causing thread buildup — stuck queries holding threads)
         AddEdge("THREADPOOL", "LCK", "thread_exhaustion",
-            "Lock contention — blocked queries holding worker threads",
+            "Lock contention: blocked queries holding worker threads",
             facts => HasFact(facts, "LCK") && facts["LCK"].Severity >= 0.5);
 
         // CPU_SQL_PERCENT → SOS_SCHEDULER_YIELD (CPU confirms scheduler pressure)
@@ -141,32 +141,32 @@ public class RelationshipGraph
 
         // SOS_SCHEDULER_YIELD → CPU_SQL_PERCENT (scheduler yields with high CPU)
         AddEdge("SOS_SCHEDULER_YIELD", "CPU_SQL_PERCENT", "cpu_pressure",
-            "SQL CPU > 80% — confirms CPU is the bottleneck",
+            "SQL CPU > 80%: confirms CPU is the bottleneck",
             facts => HasFact(facts, "CPU_SQL_PERCENT") && facts["CPU_SQL_PERCENT"].Value >= 80);
 
         // CPU_SPIKE → SOS_SCHEDULER_YIELD (spike confirmed by scheduler pressure)
         AddEdge("CPU_SPIKE", "SOS_SCHEDULER_YIELD", "cpu_spike",
-            "Scheduler yields — CPU spike caused scheduler starvation",
+            "Scheduler yields: CPU spike caused scheduler starvation",
             facts => HasFact(facts, "SOS_SCHEDULER_YIELD") && facts["SOS_SCHEDULER_YIELD"].Value >= 0.25);
 
         // CPU_SPIKE → CXPACKET (spike from parallelism)
         AddEdge("CPU_SPIKE", "CXPACKET", "cpu_spike",
-            "Parallelism waits — parallel queries contributing to CPU spike",
+            "Parallelism waits: parallel queries contributing to CPU spike",
             facts => HasFact(facts, "CXPACKET") && facts["CXPACKET"].Severity >= 0.3);
 
         // CPU_SPIKE → PLAN_REGRESSION (spike explained by a regressed plan)
         AddEdge("CPU_SPIKE", "PLAN_REGRESSION", "cpu_spike",
-            "Plan regression present — a query is running a worse plan than before",
+            "Plan regression present: a query is running a worse plan than before",
             facts => HasFact(facts, "PLAN_REGRESSION") && facts["PLAN_REGRESSION"].BaseSeverity > 0);
 
         // CPU_SQL_PERCENT → PLAN_REGRESSION (sustained CPU explained by a regressed plan)
         AddEdge("CPU_SQL_PERCENT", "PLAN_REGRESSION", "cpu_pressure",
-            "Plan regression present — a query is running a worse plan than before",
+            "Plan regression present: a query is running a worse plan than before",
             facts => HasFact(facts, "PLAN_REGRESSION") && facts["PLAN_REGRESSION"].BaseSeverity > 0);
 
         // CPU_SPIKE → PARAMETER_SENSITIVITY (spike explained by a parameter-sensitive plan)
         AddEdge("CPU_SPIKE", "PARAMETER_SENSITIVITY", "cpu_spike",
-            "Parameter-sensitive plan present — one plan running expensively for some inputs",
+            "Parameter-sensitive plan present: one plan running expensively for some inputs",
             facts => HasFact(facts, "PARAMETER_SENSITIVITY") && facts["PARAMETER_SENSITIVITY"].BaseSeverity > 0);
     }
 
@@ -176,67 +176,67 @@ public class RelationshipGraph
     {
         // PAGEIOLATCH_SH → RESOURCE_SEMAPHORE (memory grants contributing to buffer pressure)
         AddEdge("PAGEIOLATCH_SH", "RESOURCE_SEMAPHORE", "memory_pressure",
-            "RESOURCE_SEMAPHORE present — memory grants competing with buffer pool",
+            "RESOURCE_SEMAPHORE present: memory grants competing with buffer pool",
             facts => HasFact(facts, "RESOURCE_SEMAPHORE") && FactScorer.ClearsRootBar(facts["RESOURCE_SEMAPHORE"]));
 
         // PAGEIOLATCH_EX → same
         AddEdge("PAGEIOLATCH_EX", "RESOURCE_SEMAPHORE", "memory_pressure",
-            "RESOURCE_SEMAPHORE present — memory grants competing with buffer pool",
+            "RESOURCE_SEMAPHORE present: memory grants competing with buffer pool",
             facts => HasFact(facts, "RESOURCE_SEMAPHORE") && FactScorer.ClearsRootBar(facts["RESOURCE_SEMAPHORE"]));
 
         // RESOURCE_SEMAPHORE → PAGEIOLATCH (downstream I/O cascade)
         AddEdge("RESOURCE_SEMAPHORE", "PAGEIOLATCH_SH", "memory_grants",
-            "PAGEIOLATCH elevated — memory grant pressure causing buffer pool shrinkage",
+            "PAGEIOLATCH elevated: memory grant pressure causing buffer pool shrinkage",
             facts => HasFact(facts, "PAGEIOLATCH_SH") && facts["PAGEIOLATCH_SH"].Severity >= 0.5);
 
         // RESOURCE_SEMAPHORE → MEMORY_GRANT_PENDING (grant pressure confirmed by semaphore waiters)
         AddEdge("RESOURCE_SEMAPHORE", "MEMORY_GRANT_PENDING", "memory_grants",
-            "Memory grant waiters present — queries queued for memory",
+            "Memory grant waiters present: queries queued for memory",
             facts => HasFact(facts, "MEMORY_GRANT_PENDING") && facts["MEMORY_GRANT_PENDING"].BaseSeverity > 0);
 
         // RESOURCE_SEMAPHORE → QUERY_SPILLS (grant pressure causing spills)
         AddEdge("RESOURCE_SEMAPHORE", "QUERY_SPILLS", "memory_grants",
-            "Query spills present — queries running with insufficient memory",
+            "Query spills present: queries running with insufficient memory",
             facts => HasFact(facts, "QUERY_SPILLS") && facts["QUERY_SPILLS"].BaseSeverity > 0);
 
         // MEMORY_GRANT_PENDING → RESOURCE_SEMAPHORE (waiters confirm RESOURCE_SEMAPHORE waits)
         AddEdge("MEMORY_GRANT_PENDING", "RESOURCE_SEMAPHORE", "memory_grants",
-            "RESOURCE_SEMAPHORE waits — grant pressure visible in wait stats",
+            "RESOURCE_SEMAPHORE waits: grant pressure visible in wait stats",
             facts => HasFact(facts, "RESOURCE_SEMAPHORE") && FactScorer.ClearsRootBar(facts["RESOURCE_SEMAPHORE"]));
 
         // MEMORY_GRANT_PENDING → QUERY_SPILLS (insufficient grants causing spills)
         AddEdge("MEMORY_GRANT_PENDING", "QUERY_SPILLS", "memory_grants",
-            "Query spills — queries getting insufficient memory grants",
+            "Query spills: queries getting insufficient memory grants",
             facts => HasFact(facts, "QUERY_SPILLS") && facts["QUERY_SPILLS"].BaseSeverity > 0);
 
         // PAGEIOLATCH_SH → IO_READ_LATENCY_MS (buffer miss confirmed by disk latency)
         AddEdge("PAGEIOLATCH_SH", "IO_READ_LATENCY_MS", "memory_pressure",
-            "Read latency elevated — disk confirms buffer pool pressure",
+            "Read latency elevated: disk confirms buffer pool pressure",
             facts => HasFact(facts, "IO_READ_LATENCY_MS") && FactScorer.ClearsRootBar(facts["IO_READ_LATENCY_MS"]));
 
         // PAGEIOLATCH_EX → IO_READ_LATENCY_MS
         AddEdge("PAGEIOLATCH_EX", "IO_READ_LATENCY_MS", "memory_pressure",
-            "Read latency elevated — disk confirms buffer pool pressure",
+            "Read latency elevated: disk confirms buffer pool pressure",
             facts => HasFact(facts, "IO_READ_LATENCY_MS") && FactScorer.ClearsRootBar(facts["IO_READ_LATENCY_MS"]));
 
         // MEMORY_GRANT_PENDING → PARAMETER_SENSITIVITY (grant pressure traced to a sensitive plan)
         AddEdge("MEMORY_GRANT_PENDING", "PARAMETER_SENSITIVITY", "memory_grants",
-            "Parameter-sensitive plan present — its grant varies wildly with its inputs",
+            "Parameter-sensitive plan present: its grant varies wildly with its inputs",
             facts => HasFact(facts, "PARAMETER_SENSITIVITY") && facts["PARAMETER_SENSITIVITY"].BaseSeverity > 0);
 
         // RESOURCE_SEMAPHORE_QUERY_COMPILE → SOS_SCHEDULER_YIELD (compilation competing for CPU)
         AddEdge("RESOURCE_SEMAPHORE_QUERY_COMPILE", "SOS_SCHEDULER_YIELD", "memory_grants",
-            "Scheduler yields elevated — query compilation competing for CPU",
+            "Scheduler yields elevated: query compilation competing for CPU",
             facts => HasFact(facts, "SOS_SCHEDULER_YIELD") && facts["SOS_SCHEDULER_YIELD"].Value >= 0.25);
 
         // RESOURCE_SEMAPHORE_QUERY_COMPILE → CPU_SQL_PERCENT (compilation a share of CPU load)
         AddEdge("RESOURCE_SEMAPHORE_QUERY_COMPILE", "CPU_SQL_PERCENT", "memory_grants",
-            "SQL Server CPU elevated — compilation is a measurable share of CPU load",
+            "SQL Server CPU elevated: compilation is a measurable share of CPU load",
             facts => HasFact(facts, "CPU_SQL_PERCENT") && facts["CPU_SQL_PERCENT"].Value >= 80);
 
         // SOS_SCHEDULER_YIELD → RESOURCE_SEMAPHORE_QUERY_COMPILE (CPU pressure traced to compiles)
         AddEdge("SOS_SCHEDULER_YIELD", "RESOURCE_SEMAPHORE_QUERY_COMPILE", "memory_grants",
-            "Query-compile memory pressure — compilation contributing to CPU pressure",
+            "Query-compile memory pressure: compilation contributing to CPU pressure",
             facts => HasFact(facts, "RESOURCE_SEMAPHORE_QUERY_COMPILE") && FactScorer.ClearsRootBar(facts["RESOURCE_SEMAPHORE_QUERY_COMPILE"]));
     }
 
@@ -246,91 +246,91 @@ public class RelationshipGraph
     {
         // LCK → BLOCKING_EVENTS (lock waits confirmed by actual blocking reports)
         AddEdge("LCK", "BLOCKING_EVENTS", "lock_contention",
-            "Blocked process reports present — confirmed blocking events",
+            "Blocked process reports present: confirmed blocking events",
             facts => HasFact(facts, "BLOCKING_EVENTS") && facts["BLOCKING_EVENTS"].BaseSeverity > 0);
 
         // LCK → DEADLOCKS (lock contention escalating)
         AddEdge("LCK", "DEADLOCKS", "lock_contention",
-            "Deadlocks present — lock contention escalating to deadlocks",
+            "Deadlocks present: lock contention escalating to deadlocks",
             facts => HasFact(facts, "DEADLOCKS") && facts["DEADLOCKS"].BaseSeverity > 0);
 
         // BLOCKING_EVENTS → LCK (blocking confirmed by lock waits)
         AddEdge("BLOCKING_EVENTS", "LCK", "blocking",
-            "Lock contention waits elevated — blocking visible in wait stats",
+            "Lock contention waits elevated: blocking visible in wait stats",
             facts => HasFact(facts, "LCK") && facts["LCK"].Severity >= 0.5);
 
         // BLOCKING_EVENTS → DEADLOCKS (blocking escalating)
         AddEdge("BLOCKING_EVENTS", "DEADLOCKS", "blocking",
-            "Deadlocks also present — blocking escalating to deadlocks",
+            "Deadlocks also present: blocking escalating to deadlocks",
             facts => HasFact(facts, "DEADLOCKS") && facts["DEADLOCKS"].BaseSeverity > 0);
 
         // BLOCKING_EVENTS → THREADPOOL (blocking causing thread exhaustion)
         AddEdge("BLOCKING_EVENTS", "THREADPOOL", "blocking",
-            "THREADPOOL waits present — blocked queries consuming worker threads",
+            "THREADPOOL waits present: blocked queries consuming worker threads",
             facts => HasFact(facts, "THREADPOOL") && facts["THREADPOOL"].Severity > 0);
 
         // DEADLOCKS → BLOCKING_EVENTS (deadlocks with systemic blocking)
         AddEdge("DEADLOCKS", "BLOCKING_EVENTS", "deadlocking",
-            "Blocking events also present — systemic contention pattern",
+            "Blocking events also present: systemic contention pattern",
             facts => HasFact(facts, "BLOCKING_EVENTS") && facts["BLOCKING_EVENTS"].BaseSeverity > 0);
 
         // DEADLOCKS → LCK_M_S (reader/writer deadlocks)
         AddEdge("DEADLOCKS", "LCK_M_S", "deadlocking",
-            "Reader lock waits present — RCSI could prevent reader/writer deadlocks",
+            "Reader lock waits present: RCSI could prevent reader/writer deadlocks",
             facts => HasFact(facts, "LCK_M_S") && FactScorer.ClearsRootBar(facts["LCK_M_S"]));
 
         // LCK_M_S → DB_CONFIG (reader/writer contention → RCSI recommendation)
         AddEdge("LCK_M_S", "DB_CONFIG", "lock_contention",
-            "Databases without RCSI — readers blocked by writers could be eliminated",
+            "Databases without RCSI: readers blocked by writers could be eliminated",
             facts => HasFact(facts, "DB_CONFIG")
                   && facts["DB_CONFIG"].Metadata.GetValueOrDefault("rcsi_off_count") > 0
                   && facts["DB_CONFIG"].BaseSeverity > 0);
 
         // DB_CONFIG → LCK_M_S (RCSI-off confirmed by reader/writer lock contention)
         AddEdge("DB_CONFIG", "LCK_M_S", "config_issue",
-            "LCK_M_S waits — readers blocked by writers, RCSI would eliminate these",
+            "LCK_M_S waits: readers blocked by writers, RCSI would eliminate these",
             facts => HasFact(facts, "LCK_M_S") && FactScorer.ClearsRootBar(facts["LCK_M_S"])
                   && HasFact(facts, "DB_CONFIG")
                   && facts["DB_CONFIG"].Metadata.GetValueOrDefault("rcsi_off_count") > 0);
 
         // THREADPOOL → BLOCKING_EVENTS (blocking causing thread buildup)
         AddEdge("THREADPOOL", "BLOCKING_EVENTS", "thread_exhaustion",
-            "Blocking events present — blocked queries holding worker threads",
+            "Blocking events present: blocked queries holding worker threads",
             facts => HasFact(facts, "BLOCKING_EVENTS") && facts["BLOCKING_EVENTS"].BaseSeverity > 0);
 
         // BLOCKING_CHAIN → LCK (chain blocking visible in lock waits)
         AddEdge("BLOCKING_CHAIN", "LCK", "blocking",
-            "Lock contention waits elevated — chain blocking visible in wait stats",
+            "Lock contention waits elevated: chain blocking visible in wait stats",
             facts => HasFact(facts, "LCK") && facts["LCK"].Severity >= 0.5);
 
         // BLOCKING_CHAIN → THREADPOOL (chain victims pinning worker threads)
         AddEdge("BLOCKING_CHAIN", "THREADPOOL", "blocking",
-            "THREADPOOL waits present — chain victims consuming worker threads",
+            "THREADPOOL waits present: chain victims consuming worker threads",
             facts => HasFact(facts, "THREADPOOL") && facts["THREADPOOL"].Severity > 0);
 
         // BLOCKING_CHAIN → DEADLOCKS (chain blocking escalating)
         AddEdge("BLOCKING_CHAIN", "DEADLOCKS", "blocking",
-            "Deadlocks also present — chain blocking escalating to deadlocks",
+            "Deadlocks also present: chain blocking escalating to deadlocks",
             facts => HasFact(facts, "DEADLOCKS") && facts["DEADLOCKS"].BaseSeverity > 0);
 
         // BLOCKING_CHAIN → BLOCKING_EVENTS (chain confirmed by event volume)
         AddEdge("BLOCKING_CHAIN", "BLOCKING_EVENTS", "blocking",
-            "Blocking event rate elevated — chain confirmed by event volume",
+            "Blocking event rate elevated: chain confirmed by event volume",
             facts => HasFact(facts, "BLOCKING_EVENTS") && facts["BLOCKING_EVENTS"].BaseSeverity > 0);
 
         // BLOCKING_EVENTS → BLOCKING_CHAIN (event rate has structural depth)
         AddEdge("BLOCKING_EVENTS", "BLOCKING_CHAIN", "blocking",
-            "Reconstructed blocking chain — the pile-up has structural depth",
+            "Reconstructed blocking chain: the pile-up has structural depth",
             facts => HasFact(facts, "BLOCKING_CHAIN") && facts["BLOCKING_CHAIN"].BaseSeverity > 0);
 
         // LCK → BLOCKING_CHAIN (lock waits form a transitive pile-up)
         AddEdge("LCK", "BLOCKING_CHAIN", "lock_contention",
-            "Reconstructed blocking chain — lock waits form a transitive pile-up",
+            "Reconstructed blocking chain: lock waits form a transitive pile-up",
             facts => HasFact(facts, "BLOCKING_CHAIN") && facts["BLOCKING_CHAIN"].BaseSeverity > 0);
 
         // THREADPOOL → BLOCKING_CHAIN (chain victims pinning worker threads)
         AddEdge("THREADPOOL", "BLOCKING_CHAIN", "thread_exhaustion",
-            "Reconstructed blocking chain — chain victims pinning worker threads",
+            "Reconstructed blocking chain: chain victims pinning worker threads",
             facts => HasFact(facts, "BLOCKING_CHAIN") && facts["BLOCKING_CHAIN"].BaseSeverity > 0);
     }
 
@@ -340,17 +340,17 @@ public class RelationshipGraph
     {
         // IO_READ_LATENCY_MS → PAGEIOLATCH_SH (disk latency with buffer pool misses)
         AddEdge("IO_READ_LATENCY_MS", "PAGEIOLATCH_SH", "io_pressure",
-            "PAGEIOLATCH waits — buffer pool misses driving read I/O",
+            "PAGEIOLATCH waits: buffer pool misses driving read I/O",
             facts => HasFact(facts, "PAGEIOLATCH_SH") && facts["PAGEIOLATCH_SH"].Severity >= 0.5);
 
         // IO_WRITE_LATENCY_MS → WRITELOG (write latency with log waits)
         AddEdge("IO_WRITE_LATENCY_MS", "WRITELOG", "io_pressure",
-            "WRITELOG waits — transaction log I/O bottleneck",
+            "WRITELOG waits: transaction log I/O bottleneck",
             facts => HasFact(facts, "WRITELOG") && facts["WRITELOG"].Value >= 0.05);
 
         // WRITELOG → IO_WRITE_LATENCY_MS (log waits confirmed by disk latency)
         AddEdge("WRITELOG", "IO_WRITE_LATENCY_MS", "log_io",
-            "Write latency elevated — disk confirms log I/O bottleneck",
+            "Write latency elevated: disk confirms log I/O bottleneck",
             facts => HasFact(facts, "IO_WRITE_LATENCY_MS") && FactScorer.ClearsRootBar(facts["IO_WRITE_LATENCY_MS"]));
 
         // #3538 A5: the two halves of commit latency on a synchronous availability group. A commit on the
@@ -364,14 +364,14 @@ public class RelationshipGraph
         // also slow — the commit path is slow end to end, and the local half is the one the operator can
         // measure without leaving the primary.
         AddEdge("HADR_SYNC_COMMIT", "WRITELOG", "log_io",
-            "Log-flush waits also elevated — the primary's own log write is part of the commit cost",
+            "Log-flush waits also elevated: the primary's own log write is part of the commit cost",
             facts => HasFact(facts, "WRITELOG") && facts["WRITELOG"].BaseSeverity >= 0.5);
 
         // WRITELOG → HADR_SYNC_COMMIT: a log-flush finding on a primary whose synchronous secondary is also
         // making commits wait — the story should say so before its advice sends the operator to local
         // storage, because the larger half of the commit may be the replica round trip.
         AddEdge("WRITELOG", "HADR_SYNC_COMMIT", "log_io",
-            "Synchronous-commit waits also elevated — the replica round trip is part of the commit cost",
+            "Synchronous-commit waits also elevated: the replica round trip is part of the commit cost",
             facts => HasFact(facts, "HADR_SYNC_COMMIT") && facts["HADR_SYNC_COMMIT"].BaseSeverity >= 0.5);
     }
 
@@ -381,12 +381,12 @@ public class RelationshipGraph
     {
         // LATCH_EX → TEMPDB_USAGE (latch contention often from TempDB allocation)
         AddEdge("LATCH_EX", "TEMPDB_USAGE", "latch_contention",
-            "TempDB usage — latch contention may be on TempDB allocation pages",
+            "TempDB usage: latch contention may be on TempDB allocation pages",
             facts => HasFact(facts, "TEMPDB_USAGE") && FactScorer.ClearsRootBar(facts["TEMPDB_USAGE"]));
 
         // LATCH_EX → CXPACKET (parallel operations amplifying latch contention)
         AddEdge("LATCH_EX", "CXPACKET", "latch_contention",
-            "Parallelism waits — parallel operations amplifying page latch contention",
+            "Parallelism waits: parallel operations amplifying page latch contention",
             facts => HasFact(facts, "CXPACKET") && facts["CXPACKET"].Severity >= 0.5);
     }
 
@@ -396,12 +396,12 @@ public class RelationshipGraph
     {
         // TEMPDB_USAGE → PAGEIOLATCH_SH (tempdb pressure causing I/O)
         AddEdge("TEMPDB_USAGE", "PAGEIOLATCH_SH", "tempdb_pressure",
-            "PAGEIOLATCH waits — TempDB pressure contributing to I/O",
+            "PAGEIOLATCH waits: TempDB pressure contributing to I/O",
             facts => HasFact(facts, "PAGEIOLATCH_SH") && facts["PAGEIOLATCH_SH"].Severity >= 0.5);
 
         // TEMPDB_USAGE → QUERY_SPILLS (spills consuming tempdb)
         AddEdge("TEMPDB_USAGE", "QUERY_SPILLS", "tempdb_pressure",
-            "Query spills — spilling to TempDB consuming space",
+            "Query spills: spilling to TempDB consuming space",
             facts => HasFact(facts, "QUERY_SPILLS") && facts["QUERY_SPILLS"].BaseSeverity > 0);
     }
 
@@ -411,46 +411,46 @@ public class RelationshipGraph
     {
         // QUERY_SPILLS → MEMORY_GRANT_PENDING (spills from insufficient grants)
         AddEdge("QUERY_SPILLS", "MEMORY_GRANT_PENDING", "query_performance",
-            "Memory grant waiters — spills caused by insufficient memory grants",
+            "Memory grant waiters: spills caused by insufficient memory grants",
             facts => HasFact(facts, "MEMORY_GRANT_PENDING") && facts["MEMORY_GRANT_PENDING"].BaseSeverity > 0);
 
         // QUERY_SPILLS → TEMPDB_USAGE (spills consuming tempdb space)
         AddEdge("QUERY_SPILLS", "TEMPDB_USAGE", "query_performance",
-            "TempDB usage elevated — spills consuming TempDB space",
+            "TempDB usage elevated: spills consuming TempDB space",
             facts => HasFact(facts, "TEMPDB_USAGE") && FactScorer.ClearsRootBar(facts["TEMPDB_USAGE"]));
 
         // QUERY_HIGH_DOP → CXPACKET (high-DOP queries causing parallelism waits)
         AddEdge("QUERY_HIGH_DOP", "CXPACKET", "query_performance",
-            "CXPACKET waits — high-DOP queries causing excessive parallelism",
+            "CXPACKET waits: high-DOP queries causing excessive parallelism",
             facts => HasFact(facts, "CXPACKET") && facts["CXPACKET"].Severity >= 0.5);
 
         // QUERY_HIGH_DOP → SOS_SCHEDULER_YIELD (high-DOP queries causing CPU pressure)
         AddEdge("QUERY_HIGH_DOP", "SOS_SCHEDULER_YIELD", "query_performance",
-            "Scheduler yields — high-DOP queries saturating CPU",
+            "Scheduler yields: high-DOP queries saturating CPU",
             facts => HasFact(facts, "SOS_SCHEDULER_YIELD") && facts["SOS_SCHEDULER_YIELD"].Severity >= 0.5);
 
         // PARAMETER_SENSITIVITY → MEMORY_GRANT_PENDING (sensitive plan's grant varies — grant pressure)
         AddEdge("PARAMETER_SENSITIVITY", "MEMORY_GRANT_PENDING", "query_performance",
-            "Memory grant waiters — a parameter-sensitive plan's grant varies with its inputs",
+            "Memory grant waiters: a parameter-sensitive plan's grant varies with its inputs",
             facts => HasFact(facts, "MEMORY_GRANT_PENDING") && facts["MEMORY_GRANT_PENDING"].BaseSeverity > 0
                   && facts.TryGetValue("PARAMETER_SENSITIVITY", out var ps)
                   && ps.Metadata.GetValueOrDefault("grant_divergence") > 0);
 
         // PARAMETER_SENSITIVITY → QUERY_SPILLS (sensitive plan spills on some parameter values)
         AddEdge("PARAMETER_SENSITIVITY", "QUERY_SPILLS", "query_performance",
-            "Query spills — a parameter-sensitive plan spills on some parameter values",
+            "Query spills: a parameter-sensitive plan spills on some parameter values",
             facts => HasFact(facts, "QUERY_SPILLS") && facts["QUERY_SPILLS"].BaseSeverity > 0
                   && facts.TryGetValue("PARAMETER_SENSITIVITY", out var ps)
                   && ps.Metadata.GetValueOrDefault("spill_divergence") > 0);
 
         // PLAN_REGRESSION → CPU_SQL_PERCENT (regressed plan driving CPU load)
         AddEdge("PLAN_REGRESSION", "CPU_SQL_PERCENT", "query_performance",
-            "SQL Server CPU elevated — the regressed plan is burning CPU",
+            "SQL Server CPU elevated: the regressed plan is burning CPU",
             facts => HasFact(facts, "CPU_SQL_PERCENT") && FactScorer.ClearsRootBar(facts["CPU_SQL_PERCENT"]));
 
         // PLAN_REGRESSION → CPU_SPIKE (regressed plan caused a CPU spike)
         AddEdge("PLAN_REGRESSION", "CPU_SPIKE", "query_performance",
-            "CPU spike — the regressed plan is burning CPU",
+            "CPU spike: the regressed plan is burning CPU",
             facts => HasFact(facts, "CPU_SPIKE") && FactScorer.ClearsRootBar(facts["CPU_SPIKE"]));
     }
 
@@ -488,17 +488,17 @@ public class RelationshipGraph
     {
         // SCH_M → RUNNING_JOBS (schema-modification waits while a job runs long — index maintenance)
         AddEdge("SCH_M", "RUNNING_JOBS", "maintenance",
-            "Agent job running past its normal duration — the schema locks are probably its index maintenance",
+            "Agent job running past its normal duration: the schema locks are probably its index maintenance",
             facts => HasFact(facts, "RUNNING_JOBS") && facts["RUNNING_JOBS"].BaseSeverity > 0);
 
         // IO_WRITE_LATENCY_MS → RUNNING_JOBS (write latency while a job runs long — rebuild/CHECKDB write volume)
         AddEdge("IO_WRITE_LATENCY_MS", "RUNNING_JOBS", "maintenance",
-            "Agent job running past its normal duration — its write volume is a candidate for the latency",
+            "Agent job running past its normal duration: its write volume is a candidate for the latency",
             facts => HasFact(facts, "RUNNING_JOBS") && facts["RUNNING_JOBS"].BaseSeverity > 0);
 
         // WRITELOG → RUNNING_JOBS (log-flush waits while a job runs long — a rebuild is fully logged)
         AddEdge("WRITELOG", "RUNNING_JOBS", "maintenance",
-            "Agent job running past its normal duration — a fully logged rebuild or reload drives log flushes",
+            "Agent job running past its normal duration: a fully logged rebuild or reload drives log flushes",
             facts => HasFact(facts, "RUNNING_JOBS") && facts["RUNNING_JOBS"].BaseSeverity > 0);
     }
 

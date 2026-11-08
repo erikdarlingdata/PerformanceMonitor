@@ -242,7 +242,7 @@
             </ResourceDictionary>
     </Window.Resources>
 
-    <Grid Margin="10">
+    <Grid Margin="10" SizeChanged="RootGrid_SizeChanged">
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
@@ -1375,7 +1375,8 @@
                                                 Visibility="{Binding ShowCopyFix, Converter={StaticResource RecoBoolToVis}}"
                                                 Click="CopyFix_Click"
                                                 ToolTip="Copy the suggested T-SQL to the clipboard"/>
-                                        <Button Content="Ask AI" Padding="10,3"
+                                        <!-- #8226: the accent style, since the plain button's fill is the card's own background. -->
+                                        <Button Content="Ask AI" Padding="10,3" Style="{DynamicResource AccentButton}"
                                                 Visibility="{Binding ShowAskAi, Converter={StaticResource RecoBoolToVis}}"
                                                 Click="AskAi_Click"
                                                 ToolTip="Copy an MCP investigation prompt to the clipboard"/>

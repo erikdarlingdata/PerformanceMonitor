@@ -445,7 +445,7 @@ public class LiteRecommendationsReaderTests
         /* The card renders it as a status line, prefixed, and hides the line when there is nothing to say. */
         var card = new LiteRecommendationCardViewModel(marked);
         Assert.True(card.ShowNotPaged);
-        Assert.StartsWith("Not paged — ", card.NotPagedText, StringComparison.Ordinal);
+        Assert.StartsWith("Not paged: ", card.NotPagedText, StringComparison.Ordinal);
         var quiet = new LiteRecommendationCardViewModel(LiteRecommendationsReader.MapFinding(chain, ServerName, lens));
         Assert.False(quiet.ShowNotPaged);
         Assert.Equal(string.Empty, quiet.NotPagedText);

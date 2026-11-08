@@ -404,8 +404,9 @@ internal static class DarlingPasswordKeySelfCheck
     /// <summary>The <c>file:</c> checks (#8006 review, request 1) through the real Unix calls: a 0644 file loads with the
     /// warning that others can read it; a 0664 file is refused; <c>/dev/zero</c>, a FIFO and a pipe behind a
     /// <c>/proc/self/fd</c> link are refused as not regular files, at once, without being opened; and, when this runs as
-    /// root (as the workflow does), a file given to another user (not root) loads with the owner warning, and the same
-    /// file given to root loads without it. Run as another user, which cannot give a file away, those cases are skipped.
+    /// root (as the workflow's first run does, with <c>--user 0:0</c>, since the image runs as user 1654), a file given
+    /// to another user (not root) loads with the owner warning, and the same file given to root loads without it. Run as
+    /// another user, which cannot give a file away, those cases are skipped.
     /// Returns null when all of it held.</summary>
     [UnsupportedOSPlatform("windows")]
     private static string? CheckFileChecks(char[] base64, string keyId, string directory, Microsoft.Extensions.Logging.ILogger logger)
@@ -463,7 +464,8 @@ internal static class DarlingPasswordKeySelfCheck
 
         if (FileIdentity.EffectiveUserId() != 0)
         {
-            /* Only root can give a file to another user; the workflow runs the image as root, so there it always runs. */
+            /* Only root can give a file to another user; the workflow runs the image once as root (--user 0:0; its
+               default user is 1654, #8141), so there it always runs. */
             return null;
         }
 

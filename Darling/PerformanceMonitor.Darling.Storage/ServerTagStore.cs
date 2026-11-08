@@ -443,7 +443,7 @@ WHERE server_id = ANY($1)";
             {
                 return new ServerTagWriteResult.ConfirmRequired(
                     scoped,
-                    string.Create(CultureInfo.InvariantCulture, $"Deleting tag {tagId} and its subtree would leave {scoped.Count} custom alert rule(s) scoped to it matching no server: {string.Join(", ", scoped.Select(r => $"'{r.Name}'"))}. Nothing was deleted. Repeat with confirm=true to proceed."));
+                    string.Create(CultureInfo.InvariantCulture, $"Deleting tag {tagId} and its subtree would leave {CountText.Plural(scoped.Count, "custom alert rule")} scoped to it matching no server: {string.Join(", ", scoped.Select(r => $"'{r.Name}'"))}. Nothing was deleted. Repeat with confirm=true to proceed."));
             }
         }
 

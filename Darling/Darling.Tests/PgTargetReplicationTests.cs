@@ -192,7 +192,7 @@ public sealed class PgTargetReplicationTests
         Assert.Equal(0.0, steady.Severity);
 
         var advice = PgTargetAdvice.Compose(PgTargetFactKeys.ReplicationLag, Lookup(steady))!;
-        Assert.Contains("steady — pacing behind at a distance; context, not a finding", advice.Headline, StringComparison.Ordinal);
+        Assert.Contains("steady: pacing behind at a distance; context, not a finding", advice.Headline, StringComparison.Ordinal);
         Assert.Contains("the stage furthest behind at the latest sample is sent", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("This standby is SYNCHRONOUS", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("No slot state was observed in this window", advice.Investigation, StringComparison.Ordinal);

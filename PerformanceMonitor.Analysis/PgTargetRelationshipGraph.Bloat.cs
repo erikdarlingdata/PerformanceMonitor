@@ -54,15 +54,15 @@ public sealed partial class PgTargetRelationshipGraph
 
         /* trend ↔ backlog, same table: the damage and its cause, either one leading. */
         AddEdge(PgTargetFactKeys.BloatTrend, PgTargetFactKeys.AutovacuumBacklog, BloatCategory,
-            "PG_AUTOVACUUM_BACKLOG fired on a table this trend names — the dead tuples autovacuum is not clearing are where the growth is coming from",
+            "PG_AUTOVACUUM_BACKLOG fired on a table this trend names: the dead tuples autovacuum is not clearing are where the growth is coming from",
             facts => BloatTrendAndBacklogCoFire(facts));
         AddEdge(PgTargetFactKeys.AutovacuumBacklog, PgTargetFactKeys.BloatTrend, BloatCategory,
-            "PG_BLOAT_TREND fired on this table — the backlog's damage: the bloat estimate has grown past the measured line across the lookback",
+            "PG_BLOAT_TREND fired on this table, the backlog's damage: the bloat estimate has grown past the measured line across the lookback",
             facts => BloatTrendAndBacklogCoFire(facts));
 
         /* index trend → table trend, same parent table: the heap and its index churning together. */
         AddEdge(PgTargetFactKeys.IndexBloatTrend, PgTargetFactKeys.BloatTrend, BloatCategory,
-            "PG_BLOAT_TREND fired on this index's table — heap and index are growing together, which is churn on the table, not an index-only shape",
+            "PG_BLOAT_TREND fired on this index's table: heap and index are growing together, which is churn on the table, not an index-only shape",
             facts => Fired(facts, PgTargetFactKeys.BloatTrend)
                 && facts.TryGetValue(PgTargetFactKeys.IndexBloatTrend, out var index)
                 && facts.TryGetValue(PgTargetFactKeys.BloatTrend, out var table)

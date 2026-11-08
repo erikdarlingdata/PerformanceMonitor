@@ -165,7 +165,7 @@ public static class StoryConfidence
             return "detector-measured: the same-statement pileup is observed directly (concurrent sessions on one statement against that statement's own duration baseline), so it carries 1.0 by construction rather than by the corroboration formula.";
 
         if (IsLegacyPathShape(confidence, factCount))
-            return "path-shape (pre-#3538): this row was persisted when confidence was (n-1)/n over the story path with a lone symptom at 1.0 — a path-length statistic, NOT an evidence score; it is not comparable to corroboration-derived values and a lone-symptom 1.0 here means UNCORROBORATED.";
+            return "path-shape (pre-#3538): this row was persisted when confidence was (n-1)/n over the story path with a lone symptom at 1.0, a path-length statistic, NOT an evidence score; it is not comparable to corroboration-derived values and a lone-symptom 1.0 here means UNCORROBORATED.";
 
         var n = Math.Max(1, factCount);
         return $"corroboration (#3538): 0.20 for the fired symptom + up to 0.48 for the share of the root fact's amplifier checks that matched + up to 0.32 for path depth ((n-1)/n over the {n}-node story path; a root with no amplifier catalogue earns the full 0.80 from path depth). A lone uncorroborated symptom scores 0.20; a fully corroborated deep chain approaches but never reaches 1.0.";

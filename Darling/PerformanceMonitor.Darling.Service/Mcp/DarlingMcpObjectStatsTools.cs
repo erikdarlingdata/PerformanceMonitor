@@ -160,7 +160,7 @@ public sealed class DarlingMcpObjectStatsTools
                         ? null
                         : $"The store holds {span.DaysOfData} day(s) of index snapshots for this server, so the "
                           + (covers7d ? "30-day baseline does not exist: growth_30d_mb and growth_pct_30d are null" : "7-day and 30-day baselines do not exist: growth_7d_mb, growth_30d_mb and growth_pct_30d are null")
-                          + " rather than re-measured over a shorter span under the same name. Read growth_over_available_history_* — it spans exactly growth_window_days.",
+                          + " rather than re-measured over a shorter span under the same name. Read growth_over_available_history_*: it spans exactly growth_window_days.",
                 },
                 tables_returned = page.Count,
                 truncated,
@@ -183,11 +183,11 @@ public sealed class DarlingMcpObjectStatsTools
     {
         var notes = new List<string>();
         if (r.DaysOfData < 1)
-            notes.Add("the store holds a single day of snapshots for this server, so no growth is knowable yet — every growth figure is null, not 0");
+            notes.Add("the store holds a single day of snapshots for this server, so no growth is knowable yet: every growth figure is null, not 0");
         if (r.Snapshot7dTime is null)
             notes.Add("no snapshot 7+ days old exists, so growth_7d_mb is null");
         else if (r.ReservedMb7dAgo is null)
-            notes.Add($"this table was not in the {r.Snapshot7dTime:o} snapshot (created since), so growth_7d_mb is null — its whole current size is newer than 7 days");
+            notes.Add($"this table was not in the {r.Snapshot7dTime:o} snapshot (created since), so growth_7d_mb is null: its whole current size is newer than 7 days");
         if (r.Snapshot30dTime is null)
             notes.Add("no snapshot 30+ days old exists, so growth_30d_mb and growth_pct_30d are null");
         else if (r.ReservedMb30dAgo is null)
@@ -260,7 +260,7 @@ public sealed class DarlingMcpObjectStatsTools
                             "empty",
                             $"No index usage rows for {scope} on {resolved.DisplayName} at the "
                             + $"latest snapshot, though the server has {anyOnServer:N0} across its other "
-                            + $"databases. Check the database {(databases.Names.Count == 1 ? "name" : "names")} against get_database_sizes — the filter "
+                            + $"databases. Check the database {(databases.Names.Count == 1 ? "name" : "names")} against get_database_sizes: the filter "
                             + "matches exactly, and an excluded or renamed database looks identical to one "
                             + "with no indexes.");
                     }
@@ -306,11 +306,11 @@ public sealed class DarlingMcpObjectStatsTools
                         ? $"TRUNCATED: {matching:N0} indexes match and {rows.Count:N0} were returned. Rows are "
                           + "ordered UNUSED FIRST across the whole server, so the ones omitted are the ACTIVE "
                           + "indexes and they may be concentrated in databases with no rows here at all. This is "
-                          + "not evidence that a database was not collected — pass database_name to ask about "
+                          + "not evidence that a database was not collected: pass database_name to ask about "
                           + "one, or raise limit."
                         : $"TRUNCATED: {matching:N0} indexes match {scope} and {rows.Count:N0} were returned. Rows are "
                           + $"ordered UNUSED FIRST across {scope}, so the ones omitted are the ACTIVE "
-                          + "indexes there. This says nothing about databases outside the filter — raise limit to see more.")
+                          + "indexes there. This says nothing about databases outside the filter: raise limit to see more.")
                     : "Complete: every index matching this filter at the latest snapshot is included.",
                 indexes = result
             }, McpHelpers.JsonOptions);
@@ -463,7 +463,7 @@ public sealed class DarlingMcpObjectStatsTools
                     return McpHelpers.Status("empty",
                         $"No lock/latch contention{inScope} on {resolved.DisplayName} at the latest snapshot, though other databases on "
                         + $"the server have some. Check the database {(databases.Names.Count == 1 ? "name" : "names")} against get_database_sizes "
-                        + "— the filter matches exactly, and an excluded or renamed database looks identical to one with no contention."
+                        + ": the filter matches exactly, and an excluded or renamed database looks identical to one with no contention."
                         + (optimizedLockingNote is null ? "" : " " + optimizedLockingNote),
                         optimizedLockingNote is null && separatelyMonitoredNote is null
                             ? null

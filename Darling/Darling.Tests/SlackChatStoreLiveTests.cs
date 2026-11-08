@@ -134,8 +134,8 @@ public sealed class SlackChatStoreLiveTests
     {
         await WithStoreAsync(async (connection, _, _, _, ct) =>
         {
-            Assert.Equal("255", await ScalarAsync(connection, "SELECT max(version) FROM darling_schema_version", ct));
-            Assert.Equal(255, StorageVersion.SchemaVersion);
+            Assert.Equal(StorageVersion.SchemaVersion.ToString(System.Globalization.CultureInfo.InvariantCulture), await ScalarAsync(connection, "SELECT max(version) FROM darling_schema_version", ct));
+            Assert.True(StorageVersion.SchemaVersion >= 254, "the build ships V254");
             Assert.Equal("True", await ScalarAsync(connection, "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.investigation_requests') AND attname = 'chat_thread_of' AND NOT attisdropped)", ct));
             Assert.Equal("True", await ScalarAsync(connection, "SELECT to_regclass('config.investigation_request_askers') IS NOT NULL", ct));
             Assert.Equal("True", await ScalarAsync(connection, "SELECT to_regclass('config.investigation_person_messages') IS NOT NULL", ct));

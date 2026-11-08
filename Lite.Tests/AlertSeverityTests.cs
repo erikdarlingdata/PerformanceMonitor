@@ -154,7 +154,7 @@ public class AlertSeverityTests
         Assert.True(
             declaredArms.Count > 0,
             "Found no string-literal switch arms in AlertSeverity.cs. If ForMetric's shape changed, this "
-            + "census needs to learn the new one rather than be deleted — it is the only thing that fails "
+            + "census needs to learn the new one rather than be deleted: it is the only thing that fails "
             + "when a deliberate INFO arm joins neither IsInformational nor the InlineData pins above.");
 
         /* The deliberate INFO arms: declared, and rendered by the compiled method exactly like the

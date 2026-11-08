@@ -261,11 +261,11 @@ public sealed class DarlingMcpPvsTools
     internal static string? PctReason(bool pvsMeasured, double? databaseDataSizeMb)
     {
         if (!pvsMeasured)
-            return "pvs_size_mb was not reported by sys.dm_tran_persistent_version_store_stats in this capture, so the share is unknown — not zero.";
+            return "pvs_size_mb was not reported by sys.dm_tran_persistent_version_store_stats in this capture, so the share is unknown, not zero.";
         if (databaseDataSizeMb is null)
-            return "database_data_size_mb was not captured for this database, so there is no denominator — the share is unknown, not zero.";
+            return "database_data_size_mb was not captured for this database, so there is no denominator: the share is unknown, not zero.";
         if (databaseDataSizeMb <= 0)
-            return "database_data_size_mb is 0, so the share has no denominator — the share is unknown, not zero.";
+            return "database_data_size_mb is 0, so the share has no denominator: the share is unknown, not zero.";
         return null;
     }
 }

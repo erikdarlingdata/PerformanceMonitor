@@ -1,0 +1,229 @@
+# Default values for the performancemonitor-darling chart. Every key is documented here.
+# The pod always runs one replica with a Recreate strategy and a fixed non-root security context
+# (UID/GID 1654, the image's user); none of those are values.
+
+image:
+  # Image repository of the Darling collector service.
+  repository: ghcr.io/erikdarlingdata/performancemonitor-darling
+  # Image tag. Empty means the chart's appVersion. Pin it to a release for any real install.
+  tag: ""
+  # Optional image digest (sha256:...). When set, the image is rendered as repository:tag@digest.
+  digest: ""
+  # Image pull policy.
+  pullPolicy: IfNotPresent
+
+# Secrets used to pull the image from a private registry: a list of { name: <secret> }.
+imagePullSecrets: []
+
+# Override the chart name used in resource names and labels.
+nameOverride: ""
+# Override the full resource name prefix.
+fullnameOverride: ""
+
+# Resources of the Darling container. The memory limit is what the collector plans against: it stops launching new
+# collections once its resident memory reaches 80% of the container's limit, and resumes when it falls back under. A limit
+# too small for the fleet holds collection off rather than failing (2Gi held a real fleet's collection off for hours),
+# so size it to the fleet and watch the log for the memory launch guard.
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 4Gi
+
+persistence:
+  # Size of the state volume mounted at /var/lib/darling.
+  size: 1Gi
+  # Storage class of the state volume. Empty uses the cluster default; "-" disables dynamic provisioning.
+  storageClass: ""
+  # Use an existing PersistentVolumeClaim instead of creating one. The volume must be writable by UID/GID 1654.
+  existingClaim: ""
+
+# Extra annotations on the Deployment itself (not the pod), for controllers that watch Deployment annotations, for
+# example one that restarts the pod when a referenced Secret changes.
+deploymentAnnotations: {}
+# Extra annotations on the pod.
+podAnnotations: {}
+# Extra labels on the pod.
+podLabels: {}
+# Node selector of the pod.
+nodeSelector: {}
+# Tolerations of the pod.
+tolerations: []
+# Affinity of the pod.
+affinity: {}
+# Priority class of the pod.
+priorityClassName: ""
+# Extra /etc/hosts entries of the pod: a list of { ip, hostnames }.
+hostAliases: []
+
+# Extra environment variables of the Darling container (a list of EnvVar objects).
+extraEnv: []
+# Extra envFrom sources of the Darling container (a list of EnvFromSource objects).
+extraEnvFrom: []
+# Extra volumes of the pod (a list of Volume objects).
+extraVolumes: []
+# Extra volume mounts of the Darling container (a list of VolumeMount objects).
+extraVolumeMounts: []
+
+# The operator's darling.json: servers, collection settings, alerts. The chart owns these keys of it: postgres.managed,
+# postgres.connectionString, web.enabled, web.port, web.publicBaseUrl, web.network.listen, web.network.allowFrom,
+# web.network.trustedProxies, web.network.token, mcp.enabled, mcp.port, mcp.network.listen, mcp.network.allowFrom,
+# mcp.network.token, health and passwordKey. Setting one here fails the render and names the value to use instead; every
+# other key (postgres.webConnectionString, web.network.oidc, web.network.tls, ...) passes through.
+# Some keys are only a first-run seed: the store keeps them after the first start (see the README).
+# Strings may contain a placeholder listed in configSubstitutions; its secret value is written in when the pod starts.
+config: {}
+
+# A list of { placeholder, secretKey }. A placeholder must look like @@NAME@@ (NAME: A-Z a-z 0-9 _). At pod start an init container replaces every occurrence of `placeholder` in darling.json
+# with the value of `secretKey` from the Secret below, so a secret such as a webhook URL never lands in a ConfigMap.
+# A value may only contain A-Z a-z 0-9 and : / . _ ~ % ? = & + # - ; anything else stops the pod from starting. One trailing
+# newline is dropped first (kubectl create secret --from-file keeps a file's last one); a newline anywhere else is refused.
+configSubstitutions: []
+
+# Where Darling reads its password key from (the key that seals stored server passwords), instead of generating one
+# into its state volume. Empty leaves Darling to manage the key itself.
+passwordKey:
+  # Name of a Secret you manage that holds the key. Empty means unset.
+  existingSecret: ""
+  # Key of the Secret that holds it.
+  secretKey: password-key
+  # file: mounted read-only at /run/secrets/darling-password-key, mode 0440, group 1654 through fsGroup (the service reads it
+  # as that group, and never needs write access). env: injected as DARLING_PASSWORD_KEY.
+  source: file
+
+secrets:
+  # Name of a Secret you manage (GitOps installs must use this). Empty makes the chart create one from `values` plus generated tokens.
+  existingSecret: ""
+  # The Darling container gets only the keys darling.json references as file:/run/secrets/darling/<key> (the token keys
+  # and the keys config names); a key used only by configSubstitutions is never mounted. The dashboard and MCP accept no
+  # env:/file: password; a server added later from the host command line with a file: password needs its own file from
+  # extraVolumes and extraVolumeMounts: every key darling.json references belongs to the service or to a server the file
+  # declares, and is refused for any other server.
+  # Extra keys of the chart-created Secret (key: value). A key set here wins over generation.
+  values: {}
+  # Key of the web dashboard token in the Secret. The chart generates it (40 random characters) when the key is not in
+  # `values`. A token you supply needs at least 16 characters and 6 different ones, or the surface stays loopback-only.
+  webTokenKey: web-token
+  # Key of the MCP token in the Secret. The chart generates it when the key is not in `values`.
+  mcpTokenKey: mcp-token
+
+store:
+  # Where Darling keeps its data. "bundled" runs a single TimescaleDB pod (a StatefulSet) with this release. It suits
+  # evaluation and small installs: one replica, no backups, no failover. "external" connects to a PostgreSQL/TimescaleDB
+  # server you run (see store.external); the chart then renders no store resources.
+  mode: bundled
+  bundled:
+    # The store image. Keep it equal to STORE_IMAGE in .github/workflows/darling-linux-store.yml, the image CI tests Darling against.
+    image: timescale/timescaledb:2.31.0-pg17
+    persistence:
+      # Size of the store's data volume. Changing it later makes helm upgrade fail (a StatefulSet's volumeClaimTemplates
+      # cannot change): resize the PVC itself (see the README's Upgrades).
+      size: 10Gi
+      # Storage class of the data volume. Empty uses the cluster default.
+      storageClass: ""
+    auth:
+      # Name of a Secret you manage that holds the store password under the key `password`. The store pod
+      # (POSTGRES_PASSWORD_FILE) and the Darling pod (PGPASSWORD) both read that key. Empty makes the chart generate
+      # the password into the Secret <release>-store; GitOps installs must set this.
+      existingSecret: ""
+    # Resources of the store container. As the compose file says: give a store with real data 4 GB or more.
+    resources:
+      requests:
+        memory: 2Gi
+      limits:
+        memory: 4Gi
+  external:
+    # Host, database and username of the external store. All three are required unless connectionStringSecret is set,
+    # and none of them may contain ";" or "=" (they would inject extra connection string settings).
+    host: ""
+    port: 5432
+    database: ""
+    username: ""
+    # Npgsql SSL Mode: Disable, Allow, Prefer, Require, VerifyCA or VerifyFull.
+    sslMode: Prefer
+    # The password of the user, read from a Secret you manage. It reaches the Darling container as the PGPASSWORD
+    # environment variable, so it never appears in darling.json. Leave name empty when the server needs no password
+    # (trust or certificate authentication); that is allowed. Mutually exclusive with connectionStringSecret.
+    passwordSecret:
+      name: ""
+      key: password
+    # A Secret holding the whole Npgsql connection string (password included). It is mounted read-only at
+    # /run/secrets/darling-store/<key> and postgres.connectionString becomes file:<that path>; host, port, database,
+    # username and sslMode are then ignored. Mutually exclusive with passwordSecret.
+    connectionStringSecret:
+      name: ""
+      key: connection-string
+    # A Secret holding the CA certificate (PEM) that signs the server's certificate. It is mounted read-only at
+    # /etc/darling/store-ca/ca.crt and added to the connection string as Root Certificate (unless connectionStringSecret
+    # is used, whose string you write yourself). Pair it with sslMode VerifyCA or VerifyFull.
+    caSecret:
+      name: ""
+      key: ca.crt
+
+# Network settings shared by the web dashboard and the MCP endpoint. Both listen on 0.0.0.0 inside the pod (IPv4: IPv6-only
+# clusters are not supported), and allowFrom decides who is served (Darling refuses clients outside the list; a loopback
+# connection is always admitted).
+network:
+  # CIDRs allowed to connect (one /32 per single address). Empty admits loopback only (the chart renders 127.0.0.1/32,
+  # because Darling refuses an empty list with a Critical log line). An enabled Ingress needs it, and the two surfaces judge
+  # different addresses behind one, so set the per-surface lists rather than this shared one:
+  # - web.network.allowFrom: the dashboard trusts X-Forwarded-For from trustedProxies, so it judges the client address the
+  #   ingress controller forwards. List your operators' addresses.
+  # - mcp.network.allowFrom: the MCP endpoint never reads X-Forwarded-For, so it judges the connection itself. List the
+  #   ingress controller pods' CIDR.
+  # A surface's own network.allowFrom wins over this.
+  allowFrom: []
+  # CIDRs of the proxies (the ingress controller pods) whose X-Forwarded-For, -Proto and -Host the dashboard trusts: the
+  # forwarded client is then what allowFrom and the sign-in throttle judge, the session cookie gets Secure, and an OIDC
+  # redirect uses https. Required when web.ingress is enabled. Applies to the web dashboard only (the MCP endpoint has no
+  # such setting). web.network.trustedProxies wins over this.
+  trustedProxies: []
+
+web:
+  # Serve the web dashboard.
+  enabled: true
+  # Port of the dashboard inside the pod, and of its Service.
+  port: 5153
+  # The URL users reach the dashboard by, for links in alert messages. Empty derives it from the first web.ingress host
+  # (https when a tls entry covers that host); with no Ingress it stays unset.
+  publicBaseUrl: ""
+  network:
+    # Overrides network.allowFrom for the dashboard when non-empty. Behind an Ingress: the client addresses the controller
+    # forwards (your operators' addresses), not the controller.
+    allowFrom: []
+    # Overrides network.trustedProxies for the dashboard when non-empty.
+    trustedProxies: []
+  ingress:
+    # Create an Ingress for the dashboard. Needs hosts, trustedProxies and allowFrom (see network above).
+    enabled: false
+    # IngressClass name. Empty uses the cluster default.
+    className: ""
+    # Host names of the Ingress (a list of strings). Every path of every host goes to the dashboard Service, but Darling's
+    # Host guard admits only the host of web.publicBaseUrl (by default the first host here): the others get 400.
+    hosts: []
+    # TLS entries of the Ingress, as in the Kubernetes Ingress spec: a list of { hosts, secretName }.
+    tls: []
+    # Annotations of the Ingress.
+    annotations: {}
+
+mcp:
+  # Serve the MCP endpoint (a token-protected API for AI agents). Off by default.
+  enabled: false
+  # Port of the MCP endpoint inside the pod, and of its Service.
+  port: 5152
+  network:
+    # Overrides network.allowFrom for the MCP endpoint when non-empty. Behind an Ingress: the ingress controller pods' CIDR.
+    allowFrom: []
+  ingress:
+    # Create an Ingress for the MCP endpoint. Needs hosts and allowFrom (see network above). The first host becomes the one DNS name
+    # the endpoint admits in the Host header (mcp.network.hostName), unless config sets it.
+    enabled: false
+    # IngressClass name. Empty uses the cluster default.
+    className: ""
+    # Host names of the Ingress (a list of strings).
+    hosts: []
+    # TLS entries of the Ingress, as in the Kubernetes Ingress spec.
+    tls: []
+    # Annotations of the Ingress.
+    annotations: {}

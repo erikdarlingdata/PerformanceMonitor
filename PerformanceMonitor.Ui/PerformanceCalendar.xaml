@@ -75,7 +75,7 @@
         <ItemsControl Grid.Row="2" ItemsSource="{Binding Cells, ElementName=Root}">
             <ItemsControl.ItemsPanel>
                 <ItemsPanelTemplate>
-                    <UniformGrid Columns="7" Rows="6"/>
+                    <UniformGrid Columns="7"/>
                 </ItemsPanelTemplate>
             </ItemsControl.ItemsPanel>
             <ItemsControl.ItemTemplate>

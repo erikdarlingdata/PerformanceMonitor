@@ -79,7 +79,7 @@ public sealed class ViewerEmptyAndCountTextTests
     [InlineData(0, "0 events")]
     [InlineData(1, "1 event")]
     [InlineData(2, "2 events")]
-    [InlineData(1500, "1500 events")]
+    [InlineData(1500, "1,500 events")]
     public void ACount_ReadsAsANaturalPlural(int count, string expected)
     {
         Assert.Equal(expected, PerformanceMonitor.Common.CountText.Plural(count, "event"));

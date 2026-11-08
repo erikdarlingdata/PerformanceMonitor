@@ -110,7 +110,7 @@ public sealed partial class PgTargetFactCollector : IFactCollector
         {
             _logger?.LogWarning(
                 ex,
-                "[PgTargetFactCollector] {CollectMethod} did not finish within its command timeout on server {ServerId} ({ServerName}) — that analysis input is MISSING for this pass, which is not the same as the server having none. The store side logs this as 'canceling statement due to user request'. If it repeats, the window this query scans has outgrown the timeout: {Message}",
+                "[PgTargetFactCollector] {CollectMethod} did not finish within its command timeout on server {ServerId} ({ServerName}), that analysis input is MISSING for this pass, which is not the same as the server having none. The store side logs this as 'canceling statement due to user request'. If it repeats, the window this query scans has outgrown the timeout: {Message}",
                 collectMethod, context.ServerId, context.ServerName, ex.Message);
         }
         else if (ex is PostgresException { SqlState: "42P01" or "42703" } pgEx)

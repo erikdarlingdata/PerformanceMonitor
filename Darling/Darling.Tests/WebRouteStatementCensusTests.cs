@@ -47,6 +47,7 @@ public sealed class WebRouteStatementCensusTests
         "DarlingTriageEndpoint.cs",
         "DarlingWebEndpoints.cs",
         "FrontDoor/DarlingFrontDoorWebProxy.cs",
+        "Hosting/DarlingHealthHostService.cs",
         "Mcp/DarlingMcpHostService.cs",
     };
 
@@ -54,6 +55,8 @@ public sealed class WebRouteStatementCensusTests
     private static readonly Dictionary<string, string> Named = new(StringComparer.Ordinal)
     {
         ["\"/api/ping\""] = "liveness, no data",
+        ["\"/livez\""] = "the health port's one word (ok, starting, degraded or stopped), no data, no store read (#8184)",
+        ["\"/readyz\""] = "the health port's one word (ok, starting, degraded or stopped), no data, no store read (#8184)",
         ["\"/api/{**rest}\""] = "the front door's one catch-all (#6840), which exists only on a front door and maps no dashboard route. It answers four routes itself, none with statement text: /api/ping (liveness), /api/session (the seat's capabilities plus front_door and can_own), /api/front-door (store names, health and server counts) and /api/front-door/locate (a store name, a server name, or an ambiguity message). Every other /api path is sent to one store's dashboard, whose own routes ran the sweep before answering, and the proxy copies that answer through unchanged",
         ["\"/api/webhook-signing\""] = "signing key presence and dates from the worker's in-process snapshot, no store read (#5998)",
         ["\"/api/session\""] = "the seat's capabilities",

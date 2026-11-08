@@ -72,7 +72,7 @@ public sealed class DarlingMcpPgWaitTools
                         "No PostgreSQL wait data for this server and window. If the server is offline, nothing "
                         + "is being collected from it. On Aurora, the pg_wait_stats collector may not have "
                         + "completed a cycle yet. Otherwise the store has not yet learned that it is a "
-                        + "PostgreSQL server — check list_servers.", cancellationToken);
+                        + "PostgreSQL server: check list_servers.", cancellationToken);
             }
 
             /* #4966: where the store's coverage of the window starts. The probe is the web's source for this read (WebDataStartNote), the

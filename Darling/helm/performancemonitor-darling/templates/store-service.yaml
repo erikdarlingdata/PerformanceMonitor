@@ -1,0 +1,32 @@
+{{- if eq .Values.store.mode "bundled" }}
+# The headless Service gives the StatefulSet its stable identity; the ClusterIP Service is what Darling connects to.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "performancemonitor-darling.storeName" . }}-headless
+  labels:
+    {{- include "performancemonitor-darling.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "performancemonitor-darling.storeSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "performancemonitor-darling.storeName" . }}
+  labels:
+    {{- include "performancemonitor-darling.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "performancemonitor-darling.storeSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+{{- end }}

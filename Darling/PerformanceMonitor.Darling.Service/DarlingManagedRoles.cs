@@ -4901,6 +4901,60 @@ WHERE t.tgrelid = 'config.investigation_journal'::regclass
             "PerformanceMonitorDarling", "compose-credentials")
         : "/var/lib/darling/credentials";
 
+    /// <summary>The mount point of the compose distribution's credential volume (#8141).</summary>
+    internal const string ComposeCredentialVolumeRoot = "/var/lib/darling";
+
+    /// <summary>
+    /// The command that gives the credential file or directory at <paramref name="path"/> to <paramref name="userId"/>
+    /// (#8141). Inside the compose volume the files are reachable only through the container, so the fix is the
+    /// one-off root container that chowns the volume; elsewhere it is a recursive chown of the path, so a directory's
+    /// files follow it.
+    /// </summary>
+    internal static string CredentialOwnershipFix(uint userId, string path)
+    {
+        var u = userId.ToString(CultureInfo.InvariantCulture);
+        return path == ComposeCredentialVolumeRoot || path.StartsWith(ComposeCredentialVolumeRoot + "/", StringComparison.Ordinal)
+            ? $"{ComposeVolumeOwnershipCommand(userId)} "
+                + "(on Kubernetes, run the one-off root Job under Container user in docs/darling/security.md instead)"
+            : $"chown -R {u}:{u} '{path}'";
+    }
+
+    /// <summary>The one-off root compose container that gives the whole credential volume to <paramref name="userId"/>
+    /// (#8141), as docs/darling/security.md gives it.</summary>
+    internal static string ComposeVolumeOwnershipCommand(uint userId)
+    {
+        var u = userId.ToString(CultureInfo.InvariantCulture);
+        return $"docker compose run --rm --no-deps --user 0 --entrypoint chown darling -R {u}:{u} {ComposeCredentialVolumeRoot}";
+    }
+
+    /// <summary>The image's own user, <c>$APP_UID</c> of the .NET base image, which owns the image's /var/lib/darling (#8141).</summary>
+    internal const uint ImageUserId = 1654;
+
+    /// <summary>
+    /// What to do instead of only the chown when a service that is neither root nor the image's user finds a compose
+    /// credential path owned by the image's user (#8141 review: <c>user:</c> set to another uid, or OpenShift's random
+    /// one). With nothing mounted at /var/lib/darling that is the image's own directory, and the one-off container's chown
+    /// changes only that container, so the next start refuses again: run as the image's user, or mount a volume. A new
+    /// named volume is seeded from the image, owned by 1654, so the chown still follows the mount; a mounted volume keeps
+    /// it. Null when it is not this case.
+    /// </summary>
+    internal static string? ImageOwnedCredentialAdvice(uint userId, string path, uint ownerUserId)
+    {
+        if (ownerUserId != ImageUserId || userId == ImageUserId || userId == 0
+            || (path != ComposeCredentialVolumeRoot && !path.StartsWith(ComposeCredentialVolumeRoot + "/", StringComparison.Ordinal)))
+        {
+            return null;
+        }
+
+        var image = ImageUserId.ToString(CultureInfo.InvariantCulture);
+        return $"run the service as user {image}, or mount a volume at {ComposeCredentialVolumeRoot} "
+            + $"(or {ComposeCredentialVolumeRoot}/credentials) and recreate the container (docker compose up -d); "
+            + $"with nothing mounted at {ComposeCredentialVolumeRoot} this is the image's own directory, and a chown in a "
+            + "one-off container changes only that container, so the next start refuses again; "
+            + $"a new named volume starts owned by user {image}, so then, as for a volume already mounted there, "
+            + $"run: {CredentialOwnershipFix(userId, path)}";
+    }
+
     /// <summary>The compose store's credential file for <paramref name="role"/>: the managed file's name without
     /// the <c>.dpapi</c> extension, because it holds the password itself (#3914).</summary>
     public static string ComposeStoreCredentialFileName(string role) => $"pg-{role}-credential";
@@ -5112,9 +5166,15 @@ WHERE u.rolname = current_user";
                 return EarlierComposeCredential.Trusted(password);
             }
 
-            return EarlierComposeCredential.None(untrusted is null
-                ? $"{path} does not exist"
-                : $"{path} is not trusted ({untrusted})");
+            if (untrusted is not null)
+            {
+                return EarlierComposeCredential.None($"{path} is not trusted ({untrusted})");
+            }
+
+            /* #8141: a file in a directory the service cannot list reads as absent; say so, never "does not exist". */
+            return EarlierComposeCredential.None(DarlingServiceKeyFile.UnreadableDirectoryReason(directory) is { } unreadable
+                ? $"{path} could not be looked for: {unreadable}"
+                : $"{path} does not exist");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -5161,12 +5221,14 @@ WHERE u.rolname = current_user";
     /// readable by ordinary users (<see cref="DarlingFileSecurity.IsReadableByOrdinaryUsers"/>). A plaintext password
     /// others could read may already be theirs, so such a file is distrusted and regenerated, not re-hardened.
     ///
-    /// <para><b>What this cannot see.</b> Managed .NET cannot read a Unix file's owner, and this adds no native
-    /// interop to get it, so a file another user created with mode 0600 passes the mode check. What keeps anyone
-    /// else from creating one is the directory: the shipped <c>darling-credentials</c> named volume is seeded
-    /// root:root 0700 by the Dockerfile, and the service sets the directory owner-only again every start and
-    /// distrusts it when it cannot (<see cref="PrepareComposeCredentialDirectory"/>). A bind mount whose host
-    /// directory another host user owns or can write to is outside what either check can see.</para>
+    /// <para><b>What this does not check.</b> This method looks at the file's mode, not its owner, so a file another
+    /// user created with mode 0600 passes it. The owner of the credentials directory is checked at start (a
+    /// directory owned by another user stops collection), and <see cref="DarlingServiceKeyFile.UnexpectedOwnerReason"/>
+    /// checks the password key's owner. What keeps anyone else from creating a role credential file is the
+    /// directory: the shipped <c>darling-credentials</c> named volume is seeded owned by user 1654, mode 0700, by the
+    /// Dockerfile, and the service sets the directory owner-only again every start and distrusts it when it cannot
+    /// (<see cref="PrepareComposeCredentialDirectory"/>). A bind mount whose host directory another host user can
+    /// write to is outside what these checks can see.</para>
     /// </summary>
     internal static string? UntrustedComposeCredentialReason(FileInfo info)
     {
@@ -5201,6 +5263,48 @@ WHERE u.rolname = current_user";
 
         var mode = File.GetUnixFileMode(info.FullName);
         return (mode & GroupOrOtherAccess) == 0 ? null : $"its mode {Octal(mode)} gives other users access";
+    }
+
+    /// <summary>
+    /// Why the service must not start collecting with the credentials directory at <paramref name="directory"/> (#8141):
+    /// another user owns it, or its owner cannot be read because a parent cannot be searched. One sentence with the path,
+    /// both users and the command that fixes it; no exception text, because it reaches the ping body. Null when there is
+    /// nothing to refuse: this platform has no Unix modes, the service is root, nothing is at the path, the owner cannot
+    /// be told, or the service owns it (even unlistable: the start sets its own directory owner-only again).
+    /// </summary>
+    internal static ComposeCredentialDirectoryRefusal? ComposeCredentialDirectoryOwnershipRefusal(string directory)
+    {
+        if (ComposeCredentialDirectoryGuard.Current.UnixModes is not { } modes || modes.EffectiveUserId == 0)
+        {
+            return null;
+        }
+
+        var euid = modes.EffectiveUserId;
+        UnixFileOwner? owner;
+        try
+        {
+            owner = modes.OwnerOf(directory);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return new ComposeCredentialDirectoryRefusal(directory, euid, null);
+        }
+        catch (Exception ex) when (ex is IOException or PlatformNotSupportedException)
+        {
+            // Cannot tell who owns it: not a reason to stop the start.
+            return null;
+        }
+
+        if (owner is not { } found)
+        {
+            return null;
+        }
+
+        /* The service's own directory is never refused, even one it cannot list (and CanList, which can throw, is never
+           asked here): PrepareComposeCredentialDirectory sets it owner-only again, which a chown would not fix. */
+        return found.UserId != euid
+            ? new ComposeCredentialDirectoryRefusal(directory, euid, found.UserId)
+            : null;
     }
 
     /// <summary>
@@ -5982,6 +6086,11 @@ internal interface IUnixDirectoryModes
     /// <summary>The user id this process runs as, for comparing with <see cref="UnixFileOwner.UserId"/>.</summary>
     uint EffectiveUserId => 0;
 
+    /// <summary>Whether this process can list <paramref name="directory"/> (#8141). When it cannot, a file in it reads as
+    /// absent (<see cref="FileInfo.Exists"/> is false), which is not the same as missing. True where a stand-in does not
+    /// model it.</summary>
+    bool CanList(string directory) => true;
+
     /// <summary>Whether the file at <paramref name="path"/>, every link followed, is a regular file (#8006): not a
     /// directory, a device, a FIFO or a socket. Null when that cannot be told here (Windows, a stand-in that does not
     /// model it).</summary>
@@ -6004,6 +6113,19 @@ internal sealed class PlatformUnixDirectoryModes : IUnixDirectoryModes
     public UnixFileOwner? OwnerOf(string path) => FileIdentity.UnixOwnerOf(path);
 
     public uint EffectiveUserId => FileIdentity.EffectiveUserId();
+
+    public bool CanList(string directory)
+    {
+        try
+        {
+            _ = Directory.EnumerateFileSystemEntries(directory).Any();
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 
     public bool? IsRegularFile(string path) => FileIdentity.UnixIsRegularFile(path);
 }

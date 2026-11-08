@@ -306,7 +306,7 @@ public sealed class DarlingMcpPgIoTools
             busiest_rank_note = busiest is not null && rankedByReads ? "(by reads)" : null,
             busiest_basis = timingTracked
                 ? "total read time (read_time_ms), then read count"
-                : "read count (reads) — this server does not measure I/O time, so every read-time figure "
+                : "read count (reads): this server does not measure I/O time, so every read-time figure "
                   + "is zero in the store and cannot rank anything; the ordering falls back to the counter "
                   + "that exists",
             /* Said once at the top rather than repeated per row: on Aurora this is false everywhere,
@@ -325,7 +325,7 @@ public sealed class DarlingMcpPgIoTools
             note = (anyWritesTracked
                 ? "All counters are windowed differences, clamped per interval so a stats reset cannot "
                 + "produce a negative figure."
-                : "All counters are windowed differences. This server tracks NO write counters — the "
+                : "All counters are windowed differences. This server tracks NO write counters: the "
                 + "signature of Amazon Aurora, where backends do not write data files and the storage "
                 + "layer does. Absent writes here mean unmeasured, not zero.")
                 + " total_reads and total_read_time_ms are the WHOLE window's figures across every "

@@ -285,7 +285,9 @@ public class AnomalyGateNullWindowMonteCarloTests(ITestOutputHelper output)
             }
 
             var localHour = new DateTime(2026, 9, 24, t % 24, 0, 0, DateTimeKind.Unspecified);
-            tiles[t] = new WindowTile(localHour, peak, sum / samplesPerTile, samplesPerTile);
+            // The samples are spread evenly over the hour, so every tile covers it in full (#8293's coverage rule).
+            tiles[t] = new WindowTile(localHour, peak, sum / samplesPerTile, samplesPerTile,
+                Collections: samplesPerTile, CollectionSpan: TimeSpan.FromMinutes(60.0 * (samplesPerTile - 1) / samplesPerTile));
         }
 
         return tiles;

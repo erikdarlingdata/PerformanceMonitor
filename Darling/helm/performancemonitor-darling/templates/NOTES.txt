@@ -1,0 +1,1 @@
+{{ include "performancemonitor-darling.notes" . }}

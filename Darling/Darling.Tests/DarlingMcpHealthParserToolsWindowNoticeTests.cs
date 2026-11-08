@@ -656,7 +656,7 @@ VALUES ($1, $2, $3, $4, $5, 12, $6, 0, $7)",
             var covered = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "rung2cov-" + tool, 168, end));
 
             Assert.False(covered.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
-            Assert.EndsWith(", so nothing happened in this window — widen hours_back to reach the most recent events.", covered.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.EndsWith(", so nothing happened in this window: widen hours_back to reach the most recent events.", covered.GetProperty("message").GetString()!, StringComparison.Ordinal);
         });
 
     [Theory]

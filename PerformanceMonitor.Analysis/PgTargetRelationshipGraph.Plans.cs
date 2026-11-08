@@ -48,7 +48,7 @@ public sealed partial class PgTargetRelationshipGraph
         /* The regression walks to the statement the queries family graded — when the pass's top bad actor is the
            regressed statement (see the class summary for why the two must be the same fact). */
         AddEdge(PgTargetFactKeys.PlanRegression, PgTargetFactKeys.BadActorFamily, PlanCategory,
-            "PG_BAD_ACTOR fired for the same queryid — the statement whose plan flipped is the one holding the window's execution time",
+            "PG_BAD_ACTOR fired for the same queryid: the statement whose plan flipped is the one holding the window's execution time",
             facts => facts.TryGetValue(PgTargetFactKeys.PlanRegression, out var regression) && regression.BaseSeverity > 0
                 && !string.IsNullOrEmpty(regression.ObjectName)
                 && string.Equals(ResolveBadActor(facts), PgTargetFactKeys.BadActorKeyPrefix + regression.ObjectName, StringComparison.Ordinal)
@@ -57,7 +57,7 @@ public sealed partial class PgTargetRelationshipGraph
         /* Mechanism to cost: the skew names WHY the plan flips; the regression says what the flip cost. Same statement,
            by ObjectName (the query_id), both fired. */
         AddEdge(PgTargetFactKeys.ParameterSensitivity, PgTargetFactKeys.PlanRegression, PlanCategory,
-            "PG_PLAN_REGRESSION fired on the same queryid — the plan variance the skewed column explains stepped the statement's per-call time",
+            "PG_PLAN_REGRESSION fired on the same queryid: the plan variance the skewed column explains stepped the statement's per-call time",
             facts => PgTargetScorer.SameStatementFired(facts, PgTargetFactKeys.ParameterSensitivity, PgTargetFactKeys.PlanRegression));
 
         /* The deviation folds onto the fact that names the flip (PgTargetFactKeys.AnomalyToFamilies names the same fold
@@ -69,14 +69,14 @@ public sealed partial class PgTargetRelationshipGraph
            the switch — one predicate for the amplifier and the edge (PgTargetScorer.PlanRegressionAnomalyCorroborates),
            so the lift and the story can never disagree about which statement the deviation belongs to. */
         AddEdge(PgTargetFactKeys.AnomalyPlanRegression, PgTargetFactKeys.PlanRegression, PlanCategory,
-            "PG_PLAN_REGRESSION fired for the statement this deviation is about — the per-call slowdown has a captured plan flip behind it",
+            "PG_PLAN_REGRESSION fired for the statement this deviation is about: the per-call slowdown has a captured plan flip behind it",
             PgTargetScorer.PlanRegressionAnomalyCorroborates);
 
         /* lane 30: PG_SEQ_SCAN_ADVISORY → PgTargetFactKeys.BadActorFamily (the statement the scan was captured under) — under
            the regression's rule: the alias resolves to the pass's TOP bad actor, so the edge opens only when that is the
            top pair's statement; otherwise the story ends at the scan and the amplifier still lifts it. */
         AddEdge(PgTargetFactKeys.SeqScanAdvisory, PgTargetFactKeys.BadActorFamily, PlanCategory,
-            "PG_BAD_ACTOR fired for the statement behind the top scanned pair — the statement reading the relation sequentially is the one holding the window's execution time",
+            "PG_BAD_ACTOR fired for the statement behind the top scanned pair: the statement reading the relation sequentially is the one holding the window's execution time",
             facts => PgTargetScorer.SeqScanTopStatement(facts) is { } id
                 && string.Equals(ResolveBadActor(facts), PgTargetFactKeys.BadActorKey(id), StringComparison.Ordinal)
                 && PgTargetScorer.SeqScanTopStatementBadActorFired(facts));
@@ -84,7 +84,7 @@ public sealed partial class PgTargetRelationshipGraph
         /* Shape to cost: the scan is a candidate reason the regressed statement's new plan is slower — same statement,
            the regression fired. */
         AddEdge(PgTargetFactKeys.SeqScanAdvisory, PgTargetFactKeys.PlanRegression, PlanCategory,
-            "PG_PLAN_REGRESSION fired on the statement behind the top scanned pair — its plan changed and got slower in the window the sequential scan was captured",
+            "PG_PLAN_REGRESSION fired on the statement behind the top scanned pair: its plan changed and got slower in the window the sequential scan was captured",
             facts => PgTargetScorer.SeqScanTopStatementRegressed(facts));
     }
 }

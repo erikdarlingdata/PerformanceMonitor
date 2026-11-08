@@ -237,8 +237,9 @@ public static class AnomalyGate
     /// source and its <c>Peak</c>/<c>Mean</c> are what the finding reports in place of the whole-window statistics.</param>
     /// <param name="Bucket">The baseline bucket the worst tile was scored against — its tier and quality feed
     /// <c>AddBaselineContext</c> exactly as the whole-window bucket does today.</param>
-    /// <param name="TilesScored">How many tiles cleared <c>minTileSamples</c> and had a non-empty bucket —
-    /// <c>tiles_scored</c>.</param>
+    /// <param name="TilesScored">How many tiles cleared <c>minTileSamples</c> and the coverage rule and had a
+    /// non-empty bucket — <c>tiles_scored</c>. 0 on the non-firing verdict the gate returns for a window whose own
+    /// collection covers under half of it (see <see cref="EvaluateTiles"/>).</param>
     /// <param name="TilesFired">How many of the scored tiles had <c>Decision.Fire</c> true — <c>tiles_fired</c>. 0
     /// when the verdict's own <c>Decision.Fire</c> is false.</param>
     public readonly record struct TileVerdict(ZDecision Decision, WindowTile Tile, BaselineBucket Bucket, int TilesScored, int TilesFired);
@@ -250,17 +251,30 @@ public static class AnomalyGate
     /// <c>LocalHour</c>); when every scored tile is judged and none fires, still returns a verdict with
     /// <c>Decision.Fire = false</c>, the highest-<c>Sigma</c> scored tile, and <c>TilesFired = 0</c> — the caller
     /// gets a display verdict even on a quiet pass. Returns <c>null</c> only when NO tile could be scored at all
-    /// (every tile under <paramref name="minTileSamples"/>, or every selected bucket empty): the design's
-    /// never-blind rule — the caller falls back to the whole-window <see cref="EvaluateZScore(BaselineBucket,
+    /// (every tile under <paramref name="minTileSamples"/> or under the coverage rule, or every selected bucket
+    /// empty) and the window's own collection covers at least half of the window: the design's never-blind rule —
+    /// the caller falls back to the whole-window <see cref="EvaluateZScore(BaselineBucket,
     /// double,double,double,double,double,double,TimeSpan?)"/>/<c>EvaluateZScore</c> pair against the start bucket
     /// rather than going silent.
+    /// <para>#8293: a tile is scored only once its collection covers at least
+    /// <see cref="AnomalyThresholds.MinTileCoverage"/> of its hour — its distinct collection instants
+    /// (<see cref="WindowTile.Collections"/>), each worth one cadence, with the cadence measured from the window's
+    /// own tiles (<see cref="WindowTiles.CollectionCadence"/>), so a one-minute and a fifteen-minute collector get
+    /// the same rule. The sample floor alone lets a one-minute collector score a three-minute sliver, and a trailing
+    /// tile that is all burst has no quiet minutes for the mean clause to dilute the burst against, so its verdict
+    /// depends on how soon after the burst the pass runs. The window's leading and trailing partial hours, and an
+    /// hour the collector mostly missed, fail the rule alike. When every tile fails it and the window's collection
+    /// covers under half of the window, the whole-window mean would be built from the same sliver, so the gate
+    /// returns a verdict that does not fire (<c>TilesScored</c> 0) instead of <c>null</c>, and the caller does not
+    /// fall back.</para>
     /// <para>Each tile is decided through <see cref="DecideRobustFirst"/> with <c>correctMean: true</c> (design §3:
     /// "through a private flag on the existing internal decision path; don't copy <c>Decide</c>"), so the tile's
     /// mean clause is judged against the SAME Šidák-raised k_W as its peak clause — the trust, untrustworthy and
     /// zero-history paths inside <c>Decide</c> are otherwise untouched per tile.</para>
     /// </summary>
     /// <param name="tiles">One entry per target-local hour the window's SQL grouped by (design §1); a tile below
-    /// <paramref name="minTileSamples"/> is skipped before its bucket is even looked up.</param>
+    /// <paramref name="minTileSamples"/>, or whose collection covers under half its hour, is skipped before its
+    /// bucket is even looked up.</param>
     /// <param name="map">The precomputed (hour, dow) baseline map for this window (lane L1b's provider accessor) —
     /// each tile is looked up independently through <see cref="BaselineBucketMap.For"/>, so each can land on a
     /// different tier with its own trust/zero-history state.</param>
@@ -280,14 +294,32 @@ public static class AnomalyGate
         TimeSpan window,
         int minTileSamples = AnomalyThresholds.MinTileSamples)
     {
+        // #8293: the collector's cadence, measured from the tiles' own collection instants, prices each tile's
+        // coverage below; null when no tile holds enough instants to measure one, which leaves coverage unknown.
+        var cadence = WindowTiles.CollectionCadence(tiles, minTileSamples);
+
         var scored = new List<(ZDecision Decision, WindowTile Tile, BaselineBucket Bucket)>(tiles.Count);
+        WindowTile? underCovered = null;
 
         foreach (var tile in tiles)
         {
-            // Design §1's minimum-samples edge rule: a tile under the floor is a partial first/last hour or a
-            // restart gap, not scored at all — skipped before its bucket is even looked up.
+            // Design §1's minimum-samples edge rule: a tile under the floor holds too few samples for a peak and a
+            // mean to mean anything — not scored at all, skipped before its bucket is even looked up.
             if (tile.Samples < minTileSamples)
                 continue;
+
+            // #8293: the coverage rule beside it. The tile's collection must cover at least MinTileCoverage of its
+            // hour, its collection instants each worth one cadence. The window's leading and trailing partial hours,
+            // and an hour the collector mostly missed, fail it alike: a tile that is all burst has no quiet minutes
+            // for the mean clause to dilute the burst against, so scoring it would tie the verdict to the pass phase.
+            // Unknown coverage (no cadence, or a row without the coverage columns) fails it too. The highest-peak
+            // tile that fails is kept for the under-covered window's own verdict below.
+            if (cadence is not { } tileCadence || WindowTiles.CoveredTime(tile, tileCadence) < AnomalyThresholds.MinTileCoverage)
+            {
+                if (underCovered is null || tile.Peak > underCovered.Value.Peak)
+                    underCovered = tile;
+                continue;
+            }
 
             var bucket = map.For(tile.LocalHour.Hour, (int)tile.LocalHour.DayOfWeek);
             // Design §1's missing-bucket rule: SelectBucket's own empty sentinel (SampleCount == 0) means this
@@ -317,9 +349,22 @@ public static class AnomalyGate
             scored.Add((decision, tile, bucket));
         }
 
-        // Design §1's never-blind rule: no tile scored at all → null, caller falls back to EvaluateZScore.
         if (scored.Count == 0)
+        {
+            // #8293: a window whose collection covers under half of the window — a collector that was away and
+            // returned into a burst — has only that sliver to build a whole-window mean from, so the fallback would
+            // reach the verdict the coverage rule removes. The gate answers for it: a verdict that does not fire,
+            // over the highest-peak under-covered tile and its own bucket, scored 0 and fired 0.
+            if (cadence is { } windowCadence && underCovered is { } sliver && WindowTiles.CoveredTime(tiles, windowCadence) < window / 2)
+            {
+                return new TileVerdict(
+                    new ZDecision(Fire: false, Sigma: 0.0, LowQualityBaseline: false, FallbackExceedance: 0.0),
+                    sliver, map.For(sliver.LocalHour.Hour, (int)sliver.LocalHour.DayOfWeek), TilesScored: 0, TilesFired: 0);
+            }
+
+            // Design §1's never-blind rule: no tile scored at all → null, caller falls back to EvaluateZScore.
             return null;
+        }
 
         var firing = scored.Where(s => s.Decision.Fire).ToList();
         var tilesFired = firing.Count;

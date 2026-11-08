@@ -93,9 +93,10 @@ public static class PlanFeatureExtractor
     /// 4 since the analyzer's warning set changed in one release: Bare Scan and Scan With Predicate need 10,000 rows read
     /// and a tenth of the statement's time (#7891), Top Above Scan is quiet over an ordered scan that the Top stops early
     /// (#7890), the Data Type Mismatch and Table-Valued Function text changed and Local Variables yields to Optimize For
-    /// Unknown (#7898), a Sort that only waited across an exchange gets no Expensive Operator warning (#7979), and a Key
-    /// Lookup's severity follows its share of the statement's time rather than its presence (#7889). One bump covers the
-    /// release, so each plan digest is parsed once more and the old and new warning rows stay apart.
+    /// Unknown (#7898), a Sort that only waited across an exchange gets no Expensive Operator warning (#7979), a Key
+    /// Lookup's severity follows its share of the statement's time rather than its presence (#7889), and every warning
+    /// message reads with plain punctuation in place of an em dash (#7536). One bump covers the release, so each plan
+    /// digest is parsed once more and the old and new warning rows stay apart.
     /// 3 since the exporter moved into this repository and builds against the current PlanAnalysis, not the 4d730bb42
     /// copy that version 2 used. PlanAnalysis changed by about 1,200 lines between the two, so the same plan XML can give
     /// different feature, warning and missing-index rows. A new version keeps the two sets apart in the lake.

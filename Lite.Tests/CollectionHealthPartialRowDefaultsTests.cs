@@ -63,6 +63,19 @@ public class CollectionHealthPartialRowDefaultsTests
         }
     }
 
+    /// <summary>Darling's twin: a partial row writes its times to the whole second, with the kind suffix of the round-trip form.</summary>
+    [Fact]
+    public void APartialRowWritesItsTimesToTheWholeSecond()
+    {
+        var at = new DateTime(2026, 10, 13, 8, 0, 5, DateTimeKind.Utc).AddTicks(1_234_567);
+        var local = DateTime.SpecifyKind(at, DateTimeKind.Unspecified);
+        var row = Partial(new CollectorHealthRow { CollectorName = "wait_stats", LastSuccessTime = at, LastErrorTime = local, LastDeniedTime = at });
+
+        Assert.Equal("2026-10-13T08:00:05Z", row["last_success"]);
+        Assert.Equal("2026-10-13T08:00:05", row["last_error_at"]);
+        Assert.Equal("2026-10-13T08:00:05Z", row["last_denied_at"]);
+    }
+
     [Fact]
     public void ALongErrorCarriesTheTruncatedFlagAndAShortOneDoesNot()
     {

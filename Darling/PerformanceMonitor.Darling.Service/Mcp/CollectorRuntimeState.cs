@@ -282,6 +282,12 @@ public sealed class CollectorRuntimeState
     public void PublishManagedStoreNeedsWindows()
         => PublishStoppedCore(StartupStep.ManagedStore, ManagedStoreNeedsWindowsDetail);
 
+    /// <summary>Publishes the terminal Configuration stand-down for a credentials directory another user owns or the
+    /// service's user cannot list (worker only; #8141). The detail is the refusal's sentence: a path, two user ids and a
+    /// fixed command, never exception text.</summary>
+    internal void PublishCredentialDirectoryRefused(ComposeCredentialDirectoryRefusal refusal)
+        => PublishStoppedCore(StartupStep.Configuration, refusal.Sentence);
+
     /// <summary>The shared body every terminal stand-down publishes through, whatever its detail's source —
     /// an exception's fixed sentence (<see cref="PublishStopped"/>), the joined config problems
     /// (<see cref="PublishConfigurationProblems"/>), or the not-Windows sentence
@@ -299,7 +305,9 @@ public sealed class CollectorRuntimeState
         /* #3914: every one of these stand-downs comes before role provisioning, so a web or MCP host in a
            container waiting to hear whether the compose store's roles were provisioned would otherwise wait for
            a verdict that never comes. It connects with its role's credential from an earlier start instead, or as
-           the owner when the service holds none, and its warning says which and why. */
+           the owner when the service holds none, and its warning says which and why. The exception is the
+           credentials-directory stand-down (#8141): there the host's unmanaged resolve (DarlingStoreLogins) logs
+           the refusal sentence and returns null, so the surface stays down instead. */
         DarlingStoreLogins.SettleComposeStoreVerdict(
             $"The collector stopped before it could provision the store's roles ({step}: {FirstLineOf(detail)}).");
     }

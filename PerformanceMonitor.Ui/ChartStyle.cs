@@ -44,6 +44,8 @@ namespace PerformanceMonitor.Ui
         /// around it), and falls back to the theme's stock hex when the app has no dictionary (the tests, a headless host).
         /// The figure and legend sit on the raised panel color, the data area on the well color (Dark) or the page color
         /// (the light themes), text on the foreground, and the legend outline on the border.
+        /// #8266: the grid is the theme's ink at a low alpha in every theme, so a 1 px gridline reads against the plot
+        /// the same way in each (a contrast of about 1.5 against the plot background) and stays quieter than the axis.
         /// </summary>
         public static ChartThemeColors GetThemeColors()
         {
@@ -56,7 +58,7 @@ namespace PerformanceMonitor.Ui
                     figure,
                     ThemeColor("BackgroundColor", "#DAE6F0"),
                     text,
-                    border.WithAlpha(120),
+                    text.WithAlpha(60),
                     figure,
                     text,
                     border);
@@ -70,7 +72,7 @@ namespace PerformanceMonitor.Ui
                     figure,
                     ThemeColor("BackgroundColor", "#F5F7FA"),
                     text,
-                    ScottPlot.Colors.Black.WithAlpha(20),
+                    ScottPlot.Colors.Black.WithAlpha(50),
                     figure,
                     text,
                     ThemeColor("BorderColor", "#DEE2E6"));

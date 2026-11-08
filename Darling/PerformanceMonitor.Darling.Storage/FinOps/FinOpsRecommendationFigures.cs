@@ -218,7 +218,7 @@ public static class FinOpsRecommendationFigures
                 Category = "Licensing",
                 Severity = "Low",
                 Confidence = "High",
-                Finding = "Enterprise Edition — Availability Group secondary replica",
+                Finding = "Enterprise Edition: Availability Group secondary replica",
                 Detail = "This instance is currently a secondary replica in an Availability Group. " +
                          "Every replica in an AG must run the same SQL Server edition, so edition and " +
                          "licensing decisions apply to the whole group and should be evaluated on the " +
@@ -253,7 +253,7 @@ public static class FinOpsRecommendationFigures
                 Severity = "High",
                 Confidence = hasAdvancedAg ? "Medium" : "High",
                 Finding = hasAdvancedAg
-                    ? "Enterprise Edition — review Availability Group requirements before downgrading"
+                    ? "Enterprise Edition: review Availability Group requirements before downgrading"
                     : "Enterprise Edition with no Enterprise-only features detected",
                 Detail = "No databases use Transparent Data Encryption (TDE), the only feature " +
                          "still restricted to Enterprise Edition since SQL Server 2016 SP1. " +
@@ -269,7 +269,7 @@ public static class FinOpsRecommendationFigures
                 Category = "Licensing",
                 Severity = "Low",
                 Confidence = "High",
-                Finding = "TDE in use — Enterprise Edition downgrade blocker",
+                Finding = "TDE in use: Enterprise Edition downgrade blocker",
                 Detail = $"The following databases use Transparent Data Encryption: {string.Join(", ", tdeDbNames.Take(20))}" +
                          (tdeDbNames.Count > 20 ? $" and {tdeDbNames.Count - 20} more" : "") +
                          ". TDE must be removed before downgrading to Standard Edition."
@@ -464,7 +464,7 @@ public static class FinOpsRecommendationFigures
                     Category = "Cloud",
                     Severity = "Low",
                     Confidence = confidence,
-                    Finding = $"Stable CPU utilization (avg {avgCpu:N1}%, CV {cv:N2}) — reserved capacity candidate",
+                    Finding = $"Stable CPU utilization (avg {avgCpu:N1}%, CV {cv:N2}): reserved capacity candidate",
                     Detail = $"CPU utilization is consistently {avgCpu:N1}% with low variance (±{stddevCpu:N1}%). " +
                              "Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads."
                 };

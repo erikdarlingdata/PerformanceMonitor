@@ -1084,7 +1084,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
             Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 2 * gib, chunks: 1),
         };
         var gap = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(gapRows)!, gapRows, states, largest, existenceRead: true);
-        Assert.Contains("NOT RECONCILED — a finding: 10.0 GiB of pg_database_size is attributed to NO row", gap, StringComparison.Ordinal);
+        Assert.Contains("NOT RECONCILED, a finding: 10.0 GiB of pg_database_size is attributed to NO row", gap, StringComparison.Ordinal);
         Assert.DoesNotContain("RECONCILED: every", gap, StringComparison.Ordinal);
 
         /* Missing catch-all rows: a sweep failure, said so, and no coverage verdict dressed up as arithmetic. */
@@ -1248,7 +1248,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
             outside, null, none, existenceRead);
 
         var dropped = Note(false, existenceRead: true);
-        Assert.Contains("1 object row(s) are for objects that no longer exist — dropped or retired since their last row — and are excluded from these sums", dropped, StringComparison.Ordinal);
+        Assert.Contains("1 object row(s) are for objects that no longer exist (dropped or retired since their last row) and are excluded from these sums", dropped, StringComparison.Ordinal);
         Assert.Contains("That is history, not a sweep failure", dropped, StringComparison.Ordinal);
         Assert.Contains($"stays its newest for {StoreSelfMetrics.RetentionDays} days", dropped, StringComparison.Ordinal);
         Assert.Contains("The most recent: perfmon_baseline (continuous_aggregate, last row 2026-09-10T04:00:00.0000000)", dropped, StringComparison.Ordinal);

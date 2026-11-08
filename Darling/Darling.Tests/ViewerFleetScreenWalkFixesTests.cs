@@ -122,7 +122,7 @@ public sealed class ViewerFleetScreenWalkFixesTests : IDisposable
     [Fact]
     public void JobCount_WordingIsUnchanged()
     {
-        Assert.Equal("2000 runs (showing the newest 2,000)", JobHistoryCap.CountText(2000, 2000, 2000));
+        Assert.Equal("2,000 runs (showing the newest 2,000)", JobHistoryCap.CountText(2000, 2000, 2000));
     }
 
     [Fact]

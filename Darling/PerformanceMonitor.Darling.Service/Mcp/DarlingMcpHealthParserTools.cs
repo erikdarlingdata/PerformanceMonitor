@@ -671,7 +671,7 @@ public sealed class DarlingMcpHealthParserTools
         catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_memory_broker", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_memory_node_oom"), Description("Gets memory-node out-of-memory events from system_health over an event_time window ending at as_of, newest first. Ungated: every recorded OOM is returned. An empty answer with status empty is a real result: nothing of this kind was recorded in this window. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets memory node OOM events from system_health: out-of-memory conditions on specific NUMA nodes, with the node's physical/virtual/page-file memory, target/reserved/committed KB, the failure type, and the memory-low flags. Never gated — every recorded OOM is returned. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
+    [McpServerTool(Name = "get_health_parser_memory_node_oom"), Description("Gets memory-node out-of-memory events from system_health over an event_time window ending at as_of, newest first. Ungated: every recorded OOM is returned. An empty answer with status empty is a real result: nothing of this kind was recorded in this window. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets memory node OOM events from system_health: out-of-memory conditions on specific NUMA nodes, with the node's physical/virtual/page-file memory, target/reserved/committed KB, the failure type, and the memory-low flags. Never gated: every recorded OOM is returned. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetMemoryNodeOOM(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -743,7 +743,7 @@ public sealed class DarlingMcpHealthParserTools
         catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_memory_node_oom", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_significant_waits"), Description("Gets individual waits from system_health, one row per wait_info event with the waiting statement's SQL text, over an event_time window ending at as_of, newest first. Floors: a real session, a non-BACKUP statement, at least 500 ms, and a wait type off the idle/background list; shorter waits are never listed. get_wait_stats has the instance-wide totals. An empty answer with status empty is a real result: nothing in this window passed the floors, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets significant individual waits from system_health: one row per wait_info event where a real session's non-BACKUP statement waited at least 500 ms on a wait type that is not idle/background — the wait type, total and signal duration, the wait resource, the session id and the waiting statement. get_wait_stats gives the instance-wide totals and can never name the statement that paid them; this is the individual waits, with their SQL text. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
+    [McpServerTool(Name = "get_health_parser_significant_waits"), Description("Gets individual waits from system_health, one row per wait_info event with the waiting statement's SQL text, over an event_time window ending at as_of, newest first. Floors: a real session, a non-BACKUP statement, at least 500 ms, and a wait type off the idle/background list; shorter waits are never listed. get_wait_stats has the instance-wide totals. An empty answer with status empty is a real result: nothing in this window passed the floors, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets significant individual waits from system_health: one row per wait_info event where a real session's non-BACKUP statement waited at least 500 ms on a wait type that is not idle/background, the wait type, total and signal duration, the wait resource, the session id and the waiting statement. get_wait_stats gives the instance-wide totals and can never name the statement that paid them; this is the individual waits, with their SQL text. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSignificantWaits(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -964,7 +964,7 @@ public sealed class DarlingMcpHealthParserTools
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
                     factual: $"No {eventType} events were captured for {c.DisplayName} in the last {hoursBack} hour(s). This server has captured them before (the newest was stored at {Stamp(seen)})",
-                    coveredClaim: ", so nothing happened in this window — widen hours_back to reach the most recent events."),
+                    coveredClaim: ", so nothing happened in this window: widen hours_back to reach the most recent events."),
                 sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: seen, eventsInWindow: 0,
                 hints: notice.AsHints()), cancellationToken, c.WindowEnd.AddHours(-hoursBack));
         }
@@ -973,7 +973,7 @@ public sealed class DarlingMcpHealthParserTools
         {
             return await DarlingServerOfflineNote.EmptyAsync(postgres, c.ServerId, c.DisplayName, c.WindowEnd, WitnessStatus(
                 "empty",
-                $"No {eventType} events have been captured for {c.DisplayName} at any time, but its system_health session is being read — the collector last stored an event of another type at {Stamp(alive)} — so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
+                $"No {eventType} events have been captured for {c.DisplayName} at any time, but its system_health session is being read (the collector last stored an event of another type at {Stamp(alive)}), so for this category the absence is a measurement: the engine has not recorded one. Not a blind spot, and a wider window would not change it.",
                 sourceObserved: true, alive, lastCapturedOfTypeAt: null, eventsInWindow: 0,
                 hints: (await NoticeAsync(postgres, c, hoursBack, null, emptyAnswer: true, logger, cancellationToken)).AsHints()), cancellationToken, c.WindowEnd.AddHours(-hoursBack));
         }
@@ -1000,7 +1000,7 @@ public sealed class DarlingMcpHealthParserTools
 
         return WitnessStatus(
                 "unavailable",
-                $"No system_health events of ANY type have EVER been captured for {c.DisplayName}, so this is NOT an all-clear — there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
+                $"No system_health events of ANY type have EVER been captured for {c.DisplayName}, so this is NOT an all-clear: there is nothing here to be clear about. This read is served from the collected system_health ring buffer: check that collection is running for this server and that its system_health session is started before concluding nothing happened.",
                 sourceObserved: false, lastCapturedAt: null, lastCapturedOfTypeAt: null, eventsInWindow: 0);
     }
 

@@ -289,6 +289,10 @@ public static partial class DarlingWebEndpoints
         "wait_for_investigation_requests",
         /* #6033: an agent's read of one claimed request's frozen evidence, served by claim; no page read mirrors it. */
         "get_investigation_evidence",
+        /* #7643: schema history is read by an assistant over MCP; the web page for it is phase 2 of #7643. */
+        "find_schema_objects",
+        "get_object_definition",
+        "get_schema_changes",
     };
 
     /// <summary>

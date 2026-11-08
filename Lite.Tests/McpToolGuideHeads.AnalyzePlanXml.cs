@@ -25,7 +25,7 @@ public sealed class McpToolGuideHeadsAnalyzePlanXmlTests
     [
         "not a stored plan",
         "labelled impact_basis",
-        "create_statement — the optimizer's suggested CREATE INDEX for this statement",
+        "create_statement, the optimizer's suggested CREATE INDEX for this statement",
         "corroboration for a statement already measured slow, never a diagnosis",
         "every row carries the fixed caveat",
         "regression risk for other plans",

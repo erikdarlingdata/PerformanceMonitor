@@ -108,8 +108,12 @@ public sealed class GridPolishTests
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
+    /// <summary>
+    /// #8197: the tab is already named Memory Broker, so the panel never repeats that name as a title of its own; its card (#8226) says
+    /// what the rows are in its title and what the tab cannot say ("target shrinks") in its subtitle.
+    /// </summary>
     [Fact]
-    public void TheMemoryBrokerPanel_HasNoTitleOfItsOwn_OnlyTheTargetShrinksSubtitle()
+    public void TheMemoryBrokerPanel_DoesNotRepeatItsTabsName_AndKeepsTheTargetShrinksSubtitle()
     {
         var problems = Run("DarkTheme", 1280, 800, (tab, window) =>
         {
@@ -120,7 +124,8 @@ public sealed class GridPolishTests
             var inGrid = ClippedTextProbe.Descendants(grid).ToHashSet();
             var texts = ClippedTextProbe.Descendants(panel).OfType<TextBlock>()
                 .Where(b => b.IsVisible && b.Text.Length > 0 && !inGrid.Contains(b)).ToList();
-            var found = texts.Where(b => b.FontSize >= 14).Select(b => $"title-level text '{b.Text}' ({b.FontSize} px)").ToList();
+            var found = texts.Where(b => b.FontSize >= 14 && b.Text.Contains("memory broker", StringComparison.OrdinalIgnoreCase))
+                .Select(b => $"title-level text '{b.Text}' ({b.FontSize} px) repeats the tab's name").ToList();
             if (!texts.Any(b => b.Text.Contains("target shrinks", StringComparison.OrdinalIgnoreCase) && b.FontSize < 14))
             {
                 found.Add("no 'target shrinks' subtitle");

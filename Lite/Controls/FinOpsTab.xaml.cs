@@ -30,6 +30,9 @@ namespace PerformanceMonitorLite.Controls;
 
 public partial class FinOpsTab : UserControl
 {
+    /// <summary>The Utilization and Optimization pages scroll as one: a wheel over a grid that is at its end moves the page (<see cref="PageScroll.ForwardWheel"/>).</summary>
+    private void PageScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e) => PageScroll.ForwardWheel(sender, e);
+
     private LocalDataService? _dataService;
     private ServerManager? _serverManager;
     private Func<int, ServerClock?> _openTabClock = _ => null;

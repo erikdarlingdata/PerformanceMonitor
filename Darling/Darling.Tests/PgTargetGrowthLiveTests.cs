@@ -161,7 +161,7 @@ public sealed class PgTargetGrowthLiveTests
                 Assert.Equal(PgTargetSources.GrowthSource, finding.GetProperty("category").GetString());
                 Assert.Equal(40.0 * GiB, finding.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 3);
                 var advice = finding.GetProperty("advice");
-                Assert.Equal("appdb grew 40 GB (40%) in 14 days — 2.9 GB/day; at that slope it doubles in ~49 days", advice.GetProperty("headline").GetString());
+                Assert.Equal("appdb grew 40 GB (40%) in 14 days: 2.9 GB/day; at that slope it doubles in ~49 days", advice.GetProperty("headline").GetString());
                 var investigation = advice.GetProperty("investigation").GetString()!;
                 Assert.Contains("a straight-line extrapolation of the lookback's slope, not a forecast", investigation, StringComparison.Ordinal);
                 Assert.Contains("The instance total could not be trended: 1 database could not be sized by the monitoring role", investigation, StringComparison.Ordinal);

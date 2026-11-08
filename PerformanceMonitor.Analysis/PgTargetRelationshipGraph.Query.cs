@@ -75,7 +75,7 @@ public sealed partial class PgTargetRelationshipGraph
         /* Lane 6: the spill leads to the knob when the knob fired on the spill's own evidence. The predicate reads
            the knob's verdict, never a size of its own; the bar is PgTargetScorer.Temp.cs's with its lineage. */
         AddEdge(PgTargetFactKeys.TempSpill, PgTargetFactKeys.ConfigWorkMem, TempCategory,
-            "work_mem is the per-sort budget these temp files exceeded — the knob fired on this spill's evidence (D5)",
+            "work_mem is the per-sort budget these temp files exceeded: the knob fired on this spill's evidence (D5)",
             facts => facts.TryGetValue(PgTargetFactKeys.ConfigWorkMem, out var knob) && knob.Severity > 0);
 
         /* Lane 32's co-fire, as a story (#3809): the spill leads to the composition check when the configured worst
@@ -88,7 +88,7 @@ public sealed partial class PgTargetRelationshipGraph
         /* Lane 34: the own-normal deviation leads to the statement it names — see the class summary. Predicate reads
            the anomaly's verdict (BaseSeverity > 0, the shared deviation ramp's) and the alias resolution, never a bar. */
         AddEdge(PgTargetFactKeys.AnomalyBadActorShare, PgTargetFactKeys.BadActorFamily, QueriesCategory,
-            "PG_BAD_ACTOR fired for the statement the anomaly names — its share of the window is beyond its own hour-of-week normal",
+            "PG_BAD_ACTOR fired for the statement the anomaly names: its share of the window is beyond its own hour-of-week normal",
             facts =>
             {
                 var resolved = ResolveBadActor(facts);

@@ -35,6 +35,9 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public partial class FinOpsTab : UserControl
 {
+    /// <summary>The Utilization and Optimization pages scroll as one: a wheel over a grid that is at its end moves the page (<see cref="PageScroll.ForwardWheel"/>).</summary>
+    private void FinOpsPageScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e) => PageScroll.ForwardWheel(sender, e);
+
     /// <summary>Set once via <see cref="Initialize"/>; every load runs after that, so the loaders read it non-null.</summary>
     private ViewerDataService _dataService = null!;
 

@@ -1,0 +1,5 @@
+tests/
+.git/
+.gitignore
+*.swp
+*.tmp

@@ -814,7 +814,7 @@ public class PgBaselineProvider
         }
 
         _logger?.LogWarning(
-            "[PgBaselineProvider] {KeyedEntries} keyed baseline series are cached (bar {WarnCount}; latest server {ServerId}, metric {MetricName}) — each is a month of per-member buckets computed per cache period, so a consumer of the keyed overload is not bounding itself to its window's top-N (#3691 lane 33). Noted once per cache period.",
+            "[PgBaselineProvider] {KeyedEntries} keyed baseline series are cached (bar {WarnCount}; latest server {ServerId}, metric {MetricName}): each is a month of per-member buckets computed per cache period, so a consumer of the keyed overload is not bounding itself to its window's top-N (#3691 lane 33). Noted once per cache period.",
             keyedEntries, KeyedBaselineCacheWarnCount, serverId, metricName);
     }
 
@@ -1258,7 +1258,7 @@ LIMIT 1";
             if (IsCommandTimeout(ex))
             {
                 _logger?.LogError(
-                    "[PgBaselineProvider] Baseline query for {MetricName} did not finish within its command timeout — gave up after {Seconds:F1}s, so this metric has NO baseline this pass and its anomaly detection is silent (the collected data is unaffected). The store side logs this as 'canceling statement due to user request'. If it repeats, the window this query scans has outgrown the timeout: {Message}",
+                    "[PgBaselineProvider] Baseline query for {MetricName} did not finish within its command timeout: gave up after {Seconds:F1}s, so this metric has NO baseline this pass and its anomaly detection is silent (the collected data is unaffected). The store side logs this as 'canceling statement due to user request'. If it repeats, the window this query scans has outgrown the timeout: {Message}",
                     metricName, elapsed.Elapsed.TotalSeconds, ex.Message);
             }
             else

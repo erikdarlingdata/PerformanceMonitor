@@ -494,7 +494,7 @@ public sealed class DarlingMcpServerTagTools
             ["refusal"] = RulesAffectedCode,
             ["message"] = message ?? string.Create(
                 CultureInfo.InvariantCulture,
-                $"Deleting tag {tagId} and its subtree would leave {count} custom alert rule(s) scoped to it matching no server: {names}. Nothing was deleted. Repeat with confirm=true to proceed."),
+                $"Deleting tag {tagId} and its subtree would leave {CountText.Plural(count, "custom alert rule")} scoped to it matching no server: {names}. Nothing was deleted. Repeat with confirm=true to proceed."),
             ["tag_id"] = tagId,
             ["affected_rules"] = RulesNode(ServerTagCoverage.SimulateDelete(before, tagId), before, before),
         });
@@ -526,7 +526,9 @@ public sealed class DarlingMcpServerTagTools
                 return Refusal(
                     "not_found",
                     UnknownServerCode,
-                    string.Create(CultureInfo.InvariantCulture, $"Server id(s) {string.Join(", ", unknown)} are not monitored servers. Nothing was written."),
+                    unknown.Count == 1
+                        ? string.Create(CultureInfo.InvariantCulture, $"Server id {unknown[0]} is not a monitored server. Nothing was written.")
+                        : string.Create(CultureInfo.InvariantCulture, $"Server ids {string.Join(", ", unknown)} are not monitored servers. Nothing was written."),
                     new JsonObject { ["unknown_server_ids"] = IntArray(unknown) });
             }
 

@@ -304,13 +304,13 @@ public sealed class DarlingMcpHostService : BackgroundService
                     break;
 
                 case McpSupervisorAction.Stop:
-                    _logger.LogInformation("MCP server disabled via the control plane — stopping (no restart needed)");
+                    _logger.LogInformation("MCP server disabled via the control plane: stopping (no restart needed)");
                     await StopServerAsync(stoppingToken);
                     break;
 
                 case McpSupervisorAction.Restart:
                     _logger.LogInformation(
-                        "MCP port changed via the control plane ({Old} -> {New}) — rebinding", _runningPort, toggle.Port);
+                        "MCP port changed via the control plane ({Old} -> {New}): rebinding", _runningPort, toggle.Port);
                     await StopServerAsync(stoppingToken);
                     if (!await TryStartServerAsync(config, toggle, stoppingToken))
                     {
@@ -497,7 +497,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                     else if (floor.Problem is not null)
                     {
                         _logger.LogCritical(
-                            "MCP network token (mcp.network.token / mcp.network.encryptedToken) {Problem} — refusing to expose; binding loopback-only.",
+                            "MCP network token (mcp.network.token / mcp.network.encryptedToken) {Problem}: refusing to expose; binding loopback-only.",
                             floor.Problem);
                         networkMode = floor.NetworkMode;
                         bearerToken = token!;
@@ -508,7 +508,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                         if (usedPlaintext)
                         {
                             _logger.LogWarning(
-                                "mcp.network.token is set in plaintext (dev convenience) — prefer mcp.network.encryptedToken " +
+                                "mcp.network.token is set in plaintext (dev convenience): prefer mcp.network.encryptedToken " +
                                 "(produced by --encrypt-password). This token gates ALL MCP network access.");
                         }
                     }
@@ -616,13 +616,13 @@ public sealed class DarlingMcpHostService : BackgroundService
                 if (!writes.Writes && writeTokenProblem is not null)
                 {
                     _logger.LogCritical(
-                        "MCP bearer token (mcp.network.token / mcp.network.encryptedToken) {Problem} — the MCP write tools stay off.",
+                        "MCP bearer token (mcp.network.token / mcp.network.encryptedToken) {Problem}: the MCP write tools stay off.",
                         writeTokenProblem);
                 }
                 else if (!writes.Writes)
                 {
                     _logger.LogCritical(
-                        "{Setting} is on but no usable bearer token is available — the MCP write tools stay off. Set mcp.network.encryptedToken " +
+                        "{Setting} is on but no usable bearer token is available: the MCP write tools stay off. Set mcp.network.encryptedToken " +
                         "(via --encrypt-password) or mcp.network.token, at least {MinimumLength} characters; every MCP request, loopback " +
                         "included, must then present it.",
                         DarlingMcpWritePolicy.WritesSetting,
@@ -631,7 +631,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                 else
                 {
                     _logger.LogWarning(
-                        "MCP write tools are ON ({Setting}; add_servers/edit_server/remove_server {ServerAdmin}) — every MCP request, " +
+                        "MCP write tools are ON ({Setting}; add_servers/edit_server/remove_server {ServerAdmin}): every MCP request, " +
                         "loopback included, must present the bearer token.",
                         DarlingMcpWritePolicy.WritesSetting,
                         writes.ServerAdmin ? "on via " + DarlingMcpWritePolicy.ServerAdminSetting : "off");
@@ -698,7 +698,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                bail here reports nothing about the firewall. */
             if (await PortUtilityService.IsTcpPortListeningAsync(effectivePort, primaryBind, stoppingToken))
             {
-                _logger.LogError("Port {Port} is already in use — MCP server not started this attempt; will retry", effectivePort);
+                _logger.LogError("Port {Port} is already in use: MCP server not started this attempt; will retry", effectivePort);
                 await DisposeFailedStartAsync();
                 return false;
             }
@@ -847,7 +847,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             if (_registryState.Read() is null)
             {
                 _logger.LogDebug(
-                    "MCP starting before the worker's first registry publish — live plan fetch resolves from darling.json until it arrives (self-healing; store-registered servers reach the resolver on the worker's next reload).");
+                    "MCP starting before the worker's first registry publish: live plan fetch resolves from darling.json until it arrives (self-healing; store-registered servers reach the resolver on the worker's next reload).");
             }
 
             var planFetcher = new PgPlanFetcher(
@@ -920,7 +920,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             else if (!declaredPeers.IsEmpty)
             {
                 _logger.LogInformation(
-                    "MCP peer disclosure active: {PeerCount} declared peer store(s){Coverage}. Disclosure only — this service never contacts a peer.",
+                    "MCP peer disclosure active: {PeerCount} declared peer store(s){Coverage}. Disclosure only: this service never contacts a peer.",
                     declaredPeers.Peers.Count,
                     declaredPeers.ThisStoreCovers.Length > 0 ? $"; this store covers {declaredPeers.ThisStoreCovers}" : "");
             }
@@ -1544,6 +1544,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpFindDatabaseTools>()
             /* #7610: find_queries_by_text, which statements on one server contain a piece of text (Query Store text and the raw tier's plan-cache text). */
             .WithGeminiCompatibleTools<DarlingMcpFindQueriesByTextTools>()
+            /* #7643: get_object_definition, get_schema_changes and find_schema_objects, the table and view definitions the schema_objects collector keeps and what changed in them. */
+            .WithGeminiCompatibleTools<DarlingMcpSchemaTools>()
             /* #7609: get_query_fleet_summary, one statement's cost on every server. */
             .WithGeminiCompatibleTools<DarlingMcpQueryFleetSummaryTools>()
             /* #5983: get_resource_use_by_tag, resource use rolled up by query tag (wave 2 of #5971). */
@@ -2140,7 +2142,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             if (usedPlaintext)
             {
                 logger.LogWarning(
-                    "mcp.network.token is set in plaintext (dev convenience) — prefer mcp.network.encryptedToken " +
+                    "mcp.network.token is set in plaintext (dev convenience): prefer mcp.network.encryptedToken " +
                     "(produced by --encrypt-password). This token gates ALL MCP access, loopback included.");
             }
 
@@ -2647,21 +2649,21 @@ public sealed class DarlingMcpHostService : BackgroundService
         {
             case McpBindReason.ListenInvalid:
                 _logger.Log(level.Value,
-                    "MCP network exposure requested but mcp.network.listen '{Listen}' is not a valid IP address — " +
+                    "MCP network exposure requested but mcp.network.listen '{Listen}' is not a valid IP address: " +
                     "refusing to expose; binding loopback-only. Use a specific IP (e.g. 192.168.1.205), or 0.0.0.0 for all interfaces.",
                     mcp.Network?.Listen);
                 break;
 
             case McpBindReason.TokenMissing:
                 _logger.Log(level.Value,
-                    "MCP network exposure requested (mcp.network.listen is non-loopback) but no bearer token is set — " +
+                    "MCP network exposure requested (mcp.network.listen is non-loopback) but no bearer token is set: " +
                     "refusing to expose; binding loopback-only. Set mcp.network.encryptedToken (via --encrypt-password) or mcp.network.token.");
                 break;
 
             case McpBindReason.AllowFromInvalid:
                 _logger.Log(level.Value,
                     "MCP network exposure requested but mcp.network.allowFrom '{AllowFrom}' is not a valid CIDR list or an " +
-                    "entry's address family does not match mcp.network.listen — refusing to expose; binding loopback-only. " +
+                    "entry's address family does not match mcp.network.listen: refusing to expose; binding loopback-only. " +
                     "Use one CIDR (e.g. 192.168.1.0/24) or several, separated by commas " +
                     "(e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address), with each IPv4 " +
                     "address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same " +
@@ -2738,7 +2740,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
         }
 
-        _logger.LogError("MCP server not started: the managed Postgres mcp-role credential never appeared — see the worker log for the bootstrap failure");
+        _logger.LogError("MCP server not started: the managed Postgres mcp-role credential never appeared, see the worker log for the bootstrap failure");
         return null;
     }
 
