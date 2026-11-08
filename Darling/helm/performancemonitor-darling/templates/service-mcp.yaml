@@ -1,0 +1,16 @@
+{{- if .Values.mcp.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "performancemonitor-darling.surfaceName" (dict "ctx" . "surface" "mcp") }}
+  labels:
+    {{- include "performancemonitor-darling.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "performancemonitor-darling.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: mcp
+      port: {{ .Values.mcp.port }}
+      targetPort: {{ .Values.mcp.port }}
+{{- end }}

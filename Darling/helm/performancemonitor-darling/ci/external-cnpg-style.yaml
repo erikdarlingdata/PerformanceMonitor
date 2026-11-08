@@ -1,0 +1,96 @@
+# An install against an external PostgreSQL/TimescaleDB server with every secret in one Secret the operator manages, both
+# Ingresses behind a proxy, and the optional pod settings an existing platform usually needs. The names are made up.
+image:
+  tag: "3.13.0"
+
+store:
+  mode: external
+  external:
+    host: sql.example.internal
+    port: 5432
+    database: darling
+    username: darling
+    sslMode: VerifyFull
+    passwordSecret:
+      name: darling-secrets
+      key: sql-password
+    caSecret:
+      name: darling-store-ca
+      key: ca.crt
+
+secrets:
+  existingSecret: darling-secrets
+
+config:
+  mcp:
+    tokens:
+      - name: ops
+        role: operator
+        token: file:/run/secrets/darling/mcp-operator-token
+      - name: assistant
+        role: reader
+        token: file:/run/secrets/darling/mcp-reader-token
+  servers:
+    - name: sql-a
+      host: sql-a.example.internal
+      username: monitor
+      password: file:/run/secrets/darling/sql-a-password
+    - name: sql-b
+      host: sql-b.example.internal
+      username: monitor
+      password: file:/run/secrets/darling/sql-b-password
+  webhooks:
+    slackUrl: "@@ALERT_WEBHOOK_URL@@"
+
+configSubstitutions:
+  - placeholder: "@@ALERT_WEBHOOK_URL@@"
+    secretKey: alert-webhook-url
+
+hostAliases:
+  - ip: 10.20.0.11
+    hostnames: [sql-a.example.internal]
+  - ip: 10.20.0.12
+    hostnames: [sql-b.example.internal]
+
+podAnnotations:
+  example.com/scrape: "true"
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 4Gi
+
+persistence:
+  existingClaim: darling-state
+
+web:
+  publicBaseUrl: https://darling.example.com
+  network:
+    # The dashboard judges the client address the controller forwards: the operators' network.
+    allowFrom: [192.0.2.0/24]
+    # The ingress controller pods.
+    trustedProxies: [10.244.0.0/16]
+  ingress:
+    enabled: true
+    className: example-ingress
+    hosts: [darling.example.com]
+    tls:
+      - secretName: darling-web-tls
+        hosts: [darling.example.com]
+    annotations:
+      example.com/owner: platform
+
+mcp:
+  enabled: true
+  network:
+    # The MCP endpoint judges the connection: the ingress controller pods.
+    allowFrom: [10.244.0.0/16]
+  ingress:
+    enabled: true
+    className: example-ingress
+    hosts: [darling-mcp.example.com]
+    tls:
+      - secretName: darling-mcp-tls
+        hosts: [darling-mcp.example.com]

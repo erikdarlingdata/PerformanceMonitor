@@ -51,7 +51,7 @@ The first line keeps `secrets/` closed to other users on the host while its file
 docker compose run --rm --no-deps --user 0 --entrypoint chown darling -R 0:0 /var/lib/darling
 ```
 
-**Kubernetes.** Mount a volume at `/var/lib/darling` and run the pod as 1654:
+**Kubernetes.** The [Helm chart](kubernetes.md) sets all of this for you. To write the manifests yourself, mount a volume at `/var/lib/darling` and run the pod as 1654:
 
 ```yaml
 spec:
