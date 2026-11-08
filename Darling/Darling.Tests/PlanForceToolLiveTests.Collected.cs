@@ -22,21 +22,32 @@ namespace Darling.Tests;
 public sealed partial class PlanForceToolLiveTests
 {
     private const string PlanNotCollected = "plan_not_collected";
+    private const string PlanQueryChanged = "plan_query_changed";
 
-    /// <summary>One collected Query Store row for the server under test: the three values a caller copies from one get_query_store_top row.</summary>
-    private static async Task SeedCollectedPlanAsync(Ctx c, string database, long queryId, long planId)
+    /// <summary>A <c>query_hash</c> in the store's <c>0x</c> text form that no query on the test server has.</summary>
+    private const string OtherQueryHash = "0x0000000000000001";
+
+    /// <summary>
+    /// One collected Query Store row for the server under test: the three values a caller copies from one get_query_store_top row, with the query's
+    /// <c>query_hash</c> as the server holds it when the row is for the test's own SQL Server database (a placeholder for a database that exists only in the store).
+    /// <paramref name="queryHash"/> overrides it, for a row collected from a query that is no longer the one behind the ids.
+    /// </summary>
+    private static async Task SeedCollectedPlanAsync(Ctx c, string database, long queryId, long planId, string? queryHash = null)
     {
+        if (queryHash is null && !c.StoreOnly && string.Equals(database, c.Sql.Database, StringComparison.Ordinal))
+            queryHash = await c.Sql.QueryHashAsync(queryId, c.Ct);
         await using var insert = new NpgsqlCommand(@"
 INSERT INTO collect.query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
     execution_type_desc, first_execution_time, module_name, query_hash, execution_count, avg_duration_us, avg_cpu_time_us,
     max_duration_us, max_cpu_time_us, replica_role, runtime_stats_interval_id, interval_start_time_utc)
-VALUES ($1, $2, 7, 'srv-7', $3, $4, $5, 'Regular', $2, 'mod', md5($3 || $4::text || $5::text), 10, 500, 300, 900, 700, 'PRIMARY', 1, $2)", c.Connection) { CommandTimeout = 60 };
+VALUES ($1, $2, 7, 'srv-7', $3, $4, $5, 'Regular', $2, 'mod', COALESCE($6, md5($3 || $4::text || $5::text)), 10, 500, 300, 900, 700, 'PRIMARY', 1, $2)", c.Connection) { CommandTimeout = 60 };
         var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
         insert.Parameters.Add(new NpgsqlParameter<long> { TypedValue = now.Ticks, NpgsqlDbType = NpgsqlDbType.Bigint });
         insert.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now, NpgsqlDbType = NpgsqlDbType.Timestamp });
         insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = database, NpgsqlDbType = NpgsqlDbType.Text });
         insert.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId, NpgsqlDbType = NpgsqlDbType.Bigint });
         insert.Parameters.Add(new NpgsqlParameter<long> { TypedValue = planId, NpgsqlDbType = NpgsqlDbType.Bigint });
+        insert.Parameters.Add(new NpgsqlParameter<string?> { TypedValue = queryHash, NpgsqlDbType = NpgsqlDbType.Text });
         await insert.ExecuteNonQueryAsync(c.Ct);
     }
 
@@ -191,5 +202,103 @@ VALUES (7, $2, $1, 1, 7, 5, 'PRIMARY', $2, 'Regular')", c.Connection) { CommandT
             Assert.NotEqual(PlanNotCollected, (string?)json["reason"]);
             Assert.Equal("0", await RefusedRowsAsync(c, PlanNotCollected));
         }, storeOnly: true);
+    }
+
+    /// <summary>
+    /// The store holds the triple, but its row's <c>query_hash</c> is not the hash of the query the server has behind that query_id now: a database restored or
+    /// re-created inside the store's window restarts its Query Store ids, so the same pair names another query's plan. The call is refused before anything is
+    /// written, on a dry run and on a write, for a force and an unforce alike; the message names both hashes; the refusal is journaled and no action row is.
+    /// </summary>
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    public async Task AForceOrUnforceOfAPairWhoseCollectedQueryHashIsNotTheServers_IsRefusedAsPlanQueryChanged_AndWritesNothing(bool force, bool dryRun)
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var (query, planA, _) = await c.Sql.TwoPlansAsync("pfh1", c.Ct);
+            if (!force)
+                await c.Sql.ForceDirectlyAsync(query, planA, c.Ct);
+            var serverHash = await c.Sql.QueryHashAsync(query, c.Ct);
+            Assert.NotNull(serverHash);
+            await SeedCollectedPlanAsync(c, c.Sql.Database, query, planA, OtherQueryHash);
+
+            var json = Parse(await CallForceAsync(c, force, query, planA, dryRun));
+            Assert.Equal("refused", (string?)json["status"]);
+            Assert.Equal(PlanQueryChanged, (string?)json["reason"]);
+            var message = (string?)json["message"];
+            Assert.Contains(serverHash, message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(OtherQueryHash, message, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(force ? null : planA, await c.Sql.ForcedPlanAsync(query, c.Ct));
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+            Assert.Equal("1", await RefusedRowsAsync(c, PlanQueryChanged));
+        });
+    }
+
+    /// <summary>The collected row's <c>query_hash</c> is the server's: the check passes, and the before image carries the hash the server has, so the journal shows which query the ids named.</summary>
+    [Fact]
+    public async Task AForceOfAPairWhoseCollectedQueryHashIsTheServers_Runs_AndTheBeforeImageCarriesTheHash()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var (query, planA, _) = await c.Sql.TwoPlansAsync("pfh2", c.Ct);
+            var serverHash = await c.Sql.QueryHashAsync(query, c.Ct);
+            Assert.NotNull(serverHash);
+            await SeedCollectedPlanAsync(c, c.Sql.Database, query, planA, serverHash);
+
+            var json = Parse(await CallForceAsync(c, force: true, query, planA, dryRun: true));
+            Assert.Equal("dry_run", (string?)json["status"]);
+            Assert.Equal(serverHash, (string?)json["before"]!["query_hash"], StringComparer.OrdinalIgnoreCase);
+            Assert.Equal("0", await RefusedRowsAsync(c, PlanQueryChanged));
+        });
+    }
+
+    /// <summary>
+    /// The store holds the pair in rows from before and after the query behind the ids changed: the server's hash is among the collected ones, so the pair is
+    /// one the store collected for this query and the check passes.
+    /// </summary>
+    [Fact]
+    public async Task AForceOfAPairWhoseCollectedRowsIncludeTheServersHash_PassesTheQueryCheck()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var (query, planA, _) = await c.Sql.TwoPlansAsync("pfh3", c.Ct);
+            await SeedCollectedPlanAsync(c, c.Sql.Database, query, planA, OtherQueryHash);
+            await SeedCollectedPlanAsync(c, c.Sql.Database, query, planA);
+
+            var json = Parse(await CallForceAsync(c, force: true, query, planA, dryRun: true));
+            Assert.Equal("dry_run", (string?)json["status"]);
+            Assert.Equal("0", await RefusedRowsAsync(c, PlanQueryChanged));
+        });
+    }
+
+    /// <summary>
+    /// Every collected row for the pair carries no <c>query_hash</c> (an interval row written without one), while the server has a hash: the store says nothing about
+    /// which query the pair belonged to, so the check has nothing to compare and does not refuse. The pair is still a collected one, so the call goes on.
+    /// </summary>
+    [Fact]
+    public async Task AForceOfAPairWhoseCollectedRowsCarryNoQueryHash_PassesTheQueryCheck()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var (query, planA, _) = await c.Sql.TwoPlansAsync("pfh4", c.Ct);
+            Assert.NotNull(await c.Sql.QueryHashAsync(query, c.Ct));
+            await using (var insert = new NpgsqlCommand(@"
+INSERT INTO collect.query_store_interval_wide (server_id, collection_time, database_name, runtime_stats_interval_id, plan_id, query_id, replica_role, first_execution_time, execution_type_desc)
+VALUES (7, $2, $1, 1, $4, $3, 'PRIMARY', $2, 'Regular')", c.Connection) { CommandTimeout = 60 })
+            {
+                insert.Parameters.Add(new NpgsqlParameter<string> { TypedValue = c.Sql.Database, NpgsqlDbType = NpgsqlDbType.Text });
+                insert.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified), NpgsqlDbType = NpgsqlDbType.Timestamp });
+                insert.Parameters.Add(new NpgsqlParameter<long> { TypedValue = query, NpgsqlDbType = NpgsqlDbType.Bigint });
+                insert.Parameters.Add(new NpgsqlParameter<long> { TypedValue = planA, NpgsqlDbType = NpgsqlDbType.Bigint });
+                await insert.ExecuteNonQueryAsync(c.Ct);
+            }
+
+            var json = Parse(await CallForceAsync(c, force: true, query, planA, dryRun: true));
+            Assert.Equal("dry_run", (string?)json["status"]);
+            Assert.Equal("0", await RefusedRowsAsync(c, PlanQueryChanged));
+        });
     }
 }

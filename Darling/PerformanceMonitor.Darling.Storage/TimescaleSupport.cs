@@ -13824,16 +13824,15 @@ AND   EXTRACT(EPOCH FROM d.time_interval)::bigint <> {(long)MaterializationChunk
     /// (<see cref="CreateHypertableSql(string, string)"/>: <c>migrate_data</c> moves any existing rows into
     /// chunks — the proven non-transactional path, so no migration-transaction risk; compression segments by
     /// <see cref="CollectionLogSegmentBy"/> at <see cref="CompressAfterDays"/>). Idempotent (<c>if_not_exists</c>),
-    /// so it re-converges every pass; on a table the V23 migration already converted, the conversion and the policy
-    /// are no-ops and only the settings change below can act. The long
+    /// so it re-converges every pass; on a table the V23 migration already converted, the conversion is a no-op,
+    /// the settings change below moves the segment-by, and the policy step adds the policy V23 does not. The long
     /// <see cref="SetupTimeoutSeconds"/> command timeout covers a large first <c>migrate_data</c>.
     ///
     /// <para><b>The settings change (#4951).</b> A store converted before #4951 compresses by <c>server_id</c>
-    /// alone, and so does a table V23 converts, because V23's text keeps <c>server_id</c> (a migration is never
-    /// edited). V23's policy has no start time, so the scheduler runs it as soon as it is added. On a new store
-    /// that run finds an empty table, and this runs at the first start, before any row is old enough to compress.
-    /// On an upgrade where V23 converts existing rows, that run compresses the older chunks by <c>server_id</c>
-    /// before this runs, and they are old chunks like any upgraded store's.
+    /// alone, and a table V23 converts is enabled with <c>server_id</c>, because V23's text keeps it. V23 adds no
+    /// compression policy (#8275): this method adds it, after the ALTER below, on the hourly cadence and its phase
+    /// minute, so on a store V23 converted no chunk is compressed under <c>server_id</c> alone, whether the table
+    /// was empty (a new store) or carried rows V23 moved into chunks (an upgrade).
     /// The ALTER moves the hypertable to <see cref="CollectionLogSegmentBy"/>; every chunk already
     /// compressed keeps the settings it was compressed with, and only chunks compressed from then on use the new
     /// one, so no chunk is rewritten and the mix ages out with retention. The ALTER runs only when the settings

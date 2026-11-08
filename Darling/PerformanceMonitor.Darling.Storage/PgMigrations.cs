@@ -10103,16 +10103,17 @@ CREATE INDEX IF NOT EXISTS idx_index_object_stats_latest ON collect.index_object
     /// <c>create_hypertable</c> emits the advisory use-TIMESTAMPTZ WARNING — expected, exactly like the
     /// collector hypertables.</para>
     ///
-    /// <para><b>Compression.</b> Enabled + policy added mirroring <see cref="TimescaleSupport"/> for this one
-    /// table: segment by <c>server_id</c> (every read filters it first) and compress chunks older than the same
-    /// <see cref="TimescaleSupport.CompressAfterDays"/>, with the same <see cref="TimescaleSupport.ChunkIntervalDays"/>
-    /// chunk width — the constants are interpolated so the two never drift. <c>if_not_exists</c> on the policy
-    /// keeps it idempotent. Explicitly <c>collect.</c>-qualified like V21/V22.</para>
+    /// <para><b>Compression.</b> Enabled mirroring <see cref="TimescaleSupport"/> for this one table: segment by
+    /// <c>server_id</c> (every read filters it first), with the same <see cref="TimescaleSupport.ChunkIntervalDays"/>
+    /// chunk width, interpolated so the two never drift. V23 adds no compression policy:
+    /// <see cref="TimescaleSupport.EnsureCollectionLogHypertableAsync"/> adds it at runtime, on the hourly cadence at its
+    /// phase minute. Explicitly <c>collect.</c>-qualified like V21/V22.</para>
     /// </summary>
     private static string V23Sql =>
         $@"
-/* V23: best-effort UPGRADE fast-path that converts collect.collection_log to a TimescaleDB hypertable + compresses
-   it, mirroring the collector hypertables. GUARDED on the extension (plain PostgreSQL skips it, keeping the table a
+/* V23: best-effort UPGRADE fast-path that converts collect.collection_log to a TimescaleDB hypertable and enables
+   compression, mirroring the collector hypertables; the runtime path (EnsureCollectionLogHypertableAsync) adds the
+   phased compression policy. GUARDED on the extension (plain PostgreSQL skips it, keeping the table a
    heap with batched-DELETE retention) and wrapped in EXCEPTION WHEN OTHERS so it can NEVER abort the startup-critical
    migration. The AUTHORITATIVE conversion is TimescaleSupport.EnsureCollectionLogHypertableAsync at runtime (after
    CREATE EXTENSION), which is the proven-live path and self-heals a fresh store this guard skipped. collection_log is
@@ -10122,7 +10123,6 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
         PERFORM create_hypertable('collect.collection_log', by_range('collection_time', INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'), if_not_exists => true, migrate_data => true);
         ALTER TABLE collect.collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id');
-        PERFORM add_compression_policy('collect.collection_log', compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days', if_not_exists => true);
     END IF;
 EXCEPTION WHEN OTHERS THEN
     RAISE WARNING 'V23: deferred collection_log hypertable conversion to the runtime path (%): %', SQLSTATE, SQLERRM;
