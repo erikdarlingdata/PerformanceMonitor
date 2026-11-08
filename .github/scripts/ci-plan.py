@@ -61,7 +61,7 @@ Rules, in order:
      a changed test file is not safe in the file table (a helper, a fixture, a base class, a .csproj, a file the map does
      not know), the whole pull request runs as rule 5 says, and `why` says so. The full suite runs when the pull
      request is marked ready for review (`ready_for_review` starts a run), so every merge still has a full green run
-     behind it. A dev push, a docs-only change and a test-only change are as before.
+     behind it. A dev push and a docs-only change are as before; a test-only change is rule 6.
   8. A pull request that is ready for review and changes product files (#7728): the test classes the newest nightly
      `test-map` selects (ci-select.py's map_select), plus the classes of its changed test files, plus the Darling
      Stage=Guard classes, as areas classes. FULL (rule 5) instead, with `why` saying which: the map is missing or cannot be
