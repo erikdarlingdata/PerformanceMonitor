@@ -78,20 +78,22 @@ public sealed class SettingsDialogWalkTests
     }
 
     [Fact]
-    public void ADisabledPasswordBox_KeepsTheFillADisabledTextBoxHas()
+    public void ADisabledPasswordBox_DimsAsADisabledTextBoxDoes()
     {
-        var (password, text) = StaTestThread.Run(() => DialogWalkTestHost.WithTheme(() =>
+        var (enabledText, disabledText, disabledPassword) = StaTestThread.Run(() => DialogWalkTestHost.WithTheme(() =>
         {
+            var enabledBox = new TextBox { Width = 160, Text = "smtp.example" };
+            var disabledBox = new TextBox { IsEnabled = false, Width = 160, Text = "smtp.example" };
             var passwordBox = new PasswordBox { IsEnabled = false, Width = 160 };
-            var textBox = new TextBox { IsEnabled = false, Width = 160, Text = "smtp.example" };
-            var window = new Window { Content = new StackPanel { Children = { passwordBox, textBox } }, Width = 300, Height = 200, Left = 0, Top = 0 };
+            var window = new Window { Content = new StackPanel { Children = { enabledBox, disabledBox, passwordBox } }, Width = 300, Height = 200, Left = 0, Top = 0 };
             DialogWalkTestHost.Show(window);
-            var result = (passwordBox.Opacity, textBox.Opacity);
+            var result = (enabledBox.Opacity, disabledBox.Opacity, passwordBox.Opacity);
             window.Close();
             return result;
         }));
 
-        Assert.Equal(text, password);
+        Assert.True(disabledText < enabledText, $"a disabled TextBox ({disabledText}) looks like an enabled one ({enabledText})");
+        Assert.Equal(disabledText, disabledPassword);
     }
 
     [Fact]
