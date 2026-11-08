@@ -121,8 +121,7 @@ public sealed class McpWebhookSigningKeyLiveTests
     /// <summary>The route's keys as the service's webhook sender opens them (<see cref="WebhookSigningKeys.LiveKeys"/> is what it signs with).</summary>
     private static async Task<WebhookSigningKeys> OpenedRouteKeysAsync(Store store, int routeId, CancellationToken ct)
     {
-        await using var connection = new NpgsqlConnection(store.Owner.ConnectionString);
-        await connection.OpenAsync(ct);
+        await using var connection = await store.Owner.OpenConnectionAsync(ct);
         var routes = await StoreConfigProvider.ReadNotificationRoutesAsync(connection, null, ct);
         return DarlingWebhookSecrets.Open(new WebhooksConfig(), routes, store.Ring).Routes.Single(r => r.RouteId == routeId).GenericSigning!;
     }

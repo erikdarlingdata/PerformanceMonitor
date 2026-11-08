@@ -411,8 +411,8 @@ public sealed class DatabaseSizeRow
     {
         if (rows.Count == 0) return "";
         return rows.Any(r => r.IsAzureSiblingRow)
-            ? $"{rows.Count} file(s). {AzureSiblingDatabaseSize.GridCaption}"
-            : $"{rows.Count} file(s)";
+            ? $"{CountText.Plural(rows.Count, "file")}. {AzureSiblingDatabaseSize.GridCaption}"
+            : CountText.Plural(rows.Count, "file");
     }
 
     /// <summary>The caption under the Allocated vs Used chart, or null when none of its bars needs one. The chart

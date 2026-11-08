@@ -64,12 +64,12 @@
                                    Visibility="{Binding HasAdvice, Converter={StaticResource BoolToVis}}"
                                    Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
 
-                        <!-- #3712: the corroboration gate kept this finding off email / webhooks / tray. Muted and
-                             italic like the Settings hints: a status about delivery, not more advice. Collapsed for
+                        <!-- #3712: the corroboration gate kept this finding off email / webhooks / tray. Muted like
+                             the Settings hints: a status about delivery, not more advice. Collapsed for
                              a delivered finding and for one below the notify floor. -->
                         <TextBlock Text="{Binding NotPagedText}" TextWrapping="Wrap"
                                    Visibility="{Binding ShowNotPaged, Converter={StaticResource BoolToVis}}"
-                                   FontSize="11" FontStyle="Italic"
+                                   FontSize="11"
                                    Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,4"/>
 
                         <!-- Affordances (advise-only): Copy fix (when derivable) + Ask AI. -->
@@ -156,14 +156,14 @@
                         Click="GenerateNowButton_Click"
                         ToolTip="Run an on-demand analysis for this server, then refresh"/>
                 <TextBlock x:Name="StatusText" VerticalAlignment="Center" Margin="12,0,0,0"
-                           FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
             </StackPanel>
         </Border>
 
         <!-- #5558: this node holds a secondary copy of some databases in an availability group, so their
              per-database findings are left to the primary. Shown only with a Loaded or Empty list. -->
         <TextBlock x:Name="ReplicaNoteText" Grid.Row="1" Visibility="Collapsed" TextWrapping="Wrap"
-                   Margin="12,6,12,0" FontStyle="Italic"
+                   Margin="12,6,12,0"
                    Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
         <!-- Content area: exactly one region is visible per state. -->

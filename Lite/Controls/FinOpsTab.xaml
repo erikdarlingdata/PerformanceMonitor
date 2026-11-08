@@ -145,7 +145,7 @@
                 <!-- Skipped-databases note (#5558) and the no-data message share the row -->
                 <StackPanel Grid.Row="1">
                     <TextBlock x:Name="RecommendationsSecondaryNoteText" Visibility="Collapsed" TextWrapping="Wrap"
-                               Margin="10,0,10,4" FontSize="11" FontStyle="Italic"
+                               Margin="10,0,10,4" FontSize="11"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                     <TextBlock Style="{DynamicResource EmptyHint}" x:Name="RecommendationsNoDataMessage"
                                Text="No recommendations — all checks passed or insufficient data for analysis."
@@ -622,7 +622,7 @@
                             <DockPanel>
                                 <!-- Says which bars leave the log out and why; the loader shows it only when a bar needs it -->
                                 <TextBlock x:Name="DbSizeChartCaption" DockPanel.Dock="Bottom" Visibility="Collapsed"
-                                           Margin="8,2,8,4" TextWrapping="Wrap" FontSize="11.5" FontStyle="Italic"
+                                           Margin="8,2,8,4" TextWrapping="Wrap" FontSize="11.5"
                                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                 <ItemsControl x:Name="DbSizeChart" Margin="8,4,8,4" Grid.IsSharedSizeScope="True">
                                     <ItemsControl.ItemTemplate>
@@ -691,8 +691,7 @@
                     <Button Content="Refresh" Click="RefreshDatabaseResources_Click"
                             Margin="4,0,0,0" Padding="10,4" MinWidth="70"/>
                     <TextBlock x:Name="DbResourcesCountIndicator" Text="" Margin="12,0,0,0"
-                               VerticalAlignment="Center" FontStyle="Italic"
-                               Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                               VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                 </StackPanel>
 
                 <!-- DataGrid -->
@@ -876,8 +875,7 @@
                     <Button Content="Refresh" Click="RefreshStorageGrowth_Click"
                             Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                     <TextBlock x:Name="StorageGrowthCountIndicator" Text="" Margin="12,0,0,0"
-                               VerticalAlignment="Center" FontStyle="Italic"
-                               Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                               VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                     <TextBlock Text="Window:" VerticalAlignment="Center" Margin="16,0,6,0" FontSize="11"
                                x:Name="ObjectHeatmapWindowLabel" Visibility="Collapsed"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
@@ -1033,7 +1031,7 @@
                           <RowDefinition Height="3*"/>
                       </Grid.RowDefinitions>
                       <TextBlock Grid.Row="0" x:Name="ObjectSubstrateCaveat" TextWrapping="Wrap" Margin="0,0,0,4"
-                                 FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                 FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"
                                  Text="Object / reserved footprint (daily). This is per-object reservation, not file allocation — it may not fully explain a database's file-level growth (log / free space)."/>
                       <ui:ChartPanel Title="Object Growth Heatmap" Grid.Row="1">
                           <ScottPlot:WpfPlot x:Name="ObjectGrowthHeatmapChart"
@@ -1116,28 +1114,27 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
-                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
+                <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8">
                     <Button x:Name="LockingBackButton" Content="&#x2190; Back" Click="LockingBack_Click"
                             Visibility="Collapsed" Margin="0,0,10,0" Padding="10,4" MinWidth="70"/>
                     <TextBlock x:Name="LockingBreadcrumb" Text="Locking &amp; Contention" VerticalAlignment="Center" Margin="0,0,10,0"
                                FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                     <Button Content="Refresh" Click="RefreshIndexLocking_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                     <TextBlock x:Name="IndexLockingCountIndicator" Text="" Margin="12,0,0,0"
-                               VerticalAlignment="Center" FontStyle="Italic"
-                               Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                               VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                     <TextBlock x:Name="LockingDbLabel" Text="Database:" VerticalAlignment="Center" Margin="16,0,6,0" FontSize="11"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                     <ComboBox x:Name="LockingDbSelector" Width="200" FontSize="11" Padding="4,2"
                               SelectionChanged="LockingDbSelector_Changed"/>
                     <TextBlock Text="Cumulative since restart; cells shaded per-column by wait time" Margin="12,0,0,0" VerticalAlignment="Center"
-                               FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                </StackPanel>
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                </WrapPanel>
                 <StackPanel Grid.Row="1">
                   <TextBlock x:Name="LockingSeparatelyMonitoredNoteText" Visibility="Collapsed" TextWrapping="Wrap"
-                             Margin="10,0,10,6" FontSize="11" FontStyle="Italic"
+                             Margin="10,0,10,6" FontSize="11"
                              Foreground="{DynamicResource ForegroundMutedBrush}"/>
                   <TextBlock x:Name="OptimizedLockingNoteText" Visibility="Collapsed" TextWrapping="Wrap"
-                             Margin="10,0,10,6" FontSize="11" FontStyle="Italic"
+                             Margin="10,0,10,6" FontSize="11"
                              Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
                 <Grid Grid.Row="2" Margin="10,0,10,10">
@@ -1263,8 +1260,7 @@
                     <Button Content="Refresh" Click="RefreshDatabaseSizes_Click"
                             Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                     <TextBlock x:Name="DbSizeCountIndicator" Text="" Margin="12,0,0,0"
-                               VerticalAlignment="Center" FontStyle="Italic"
-                               Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                               VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                 </StackPanel>
 
                 <!-- DataGrid -->
@@ -1470,8 +1466,7 @@
                     <Button Content="Refresh" Click="RefreshPvsStats_Click"
                             Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                     <TextBlock x:Name="PvsCountIndicator" Text="" Margin="12,0,0,0"
-                               VerticalAlignment="Center" FontStyle="Italic"
-                               Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                               VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                 </StackPanel>
 
                 <StackPanel Grid.Row="1">
@@ -1480,7 +1475,7 @@
                                Text="PVS sizes count OFF-ROW versions only and do not include row versions stored in-row. When a large PVS will not shrink, the skipped-page counters attribute it: Secondary means a query on a secondary replica, Snapshot means a long-running snapshot scan, Aborted means space still held by aborted transactions. Requires SQL Server 2019 or later; always on for Azure SQL Database."/>
                     <!-- #7706: a database this server holds only as an availability group secondary copy has no row here; the same sentence get_pvs_stats and Darling carry. -->
                     <TextBlock x:Name="PvsSecondaryNoteText" Visibility="Collapsed" TextWrapping="Wrap" Margin="10,0,10,8" FontSize="11"
-                               FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
 
                 <!-- DataGrid -->
@@ -1706,6 +1701,8 @@
                     <TextBlock Text="Index Analysis" VerticalAlignment="Center" Margin="0,0,10,0"
                                FontWeight="Bold" FontSize="14"
                                Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBlock Text="Database:" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="11"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
                     <TextBox x:Name="IndexAnalysisDatabaseInput" Width="180" Margin="0,0,8,0"
                              VerticalContentAlignment="Center"/>
                     <CheckBox x:Name="IndexAnalysisAllDatabases" Content="All _Databases"
@@ -1713,8 +1710,7 @@
                     <Button x:Name="RunIndexAnalysisButton" Content="Run Analysis" Click="RunIndexAnalysis_Click"
                             Padding="10,4" MinWidth="100"/>
                     <TextBlock x:Name="IndexAnalysisStatusText" Text="" Margin="12,0,0,0"
-                               VerticalAlignment="Center" FontStyle="Italic"
-                               Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                               VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                 </StackPanel>
 
                 <Grid Grid.Row="1" Margin="10,0,10,10">
@@ -2144,16 +2140,13 @@
                         </DataGrid.Columns>
                     </DataGrid>
 
-                    <TextBlock x:Name="IndexAnalysisNotInstalledMessage"
+                    <!-- One sentence for the whole analysis, in the lower grid; the summary grid above keeps only its header. -->
+                    <TextBlock Style="{DynamicResource EmptyHint}" x:Name="IndexAnalysisNotInstalledMessage" Grid.Row="1"
                                Text="sp_IndexCleanup is not installed on this server. Visit https://github.com/erikdarlingdata/DarlingData to install it."
-                               FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center"
-                               TextWrapping="Wrap" Visibility="Collapsed"/>
+                               Visibility="Collapsed"/>
 
-                    <TextBlock x:Name="IndexAnalysisNoDataMessage"
+                    <TextBlock Style="{DynamicResource EmptyHint}" x:Name="IndexAnalysisNoDataMessage" Grid.Row="1"
                                Text="No index analysis results. Click 'Run Analysis' to start."
-                               FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center"
                                Visibility="Visible"/>
                 </Grid>
             </Grid>
@@ -2181,9 +2174,9 @@
                     <Expander Header="Idle Databases" IsExpanded="True" Margin="0,0,0,8">
                         <StackPanel>
                             <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
-                                <TextBlock x:Name="IdleDatabasesCountIndicator" Text=""
-                                           FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="IdleDatabasesCountIndicator" Text="" Style="{DynamicResource PanelSubtitleText}"/>
                             </StackPanel>
+                            <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
                             <DataGrid x:Name="IdleDatabasesDataGrid"
                                       AutoGenerateColumns="False"
                                       IsReadOnly="True"
@@ -2236,17 +2229,17 @@
                                     </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <TextBlock x:Name="IdleDatabasesNoDataMessage"
-                                       Text="No idle databases detected"
-                                       FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                       HorizontalAlignment="Center" Margin="0,4,0,0"
+                            <TextBlock Style="{DynamicResource EmptyHint}" x:Name="IdleDatabasesNoDataMessage"
+                                       Text="No idle databases detected" Margin="0,28,0,0"
                                        Visibility="Collapsed"/>
+                            </Grid>
                         </StackPanel>
                     </Expander>
 
                     <!-- Tempdb Pressure -->
                     <Expander Header="tempdb Pressure" IsExpanded="True" Margin="0,0,0,8">
                         <StackPanel>
+                            <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
                             <DataGrid x:Name="TempdbPressureDataGrid"
                                       AutoGenerateColumns="False"
                                       IsReadOnly="True"
@@ -2299,11 +2292,10 @@
                                     </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <TextBlock x:Name="TempdbPressureNoDataMessage"
-                                       Text="No tempdb data available"
-                                       FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                       HorizontalAlignment="Center" Margin="0,4,0,0"
+                            <TextBlock Style="{DynamicResource EmptyHint}" x:Name="TempdbPressureNoDataMessage"
+                                       Text="No tempdb data available" Margin="0,28,0,0"
                                        Visibility="Collapsed"/>
+                            </Grid>
                         </StackPanel>
                     </Expander>
 
@@ -2317,6 +2309,7 @@
                             </StackPanel>
                         </Expander.Header>
                         <StackPanel>
+                            <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
                             <DataGrid x:Name="WaitCategorySummaryDataGrid"
                                       AutoGenerateColumns="False"
                                       IsReadOnly="True"
@@ -2358,11 +2351,10 @@
                                     </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <TextBlock x:Name="WaitCategorySummaryNoDataMessage"
-                                       Text="No wait stats data available"
-                                       FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                       HorizontalAlignment="Center" Margin="0,4,0,0"
+                            <TextBlock Style="{DynamicResource EmptyHint}" x:Name="WaitCategorySummaryNoDataMessage"
+                                       Text="No wait stats data available" Margin="0,28,0,0"
                                        Visibility="Collapsed"/>
+                            </Grid>
                         </StackPanel>
                     </Expander>
 
@@ -2377,9 +2369,9 @@
                         </Expander.Header>
                         <StackPanel>
                             <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
-                                <TextBlock x:Name="ExpensiveQueriesCountIndicator" Text=""
-                                           FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="ExpensiveQueriesCountIndicator" Text="" Style="{DynamicResource PanelSubtitleText}"/>
                             </StackPanel>
+                            <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
                             <DataGrid x:Name="ExpensiveQueriesDataGrid"
                               LoadingRow="MarkedGrid_LoadingRow"
                                       AutoGenerateColumns="False"
@@ -2428,17 +2420,17 @@
                                     </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <TextBlock x:Name="ExpensiveQueriesNoDataMessage"
-                                       Text="No expensive queries found"
-                                       FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                       HorizontalAlignment="Center" Margin="0,4,0,0"
+                            <TextBlock Style="{DynamicResource EmptyHint}" x:Name="ExpensiveQueriesNoDataMessage"
+                                       Text="No expensive queries found" Margin="0,28,0,0"
                                        Visibility="Collapsed"/>
+                            </Grid>
                         </StackPanel>
                     </Expander>
 
                     <!-- Memory Grant Efficiency -->
                     <Expander Header="Memory Grant Efficiency" IsExpanded="True" Margin="0,0,0,8">
                         <StackPanel>
+                            <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
                             <DataGrid x:Name="MemoryGrantEfficiencyDataGrid"
                                       AutoGenerateColumns="False"
                                       IsReadOnly="True"
@@ -2492,11 +2484,10 @@
                                     </DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <TextBlock x:Name="MemoryGrantEfficiencyNoDataMessage"
-                                       Text="No memory grant data available"
-                                       FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                       HorizontalAlignment="Center" Margin="0,4,0,0"
+                            <TextBlock Style="{DynamicResource EmptyHint}" x:Name="MemoryGrantEfficiencyNoDataMessage"
+                                       Text="No memory grant data available" Margin="0,28,0,0"
                                        Visibility="Collapsed"/>
+                            </Grid>
                         </StackPanel>
                     </Expander>
                 </StackPanel>
@@ -2523,8 +2514,7 @@
                     <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="16,0,4,0" FontSize="11"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <ui:TimeRangePicker x:Name="HighImpactTimeRangePicker" Compact="True" RangeChanged="HighImpactTimeRange_RangeChanged"/>
-                    <TextBlock x:Name="HighImpactCountIndicator" VerticalAlignment="Center" Margin="12,0,0,0"
-                               FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                    <TextBlock x:Name="HighImpactCountIndicator" VerticalAlignment="Center" Margin="12,0,0,0" Style="{DynamicResource PanelSubtitleText}"/>
                 </StackPanel>
 
                 <!-- No Data Message -->
@@ -2714,8 +2704,7 @@
                     <Button Content="Refresh" Click="RefreshApplicationConnections_Click"
                             Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                     <TextBlock x:Name="AppConnectionsCountIndicator" Text="" Margin="12,0,0,0"
-                               VerticalAlignment="Center" FontStyle="Italic"
-                               Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                               VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                 </StackPanel>
 
                 <!-- DataGrid -->
@@ -3006,8 +2995,7 @@
                     <Button Content="Refresh" Click="RefreshServerInventory_Click"
                             Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                     <TextBlock x:Name="ServerInventoryCountIndicator" Text="" Margin="12,0,0,0"
-                               VerticalAlignment="Center" FontStyle="Italic"
-                               Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
+                               VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                 </StackPanel>
 
                 <!-- DataGrid -->

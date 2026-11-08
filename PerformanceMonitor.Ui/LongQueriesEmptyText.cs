@@ -11,16 +11,15 @@ namespace PerformanceMonitor.Ui;
 /// <summary>
 /// What the Long Queries grid says over its empty rows (Lite and the Darling Viewer). The collector is opt-in and off by
 /// default, so an empty grid on a server whose trace is off is not "no long queries ran" (the Viewer listed 21 runs of a
-/// 50 second statement on a server Lite was not tracing). The words name the switch instead of the generic "No data for
-/// the selected time range." that read as a bug.
+/// 50 second statement on a server Lite was not tracing). The sentence says why the rows are empty, not the generic "No data
+/// for the selected time range." that read as a bug. The banner above the grid carries the switch and the box to tick, so the
+/// grid does not repeat them: one short sentence that sits on one line in the empty-hint style.
 /// </summary>
 public static class LongQueriesEmptyText
 {
-    /// <summary>The grid's empty text: a plain "none in this window" when the trace is on, the way to turn it on when it is off.</summary>
+    /// <summary>The grid's empty text: a plain "none in this window" when the trace is on, that the trace is off when it is off.</summary>
     /// <param name="traceEnabled">Whether the long_query_completions collector is enabled for this server.</param>
-    /// <param name="whereToTurnItOn">The app's own settings path, for example "Settings → Collector Schedules → Edit".</param>
-    public static string Text(bool traceEnabled, string whereToTurnItOn) => traceEnabled
+    public static string Text(bool traceEnabled) => traceEnabled
         ? "No long-running query completions in the selected time window."
-        : "Nothing is listed because the long-query completion trace is OFF for this server, so no completions are collected. "
-          + $"Turn it on in {whereToTurnItOn}, then tick the 'long_query_completions' Enabled box.";
+        : "The long-query completion trace is off for this server, so no completions are collected.";
 }

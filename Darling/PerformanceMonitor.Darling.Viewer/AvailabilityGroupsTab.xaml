@@ -106,7 +106,7 @@
                                                              server, which is what makes the per-perspective
                                                              model legible. Blank when unknown. -->
                                                         <TextBlock Text="{Binding LocalDisplay}" FontSize="10"
-                                                                   Margin="6,0,0,0" FontStyle="Italic"
+                                                                   Margin="6,0,0,0"
                                                                    Foreground="{DynamicResource ForegroundDimBrush}"/>
                                                     </StackPanel>
                                                     <TextBlock Text="{Binding NameDisplay}" FontSize="13" FontWeight="SemiBold"

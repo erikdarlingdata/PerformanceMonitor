@@ -169,7 +169,7 @@ public sealed class ViewerWalkthroughLows8115Tests
         Assert.Equal("Loading recommendations…", Constant(type, "Loading"));
         var count = Method(type, "For", typeof(int));
         Assert.Equal("no recommendations", (string)count.Invoke(null, new object[] { 0 })!);
-        Assert.Equal("3 recommendation(s)", (string)count.Invoke(null, new object[] { 3 })!);
+        Assert.Equal("3 recommendations", (string)count.Invoke(null, new object[] { 3 })!);
     }
 
     // ── F9: a toast names the server once ──

@@ -329,6 +329,8 @@ public sealed class DatabaseProtectionAlertTests
     /* ---------------- live: a seeded store ---------------- */
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+    /* Npgsql leaves the password out of the ConnectionString read back from a data source or an opened connection, so what the body opens by connection string comes from the scratch store's own string. */
+    private string _storeConnectionString = "";
 
     /// <summary>One capture of the given databases, every row stamped with ONE collection_time (a pass stamps one for every database).</summary>
     private static Task InsertCaptureAsync(NpgsqlConnection connection, CancellationToken ct, DateTime at, params DatabaseProtectionFact[] facts) =>
@@ -350,13 +352,14 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
         }
     }
 
-    private static async Task<T> WithStoreAsync<T>(Func<NpgsqlConnection, CancellationToken, Task> seed, Func<NpgsqlDataSource, NpgsqlConnection, CancellationToken, Task<T>> body)
+    private async Task<T> WithStoreAsync<T>(Func<NpgsqlConnection, CancellationToken, Task> seed, Func<NpgsqlDataSource, NpgsqlConnection, CancellationToken, Task<T>> body)
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live database protection alert tests.");
         var ct = TestContext.Current.CancellationToken;
         /* #1776 own-store: a scratch database of its own. */
         await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        _storeConnectionString = scratch.ConnectionString;
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -505,7 +508,7 @@ VALUES (515152, 'PROTECTION-PG', 'PROTECTION-PG', TRUE, 0, $1), (515153, 'PROTEC
             await InsertCaptureAsync(connection, ct, at, Db("Sales", at, TimeSpan.FromDays(30), TimeSpan.FromMinutes(5), null, checkDbState: DatabaseProtectionCollector.CheckDbNever));
         }, async (postgres, connection, ct) =>
         {
-            await using var viewer = new ViewerDataService(postgres.ConnectionString);
+            await using var viewer = new ViewerDataService(_storeConnectionString);
             var (value, detail, _) = await viewer.GetDatabaseProtectionChipAsync(ServerId, DateTime.UtcNow, ct);
             Assert.Equal("2 items on 1 database", value);
             Assert.Equal("Full backup: Sales (30 days old), CHECKDB: Sales (never checked)", detail);
@@ -789,7 +792,7 @@ VALUES (515152, 'PROTECTION-PG', 'PROTECTION-PG', TRUE, 0, $1), (515153, 'PROTEC
             Assert.Equal((true, 30L), await ToolLogBand());
 
             /* The Viewer reads the same ages. */
-            await using var viewer = new ViewerDataService(postgres.ConnectionString);
+            await using var viewer = new ViewerDataService(_storeConnectionString);
             var row = await viewer.GetAlertSettingsAsync(ct);
             Assert.Equal((168, 60, 336), (row!.BackupOverdueThresholdHours, row.LogBackupOverdueThresholdMinutes, row.CheckDbOverdueThresholdHours));
             return 0;
@@ -832,7 +835,7 @@ VALUES (515152, 'PROTECTION-PG', 'PROTECTION-PG', TRUE, 0, $1), (515153, 'PROTEC
 
             async Task<string> ViewerStatus()
             {
-                await using var viewer = new ViewerDataService(postgres.ConnectionString);
+                await using var viewer = new ViewerDataService(_storeConnectionString);
                 return (await viewer.ReadDatabaseProtectionAsync(ProtectionServer(), DateTime.UtcNow, cancellationToken: ct)).Status;
             }
 

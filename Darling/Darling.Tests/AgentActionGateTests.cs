@@ -211,6 +211,8 @@ public sealed class AgentActionGateLiveTests
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
     private DateTime _now = T0;
     private int _writes;
+    /* Npgsql leaves the password out of an opened connection's ConnectionString, so a data source the body builds comes from the scratch store's own string. */
+    private string _storeConnectionString = "";
 
     private static InvestigationAlert Alert(DateTime at, int level = 2, string metric = "Blocking", int serverId = 7) =>
         new(1, serverId, "srv-" + serverId.ToString(CultureInfo.InvariantCulture), "blocking", metric, at, Array.Empty<string>(), null,
@@ -452,7 +454,7 @@ public sealed class AgentActionGateLiveTests
             var (request, claim) = await OpenAndClaimAsync(store);
             var arg = AgentActionArgumentTests.Arg(request.ToString(), claim.ToString());
             var agentArm = new DarlingMcpWritePolicy.Effective(false, false, Investigations: true);
-            await using var dataSource = NpgsqlDataSource.Create(connection.ConnectionString);
+            await using var dataSource = NpgsqlDataSource.Create(_storeConnectionString);
 
             Task<AgentActionGateOutcome> Run() => DarlingAgentActionGate.RunAsync(
                 agentArm, dataSource, store, NullLogger.Instance, "create_mute_rule", "mute", arg, new AgentActionTarget(7, "srv-7", null, null), null,
@@ -510,7 +512,7 @@ public sealed class AgentActionGateLiveTests
             var arg = AgentActionArgumentTests.Arg(request.ToString(), claim.ToString());
             var agentArm = new DarlingMcpWritePolicy.Effective(false, false, Investigations: true);
             var target = new AgentActionTarget(7, "srv-7", null, null);
-            await using var dataSource = NpgsqlDataSource.Create(connection.ConnectionString);
+            await using var dataSource = NpgsqlDataSource.Create(_storeConnectionString);
 
             Task<AgentActionGateOutcome> Run(DarlingMcpWritePolicy.Effective policy, string? a) => DarlingAgentActionGate.RunAsync(
                 policy, dataSource, store, NullLogger.Instance, "create_mute_rule", "mute", a, target, null,
@@ -571,7 +573,7 @@ CREATE TRIGGER test_fail_every_done BEFORE INSERT ON config.investigation_journa
 
     private async Task<AgentChangeRow> ListedAsync(NpgsqlConnection connection, long calledId, CancellationToken ct)
     {
-        await using var dataSource = NpgsqlDataSource.Create(connection.ConnectionString);
+        await using var dataSource = NpgsqlDataSource.Create(_storeConnectionString);
         return (await new AgentChangeUndo(dataSource, 30, () => _now).ReadAsync(50, cancellationToken: ct)).Changes.Single(c => c.CalledId == calledId);
     }
 
@@ -703,6 +705,7 @@ CREATE TRIGGER test_fail_every_done BEFORE INSERT ON config.investigation_journa
 
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        _storeConnectionString = scratch.ConnectionString;
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);

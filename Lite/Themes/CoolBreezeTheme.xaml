@@ -259,7 +259,7 @@
 
     <!-- No Data Message Style (for empty DataGrids) -->
     <Style x:Key="NoDataMessage" TargetType="TextBlock">
-        <Setter Property="Text" Value="No data for the selected time range."/>
+        <Setter Property="Text" Value="No data in the selected time window."/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
         <Setter Property="FontSize" Value="14"/>
         <Setter Property="HorizontalAlignment" Value="Center"/>
