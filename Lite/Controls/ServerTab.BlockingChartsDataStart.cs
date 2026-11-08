@@ -82,7 +82,6 @@ public partial class ServerTab
             () => Task.Run(() => _dataService.GetBlockingXeDataStartAsync(_serverId, start, end, databaseNames)),
             $"[{_server.DisplayName}] {QueryWindowRelation.BlockedProcessReports}", start, end);
         ApplyWindowFloorToBanner(banner, EarlierOfFloorAndRowShown(floor, earliestDrawn), start, GetPickerZone());
-        FeedDataStart(LiteTimeRange.CollectorOfRelation(QueryWindowRelation.BlockedProcessReports), floor); /* #5562 R7 */
     }
 
     /// <summary>The Trends sub-tab's three notes, over the SAME UTC window the three reads took.</summary>

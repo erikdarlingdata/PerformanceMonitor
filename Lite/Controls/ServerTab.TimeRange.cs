@@ -7,7 +7,6 @@
  */
 
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -131,34 +130,13 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// The floors the tab's banner probes found (#5562 R7), by the page that asked: a collector name, or "overview" for the
-    /// lanes on the Overview page. The picker names the floor of the page on screen; a page that has not probed yet, or a page
-    /// with no probe, gets the archive's static retention edge. No query of its own: every value is one a banner site
-    /// already awaited.
+    /// Points the picker's "Data starts" note at the oldest data the store holds for this server (<see cref="OldestRetainedUtc"/>,
+    /// read with the charts' data start), else the archive's static retention edge. The note previews whatever range a reader
+    /// types, so it cannot take a window-floor probe's answer: a probe reads the oldest row INSIDE the window it was asked
+    /// about, which for a covered window is the window's own start, not where the data starts.
     /// </summary>
-    private readonly Dictionary<string, DateTime?> _probedFloors = new();
-
-    /// <summary>
-    /// Hands the picker the data start a banner site found (every <c>ApplyWindowFloorToBanner</c> site calls this with its
-    /// surface's main collector, so a source-scan test can pin the sites). It shows only while that page is on screen.
-    /// </summary>
-    internal void FeedDataStart(string? collector, DateTime? floor)
-    {
-        if (collector is not null)
-        {
-            _probedFloors[collector] = floor;
-        }
-
-        ApplyDataStart();
-    }
-
-    /// <summary>Points the picker's data start at the page on screen: its probed floor, else the static retention edge.</summary>
-    private void ApplyDataStart()
-    {
-        var key = MainTabControl.SelectedItem is TabItem { Header: "Overview" } ? "overview" : CurrentMainCollector();
-        RangePicker.DataStartUtc = LiteTimeRange.DataStartFor(
-            key is not null && _probedFloors.TryGetValue(key, out var floor) ? floor : null, DateTime.UtcNow);
-    }
+    private void ApplyDataStart() =>
+        RangePicker.DataStartUtc = LiteTimeRange.DataStartFor(OldestRetainedUtc, DateTime.UtcNow);
 
     /// <summary>Redraws the picker's resolved text and its sample-interval note (a live range slides; the schedule can be edited).</summary>
     private void RefreshRangeNotes()
@@ -217,7 +195,6 @@ public partial class ServerTab : UserControl
     /// </summary>
     public void SetTimeRange(TimeRangeSpec spec)
     {
-        _probedFloors.Clear();
         RangePicker.Select(spec);
     }
 
@@ -408,9 +385,6 @@ public partial class ServerTab : UserControl
     {
         if (!IsLoaded || _suppressRangeRefresh) return;
 
-        /* L2: a probed floor is the first row inside the window it was probed for, so a held one names an older, shorter window
-           (or an older, longer one) once the range moves. Each page probes again on its own pass. */
-        _probedFloors.Clear();
         PersistSelectedTimeRange(e.Spec);
 
         await RefreshAllDataAsync();

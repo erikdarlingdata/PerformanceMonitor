@@ -38,7 +38,7 @@
 
         <Popup x:Name="PickerPopup"
                PlacementTarget="{Binding ElementName=PickerButton}"
-               Placement="Bottom"
+               Placement="Custom"
                StaysOpen="False"
                AllowsTransparency="True"
                PopupAnimation="Fade"

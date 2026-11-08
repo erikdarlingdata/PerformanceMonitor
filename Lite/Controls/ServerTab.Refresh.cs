@@ -105,6 +105,11 @@ public partial class ServerTab : UserControl
     /// known, and then the axis stays as picked.</summary>
     internal DateTime? ServerDataStartUtc { get; set; }
 
+    /// <summary>The oldest instant the store holds data from for this server (<see cref="LocalDataService.GetOldestRetainedAsync"/>):
+    /// what the time range picker's "Data starts" note names. Null until the first read, or when the server has no row yet, and
+    /// the note then falls back to the archive's static retention edge.</summary>
+    internal DateTime? OldestRetainedUtc { get; set; }
+
     /// <summary>Reads the server's data start for the charts (#7386), once for the whole tab, with the refresh that is about to
     /// draw them. The read is kept per server for <see cref="LocalDataService.ServerDataStartMaxAge"/> and never opens the Parquet
     /// archive (<see cref="LocalDataService.GetServerDataStartAsync"/>). A failed read leaves the axis as picked.</summary>
@@ -115,13 +120,18 @@ public partial class ServerTab : UserControl
             var windowStartUtc = fromDate ?? DateTime.UtcNow.AddHours(-hoursBack);
             ServerDataStartUtc = await Task.Run(() => _dataService.GetServerDataStartAsync(_serverId, windowStartUtc));
             CorrelatedLanes.ServerDataStartUtc = ServerDataStartUtc;
+            OldestRetainedUtc = await Task.Run(() => _dataService.GetOldestRetainedAsync(_serverId));
         }
         catch (Exception ex)
         {
             ServerDataStartUtc = null;
             CorrelatedLanes.ServerDataStartUtc = null;
+            OldestRetainedUtc = null;
             AppLogger.Debug("ServerTab", $"[{_server.DisplayName}] server data start read failed, the charts keep the picked range: {ex.Message}");
         }
+
+        ApplyDataStart();
+        RangePicker.Refresh();
     }
 
     /// <summary>The X axis start of a time chart over [start, end] (#7386), in the charts' OLE automation dates.</summary>
@@ -709,10 +719,6 @@ public partial class ServerTab : UserControl
             () => Task.Run(() => _dataService.GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc, includeAlsoCovered: includeAlsoCovered, cancellationToken: ct)),
             $"[{_server.DisplayName}] {relation}", startUtc, endUtc, ct);
         ApplyWindowFloorToBanner(banner, EarlierOfFloorAndRowShown(floor, earliestRowShownUtc), startUtc, GetPickerZone());
-
-        /* #5562 R7: the picker's 'Data starts ...' note takes its start from the probe this site already awaited, for the page
-           on screen (every relation, not only the Queries grid's), else the archive's static retention edge. No new query. */
-        FeedDataStart(LiteTimeRange.CollectorOfRelation(relation), floor);
     }
 
     /// <summary>

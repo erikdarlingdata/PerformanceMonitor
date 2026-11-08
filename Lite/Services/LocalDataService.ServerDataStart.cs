@@ -62,4 +62,19 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
         _serverDataStarts[serverId] = (first, DateTime.UtcNow);
         return first;
     }
+
+    /// <summary>
+    /// The oldest instant the store holds data from, for the time range picker's "Data starts" note: the archive's oldest row
+    /// when the archive holds any (the archive is not read per server, so with an archive this is the store's oldest retained
+    /// row, which the server's data cannot precede), else the server's first hot collection (<see cref="GetServerDataStartAsync"/>),
+    /// else null when the server has no row yet. Both reads are the cached ones the window-floor probes and the charts already
+    /// make, so the note costs no query of its own.
+    /// </summary>
+    public async Task<DateTime?> GetOldestRetainedAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        var span = await GetArchiveSpanAsync("collection_log", "collection_time", cancellationToken);
+        return span is { Oldest: DateTime archived }
+            ? DateTime.SpecifyKind(archived, DateTimeKind.Utc)
+            : await GetServerDataStartAsync(serverId, DateTime.MinValue, cancellationToken);
+    }
 }

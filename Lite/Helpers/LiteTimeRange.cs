@@ -170,11 +170,12 @@ internal static class LiteTimeRange
     }
 
     /// <summary>
-    /// Where the picker's 'Data starts' note takes its start from: the coverage probe's floor the tab already awaited, else
-    /// the oldest instant the archive keeps (<see cref="RetentionService.OldestRetainedInstant"/>). No new query.
+    /// Where the picker's 'Data starts' note takes its start from: the oldest instant the store holds data from for the server
+    /// (<see cref="LocalDataService.GetOldestRetainedAsync"/>) when that is known, else the oldest instant the archive keeps
+    /// (<see cref="RetentionService.OldestRetainedInstant"/>).
     /// </summary>
-    internal static DateTime DataStartFor(DateTime? probedFloorUtc, DateTime utcNow) =>
-        probedFloorUtc ?? RetentionService.OldestRetainedInstant(utcNow);
+    internal static DateTime DataStartFor(DateTime? oldestRetainedUtc, DateTime utcNow) =>
+        oldestRetainedUtc ?? RetentionService.OldestRetainedInstant(utcNow);
 
     /// <summary>
     /// The collector behind the data a server-tab page shows (#5562 R3): the page's MAIN collector, by the header of the top

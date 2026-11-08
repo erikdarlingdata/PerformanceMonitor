@@ -69,6 +69,7 @@ public partial class TimeRangePicker : UserControl
     {
         InitializeComponent();
         BuildPresetButtons();
+        PickerPopup.CustomPopupPlacementCallback = PlacePopup;
         PickCalendar.GotMouseCapture += (_, e) =>
         {
             /* A Calendar in a popup keeps the mouse captured after a day click and swallows the next click. */
@@ -426,13 +427,45 @@ public partial class TimeRangePicker : UserControl
         RefreshPeriodLengths();
         UpdateSelectionMarks();
         var wallNow = DisplayZone.ToDisplay(NowUtc, Zone);
-        PickCalendar.DisplayDateEnd = wallNow.Date;
         PickCalendar.SelectedDates.Clear();
+        /* The days after today cannot be picked, but they are drawn: a display-date end hides every later day, and with it the
+           week rows after this week, so the month showed two rows and a blank below them early in a month. */
+        PickCalendar.BlackoutDates.Clear();
+        PickCalendar.BlackoutDates.Add(new CalendarDateRange(wallNow.Date.AddDays(1), DateTime.MaxValue));
         PickCalendar.DisplayDate = Resolve() is { } held ? DisplayZone.ToDisplay(held.StartUtc, Zone).Date : wallNow.Date;
         InputBox.Clear();
         UpdateEcho();
         InputBox.Focus();
         Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(ApplyCalendarTheme));
+    }
+
+    /// <summary>
+    /// Places the popup below the button, left-aligned with it, and slides it left when it would pass the right edge of the
+    /// window the picker is in, never past the window's left edge: WPF places a popup against the screen, so under a button on
+    /// the right of a window at the 900 px minimum it hung past the window or was pushed to the screen's edge. The sizes arrive
+    /// in the popup's own units; the button's width in both units gives the scale.
+    /// </summary>
+    private CustomPopupPlacement[] PlacePopup(Size popupSize, Size targetSize, Point offset)
+    {
+        var x = 0.0;
+        if (PickerButton.ActualWidth > 0
+            && Window.GetWindow(PickerButton) is { } window
+            && VisualTreeHelper.GetChildrenCount(window) > 0
+            && VisualTreeHelper.GetChild(window, 0) is FrameworkElement client)
+        {
+            try
+            {
+                var scale = targetSize.Width / PickerButton.ActualWidth;
+                var buttonLeft = PickerButton.TransformToAncestor(client).Transform(new Point(0, 0)).X * scale;
+                x = Math.Max(-buttonLeft, Math.Min(0, client.ActualWidth * scale - buttonLeft - popupSize.Width));
+            }
+            catch (InvalidOperationException)
+            {
+                /* The button is not under the window's client root (a detached control): the popup opens where it would by default. */
+            }
+        }
+
+        return new[] { new CustomPopupPlacement(new Point(x, targetSize.Height), PopupPrimaryAxis.Vertical) };
     }
 
     private void PickerPopup_Closed(object? sender, EventArgs e)

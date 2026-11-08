@@ -6,8 +6,11 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Media;
 
 namespace PerformanceMonitorLite.Controls;
 
@@ -20,6 +23,7 @@ public partial class SidebarFooter : UserControl
     public SidebarFooter()
     {
         InitializeComponent();
+        MoreMenu.CustomPopupPlacementCallback = PlaceMoreMenu;
     }
 
     public event RoutedEventHandler? AddServerClick;
@@ -43,6 +47,38 @@ public partial class SidebarFooter : UserControl
     {
         MoreMenu.PlacementTarget = MoreButton;
         MoreMenu.IsOpen = true;
+    }
+
+    /// <summary>
+    /// Opens the More menu beside its button, where it fits: level with the button's top when the window has room below, else
+    /// level with the button's bottom, so it grows upward and stays inside the window. The button sits at the bottom of the
+    /// sidebar, and WPF places a popup against the screen, so a menu that opened downward hung past the window at 900x600. The
+    /// sizes arrive in the popup's own units; the button's height in both units gives the scale.
+    /// </summary>
+    private CustomPopupPlacement[] PlaceMoreMenu(Size popupSize, Size targetSize, Point offset)
+    {
+        var y = 0.0;
+        if (MoreButton.ActualHeight > 0
+            && Window.GetWindow(MoreButton) is { } window
+            && VisualTreeHelper.GetChildrenCount(window) > 0
+            && VisualTreeHelper.GetChild(window, 0) is FrameworkElement client)
+        {
+            try
+            {
+                var scale = targetSize.Height / MoreButton.ActualHeight;
+                var buttonTop = MoreButton.TransformToAncestor(client).Transform(new Point(0, 0)).Y * scale;
+                if (popupSize.Height > client.ActualHeight * scale - buttonTop)
+                {
+                    y = Math.Max(-buttonTop, targetSize.Height - popupSize.Height);
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                /* The button is not under the window's client root (a detached control): the menu opens where it would by default. */
+            }
+        }
+
+        return new[] { new CustomPopupPlacement(new Point(targetSize.Width, y), PopupPrimaryAxis.Vertical) };
     }
 
     private void AddServer_Click(object sender, RoutedEventArgs e) => AddServerClick?.Invoke(this, e);
