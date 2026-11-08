@@ -61,6 +61,13 @@ spec:
             capabilities:
               drop:
                 - ALL
+          # Fixed and small (it copies one file), so a namespace with a ResourceQuota accepts the pod.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
           {{- with .Values.configSubstitutions }}
           env:
             {{- range $i, $s := . }}

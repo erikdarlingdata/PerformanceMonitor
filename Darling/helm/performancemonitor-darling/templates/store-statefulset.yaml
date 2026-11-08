@@ -18,6 +18,8 @@ spec:
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
+      # Time for postgres to finish a clean (fast) shutdown and its checkpoint on a store with real data.
+      terminationGracePeriodSeconds: 120
       # 70:70 is the postgres user of the store image (checked with: docker run --rm --entrypoint id timescale/timescaledb:2.31.0-pg17 postgres).
       # The image would start as root and drop to it; the chart starts it as that user directly, so no container runs as root.
       securityContext:

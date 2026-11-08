@@ -4,7 +4,9 @@
 #   render-config.sh <template> <output>
 #
 # For each pair DARLING_SUBST_<n>_PLACEHOLDER / DARLING_SUBST_<n>_VALUE (n = 0, 1, ... until a gap) it
-#   1. refuses a value outside [A-Za-z0-9:/._~%?=&+#-] or one with a newline (exit 2, naming the placeholder, never the value),
+#   1. drops ONE trailing newline (kubectl create secret --from-file keeps a file's last newline, and Darling trims
+#      file: secrets the same way), then refuses a value outside [A-Za-z0-9:/._~%?=&+#-] or one with a newline left
+#      (exit 2, naming the placeholder, never the value),
 #   2. refuses a placeholder that does not appear in the template,
 #   3. replaces every occurrence literally (no regex, no & expansion),
 #   4. refuses a placeholder that is still present afterwards.
@@ -37,6 +39,7 @@ while eval "[ -n \"\${DARLING_SUBST_${n}_PLACEHOLDER+set}\" ]"; do
     exit 2
   fi
   eval "value=\${DARLING_SUBST_${n}_VALUE}"
+  value="${value%"${nl}"}"
 
   case "${value}" in
     *"${nl}"*)

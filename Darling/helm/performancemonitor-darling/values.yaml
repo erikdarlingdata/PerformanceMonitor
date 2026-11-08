@@ -74,7 +74,8 @@ config: {}
 
 # A list of { placeholder, secretKey }. At pod start an init container replaces every occurrence of `placeholder` in darling.json
 # with the value of `secretKey` from the Secret below, so a secret such as a webhook URL never lands in a ConfigMap.
-# A value may only contain A-Z a-z 0-9 and : / . _ ~ % ? = & + # - ; anything else stops the pod from starting.
+# A value may only contain A-Z a-z 0-9 and : / . _ ~ % ? = & + # - ; anything else stops the pod from starting. One trailing
+# newline is dropped first (kubectl create secret --from-file keeps a file's last one); a newline anywhere else is refused.
 configSubstitutions: []
 
 # Where Darling reads its password key from (the key that seals stored server passwords), instead of generating one

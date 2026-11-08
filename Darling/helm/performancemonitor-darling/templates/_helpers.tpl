@@ -106,6 +106,15 @@ an empty value name means the chart sets the key itself and nothing overrides it
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- /* The chart writes its own top-level blocks under these names. A copy spelled in another case would sit beside them in
+darling.json, and Darling, which reads keys ignoring case, would read only one of the two. */ -}}
+{{- range $key, $_ := .Values.config -}}
+{{- range $want := list "postgres" "web" "mcp" "health" "passwordKey" -}}
+{{- if and (eq (lower $key) (lower $want)) (ne $key $want) -}}
+{{- fail (printf "config.%s must be spelled config.%s: the chart writes its own %s block, and Darling reads keys ignoring case, so it would read only one of the two" $key $want $want) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{/* A surface's effective network list as JSON: the per-surface override (web.network.<field>) when non-empty, else network.<field>.

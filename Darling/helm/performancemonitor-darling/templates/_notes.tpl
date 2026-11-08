@@ -17,11 +17,11 @@ WARNING: generated values are in use:
 They are kept across upgrades only while the Secret exists in the cluster. A tool that renders the chart without
 reading the cluster (a GitOps controller, helm template) generates different values on every render. For those installs
 create the Secrets yourself and set secrets.existingSecret and store.bundled.auth.existingSecret to their names.
-{{- if not .Values.secrets.existingSecret }}
-
-Read a token (it is never printed here):
-  kubectl get secret {{ include "performancemonitor-darling.secretName" . }} --namespace {{ .Release.Namespace }} -o jsonpath='{.data.{{ .Values.secrets.webTokenKey }}}' | base64 -d
 {{- end }}
+{{- if .Values.web.enabled }}
+
+Read the web token (it is never printed here; the key is {{ .Values.secrets.webTokenKey }}):
+  kubectl get secret {{ include "performancemonitor-darling.secretName" . }} --namespace {{ .Release.Namespace }} -o jsonpath='{.data.{{ .Values.secrets.webTokenKey }}}' | base64 -d
 {{- end }}
 {{- if eq (toString (default .Chart.AppVersion .Values.image.tag)) "latest" }}
 

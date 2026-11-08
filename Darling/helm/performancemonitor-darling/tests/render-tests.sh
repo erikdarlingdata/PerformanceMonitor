@@ -460,3 +460,29 @@ assert_eq "$(yq 'select(.kind == "ConfigMap") | .data["darling.json"]' "${OUT}" 
 t state_pvc_kept_on_uninstall
 render
 assert_eq "$(doc PersistentVolumeClaim "${DEPLOY}" | yq '.metadata.annotations["helm.sh/resource-policy"]')" "keep" "state PVC keep annotation"
+
+t fail_top_level_key_in_another_case
+# The chart merges its own postgres/web/mcp/health/passwordKey blocks; a differently-cased copy in config would sit beside
+# them in darling.json, and Darling (case-insensitive) would read only one of the two.
+assert_fails "config.Postgres must be spelled config.postgres" --set config.Postgres.webConnectionString=x
+assert_fails "config.WEB must be spelled config.web" --set config.WEB.network.oidc.authority=https://idp.example.com
+assert_fails "config.Mcp must be spelled config.mcp" --set config.Mcp.tokens=x
+# health and passwordKey are owned whole, so any spelling fails as owned.
+assert_fails "config.passwordKey is owned by the chart" --set config.PasswordKey=x
+render --set config.postgres.webConnectionString=x
+assert_eq "$(config_json '.postgres.webConnectionString')" '"x"' "exact spelling passes through"
+
+t init_container_resources
+render
+assert_eq "$(dq '.spec.template.spec.initContainers[0].resources')" '{"requests":{"cpu":"10m","memory":"16Mi"},"limits":{"memory":"64Mi"}}' "init container resources"
+
+t store_termination_grace
+render
+assert_eq "$(ssq '.spec.template.spec.terminationGracePeriodSeconds')" "120" "store terminationGracePeriodSeconds"
+
+t notes_token_command_for_existing_secret
+n="$(notes --set secrets.existingSecret=mine --set store.bundled.auth.existingSecret=x --set image.tag=1)"
+grep -qF "kubectl get secret mine" <<<"${n}" || { echo "NOTES lack the token command for an existingSecret" >&2; exit 1; }
+grep -qF "{.data.web-token}" <<<"${n}" || { echo "NOTES do not name the web token key" >&2; exit 1; }
+n="$(notes --set secrets.existingSecret=mine --set secrets.webTokenKey=dash --set store.bundled.auth.existingSecret=x --set image.tag=1)"
+grep -qF "{.data.dash}" <<<"${n}" || { echo "NOTES do not name a custom web token key" >&2; exit 1; }

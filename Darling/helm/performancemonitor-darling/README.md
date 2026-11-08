@@ -105,7 +105,7 @@ The bundled store runs custom alerts. An external store does not, by design, and
 | `mcp.enabled`, `mcp.port` | `false`, `5152` | The MCP endpoint. |
 | `mcp.network.allowFrom`, `mcp.ingress.*` | empty, disabled | Override, and the MCP Ingress. |
 
-Fixed, not values: one replica, the `Recreate` strategy, and the pod security context (`runAsNonRoot`, user, group and `fsGroup` 1654, `fsGroupChangePolicy: OnRootMismatch`, `RuntimeDefault` seccomp). Every container drops all capabilities, forbids privilege escalation and has a read-only root filesystem. No container ever runs as root.
+Fixed, not values: one replica, the `Recreate` strategy, and the pod security context (`runAsNonRoot`, user, group and `fsGroup` 1654, `fsGroupChangePolicy: OnRootMismatch`, `RuntimeDefault` seccomp). Every container drops all capabilities, forbids privilege escalation and has a read-only root filesystem. No container ever runs as root. The init container that writes `darling.json` has small fixed resources (requests 10m CPU and 16Mi, limit 64Mi), so a namespace with a ResourceQuota accepts the pod.
 
 ### Keys the chart owns in `config`
 
@@ -116,7 +116,7 @@ The chart owns exactly these keys of `darling.json`:
 - `mcp.enabled`, `mcp.port`, `mcp.network.listen`, `mcp.network.allowFrom` and `mcp.network.token`;
 - `health` and `passwordKey`.
 
-Setting one inside `config` fails the render and names the value to use instead (or says the chart sets it and nothing overrides it); the chart never overrides one silently. Keys are matched ignoring case, as Darling reads them. Every other key under `postgres`, `web.network` and `mcp.network` is yours and is passed through, for example `postgres.webConnectionString`, `web.network.oidc`, `web.network.tls` and `mcp.network.tls`. The chart sets `mcp.network.hostName` only when `config` does not (see below).
+Setting one inside `config` fails the render and names the value to use instead (or says the chart sets it and nothing overrides it); the chart never overrides one silently. Keys are matched ignoring case, as Darling reads them, and `config` must spell the top-level `postgres`, `web` and `mcp` exactly so: a `Postgres` block would sit beside the chart's and Darling would read only one of the two, so the render fails. Every other key under `postgres`, `web.network` and `mcp.network` is yours and is passed through, for example `postgres.webConnectionString`, `web.network.oidc`, `web.network.tls` and `mcp.network.tls`. The chart sets `mcp.network.hostName` only when `config` does not (see below).
 
 ### Through `config`
 
@@ -175,7 +175,7 @@ configSubstitutions:
     secretKey: slack-webhook
 ```
 
-An init container writes the Secret's value into the file the service reads, when the pod starts. Use plain tokens like `@@NAME@@`: the JSON the chart renders escapes `&`, `<` and `>`, so a placeholder containing one never matches. A value may only contain `A-Z a-z 0-9` and `: / . _ ~ % ? = & + # -`; any other character stops the pod from starting (so a bad value cannot corrupt the JSON). The Secret is the one named by `secrets.existingSecret`, or the chart's own with the key in `secrets.values`.
+An init container writes the Secret's value into the file the service reads, when the pod starts. Use plain tokens like `@@NAME@@`: the JSON the chart renders escapes `&`, `<` and `>`, so a placeholder containing one never matches. A value may only contain `A-Z a-z 0-9` and `: / . _ ~ % ? = & + # -`; any other character stops the pod from starting (so a bad value cannot corrupt the JSON). One trailing newline is dropped first, as `kubectl create secret --from-file` usually keeps the file's last one; a newline anywhere else is refused. The Secret is the one named by `secrets.existingSecret`, or the chart's own with the key in `secrets.values`.
 
 ## Secrets and GitOps
 

@@ -73,3 +73,19 @@ grep -qF 'HOOK' "${ERR}" || fail "stderr does not name the placeholder"
 
 echo "PASS ${CURRENT}"
 CURRENT=""
+
+begin subst_strips_one_trailing_newline
+# kubectl create secret --from-file usually keeps the file's last newline; Darling trims file: secrets the same way.
+printf '{"url":"@@HOOK@@"}\n' > "${TEMPLATE}"
+NL='
+'
+run_subst '@@HOOK@@' "https://x.example/a${NL}"
+[ "${STATUS}" = 0 ] || fail "exit ${STATUS}"
+[ "$(cat "${OUTPUT}")" = '{"url":"https://x.example/a"}' ] || fail "output differs: $(cat "${OUTPUT}")"
+run_subst '@@HOOK@@' "https://x.example/a${NL}${NL}"
+[ "${STATUS}" = 2 ] || fail "two trailing newlines accepted (exit ${STATUS})"
+run_subst '@@HOOK@@' "https://x.example/a${NL}b"
+[ "${STATUS}" = 2 ] || fail "embedded newline accepted (exit ${STATUS})"
+
+echo "PASS ${CURRENT}"
+CURRENT=""
