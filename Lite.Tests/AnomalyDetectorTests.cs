@@ -1172,9 +1172,12 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
     {
         await SeedBaselineWaitRates();
         await SeedBaselineCpu(10, variance: 2);
+        /* The hour is seeded on the hour inside the window: the detector tiles the window by local hour and reports the scored
+           tile's mean, so a start part way through an hour would split the sixty collections across two tiles. */
+        var hour = new DateTime(_analysisStart.Year, _analysisStart.Month, _analysisStart.Day, _analysisStart.Hour, 0, 0, _analysisStart.Kind).AddHours(1);
         for (var m = 0; m < 60; m++)
         {
-            var at = _analysisStart.AddMinutes(m);
+            var at = hour.AddMinutes(m);
             await SeedWaitStatAsync(at, "SOS_SCHEDULER_YIELD", 300_000, sampleIntervalSeconds: 60);
             await SeedWaitStatAsync(at, "PAGEIOLATCH_SH", 60_000, sampleIntervalSeconds: 60);
             if (m % 5 == 0)
