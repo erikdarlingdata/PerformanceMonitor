@@ -1068,7 +1068,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.Contains("the largest being collect.store_log_events (2.0 GiB), collect.store_metrics (512.0 MiB)", reconciled, StringComparison.Ordinal);
         Assert.Contains("2.0 GiB is PostgreSQL catalog and TimescaleDB bookkeeping in 161 relations", reconciled, StringComparison.Ordinal);
         Assert.Contains("RECONCILED: every row together accounts for 99.76%", reconciled, StringComparison.Ordinal);
-        Assert.Contains("1 of 2 continuous aggregates has compression DISABLED and hold 200.0 GiB", reconciled, StringComparison.Ordinal);
+        Assert.Contains("1 of 2 continuous aggregates has compression DISABLED and holds 200.0 GiB", reconciled, StringComparison.Ordinal);
         Assert.DoesNotContain("NOT RECONCILED", reconciled, StringComparison.Ordinal);
         Assert.DoesNotContain("not from the store row's sweep", reconciled, StringComparison.Ordinal);
         Assert.DoesNotContain("no longer exist", reconciled, StringComparison.Ordinal);
@@ -1307,7 +1307,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         const string explained = "collection_health_hourly is uncompressed by design: each refresh re-materializes its last 8 days and its retention keeps 8 days";
 
         var both = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(rows)!, rows, states, none, existenceRead: true);
-        Assert.Contains("1 of 3 continuous aggregates has compression DISABLED and hold 200.0 GiB between them", both, StringComparison.Ordinal);
+        Assert.Contains("1 of 3 continuous aggregates has compression DISABLED and holds 200.0 GiB between them", both, StringComparison.Ordinal);
         Assert.Contains("not counting the one uncompressed by design below.", both, StringComparison.Ordinal);
         Assert.Contains(explained, both, StringComparison.Ordinal);
         Assert.Contains("no chunk of this one gets that old before retention drops it", both, StringComparison.Ordinal);
@@ -1320,7 +1320,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         var enabled = byDesign with { CompressionEnabled = true };
         var handEnabled = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(rows)!, rows, new[] { states[0], states[1], enabled }, none, existenceRead: true);
         Assert.DoesNotContain("uncompressed by design", handEnabled, StringComparison.Ordinal);
-        Assert.Contains("1 of 3 continuous aggregates has compression DISABLED and hold 200.0 GiB between them (compression_enabled on each continuous_aggregate object; the policy job ids beside it).", handEnabled, StringComparison.Ordinal);
+        Assert.Contains("1 of 3 continuous aggregates has compression DISABLED and holds 200.0 GiB between them (compression_enabled on each continuous_aggregate object; the policy job ids beside it).", handEnabled, StringComparison.Ordinal);
 
         Assert.Equal("8 days", TimescaleSupport.CollectionHealthRefreshStartOffset);
         Assert.Equal("8 days", TimescaleSupport.CollectionHealthRetentionInterval);

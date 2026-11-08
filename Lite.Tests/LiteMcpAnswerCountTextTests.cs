@@ -108,6 +108,17 @@ public sealed class LiteMcpAnswerCountTextTests : IClassFixture<SharedDuckDbFixt
         Assert.DoesNotContain("(s)", report.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(1, "(searched 1 server that has a list in the last 7 days)")]
+    [InlineData(3, "(searched 3 servers that have a list in the last 7 days)")]
+    public void FindDatabaseMiss_AgreesWithItsServerCount(int searched, string expected)
+    {
+        var message = McpDiscoveryTools.NoMatchMessage("appdb", searched, 7);
+
+        Assert.StartsWith("No monitored server's newest database list names 'appdb' " + expected, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("(s)", message, StringComparison.Ordinal);
+    }
+
     private async Task<JsonElement> HealthAsync()
     {
         var json = await McpHealthTools.GetCollectionHealth(new LocalDataService(_duckDb), _serverManager, ServerName);

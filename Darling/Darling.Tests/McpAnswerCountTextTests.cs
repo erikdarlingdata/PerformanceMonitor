@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -86,6 +87,63 @@ public sealed class McpAnswerCountTextTests
         Assert.StartsWith(expected, message, StringComparison.Ordinal);
     }
 
+
+    [Theory]
+    [InlineData(1, " 1 row is REDACTED: the monitoring login lacks pg_monitor on this target, so PostgreSQL returned the rows with every state column NULL rather than refusing the read. That row says nothing about session state and its severity is reported as unknown.")]
+    [InlineData(3, " 3 rows are REDACTED: the monitoring login lacks pg_monitor on this target, so PostgreSQL returned the rows with every state column NULL rather than refusing the read. Those rows say nothing about session state and their severity is reported as unknown.")]
+    public void SessionStateRedactedSentence_AgreesWithItsCount(int count, string expected)
+    {
+        Assert.Equal(expected, DarlingMcpPgSessionStatesTools.RedactedSentence(count));
+    }
+
+    [Theory]
+    [InlineData(1, " 1 session here was idle in transaction and pinned NOTHING - it held no snapshot and no transaction id, so terminating it would not reclaim a single dead row.")]
+    [InlineData(2, " 2 sessions here were idle in transaction and pinned NOTHING - they held no snapshot and no transaction id, so terminating them would not reclaim a single dead row.")]
+    public void SessionStateIdleSentence_AgreesWithItsCount(int count, string expected)
+    {
+        Assert.Equal(expected, DarlingMcpPgSessionStatesTools.IdleWithoutHorizonSentence(count));
+    }
+
+    [Fact]
+    public void SessionStateSentences_SayNothingForACountOfZero()
+    {
+        Assert.Equal(string.Empty, DarlingMcpPgSessionStatesTools.RedactedSentence(0));
+        Assert.Equal(string.Empty, DarlingMcpPgSessionStatesTools.IdleWithoutHorizonSentence(0));
+    }
+
+    [Theory]
+    [InlineData(1, "(searched 1 server that has a list in the last 7 days)")]
+    [InlineData(3, "(searched 3 servers that have a list in the last 7 days)")]
+    public void FindDatabaseMiss_AgreesWithItsServerCount(int searched, string expected)
+    {
+        var message = DarlingMcpFindDatabaseTools.NoMatchMessage("appdb", searched, 7);
+
+        Assert.StartsWith("No monitored server's newest database list names 'appdb' " + expected, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("(s)", message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(1, 2, 3, 4, "1 alerting-side store read for this server failed and was logged but reached no health surface", "over 2 alert passes since 2026-08-23 10:00Z", "Across this whole service 8 alerting-side reads failed: 1 here, 3 on store self-alerts that belong to no server, and 4 on other servers.")]
+    [InlineData(2, 1, 3, 4, "2 alerting-side store reads for this server failed and were logged but reached no health surface", "over 1 alert pass since 2026-08-23 10:00Z", "Across this whole service 9 alerting-side reads failed: 2 here, 3 on store self-alerts that belong to no server, and 4 on other servers.")]
+    public void AlertReadFailureSummary_PlacesEachCountInItsOwnPlace(int here, int passes, int fleet, int others, string first, string second, string third)
+    {
+        var counter = new AlertReadFailureCounter(() => new DateTime(2026, 8, 23, 10, 0, 0, DateTimeKind.Utc));
+        for (var i = 0; i < passes; i++) counter.RecordPass("101");
+        for (var i = 0; i < here; i++) counter.RecordReadFailure("101", "deadlocks", 7);
+        for (var i = 0; i < fleet; i++) counter.RecordReadFailure(null, "store background-job health reads", 10_004);
+        for (var i = 0; i < others; i++) counter.RecordReadFailure("999", "blocking", 5);
+
+        var reading = counter.ReadFor("101");
+        Assert.Equal(here, reading.ServerReadFailures);
+        Assert.Equal(passes, reading.ServerAlertPasses);
+        Assert.Equal(fleet, reading.FleetReadFailures);
+        Assert.Equal(here + fleet + others, reading.InstanceReadFailures);
+
+        var finding = AlertReadFailureCounter.FormatFinding(reading)!;
+        Assert.Contains(first, finding, StringComparison.Ordinal);
+        Assert.Contains(second, finding, StringComparison.Ordinal);
+        Assert.Contains(third, finding, StringComparison.Ordinal);
+    }
 
     private static DarlingPgSessionStatesReader.PgSessionStateRow Row(int sampleCount, int horizonHolderSamples, long peakHorizonAge)
         => new(
