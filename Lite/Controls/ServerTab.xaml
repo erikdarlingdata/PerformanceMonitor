@@ -1567,9 +1567,10 @@
                          pressure flags). Loads when this sub-tab is shown (RefreshCpuAsync, CpuSubTabControl). -->
                     <TabItem Header="CPU Scheduler">
                         <!-- #8307: the page scrolls as one. The grid takes the rows it needs (up to PageScroll.GridMaxHeight) and the chart the rest,
-                             never less than its floor; below their sum the page scrolls, and a wheel over a grid at its end moves the page. -->
+                             never less than its floor; the page's least height is the two with their gap, set from the grid's realized height
+                             (CpuSchedulerGrid_SizeChanged), so the page scrolls only below their sum, and a wheel over a grid at its end moves the page. -->
                         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8" PreviewMouseWheel="PageScroll_PreviewMouseWheel">
-                        <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="{x:Static ui:PageScroll.ChartOverGridMinHeight}">
+                        <Grid x:Name="CpuSchedulerPage" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 <RowDefinition Height="Auto"/>
@@ -1579,7 +1580,7 @@
                             </ui:ChartPanel>
                             <!-- Metric/value latest-snapshot grid: a single-row point-in-time collector has no
                                  natural top-N, so its snapshot is a labelled metric list; warning rows highlight. -->
-                            <DataGrid Grid.Row="1" x:Name="CpuSchedulerGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
+                            <DataGrid Grid.Row="1" x:Name="CpuSchedulerGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}" SizeChanged="CpuSchedulerGrid_SizeChanged"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                                       CanUserSortColumns="False" Margin="0,8,0,0">

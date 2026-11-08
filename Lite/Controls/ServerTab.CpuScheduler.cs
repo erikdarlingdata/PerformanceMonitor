@@ -23,6 +23,10 @@ public partial class ServerTab
 {
     /// <summary>#8307: the CPU Scheduler page scrolls as one: a wheel over its grid that is at its end moves the page (<see cref="PageScroll.ForwardWheel"/>).</summary>
     private void PageScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e) => PageScroll.ForwardWheel(sender, e);
+
+    /// <summary>#8307: the page's least height follows the grid: the chart's floor over the rows the grid takes (<see cref="PageScroll.ChartOverGridMinHeight"/>), so the page scrolls only when the two do not fit.</summary>
+    private void CpuSchedulerGrid_SizeChanged(object sender, SizeChangedEventArgs e) =>
+        CpuSchedulerPage.MinHeight = PageScroll.ChartOverGridMinHeight(CpuSchedulerGrid.ActualHeight);
 }
 
 /// <summary>
