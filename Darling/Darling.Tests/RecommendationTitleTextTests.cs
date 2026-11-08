@@ -12,7 +12,8 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #8226: the words a recommendation card shows for a finding named only by its fact token, shared by Lite and the Darling Viewer.
+/// #8226: the words a recommendation card shows for a finding named only by its fact token, shared by Lite and the Darling Viewer. A
+/// wait type keeps its name and says that it is a wait; a key that is not a wait type reads as its words.
 /// </summary>
 public sealed class RecommendationTitleTextTests
 {
@@ -22,8 +23,15 @@ public sealed class RecommendationTitleTextTests
     [InlineData("RESOURCE_MEMVIRTUAL_LOW", "Low virtual memory")]
     [InlineData("RESOURCE_MEM_STEADY", "Memory steady")]
     [InlineData("RESOURCE_MEMPHYSICAL_SOMETHING_NEW", "Memphysical something new")]
+    [InlineData("RESOURCE_SEMAPHORE", "RESOURCE_SEMAPHORE waits")]
     [InlineData("SOS_SCHEDULER_YIELD", "SOS_SCHEDULER_YIELD waits")]
     [InlineData("CXPACKET", "CXPACKET waits")]
+    [InlineData("PAGEIOLATCH_SH", "PAGEIOLATCH_SH waits")]
+    [InlineData("LCK_M_S", "LCK_M_S waits")]
+    [InlineData("WRITELOG", "WRITELOG waits")]
+    [InlineData("CONFIG_MAXDOP_UNSET", "Config maxdop unset")]
+    [InlineData("PG_AUTOVACUUM_LAG", "Pg autovacuum lag")]
+    [InlineData("QUERY_HIGH_DOP", "Query high dop")]
     [InlineData("Plan cache bloat", "Plan cache bloat")]
     [InlineData("CPU", "CPU")]
     [InlineData("", "")]

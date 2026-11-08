@@ -96,6 +96,18 @@ public sealed class LitePanelCardsTests
 
                 found.AddRange(Placeholder(tab, window, "PerfmonSearchBox", "PerfmonSearchPlaceholder", $"{width}x{height}"));
                 found.AddRange(Placeholder(tab, window, "MemoryClerkSearchBox", "MemoryClerkSearchPlaceholder", $"{width}x{height}"));
+
+                /* The fatal-database banner is not a collection cycle, so it stands above the Collection Cycles card, whose title and subtitle do not describe it. */
+                var banner = Find<FrameworkElement>(tab, "LocalDatabaseBanner");
+                var card = Find<FrameworkElement>(tab, "CollectionHealthCard");
+                if (CardOf(banner) is not null)
+                {
+                    found.Add($"LocalDatabaseBanner at {width}x{height}: sits inside the Collection Cycles card");
+                }
+                else if (!(banner.Visibility == Visibility.Collapsed || Bounds(banner, tab).Bottom <= Bounds(card, tab).Top + 0.5))
+                {
+                    found.Add($"LocalDatabaseBanner at {width}x{height}: does not sit above the Collection Cycles card");
+                }
             }
 
             return found;
