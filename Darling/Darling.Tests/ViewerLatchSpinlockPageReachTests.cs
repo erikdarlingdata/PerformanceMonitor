@@ -14,6 +14,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.Windows.Threading;
+using ScottPlot.WPF;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Ui;
@@ -246,6 +248,61 @@ public sealed class ViewerLatchSpinlockPageReachTests
         });
 
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    [Fact]
+    public void AChartChromeChange_WhileAnExpanderIsOpen_DoesNotKeepThePageTaller_AfterItCloses()
+    {
+        var problems = WithServerTab((tab, window) =>
+        {
+            var found = new List<string>();
+            var latchGrid = Find<DataGrid>(tab, "LatchStatsGrid");
+            var spinlockGrid = Find<DataGrid>(tab, "SpinlockStatsGrid");
+            FillSnapshotGrids(latchGrid, spinlockGrid);
+            Reveal(latchGrid);
+            Settle(window);
+            var latches = ExpanderOf(latchGrid);
+            var page = PageOf(latches);
+            var grid = (Grid)page.Content;
+            var charts = new[] { Find<WpfPlot>(tab, "LatchStatsChart"), Find<WpfPlot>(tab, "SpinlockStatsChart") };
+
+            foreach (var (width, height) in Sizes)
+            {
+                latches.IsExpanded = false;
+                Resize(window, PaneWidth(width), height);
+                ChangeChrome(charts, window);
+
+                latches.IsExpanded = true;
+                Settle(window);
+                ChangeChrome(charts, window);
+
+                latches.IsExpanded = false;
+                Settle(window);
+                var rows = grid.RowDefinitions.Sum(d => d.Height.IsStar ? d.MinHeight : d.Height.IsAbsolute ? d.Height.Value : d.ActualHeight);
+                if (page.ExtentHeight > Math.Max(page.ViewportHeight, rows) + 0.5)
+                {
+                    found.Add($"{width}x{height}: after the expander closed the page is still {page.ExtentHeight:0.#} px, though its rows need {rows:0.#} px in a {page.ViewportHeight:0.#} px viewport ({Shape(grid)})");
+                }
+            }
+
+            return found;
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /* Renders the charts with their bottom-axis label toggled, so each chart's chrome height changes and the layout refits its row and the page's floor, then runs that refit, which the layout queues at background priority. A refresh with other series names or a resize that re-wraps a legend changes the chrome the same way. */
+    private static void ChangeChrome(WpfPlot[] charts, Window window)
+    {
+        foreach (var chart in charts)
+        {
+            ChartLayout.Attach(chart);
+            var label = chart.Plot.Axes.Bottom.Label;
+            label.Text = string.IsNullOrEmpty(label.Text) ? "Collected" : "";
+            using (chart.Plot.GetImage((int)Math.Max(200, chart.ActualWidth), (int)Math.Max(200, chart.ActualHeight))) { }
+        }
+        Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.Background);
+        Settle(window);
     }
 
     /* The element ends inside what the page can show (its scroll extent, or the viewport when the content is stretched to fill a taller one), and scrolling to the bottom brings its end into the viewport. */
