@@ -17,9 +17,15 @@ namespace PerformanceMonitor.Common;
 public static class CountText
 {
     /// <summary>
-    /// <paramref name="count"/> followed by <paramref name="singular"/>, with an "s" added when the count is not one. The nouns
-    /// the apps count (event, run, alert, recommendation, database) all take a plain "s".
+    /// <paramref name="count"/> followed by <paramref name="singular"/>, with an "s" added when the count is not one. Most nouns
+    /// the apps count (event, run, alert, recommendation, database) take a plain "s".
     /// </summary>
-    public static string Plural(int count, string singular) =>
-        count == 1 ? $"1 {singular}" : $"{count.ToString(CultureInfo.InvariantCulture)} {singular}s";
+    public static string Plural(int count, string singular) => Plural(count, singular, singular + "s");
+
+    /// <summary>
+    /// <paramref name="count"/> followed by <paramref name="singular"/> when the count is one and by <paramref name="plural"/>
+    /// otherwise, for a noun whose plural is not a plain "s": "1 index" and "3 indexes", "1 query" and "3 queries".
+    /// </summary>
+    public static string Plural(int count, string singular, string plural) =>
+        count == 1 ? $"1 {singular}" : $"{count.ToString(CultureInfo.InvariantCulture)} {plural}";
 }

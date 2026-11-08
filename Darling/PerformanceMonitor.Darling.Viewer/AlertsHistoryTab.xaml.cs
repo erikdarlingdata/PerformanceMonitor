@@ -166,7 +166,7 @@ public partial class AlertsHistoryTab : UserControl
             DataGridHeaderFit.Apply(AlertsDataGrid); // #6136: a longer title widens its column
             /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
             _lastReadRowCount = alerts.Count;
-            AlertCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap, "alert(s)");
+            AlertCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap, "alert");
 
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
@@ -308,7 +308,7 @@ public partial class AlertsHistoryTab : UserControl
         }
 
         _filterManager?.SetFilter(e.FilterState);
-        AlertCountIndicator.Text = JobHistoryCap.CountText(AlertsDataGrid.Items.Count, _lastReadRowCount, RowCap, "alert(s)");
+        AlertCountIndicator.Text = JobHistoryCap.CountText(AlertsDataGrid.Items.Count, _lastReadRowCount, RowCap, "alert");
     }
 
     private void FilterPopup_FilterCleared(object? sender, EventArgs e)
