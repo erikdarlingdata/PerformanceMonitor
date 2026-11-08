@@ -186,13 +186,18 @@ SELECT
         }
         catch (SqlException ex)
         {
-            result.HardwareUnavailableReason =
-                "Hardware inventory (CPU, memory, sockets) unavailable - the monitoring login likely lacks VIEW DATABASE STATE on this database.";
+            result.HardwareUnavailableReason = HardwareUnavailableNote;
             AppLogger.Warn("FinOps", $"Hardware inventory unavailable for '{connection.DataSource}': {ex.Message}");
         }
 
         return result;
     }
+
+    /// <summary>The Hardware Note of an inventory row whose hardware read was denied: set here when the live read's
+    /// sys.dm_os_sys_info query fails, and by <see cref="FinOpsServerInventory.FromCollected"/> for a collected row the
+    /// collector stored with no CPU count and no memory, which is what it stores after the same denial.</summary>
+    internal const string HardwareUnavailableNote =
+        "Hardware inventory (CPU, memory, sockets) unavailable - the monitoring login likely lacks VIEW DATABASE STATE on this database.";
 
     /// <summary>
     /// The relation a newest-row lookup reads for the servers in <paramref name="serverIds"/> (#7014): the hot <paramref name="table"/>, plus the

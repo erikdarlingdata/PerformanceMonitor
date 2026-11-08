@@ -63,12 +63,12 @@ public sealed class DailyRefreshBatchingTests
             Assert.Contains("buckets_per_batch => 1", sql, StringComparison.Ordinal);
 
             /* The window is UNCHANGED by this treatment, pinned beside the batching so the two cannot be
-               confused for each other: the 3-day reach is what the hourly tier's retention leans on, and
+               confused for each other: the 4-day reach is what the hourly tier's retention leans on, and
                "we fixed the daily refresh" must never come to mean it was shortened. */
             Assert.Contains(
                 view == TimescaleSupport.QueryStoreStatsDayGrainDailyView
-                    ? "start_offset => INTERVAL '4 days'"   // #6070: the one daily built on another daily
-                    : "start_offset => INTERVAL '3 days'",
+                    ? "start_offset => INTERVAL '5 days'"   // #6070: the one daily built on another daily
+                    : "start_offset => INTERVAL '4 days'",
                 sql, StringComparison.Ordinal);
 
             /* And no initial_start: a batching change must not also re-schedule the tier. */
@@ -97,11 +97,11 @@ public sealed class DailyRefreshBatchingTests
     {
         Assert.Equal(1, TimescaleSupport.DailyRefreshBucketsPerBatch);
 
-        /* Stated as a relation too: the window is three buckets wide, so one-per-batch is three commits, and
+        /* Stated as a relation too: the window is four buckets wide, so one-per-batch is four commits, and
            a batch size at or above the window's bucket count would be the single transaction again. */
         var bucketsInWindow =
             (int)(TimescaleSupport.DailyRefreshStartSpan.TotalDays / TimeSpan.FromDays(1).TotalDays);
-        Assert.Equal(3, bucketsInWindow);
+        Assert.Equal(4, bucketsInWindow);
         Assert.True(TimescaleSupport.DailyRefreshBucketsPerBatch < bucketsInWindow,
             "a batch size at or above the window's bucket count is the one-transaction shape the incident was");
     }

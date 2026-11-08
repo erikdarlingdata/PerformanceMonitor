@@ -179,7 +179,11 @@ WHERE server_id = $1 AND deadlock_time >= $2";
 
         /* Last collection time from collection_log — hot table first (#3895). A miss on both leaves the CPU
            row's collection_time (UTC) above in place. #5643: the loop's skipped-slots row is not a
-           collection, so it cannot make a stalled server read fresh. */
+           collection, so it cannot make a stalled server read fresh. #8304: only a SUCCESS row is a collection
+           that reached the server. Every attempt writes a row, ERROR and PERMISSIONS included, so a server Lite
+           cannot reach writes one per collector per cycle, and a read over every row moved this stamp, and the
+           freshness band under it, forward on each failed attempt. The filter is the one
+           GetLastSuccessfulCollectionAsync applies for the server list, so the card and the list agree. */
         foreach (var relation in NewestFirstRelations("collection_log"))
         {
             using var cmd = connection.CreateCommand();
@@ -187,6 +191,7 @@ WHERE server_id = $1 AND deadlock_time >= $2";
 SELECT MAX(collection_time)
 FROM " + relation + $@"
 WHERE server_id = $1
+AND   status = 'SUCCESS'
 AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             var result = await cmd.ExecuteScalarAsync();
@@ -278,8 +283,8 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
     /// <summary>
     /// #7167: when this server's newest SUCCESSFUL collector run landed (<c>collection_log.status = 'SUCCESS'</c>, the status Collection
     /// Health counts as a run that reached the server), or null when the store holds none. A server Lite cannot reach logs ERROR,
-    /// PERMISSIONS or SKIPPED rows every cycle, which keep the plain newest-row read of <see cref="GetServerSummaryAsync"/> fresh while
-    /// nothing is being read, so this read leaves them out. The loop's skipped-slots row is not a collector run (#5643).
+    /// PERMISSIONS, SKIPPED or CANCELLED rows every cycle while nothing is being read, so this read leaves them out, as the card's
+    /// Last Collect read in <see cref="GetServerSummaryAsync"/> does (#8304). The loop's skipped-slots row is not a collector run (#5643).
     /// </summary>
     public async Task<DateTime?> GetLastSuccessfulCollectionAsync(int serverId)
     {
@@ -352,7 +357,7 @@ public sealed class ServerTagPill
 /// The Overview card's status-line state, as a VALUE rather than a rendered string. The word on the card
 /// (<see cref="ServerSummaryItem.StatusDisplay"/>), the colour it is painted
 /// (<see cref="ServerSummaryItem.StatusBrush"/>), the card's border
-/// (<see cref="ServerSummaryItem.CardBorderBrush"/>), the offline overlay
+/// (<see cref="ServerSummaryItem.CardBorderBrush"/>), the "--" the Blocking and Deadlocks rows read on a dark server
 /// (<see cref="ServerSummaryItem.IsOffline"/>) and the first line of its tooltip
 /// (<see cref="ServerSummaryItem.StatusTooltip"/>) are all renderings OF THIS — the
 /// (<c>IsOnline</c>, <c>HasCollectorErrors</c>) pair is read by <see cref="ServerCardStatusRules.Classify"/>
@@ -385,7 +390,7 @@ public enum ServerCardStatus
     /// Nothing to do with the metric rows, which is the whole reason it needs explaining.</summary>
     CollectorErrors,
 
-    /// <summary>The last connection check failed — the card's red offline overlay.</summary>
+    /// <summary>The last connection check failed — the card's red border and Offline word, with "--" on its Blocking and Deadlocks rows.</summary>
     Offline,
 
     /// <summary>The server has not been connection-checked yet (<c>IsOnline</c> is null): a card built before
@@ -395,7 +400,7 @@ public enum ServerCardStatus
 
 /// <summary>
 /// The ladder itself, in ONE function, plus the two renderings every surface shares. #2451 collapsed the
-/// Overview card's word, colour, border, overlay and tooltip onto <see cref="ServerCardStatus"/>; #2458 found
+/// Overview card's word, colour, border, greyed rows and tooltip onto <see cref="ServerCardStatus"/>; #2458 found
 /// the sidebar row's dot (<c>ServerConnection.DotStatus</c>) deriving the same four words from its own copy of
 /// the same flag pair, on a different type, on a different surface — so the sidebar and the card could say
 /// different things about one server and nothing would notice. They now read this.
@@ -585,8 +590,11 @@ public class ServerSummaryItem
     public string CpuDetail =>
         CpuIsStale || !CpuPercent.HasValue || !OtherProcessCpuPercent.HasValue ? "" : $"Other: {OtherProcessCpuPercent:F0}%";
     public string MemoryDisplay => MemoryMb.HasValue ? $"{MemoryMb / 1024.0:F1} GB" : "--";
-    public string BlockingDisplay => BlockingCount > 0 ? BlockingCount.ToString() : "0";
-    public string DeadlockDisplay => DeadlockCount > 0 ? DeadlockCount.ToString() : "0";
+    /* #8304: an offline card has no hour counts to show. Its stored counts are from before the server went dark, and a green
+       "0" under a red Offline reads as a healthy server, so Blocking and Deadlocks read "--" in the card's unknown grey, as
+       CPU does for a reading it cannot show. The counts themselves stay on the item: the alert engine reads them. */
+    public string BlockingDisplay => IsOffline ? "--" : BlockingCount > 0 ? BlockingCount.ToString() : "0";
+    public string DeadlockDisplay => IsOffline ? "--" : DeadlockCount > 0 ? DeadlockCount.ToString() : "0";
 
     /// <summary>
     /// How old the newest collection_log row for this server is, banded by the SHARED
@@ -761,8 +769,10 @@ public class ServerSummaryItem
     /* Color coding. A CPU row with no shown figure (stale, #7196, or never measured) is the card's unknown grey, the one
        StatusBrush's fallback uses, never the Healthy green (#3635): Darling bands the same case Unknown. */
     public SolidColorBrush CpuBrush => MakeBrush(CpuIsCritical ? "#E57373" : CpuIsElevated ? "#FFB74D" : ShownCpuPercentForAlert is null ? "#888888" : "#81C784");
-    public SolidColorBrush BlockingBrush => MakeBrush(BlockingIsElevated ? "#FFB74D" : "#81C784");
-    public SolidColorBrush DeadlockBrush => MakeBrush(DeadlocksAreElevated ? "#E57373" : "#81C784");
+    /* #8304: on a dark server the Blocking and Deadlocks rows read "--", so their dots take the same unknown grey as a CPU row
+       with no shown figure; the gates below are read only for a reachable server, by the brush and the reason alike. */
+    public SolidColorBrush BlockingBrush => IsOffline ? MakeBrush("#888888") : MakeBrush(BlockingIsElevated ? "#FFB74D" : "#81C784");
+    public SolidColorBrush DeadlockBrush => IsOffline ? MakeBrush("#888888") : MakeBrush(DeadlocksAreElevated ? "#E57373" : "#81C784");
     /* The border ranks the same states the status word names, so it reads the SAME discriminant rather than
        the flags behind it — see ServerCardStatus for the pair the raw reads disagreed on. The precedence is
        unchanged: a dark server first, then the metric rows worst-first, then failing collectors. */
@@ -861,14 +871,18 @@ public class ServerSummaryItem
                 parts.Add(CpuDisplay.StartsWith("SQL CPU", StringComparison.Ordinal) ? CpuDisplay : "CPU " + CpuDisplay);
             }
 
-            if (BlockingIsElevated)
+            /* #8304: a dark server's Blocking and Deadlocks rows read "--", so the reason names neither; it quotes the rows as they read. */
+            if (!IsOffline)
             {
-                parts.Add("Blocking " + BlockingDisplay);
-            }
+                if (BlockingIsElevated)
+                {
+                    parts.Add("Blocking " + BlockingDisplay);
+                }
 
-            if (DeadlocksAreElevated)
-            {
-                parts.Add("Deadlocks " + DeadlockDisplay);
+                if (DeadlocksAreElevated)
+                {
+                    parts.Add("Deadlocks " + DeadlockDisplay);
+                }
             }
 
             return string.Join(", ", parts);
@@ -879,8 +893,8 @@ public class ServerSummaryItem
     /// The Overview card's status tooltip (#2437, answering #2422 on Lite's surface): what the status word
     /// means, what the metric rows say, and what to do next.
     ///
-    /// <para>The metric line is omitted on an Offline card. The card draws a dimming overlay across those rows
-    /// precisely because the numbers under it are the last ones collected before the server went dark, so
+    /// <para>The metric line is omitted on an Offline card. Its Blocking and Deadlocks rows read "--" (#8304)
+    /// precisely because the numbers behind them are the last ones collected before the server went dark, so
     /// demanding attention for them would contradict the card while the reader is looking at it.</para>
     /// </summary>
     public string StatusTooltip

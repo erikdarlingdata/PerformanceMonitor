@@ -408,7 +408,7 @@ public sealed partial class DarlingWorker : BackgroundService
         new("aggregate batching converge", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.Delta,
             (connection, logger, ct) => TimescaleSupport.ConvergeContinuousAggregateBatchingAsync(connection, logger, ct)),
 
-        /* #6070: a daily whose parent is another daily keeps a window one bucket wider than the 3-day one, so the
+        /* #6070: a daily whose parent is another daily keeps a window one bucket wider than the 4-day one, so the
            day its parent writes after it ran is still in its window the next run. config only (start_offset),
            no schedule, so the daily tier keeps finish-to-start. Before the ensure for the same 22023 reason as
            the window converge above. */
@@ -431,6 +431,13 @@ public sealed partial class DarlingWorker : BackgroundService
            values differ — nothing on a converged store. */
         new("aggregate compression", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.InPlace,
             (connection, logger, ct) => TimescaleSupport.EnsureAggregateCompressionAsync(connection, logger, ct)),
+
+        /* #8302: AFTER every policy this product schedules exists (the refresh policies from the aggregate ensure, the
+           compression policies from the raw, collection_log and aggregate steps). Selects only jobs whose retry_period
+           differs, so a converged store issues no alter_job; a crashed job is then re-run about 15 minutes after the
+           scheduler's next job-list reload instead of a day later, which the hourly purge record's reload never let it reach. */
+        new("policy job retry period converge", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.Delta,
+            (connection, logger, ct) => TimescaleSupport.ConvergePolicyJobRetryPeriodAsync(connection, logger, ct)),
 
         /* #2007/#3653: BEFORE the fallback ensure (hygiene — the retired names left the ensure list, so it
            could not recreate them anyway). Judges each superseded pair against the tier horizon, which is a
