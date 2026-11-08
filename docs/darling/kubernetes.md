@@ -17,7 +17,8 @@ The chart README is the reference. It covers:
 - [secrets, and why a GitOps install must name its own Secrets](../../Darling/helm/performancemonitor-darling/README.md#secrets-and-gitops);
 - [the password key](../../Darling/helm/performancemonitor-darling/README.md#the-password-key) (see also [Keeping the key outside the service](security.md#security--least-privilege-roles));
 - [readiness](../../Darling/helm/performancemonitor-darling/README.md#readiness), which follows the collector (see [the health port](network-endpoints.md#the-health-port));
-- [upgrades](../../Darling/helm/performancemonitor-darling/README.md#upgrades).
+- [upgrades](../../Darling/helm/performancemonitor-darling/README.md#upgrades);
+- [uninstall](../../Darling/helm/performancemonitor-darling/README.md#uninstall), which keeps the volumes and the Secrets.
 
 Out of the box only `kubectl port-forward` reaches the dashboard. An Ingress needs `allowFrom` per surface (the dashboard judges the client address the controller forwards, the MCP endpoint the controller's own connection) and, for the dashboard, `trustedProxies`; see [reaching it from outside the cluster](../../Darling/helm/performancemonitor-darling/README.md#reaching-it-from-outside-the-cluster) and [Opt-in Network Endpoints](network-endpoints.md).
 

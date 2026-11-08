@@ -5,6 +5,10 @@ metadata:
   name: {{ include "performancemonitor-darling.fullname" . }}
   labels:
     {{- include "performancemonitor-darling.labels" . | nindent 4 }}
+  # Kept on uninstall, like the Secrets and the bundled store's volume: the state volume holds the password key, and
+  # without it a reinstall cannot read the passwords saved in a store that is still there.
+  annotations:
+    helm.sh/resource-policy: keep
 spec:
   accessModes:
     - ReadWriteOnce

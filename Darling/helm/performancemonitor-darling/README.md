@@ -155,7 +155,7 @@ An init container writes the Secret's value into the file the service reads, whe
 
 ## Secrets and GitOps
 
-Unless you name your own, the chart generates the web token, the MCP token (in `<fullname>`) and the bundled store's password (in `<fullname>-store`). It looks the existing Secrets up in the cluster on each upgrade so the values stay, and marks them `helm.sh/resource-policy: keep` so an uninstall leaves them (and so the store's password still matches its volume).
+Unless you name your own, the chart generates the web token, the MCP token (in `<fullname>`) and the bundled store's password (in `<fullname>-store`). It looks the existing Secrets up in the cluster on each upgrade so the values stay, and marks them `helm.sh/resource-policy: keep` so an uninstall leaves them (and so the store's password still matches its volume; see [Uninstall](#uninstall)).
 
 A tool that renders the chart without reading the cluster (`helm template`, which is what a GitOps controller runs) cannot see them, so it generates new tokens and a new store password on every sync. A new store password locks Darling out of a store that already has data. **For a GitOps install, create the Secrets yourself and set `secrets.existingSecret` and `store.bundled.auth.existingSecret` to their names.** Any secret manager can create them (External Secrets or Sealed Secrets, for example). `secrets.existingSecret` needs the token keys (`web-token`, `mcp-token`, or the names you set), the keys your `config` and `configSubstitutions` refer to, and for a `file:` reference the path `/run/secrets/darling/<key>`. The install notes print a warning whenever a generated value is in use.
 
@@ -198,6 +198,18 @@ What readiness does not cover: it follows a startup verdict. The service publish
 2. **`Recreate` means a short outage.** The state volume allows one writer, so the old pod stops before the new one starts. Collection pauses for that time.
 3. Set the new `image.tag` and run `helm upgrade darling Darling/helm/performancemonitor-darling --reuse-values --set-string image.tag=<release>` (or edit your values file). If a new chart version adds values, drop `--reuse-values` and pass your values file.
 4. **A volume from a deployment that ran the image as root.** The image runs as user 1654. A state volume left owned by root makes the new pod stop collection and report not Ready, never restarted, with the command to fix it in its log. Run a one-off Job (or initContainer) as root that does `chown -R 1654:1654 /var/lib/darling` and the `chmod`s of the volume root, with the Deployment scaled to 0 for a ReadWriteOnce volume, then scale back. The exact commands and the shapes of volume this covers (a new volume, a root-owned one, one mounted at `credentials/`) are in [Container user](../../../docs/darling/security.md#container-user), which also has the raw-manifest `securityContext` this chart renders. The chart itself never runs as root.
+5. **The bundled store's PostgreSQL major version.** A chart version that moves `store.bundled.image` to a new PostgreSQL major is a breaking change: PostgreSQL cannot open a data directory from another major. Dump the store with the old image, then restore it into the new one.
+
+## Uninstall
+
+`helm uninstall` leaves four things behind on purpose: the state PVC `<fullname>`, the bundled store's volume `data-<fullname>-store-0`, the chart Secret `<fullname>` and the store Secret `<fullname>-store` (the chart created the last two only when you named no Secret of your own). They belong together: the state volume holds the password key that opens the passwords saved in the store, and the store Secret holds the password the store's volume was created with. A reinstall with the same release name picks all four up again. To start over, delete all of them; never delete some and keep the rest:
+
+```
+kubectl delete pvc <fullname> data-<fullname>-store-0
+kubectl delete secret <fullname> <fullname>-store
+```
+
+With a long release name the store's names are shortened (`kubectl get pvc,secret` shows them). With `persistence.existingClaim` the state volume is yours and the chart never touches it.
 
 ## Tests
 

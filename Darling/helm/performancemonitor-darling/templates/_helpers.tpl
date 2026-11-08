@@ -230,14 +230,20 @@ Arguments: dict "ctx" <root> "surface" "web"|"mcp" "field" "allowFrom"|"trustedP
 {{- mergeOverwrite (deepCopy .Values.config) $owned | toPrettyJson -}}
 {{- end -}}
 
-{{/* Name of the bundled store resources. */}}
+{{/* Name of the bundled store resources, at most 52 characters: the StatefulSet's pods get a controller-revision-hash label
+of the name plus 11 characters (63 at most), and the headless Service appends "-headless" (61). */}}
 {{- define "performancemonitor-darling.storeName" -}}
-{{- printf "%s-store" (include "performancemonitor-darling.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- printf "%s-store" (include "performancemonitor-darling.fullname" . | trunc 46 | trimSuffix "-") -}}
+{{- end -}}
+
+{{/* Name of a surface's Service and Ingress: <fullname>-web or <fullname>-mcp, at most 63 characters. Argument: dict "ctx" <root> "surface" "web"|"mcp". */}}
+{{- define "performancemonitor-darling.surfaceName" -}}
+{{- printf "%s-%s" (include "performancemonitor-darling.fullname" .ctx | trunc 59 | trimSuffix "-") .surface -}}
 {{- end -}}
 
 {{/* Selector labels of the bundled store pod. The name label differs from the Darling pod's, so the Darling Deployment's selector never matches the store pod. */}}
 {{- define "performancemonitor-darling.storeSelectorLabels" -}}
-app.kubernetes.io/name: {{ include "performancemonitor-darling.name" . }}-store
+app.kubernetes.io/name: {{ include "performancemonitor-darling.name" . | trunc 57 | trimSuffix "-" }}-store
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: store
 {{- end -}}

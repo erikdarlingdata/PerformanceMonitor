@@ -429,3 +429,27 @@ assert_eq "$(yq 'select(.kind == "Ingress") | .metadata.name' "${OUT}" | grep -v
 assert_eq "$(config_json '.web.network.allowFrom')" '["192.0.2.0/24"]' "web allowFrom: the operators' network"
 assert_eq "$(config_json '.web.network.trustedProxies')" '["10.244.0.0/16"]' "web trustedProxies: the controller pods"
 assert_eq "$(config_json '.mcp.network.allowFrom')" '["10.244.0.0/16"]' "mcp allowFrom: the controller pods"
+
+t names_fit_with_the_longest_release_name
+# 53 characters, Helm's longest release name. Every object name must stay a valid label value (63), and the store
+# StatefulSet at most 52, because its pods get a controller-revision-hash label of the name plus 11 characters.
+LONG="$(printf 'r%.0s' $(seq 1 53))"
+helm template "${LONG}" "${CHART_DIR}" --set mcp.enabled=true --set mcp.ingress.enabled=true --set 'mcp.ingress.hosts={m.example.com}' \
+  --set web.ingress.enabled=true --set 'web.ingress.hosts={d.example.com}' --set 'network.allowFrom={10.1.0.0/16}' \
+  --set 'network.trustedProxies={10.1.0.0/16}' > "${OUT}"
+assert_eq "$(yq '.metadata.name | select(length > 63)' "${OUT}" | grep -v -- '---' || true)" "" "names over 63 characters"
+assert_eq "$(yq 'select(.kind == "StatefulSet") | .metadata.name | length' "${OUT}")" "52" "StatefulSet name length"
+assert_eq "$(yq 'select(.kind == "StatefulSet") | .spec.serviceName | length <= 63' "${OUT}")" "true" "serviceName fits"
+assert_eq "$(yq 'select(.kind == "StatefulSet") | ("data-" + .metadata.name + "-0") | length <= 63' "${OUT}")" "true" "store PVC name fits"
+assert_eq "$(yq '[.. | select(has("app.kubernetes.io/name")) | .["app.kubernetes.io/name"] | select(length > 63)] | length' "${OUT}" | grep -v -- '---' | sort -u)" "0" "name labels fit"
+# Every Service and Ingress name is distinct, and each Ingress backend names a rendered Service.
+assert_eq "$(yq 'select(.kind == "Service" or .kind == "Ingress") | .kind + "/" + .metadata.name' "${OUT}" | grep -v -- '---' | sort | uniq -d)" "" "duplicate names"
+for b in $(yq 'select(.kind == "Ingress") | .spec.rules[].http.paths[].backend.service.name' "${OUT}" | grep -v -- '---'); do
+  assert_eq "$(yq "select(.kind == \"Service\" and .metadata.name == \"${b}\") | .metadata.name" "${OUT}")" "${b}" "Ingress backend ${b} is a Service"
+done
+assert_eq "$(yq 'select(.kind == "ConfigMap") | .data["darling.json"]' "${OUT}" | yq -p json '.postgres.connectionString' | sed -E 's/^Host=([^;]*);.*/\1/')" \
+  "$(yq 'select(.kind == "Service" and .spec.clusterIP != "None" and (.metadata.name | test("-store$"))) | .metadata.name' "${OUT}" | grep -v -- '---')" "Darling connects to the store Service"
+
+t state_pvc_kept_on_uninstall
+render
+assert_eq "$(doc PersistentVolumeClaim "${DEPLOY}" | yq '.metadata.annotations["helm.sh/resource-policy"]')" "keep" "state PVC keep annotation"

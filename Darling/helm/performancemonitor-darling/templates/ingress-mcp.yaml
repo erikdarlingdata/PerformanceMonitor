@@ -3,7 +3,7 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "performancemonitor-darling.fullname" . }}-mcp
+  name: {{ include "performancemonitor-darling.surfaceName" (dict "ctx" . "surface" "mcp") }}
   labels:
     {{- include "performancemonitor-darling.labels" . | nindent 4 }}
   {{- with .Values.mcp.ingress.annotations }}
@@ -27,7 +27,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "performancemonitor-darling.fullname" $ }}-mcp
+                name: {{ include "performancemonitor-darling.surfaceName" (dict "ctx" $ "surface" "mcp") }}
                 port:
                   number: {{ $.Values.mcp.port }}
     {{- end }}
