@@ -394,13 +394,45 @@ public sealed class FinOpsPagesReadabilityTests
     private static IEnumerable<string> EmptySentences(DataGrid grid, string page)
     {
         var host = (Panel)VisualTreeHelper.GetParent(grid);
-        var shown = Descendants(host).OfType<TextBlock>()
+        var sentences = Descendants(host).OfType<TextBlock>()
             .Where(t => t.IsVisible && t.ActualWidth > 0 && t.Text.StartsWith("No ", StringComparison.Ordinal) && !Descendants(grid).Contains(t))
-            .Select(t => t.Text).ToList();
-        if (shown.Count != 1)
+            .ToList();
+        if (sentences.Count != 1)
         {
-            yield return $"{page} shows {shown.Count} empty sentences: {string.Join(" | ", shown)}";
+            yield return $"{page} shows {sentences.Count} empty sentences: {string.Join(" | ", sentences.Select(t => t.Text))}";
         }
+        foreach (var sentence in sentences.Where(t => !IsSeen(host, t)))
+        {
+            yield return $"{page}: '{sentence.Text}' is laid out but not seen; something paints over it";
+        }
+    }
+
+    /// <summary>
+    /// The sentence is seen, not merely laid out: the host's rendered pixels inside the TextBlock's bounds differ between the sentence
+    /// shown and hidden. A sentence under an opaque sibling renders the same either way.
+    /// </summary>
+    private static bool IsSeen(FrameworkElement host, TextBlock sentence)
+    {
+        var bounds = sentence.TransformToAncestor(host).TransformBounds(new Rect(sentence.RenderSize));
+        var shown = Pixels(host, bounds);
+        var was = sentence.Visibility;
+        sentence.Visibility = Visibility.Hidden;
+        host.UpdateLayout();
+        var hidden = Pixels(host, bounds);
+        sentence.Visibility = was;
+        host.UpdateLayout();
+        return !shown.AsSpan().SequenceEqual(hidden);
+    }
+
+    private static byte[] Pixels(FrameworkElement host, Rect bounds)
+    {
+        var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)Math.Ceiling(host.ActualWidth), (int)Math.Ceiling(host.ActualHeight), 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(host);
+        var x = Math.Max(0, (int)bounds.X); var y = Math.Max(0, (int)bounds.Y);
+        var w = Math.Max(1, Math.Min((int)bounds.Width, bitmap.PixelWidth - x)); var h = Math.Max(1, Math.Min((int)bounds.Height, bitmap.PixelHeight - y));
+        var pixels = new byte[w * h * 4];
+        bitmap.CopyPixels(new Int32Rect(x, y, w, h), pixels, w * 4, 0);
+        return pixels;
     }
 
     /// <summary>Findings long enough that an auto-sized Finding column would take the width Est. Savings needs; details long enough to wrap.</summary>

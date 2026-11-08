@@ -30,7 +30,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ViewerFinOpsPagesReadabilityTests
 {
-    private const int MaximizedTabWidth = 1200;
+    private const int MaximizedTabWidth = 1270;
     private const int MinimumTabWidth = 860;
 
     [Theory]
@@ -184,10 +184,16 @@ public sealed class ViewerFinOpsPagesReadabilityTests
             Settle(window);
 
             var host = (Panel)VisualTreeHelper.GetParent(grid);
-            var shown = Descendants(host).OfType<TextBlock>()
+            var sentences = Descendants(host).OfType<TextBlock>()
                 .Where(t => t.IsVisible && t.ActualWidth > 0 && t.Text.StartsWith("No ", StringComparison.Ordinal) && !Descendants(grid).Contains(t))
-                .Select(t => t.Text).ToList();
-            return shown.Count == 1 ? [] : new List<string> { $"High Impact shows {shown.Count} empty sentences: {string.Join(" | ", shown)}" };
+                .ToList();
+            var found = new List<string>();
+            if (sentences.Count != 1)
+            {
+                found.Add($"High Impact shows {sentences.Count} empty sentences: {string.Join(" | ", sentences.Select(t => t.Text))}");
+            }
+            found.AddRange(sentences.Where(t => !IsSeen(host, t)).Select(t => $"High Impact: '{t.Text}' is laid out but not seen; something paints over it"));
+            return found;
         })));
 
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
@@ -294,6 +300,34 @@ public sealed class ViewerFinOpsPagesReadabilityTests
             rows.Add(row);
         }
         return rows;
+    }
+
+    /// <summary>
+    /// The sentence is seen, not merely laid out: the host's rendered pixels inside the TextBlock's bounds differ between the sentence
+    /// shown and hidden. A sentence under an opaque sibling renders the same either way.
+    /// </summary>
+    private static bool IsSeen(FrameworkElement host, TextBlock sentence)
+    {
+        var bounds = sentence.TransformToAncestor(host).TransformBounds(new Rect(sentence.RenderSize));
+        var shown = Pixels(host, bounds);
+        var was = sentence.Visibility;
+        sentence.Visibility = Visibility.Hidden;
+        host.UpdateLayout();
+        var hidden = Pixels(host, bounds);
+        sentence.Visibility = was;
+        host.UpdateLayout();
+        return !shown.AsSpan().SequenceEqual(hidden);
+    }
+
+    private static byte[] Pixels(FrameworkElement host, Rect bounds)
+    {
+        var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap((int)Math.Ceiling(host.ActualWidth), (int)Math.Ceiling(host.ActualHeight), 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(host);
+        var x = Math.Max(0, (int)bounds.X); var y = Math.Max(0, (int)bounds.Y);
+        var w = Math.Max(1, Math.Min((int)bounds.Width, bitmap.PixelWidth - x)); var h = Math.Max(1, Math.Min((int)bounds.Height, bitmap.PixelHeight - y));
+        var pixels = new byte[w * h * 4];
+        bitmap.CopyPixels(new Int32Rect(x, y, w, h), pixels, w * 4, 0);
+        return pixels;
     }
 
     private static ToolTip WithContext(ToolTip tip, FrameworkElement owner)
