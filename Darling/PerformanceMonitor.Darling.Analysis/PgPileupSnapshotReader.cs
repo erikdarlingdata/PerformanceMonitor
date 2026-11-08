@@ -42,15 +42,6 @@ public sealed class PgPileupSnapshotReader
     /// <summary>The characters of a statement the detector keeps (the bound the read's <c>LEFT()</c> applied until #5320).</summary>
     internal const int StatementTextCharacters = 1500;
 
-    /// <summary>
-    /// The row cap of one window read, 50,000: about 900 qualifying sessions a snapshot across the 55-minute window the
-    /// worker reads at a one-minute cadence, past what a busy server sustains and well short of what a runaway snapshot
-    /// would cost in statement text (2,000 blocked sessions a minute over that window is 110,000 rows). A tripwire, not a
-    /// working bound: <see cref="ReadWindowAsync"/> tells a read that filled it short of the baseline floor from one that
-    /// merely has that many rows (#8157).
-    /// </summary>
-    public const int WindowRowCap = 50_000;
-
     private readonly NpgsqlDataSource _postgres;
     private readonly ILogger? _logger;
     private readonly int _rowCap;
@@ -62,9 +53,9 @@ public sealed class PgPileupSnapshotReader
     /// need, and judges the whole statement with the sensitive-statement filter before the cut that is printed. The time
     /// floor bounds the read: the caller passes <see cref="SameStatementPileupDetector.BaselineLookbackMinutes"/> plus the
     /// staleness margin of a one-minute-cadence collector, so the rows are the window's sessions over that span. <c>$3</c>
-    /// is the row cap, <see cref="WindowRowCap"/> unless a test lowers it: a tripwire against a runaway session count. A
-    /// cap that fills before the floor is reached is caught by <see cref="ReadWindowAsync"/>, which skips the sweep rather
-    /// than hand the detector a baseline shorter than the one its finding states (#8157).
+    /// is the row cap, <see cref="SameStatementPileupDetector.WindowRowCap"/> unless a test lowers it: a tripwire against a
+    /// runaway session count. A cap that fills before the floor is passed is caught by <see cref="ReadWindowAsync"/>, which
+    /// skips the sweep rather than hand the detector a baseline shorter than the one its finding states (#8157).
     /// </summary>
     public const string PileupWindowSql = $@"
 SELECT collection_time,
@@ -88,7 +79,7 @@ AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramN
 ORDER BY collection_time DESC
 LIMIT $3";
 
-    public PgPileupSnapshotReader(NpgsqlDataSource postgres, ILogger? logger = null, int rowCap = WindowRowCap)
+    public PgPileupSnapshotReader(NpgsqlDataSource postgres, ILogger? logger = null, int rowCap = SameStatementPileupDetector.WindowRowCap)
     {
         _postgres = postgres;
         _logger = logger;

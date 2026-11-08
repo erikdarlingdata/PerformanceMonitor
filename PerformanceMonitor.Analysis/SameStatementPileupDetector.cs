@@ -241,11 +241,22 @@ public static class SameStatementPileupDetector
     public const int StaleSnapshotCutoffMinutes = 10;
 
     /// <summary>
-    /// Whether <paramref name="rows"/> reach back from their newest instant to the baseline floor <see cref="Evaluate"/>
+    /// The row cap of one window read, 50,000, bound as the read's LIMIT by both SKUs' readers: about 900 qualifying
+    /// sessions a snapshot across the 55-minute window the sweep reads at a one-minute cadence, past what a busy server
+    /// sustains and well short of what a runaway snapshot would cost in statement text (2,000 blocked sessions a minute over
+    /// that window is 110,000 rows). A tripwire, not a working bound: a reader whose read returns this many rows asks
+    /// <see cref="ReachesBaselineFloor"/> whether they still cover the baseline the finding would state (#8157).
+    /// </summary>
+    public const int WindowRowCap = 50_000;
+
+    /// <summary>
+    /// Whether <paramref name="rows"/> reach back from their newest instant past the baseline floor <see cref="Evaluate"/>
     /// draws, <see cref="BaselineLookbackMinutes"/> behind it. A window reader that filled its row cap asks this before it
     /// hands the rows on (#8157): a capped read that stopped short of the floor would have the finding state a baseline it
-    /// never read, so the sweep skips the evaluation instead. A cap that filled with the floor already reached changes
-    /// nothing. No rows reach nothing.
+    /// never read, so the sweep skips the evaluation instead. The floor is strict. A cap over newest-first rows cuts
+    /// mid-snapshot, and the baseline keeps the floor instant itself, so rows whose oldest sits exactly on the floor may be
+    /// a partial snapshot inside the baseline; only a row past the floor proves every baseline instant was read whole. A
+    /// cap that filled with the floor already passed changes nothing. No rows reach nothing.
     /// </summary>
     public static bool ReachesBaselineFloor(IReadOnlyList<SnapshotRow> rows)
     {
@@ -255,7 +266,7 @@ public static class SameStatementPileupDetector
         }
 
         var newest = rows.Max(r => r.CollectionTime);
-        return rows.Min(r => r.CollectionTime) <= newest.AddMinutes(-BaselineLookbackMinutes);
+        return rows.Min(r => r.CollectionTime) < newest.AddMinutes(-BaselineLookbackMinutes);
     }
 
     /// <summary>How much statement text the drill-down's preview carries. Bounds one finding row's

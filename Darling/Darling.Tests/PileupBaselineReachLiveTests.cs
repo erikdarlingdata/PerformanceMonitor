@@ -24,8 +24,10 @@ namespace Darling.Tests;
 /// #8157: the pileup finding says its statement was compared over the prior
 /// <see cref="SameStatementPileupDetector.BaselineLookbackMinutes"/> minutes, so the window the reader hands the
 /// detector has to reach that far back on a busy server too. The read is bounded by its time floor, the lookback
-/// plus the staleness margin the worker adds, and by nothing else: a row cap newest-first would fill on the busiest
-/// servers before the floor is reached and quietly shorten the baseline the finding describes.
+/// plus the staleness margin the worker adds, with a row cap well above this seed as a tripwire
+/// (<see cref="SameStatementPileupDetector.WindowRowCap"/>; <see cref="PileupWindowCapLiveTests"/> covers the trip): a
+/// working cap newest-first would fill on the busiest servers before the floor is reached and quietly shorten the
+/// baseline the finding describes.
 ///
 /// <para>The seed: 56 one-minute snapshots of 120 user sessions on one statement, 6,720 rows, anchored through
 /// <see cref="LiveClock"/>. The floor is the worker's: lookback plus staleness margin behind the newest snapshot.</para>
