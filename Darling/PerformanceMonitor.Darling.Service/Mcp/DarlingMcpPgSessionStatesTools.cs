@@ -188,6 +188,21 @@ public sealed class DarlingMcpPgSessionStatesTools
               + tail
             : "";
 
+    /// <summary>The note's sentence about sessions that were idle in transaction yet pinned nothing, or nothing when there were none.</summary>
+    internal static string IdleWithoutHorizonSentence(int count) => count == 0
+        ? string.Empty
+        : $" {CountText.Plural(count, "session")} here were idle in transaction and pinned "
+          + "NOTHING - they held no snapshot and no transaction id, so terminating them "
+          + "would not reclaim a single dead row.";
+
+    /// <summary>The note's sentence about rows PostgreSQL returned with every state column NULL, or nothing when there were none.</summary>
+    internal static string RedactedSentence(int count) => count == 0
+        ? string.Empty
+        : $" {CountText.Plural(count, "row")} are REDACTED: the monitoring login lacks pg_monitor on this "
+          + "target, so PostgreSQL returned the rows with every state column NULL rather "
+          + "than refusing the read. Those rows say nothing about session state and their "
+          + "severity is reported as unknown.";
+
     /// <summary>
     /// Severity band, server-computed so the browser and the WPF row styles paint the same thing from the
     /// same decision rather than each re-deriving it.
@@ -408,17 +423,8 @@ public sealed class DarlingMcpPgSessionStatesTools
                      + "window found any reportable session at all. Duration alone is NOT evidence that a "
                      + "session is starving VACUUM: read peak_horizon_age, where -1 means the session pinned "
                      + "nothing."
-                     + (idleWithoutHorizon > 0
-                         ? $" {CountText.Plural(idleWithoutHorizon, "session")} here were idle in transaction and pinned "
-                         + "NOTHING - they held no snapshot and no transaction id, so terminating them "
-                         + "would not reclaim a single dead row."
-                         : string.Empty)
-                     + (redacted > 0
-                         ? $" {CountText.Plural(redacted, "row")} are REDACTED: the monitoring login lacks pg_monitor on this "
-                         + "target, so PostgreSQL returned the rows with every state column NULL rather "
-                         + "than refusing the read. Those rows say nothing about session state and their "
-                         + "severity is reported as unknown."
-                         : string.Empty)
+                     + IdleWithoutHorizonSentence(idleWithoutHorizon)
+                     + RedactedSentence(redacted)
                      + (captureWasTruncated
                          ? " At least one capture hit the collector's per-capture row cap, so the stored "
                          + "rows for it are a worst-first sample of a larger set - compare "
