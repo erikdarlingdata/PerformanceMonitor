@@ -166,8 +166,6 @@ public partial class ViewerServerTab
     /// panel notes that say how often a collector runs share one read every five minutes.</summary>
     private ViewerScheduleOverridesCache _scheduleOverrides = null!;
 
-    private string? _noteCollector;
-
     /// <summary>Redraws the picker's resolved text from the clock, the zone and the notes. Run when the display zone moved
     /// and on every refresh, so a range that slides with now shows the window it is reading.</summary>
     private void RefreshRangePicker() => RangePicker.Refresh();
@@ -218,14 +216,6 @@ public partial class ViewerServerTab
         try
         {
             var collector = CurrentMainCollector();
-            if (!string.Equals(collector, _noteCollector, StringComparison.Ordinal))
-            {
-                /* A different top-level tab: the data-start note belonged to the last tab's surface, so it clears here and
-                   the new tab's own probe sets it again. */
-                _noteCollector = collector;
-                RecordDataStart(null);
-            }
-
             var overrides = collector is not null ? await _scheduleOverrides.GetAsync() : null;
 
             RangePicker.SampleInterval = ViewerTimeRangeWindow.SampleIntervalFor(collector, _server.ServerId, overrides);
@@ -233,20 +223,6 @@ public partial class ViewerServerTab
         catch (Exception ex)
         {
             ViewerLogger.Warn("ViewerServerTab", $"time range note failed | {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Sets the picker's "Data starts ..." note from a data-start probe a surface already awaited (#5562, the desktop twin
-    /// of the web's retention note): the same <c>floor</c> the surface's "Showing since" banner reads. No query of its own.
-    /// Every banner site reaches it through <see cref="UpdateTruncationBanner"/> and <see cref="ViewerDataStartNote.Feed"/>
-    /// (#5562 R7), for the tab on screen. A null floor (the probe found nothing, or failed) clears the note.
-    /// </summary>
-    internal void RecordDataStart(DateTime? floor)
-    {
-        if (RangePicker.DataStartUtc != floor)
-        {
-            RangePicker.DataStartUtc = floor;
         }
     }
 
@@ -354,9 +330,21 @@ public partial class ViewerServerTab
         RefreshRangePicker();
     }
 
-    /// <summary>When the server was first collected (#7386), the start the charts' X axis may not go before. Null until the first
-    /// read, or when the server has no row yet.</summary>
-    internal DateTime? ServerDataStartUtc { get; set; }
+    private DateTime? _serverDataStartUtc;
+
+    /// <summary>When the server was first collected (#7386), the start the charts' X axis may not go before, and what the picker's
+    /// "Data starts" note names: the note previews whatever range a reader types, so it takes the server's oldest row, not the
+    /// floor a surface's window probe found (a probe is bounded to the window it was asked about, which for a covered window
+    /// is the window's own start). Null until the first read, or when the server has no row yet, and then the note is hidden.</summary>
+    internal DateTime? ServerDataStartUtc
+    {
+        get => _serverDataStartUtc;
+        set
+        {
+            _serverDataStartUtc = value;
+            RangePicker.DataStartUtc = value;
+        }
+    }
 
     private DateTime _serverDataStartReadUtc = DateTime.MinValue;
 

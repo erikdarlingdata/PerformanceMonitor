@@ -1306,6 +1306,13 @@
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="CalendarItem">
+                    <ControlTemplate.Resources>
+                        <!-- The weekday header: the calendar fills its seven title cells from the template under this key, and draws none without it. -->
+                        <DataTemplate x:Key="{x:Static CalendarItem.DayTitleTemplateResourceKey}">
+                            <TextBlock Text="{Binding}" FontSize="11" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,6,0,4"
+                                       Foreground="{StaticResource ForegroundBrush}"/>
+                        </DataTemplate>
+                    </ControlTemplate.Resources>
                     <Border Background="{TemplateBinding Background}"
                             BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}">
@@ -1584,6 +1591,17 @@
         <Setter Property="Background" Value="{StaticResource BorderBrush}"/>
         <Setter Property="Margin" Value="0,4"/>
         <Setter Property="Height" Value="1"/>
+    </Style>
+    <!-- A separator inside a menu takes this key, not the Separator style, and its stock template insets the line past an icon
+         column. This one spans the menu in the theme's separator brush. -->
+    <Style x:Key="{x:Static MenuItem.SeparatorStyleKey}" TargetType="Separator" BasedOn="{StaticResource {x:Type Separator}}">
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Separator">
+                    <Border Background="{TemplateBinding Background}" SnapsToDevicePixels="True"/>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
 
     <!-- ============================================ -->
