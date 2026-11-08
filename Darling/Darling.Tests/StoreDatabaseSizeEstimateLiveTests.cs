@@ -242,11 +242,13 @@ public sealed class StoreDatabaseSizeEstimateLiveTests
             var anyBefore = await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct, sweepStatementOnly: false);
             Assert.Equal(1, sweepBefore);
 
-            /* The second caller, on its own connection, between the two reads. */
-            await using (var other = new NpgsqlConnection(scratch.ConnectionString))
+            /* Two other callers, each on its own connection, between the two reads: one spelled as an operator would spell
+               it, one as a scheduled job would. */
+            foreach (var statement in new[] { "SELECT pg_database_size(current_database())", "SELECT pg_database_size(current_database()) AS size_bytes" })
             {
+                await using var other = new NpgsqlConnection(scratch.ConnectionString);
                 await other.OpenAsync(ct);
-                await using var size = new NpgsqlCommand("SELECT pg_database_size(current_database())", other);
+                await using var size = new NpgsqlCommand(statement, other);
                 await size.ExecuteScalarAsync(ct);
             }
 
