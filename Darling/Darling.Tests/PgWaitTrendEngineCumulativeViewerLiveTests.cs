@@ -19,9 +19,9 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #8074: the Viewer's Wait Trend on an Aurora target reads the engine's cumulative counters: it follows the event with the most
-/// wait time, serves that event's per-collection deltas as its points, and names the engine_cumulative instrument, the same
-/// arm <c>get_pg_wait_trend</c> buckets for the web. Its own class because the Viewer is a WPF project; the tool-level facts are
-/// in <see cref="PgWaitTrendEngineCumulativeLiveTests"/>.
+/// wait time and serves that event's per-collection deltas as its points, the same arm the web's <c>get_pg_wait_trend</c> answer
+/// names as engine_cumulative and buckets. Its own class because the Viewer is a WPF project; the tool-level facts are in
+/// <see cref="PgWaitTrendEngineCumulativeLiveTests"/>.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class PgWaitTrendEngineCumulativeViewerLiveTests
@@ -40,6 +40,8 @@ public sealed class PgWaitTrendEngineCumulativeViewerLiveTests
             var end = new DateTime(2026, 3, 5, 11, 0, 0, DateTimeKind.Utc);
             var read = await viewer.GetPgWaitTrendAsync(PgWaitTrendEngineCumulativeLiveTests.ServerId, end.AddHours(-PgWaitTrendEngineCumulativeLiveTests.Hours), end, ct);
 
+            /* The web answer is what names the arm; the Viewer's read carries the points and the subject, not an instrument. */
+            Assert.Equal(PgWaitInstrument.EngineCumulative, web.GetProperty("instrument").GetString());
             Assert.Equal("DataFileRead", read.Subject);
             Assert.Equal(web.GetProperty("wait_event").GetString(), read.Subject);
             var webPoints = web.GetProperty("points").EnumerateArray().ToArray();
