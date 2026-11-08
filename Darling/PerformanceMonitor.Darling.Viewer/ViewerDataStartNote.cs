@@ -24,16 +24,17 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 internal static class ViewerDataStartNote
 {
-    /// <summary>Hands <paramref name="floor"/> to the picker of the tab that holds <paramref name="banner"/>, if the banner is on
-    /// screen in one. A banner outside any tab (a test's bare control, a detached tab) feeds nothing.</summary>
+    /// <summary>Hands <paramref name="floor"/> to the picker of the Job History tab that holds <paramref name="banner"/>, if the
+    /// banner is on screen in one. A banner in a server tab feeds nothing: that tab's picker names the server's data start
+    /// (<see cref="ViewerServerTab.ServerDataStartUtc"/>), which a window-bounded probe cannot give. A banner outside any tab (a
+    /// test's bare control, a detached tab) feeds nothing either.</summary>
     internal static void Feed(DependencyObject banner, DateTime? floor)
     {
         for (var node = ParentOf(banner); node is not null; node = ParentOf(node))
         {
             switch (node)
             {
-                case ViewerServerTab serverTab:
-                    serverTab.RecordDataStart(floor);
+                case ViewerServerTab:
                     return;
                 case JobHistoryTab jobHistory:
                     jobHistory.RecordDataStart(floor);
