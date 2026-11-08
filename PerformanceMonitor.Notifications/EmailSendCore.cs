@@ -270,7 +270,10 @@ public sealed class EmailSendCore
                    be blank — a firing no route covers, with no default list, has nobody to send to. */
                 emailRoute = NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings, NotificationRouter.ParseServerId(serverId),
                     AlertSeverity.RouteLevelOf(metricName, context?.SeverityOverride));
-                var recipients = emailRoute.Email.Destination ?? _settings.SmtpRecipients;
+                /* #8246: a route that turns email off for this firing means no email, not the default list, as the webhook
+                   fan-out reads an off channel. No route store writes Email into OffChannels today (a recipient list is not
+                   a secret that can fail to be read), so this arm is the fallback's safety, not a path an operator can set. */
+                var recipients = emailRoute.Email.IsOff ? null : emailRoute.Email.Destination ?? _settings.SmtpRecipients;
 
                 if (string.IsNullOrWhiteSpace(recipients))
                 {
@@ -282,8 +285,9 @@ public sealed class EmailSendCore
                        failed row and a consecutive-failure count. `emailRoute` stays set: it is the firing's
                        routing record for the alert log. */
                     _repeatBudget.Release(budget);
-                    _logger.LogDebug(
-                        $"Alert email for {metricName} on {serverName} skipped: no notification route covers it and no default recipients are set");
+                    _logger.LogDebug(emailRoute.Email.IsOff
+                        ? $"Alert email for {metricName} on {serverName} skipped: a notification route turns email off for it"
+                        : $"Alert email for {metricName} on {serverName} skipped: no notification route covers it and no default recipients are set");
                 }
                 else
                 {
