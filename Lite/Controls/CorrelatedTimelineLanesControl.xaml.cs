@@ -792,16 +792,21 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         chart.Plot.Clear();
     }
 
-    /* A lane whose read failed is drawn as the empty lane is, then says so over it, so it cannot pass for a quiet healthy lane. */
+    /* A lane whose read failed is drawn as the empty lane is (its ruler and grid) and says only that the read failed, so it cannot
+       pass for a quiet healthy lane. */
     private void ShowFailed(ScottPlot.WPF.WpfPlot chart, string title)
     {
         ShowEmpty(chart, title);
         MarkFailed(chart);
     }
 
-    /* The note is anchored to the lane's pixels, not its axes, so SyncXAxes leaves it where it is. */
-    private static void MarkFailed(ScottPlot.WPF.WpfPlot chart)
+    /* A failed read says only that it failed: the empty sentence the lane may already carry would claim the window holds no data,
+       which a read that did not return cannot establish, so it goes before the note is added. The note is anchored to the lane's
+       pixels, not its axes, so SyncXAxes leaves it where it is. */
+    private void MarkFailed(ScottPlot.WPF.WpfPlot chart)
     {
+        foreach (var empty in chart.Plot.GetPlottables<ScottPlot.Plottables.Annotation>().Where(a => a.LabelText == EmptySentence(chart)).ToList())
+            chart.Plot.Remove(empty);
         var note = chart.Plot.Add.Annotation("read failed", ScottPlot.Alignment.MiddleCenter);
         note.LabelFontColor = ChartStyle.GetThemeColors().Text;
         note.LabelFontSize = 11;
@@ -835,7 +840,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         if (chart == BlockingChart) ChartStyle.UseCountAxis(chart); // #8224: an empty count lane still labels whole numbers
         chart.Plot.Axes.SetLimitsY(0, 1);
 
-        var note = chart.Plot.Add.Annotation($"No {LaneName(chart)} data in this window", ScottPlot.Alignment.MiddleCenter);
+        var note = chart.Plot.Add.Annotation(EmptySentence(chart), ScottPlot.Alignment.MiddleCenter);
         note.LabelFontSize = 14;
         note.LabelFontColor = EmptyTextColor();
         note.LabelBackgroundColor = ScottPlot.Colors.Transparent;
@@ -845,6 +850,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
         chart.Refresh();
     }
+
+    /// <summary>The sentence an empty lane shows, the one the other charts use.</summary>
+    private string EmptySentence(ScottPlot.WPF.WpfPlot chart) => $"No {LaneName(chart)} data in this window";
 
     /// <summary>The lane's name in its empty sentence, the one Initialize uses before the first read.</summary>
     private string LaneName(ScottPlot.WPF.WpfPlot chart) =>
