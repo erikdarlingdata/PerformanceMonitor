@@ -39,7 +39,7 @@ public sealed class ViewerGridPolishTests
             foreach (var name in new[] { "QueryStatsGrid", "ProcedureStatsGrid", "QueryStoreGrid" })
             {
                 var grid = (DataGrid)tab.FindName(name);
-                SelectTabOf(grid);
+                StaTestThread.Reveal(grid);
                 ClippedTextProbe.Settle(window);
                 Assert.Empty(grid.Items);
                 found.AddRange(ClippedTextProbe.ClippedHeaders(grid).Select(c => $"[{name}] {c}"));
@@ -65,7 +65,7 @@ public sealed class ViewerGridPolishTests
         {
             var slicer = (TimeRangeSlicerControl)tab.FindName(slicerName);
             slicer.ShowEmpty(sentence);
-            SelectTabOf(slicer);
+            StaTestThread.Reveal(slicer);
             ClippedTextProbe.Settle(window);
 
             var found = new List<string>();
@@ -109,7 +109,7 @@ public sealed class ViewerGridPolishTests
         var problems = Run("DarkTheme", 1280, 800, (tab, window) =>
         {
             var grid = (DataGrid)tab.FindName("MemoryBrokerGrid");
-            SelectTabOf(grid);
+            StaTestThread.Reveal(grid);
             ClippedTextProbe.Settle(window);
             var panel = (FrameworkElement)LogicalTreeHelper.GetParent(LogicalTreeHelper.GetParent(grid));
             var inGrid = ClippedTextProbe.Descendants(grid).ToHashSet();
@@ -125,18 +125,6 @@ public sealed class ViewerGridPolishTests
         });
 
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
-    }
-
-    /// <summary>Shows every tab on the way to <paramref name="element"/>, as a click on each would.</summary>
-    private static void SelectTabOf(DependencyObject element)
-    {
-        for (var node = element; node is not null; node = LogicalTreeHelper.GetParent(node))
-        {
-            if (node is TabItem item && ItemsControl.ItemsControlFromItemContainer(item) is TabControl tabs)
-            {
-                tabs.SelectedItem = item;
-            }
-        }
     }
 
     private static List<string> Run(string theme, int width, int height, Func<ViewerServerTab, Window, List<string>> body) =>

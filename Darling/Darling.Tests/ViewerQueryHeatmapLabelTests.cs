@@ -50,13 +50,7 @@ public sealed class ViewerQueryHeatmapLabelTests
             try
             {
                 var chart = (WpfPlot)tab.FindName("QueryHeatmapChart");
-                for (var node = (DependencyObject)chart; node is not null; node = LogicalTreeHelper.GetParent(node))
-                {
-                    if (node is TabItem item && ItemsControl.ItemsControlFromItemContainer(item) is TabControl tabs)
-                    {
-                        tabs.SelectedItem = item;
-                    }
-                }
+                StaTestThread.Reveal(chart);
 
                 var result = new HeatmapResult
                 {

@@ -79,17 +79,6 @@ public sealed class ViewerThemeLeftoversRenderTests
         }
     }
 
-    private static void Reveal(FrameworkElement element)
-    {
-        for (DependencyObject? at = element; at is not null; at = LogicalTreeHelper.GetParent(at))
-        {
-            if (at is TabItem item && ItemsControl.ItemsControlFromItemContainer(item) is TabControl owner)
-            {
-                owner.SelectedItem = item;
-            }
-        }
-    }
-
     // ── FinOps > Recommendations ───────────────────────────────────────────────────────────────
 
     [Theory]
@@ -106,7 +95,7 @@ public sealed class ViewerThemeLeftoversRenderTests
             try
             {
                 var grid = (DataGrid)tab.FindName("FinOpsRecommendationsDataGrid");
-                Reveal(grid);
+                StaTestThread.Reveal(grid);
                 ClippedTextProbe.Settle(window);
                 ThemeManager.Apply(theme);
                 ClippedTextProbe.Settle(window);
@@ -136,7 +125,7 @@ public sealed class ViewerThemeLeftoversRenderTests
             try
             {
                 var grid = (DataGrid)tab.FindName("FinOpsRecommendationsDataGrid");
-                Reveal(grid);
+                StaTestThread.Reveal(grid);
                 ClippedTextProbe.Settle(window);
                 var tipped = grid.Columns.Where(c => c.Header is StackPanel p && p.Children.OfType<TextBlock>().Any(t => t.Text is "Detail" or "Est. Savings ($/mo)"))
                     .Select(c => ((StackPanel)c.Header).ToolTip as string).ToList();
@@ -439,7 +428,7 @@ public sealed class ViewerThemeLeftoversRenderTests
             {
                 var content = (FrameworkElement)tab.FindName("FinOpsUtilizationContent");
                 content.Visibility = Visibility.Visible;
-                Reveal(content);
+                StaTestThread.Reveal(content);
                 ThemeManager.Apply(theme);
                 ClippedTextProbe.Settle(window);
                 var found = Visuals<Border>(content).Where(b => b.Height == 16 && string.IsNullOrEmpty(b.Name) && b.Background is SolidColorBrush)
@@ -481,7 +470,7 @@ public sealed class ViewerThemeLeftoversRenderTests
                 foreach (var theme in new[] { "Dark", "Light", "CoolBreeze" })
                 {
                     ThemeManager.Apply(theme);
-                    inner.SelectedItem = inner.Items.OfType<TabItem>().First(t => Equals(t.Header, "Queries"));
+                    StaTestThread.WithDispatcherContext(() => inner.SelectedItem = inner.Items.OfType<TabItem>().First(t => Equals(t.Header, "Queries")));
                     ClippedTextProbe.Settle(window);
                     foreach (var (row, tabs) in new[] { ("inner", inner), ("queries", queries) })
                     {

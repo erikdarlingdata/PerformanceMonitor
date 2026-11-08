@@ -128,11 +128,7 @@ public sealed class ViewerChartTextRefreshTests
             try
             {
                 var chart = (WpfPlot)tab.FindName("QueryHeatmapChart");
-                for (var node = (DependencyObject)chart; node is not null; node = LogicalTreeHelper.GetParent(node))
-                {
-                    if (node is TabItem item && ItemsControl.ItemsControlFromItemContainer(item) is TabControl tabs)
-                        tabs.SelectedItem = item;
-                }
+                StaTestThread.Reveal(chart);
 
                 const int rows = 7, cols = 12;
                 var result = new HeatmapResult
@@ -185,7 +181,7 @@ public sealed class ViewerChartTextRefreshTests
             try
             {
                 var chart = (WpfPlot)tab.FindName("QueryHeatmapChart");
-                SelectTabsAbove(chart);
+                StaTestThread.Reveal(chart);
                 typeof(ViewerServerTab).GetMethod("UpdateQueryHeatmapChart", Instance)!.Invoke(tab, [HeatmapToppingOutAt(252)]);
                 ChartLayoutProbe.Settle(window, [chart]);
                 Shot(window, $"colourbar-{theme}-{width}x{height}");
@@ -349,14 +345,6 @@ public sealed class ViewerChartTextRefreshTests
                 result.Intensities[r, c] = (r + c) % 3 == 0 ? 0 : 1 + (r * cols + c) % 40;
         result.Intensities[rows - 1, cols - 1] = max;
         return result;
-    }
-
-    /// <summary>Selects every tab on the way up from <paramref name="element"/>, so it is laid out and rendered.</summary>
-    private static void SelectTabsAbove(DependencyObject element)
-    {
-        for (var node = element; node is not null; node = LogicalTreeHelper.GetParent(node))
-            if (node is TabItem item && ItemsControl.ItemsControlFromItemContainer(item) is TabControl tabs)
-                tabs.SelectedItem = item;
     }
 
     /// <summary>The colour bar's realized major tick labels, bottom to top, and every neighbouring pair drawn closer along the bar than a

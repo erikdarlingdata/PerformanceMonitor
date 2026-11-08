@@ -49,7 +49,7 @@ internal static class InputNamesProbe
         {
             /* #6216: the step names say where a body that never returns stopped (the hang guard reads the last one). */
             StaTestThread.Step($"tab {i}: selecting it");
-            tabs.SelectedIndex = i;
+            StaTestThread.WithDispatcherContext(() => tabs.SelectedIndex = i);
             ClippedTextProbe.Settle(window);
             var tab = (TabItem)tabs.Items[i];
             foreach (var node in ClippedTextProbe.Descendants((DependencyObject)tab.Content))
