@@ -136,48 +136,55 @@ public class ScreenReaderRowNamesTests
         Assert.Equal("Server example-sql-01, Time 06:01:12", name);
     }
 
+    /// <summary>
+    /// Scrolls a 3,000-row recycling grid in a 500x300 window in steps of 37 and reads every realized row's name along the way.
+    /// Runs on the STA thread. Returns the rows whose name did not match their item, the rows visited, the watcher count at the
+    /// top, its peak while scrolling, and the cells realized at the end.
+    /// </summary>
+    internal static (int Mismatches, int CheckedRows, int AtTop, int Peak, int Realized) ScrollARecycledGrid()
+    {
+        AccessibleNames.Register();
+        var rows = Enumerable.Range(0, 3000).Select(i => new JobRow { Time = "T" + i, Server = "S" + i, Retries = i % 2 == 0 ? "" : "1" }).ToList();
+        var grid = NewGrid(new DataGridColumn[] { TextColumn("Time", "Time"), TextColumn("Server", "Server"), TextColumn("Retries", "Retries") }, rows, recycling: true);
+        var window = new Window { Content = grid, Width = 500, Height = 300 };
+        Settle(window);
+        var scroll = Descendants(grid).OfType<ScrollViewer>().First();
+        var top = AccessibleNames.WatcherCount;
+        var max = top;
+        var bad = 0;
+        var seen = 0;
+
+        for (var offset = 0; offset <= rows.Count; offset += 37)
+        {
+            scroll.ScrollToVerticalOffset(offset);
+            Settle(window);
+            max = Math.Max(max, AccessibleNames.WatcherCount);
+
+            foreach (var row in Descendants(grid).OfType<DataGridRow>())
+            {
+                if (row.Item is not JobRow item)
+                {
+                    continue;
+                }
+
+                seen++;
+
+                if (AutomationProperties.GetName(row) != "Time " + item.Time + ", Server " + item.Server)
+                {
+                    bad++;
+                }
+            }
+        }
+
+        var realizedCells = Descendants(grid).OfType<DataGridCell>().Count();
+        window.Close();
+        return (bad, seen, top, max, realizedCells);
+    }
+
     [Fact]
     public void ARowReusedForAnotherItem_IsRenamed_AndWatchersFollowTheRealizedCells_NotTheRowCount()
     {
-        var (mismatches, checkedRows, atTop, peak, realized) = StaTestThread.Run(() =>
-        {
-            AccessibleNames.Register();
-            var rows = Enumerable.Range(0, 3000).Select(i => new JobRow { Time = "T" + i, Server = "S" + i, Retries = i % 2 == 0 ? "" : "1" }).ToList();
-            var grid = NewGrid(new DataGridColumn[] { TextColumn("Time", "Time"), TextColumn("Server", "Server"), TextColumn("Retries", "Retries") }, rows, recycling: true);
-            var window = new Window { Content = grid, Width = 500, Height = 300 };
-            Settle(window);
-            var scroll = Descendants(grid).OfType<ScrollViewer>().First();
-            var top = AccessibleNames.WatcherCount;
-            var max = top;
-            var bad = 0;
-            var seen = 0;
-
-            for (var offset = 0; offset <= rows.Count; offset += 37)
-            {
-                scroll.ScrollToVerticalOffset(offset);
-                Settle(window);
-                max = Math.Max(max, AccessibleNames.WatcherCount);
-
-                foreach (var row in Descendants(grid).OfType<DataGridRow>())
-                {
-                    if (row.Item is not JobRow item)
-                    {
-                        continue;
-                    }
-
-                    seen++;
-
-                    if (AutomationProperties.GetName(row) != "Time " + item.Time + ", Server " + item.Server)
-                    {
-                        bad++;
-                    }
-                }
-            }
-
-            var realizedCells = Descendants(grid).OfType<DataGridCell>().Count();
-            window.Close();
-            return (bad, seen, top, max, realizedCells);
-        });
+        var (mismatches, checkedRows, atTop, peak, realized) = StaTestThread.Run(() => ScrollARecycledGrid());
 
         Assert.True(checkedRows > 1000, "the scroll visited only " + checkedRows + " rows");
         Assert.Equal(0, mismatches);
