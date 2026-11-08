@@ -149,7 +149,7 @@ public sealed class McpIoTools
                 return await McpQueryTools.WithEmptyWindowNoticeAsync(everCollected
                     ? McpHelpers.StatusForDatabase(
                         "empty",
-                        await McpQueryTools.QuietWindowMessageAsync(dataService, QueryWindowRelation.FileIoStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "file_io_stats", $"No file I/O samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s)", ". This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken: widen hours_back, or read it as no measurable read or write activity on any file in this window."), scope)
+                        await McpQueryTools.QuietWindowMessageAsync(dataService, QueryWindowRelation.FileIoStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "file_io_stats", $"No file I/O samples recorded for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}", ". This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken: widen hours_back, or read it as no measurable read or write activity on any file in this window."), scope)
                     : McpHelpers.StatusForDatabase(
                         "unavailable",
                         $"No file I/O stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window: the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.", scope),

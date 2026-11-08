@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Models;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -667,7 +668,7 @@ WHERE ses.name = @session_name;", connection))
 
         if (attempted > 0 && healthy == 0 && firstFailure is not null)
         {
-            var allRefused = $"[{server.DisplayName}] Failed to ensure the {captureName} XE session in all {attempted} database(s)";
+            var allRefused = $"[{server.DisplayName}] Failed to ensure the {captureName} XE session in all {CountText.Plural(attempted, "database")}";
             if (repeatsAtDebug || explainRefusal?.Invoke(firstFailure) is not null)
             {
                 AppLogger.Debug("XeSession", allRefused);

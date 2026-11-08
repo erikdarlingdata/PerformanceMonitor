@@ -779,13 +779,13 @@ public sealed class McpHealthTools
                    describes what THIS response actually did instead of what the argument nominally requested. */
                 collector_detail_note = full_detail
                     ? "full_detail=true: every field is served for every collector below."
-                    : $"{compactCount} of {shownRows.Count} collector(s) below are HEALTHY with nothing to report (no errors, denials, session/extension-missing runs or abandoned cycles this window) and are compacted to collector/status/compact/total_runs/rows_stored/avg_duration_ms/last_success. {partialCount} need a look (failing, stale, stopped, erroring, denied, regressed, or an unexplained zero) and carry a leaner partial_detail shape instead of full detail: in a partial row a missing key means null, false or 0, and only collector, status, partial_detail, total_runs and errors are always present. Pass full_detail=true for every field on every collector.",
+                    : $"{compactCount} of {CountText.Plural(shownRows.Count, "collector")} below {(compactCount == 1 ? "is" : "are")} HEALTHY with nothing to report (no errors, denials, session/extension-missing runs or abandoned cycles this window) and are compacted to collector/status/compact/total_runs/rows_stored/avg_duration_ms/last_success. {partialCount} need a look (failing, stale, stopped, erroring, denied, regressed, or an unexplained zero) and carry a leaner partial_detail shape instead of full detail: in a partial row a missing key means null, false or 0, and only collector, status, partial_detail, total_runs and errors are always present. Pass full_detail=true for every field on every collector.",
                 /* #6180: the response-size cut, observed. Null note and false flag when every collector fit. */
                 truncated = collectorCount < collectorRows.Count,
                 collectors_returned = collectorCount,
                 collectors_total = collectorRows.Count,
                 size_note = collectorCount < collectorRows.Count
-                    ? $"{collectorRows.Count - collectorCount} of {collectorRows.Count} collector row(s) were left off the end to keep this answer within about 32 KB. Call again without full_detail: healthy collectors are then compacted and every collector fits."
+                    ? $"{collectorRows.Count - collectorCount} of {CountText.Plural(collectorRows.Count, "collector row")} {(collectorRows.Count - collectorCount == 1 ? "was" : "were")} left off the end to keep this answer within about 32 KB. Call again without full_detail: healthy collectors are then compacted and every collector fits."
                     : null,
                 collectors = collectorRows.Take(collectorCount)
             }, resolved.ServerId, McpHelpers.JsonOptions), McpHelpers.JsonOptions), readSources)).Json;
@@ -1203,7 +1203,7 @@ public sealed class McpHealthTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No collector runs on {resolved.DisplayName} in the last {hours} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.",
+                        $"No collector runs on {resolved.DisplayName} in the last {CountText.Plural(hours, "hour")} matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.",
                         emptyNotice.AsHints());
                 }
 
@@ -1211,7 +1211,7 @@ public sealed class McpHealthTools
                     "empty",
                     McpHelpers.QuietUnlessCut(
                         emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                        factual: $"No collector runs recorded for {resolved.DisplayName} in the last {hours} hour(s)",
+                        factual: $"No collector runs recorded for {resolved.DisplayName} in the last {CountText.Plural(hours, "hour")}",
                         coveredClaim: ". This server HAS collected before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent runs."),
                     emptyNotice.AsHints());
             }
@@ -1309,7 +1309,7 @@ public sealed class McpHealthTools
                 runs_returned = pageCount,
                 runs_total = rows.Count,
                 size_note = cut
-                    ? $"{rows.Count - pageCount} of the {rows.Count} run(s) this read selected were left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one collector_name / status to read the rest in full."
+                    ? $"{rows.Count - pageCount} of the {CountText.Plural(rows.Count, "run")} this read selected {(rows.Count - pageCount == 1 ? "was" : "were")} left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one collector_name / status to read the rest in full."
                     : null,
                 runs = runRows.Take(pageCount),
             }, McpHelpers.JsonOptions), pageRows.Select(r => r.ReadSource));
@@ -1383,12 +1383,12 @@ public sealed class McpHealthTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No collector runs fleet-wide in the last {hours} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds.");
+                        $"No collector runs fleet-wide in the last {CountText.Plural(hours, "hour")} matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds.");
                 }
 
                 return McpHelpers.Status(
                     "empty",
-                    $"No collector runs recorded fleet-wide in the last {hours} hour(s). At least one enabled server has collected before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent runs.");
+                    $"No collector runs recorded fleet-wide in the last {CountText.Plural(hours, "hour")}. At least one enabled server has collected before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent runs.");
             }
 
             var result = rows.Select(r => new
@@ -1431,7 +1431,7 @@ public sealed class McpHealthTools
                 runs_returned = pageCount,
                 runs_total = rows.Count,
                 size_note = cut
-                    ? $"{rows.Count - pageCount} of the {rows.Count} run(s) this read selected were left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one server_name / collector_name / status to read the rest in full."
+                    ? $"{rows.Count - pageCount} of the {CountText.Plural(rows.Count, "run")} this read selected {(rows.Count - pageCount == 1 ? "was" : "were")} left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one server_name / collector_name / status to read the rest in full."
                     : null,
                 runs = result.Take(pageCount),
             }, McpHelpers.JsonOptions), pageRows.Select(r => r.ReadSource));
@@ -1516,7 +1516,7 @@ public sealed class McpHealthTools
                 return await McpQueryTools.WithEmptyWindowNoticeAsync(everCollected
                     ? McpHelpers.Status(
                         "empty",
-                        $"Nothing was waiting on {resolved.DisplayName} in the last {hours} hour(s). The collector HAS sampled this server, so this is a genuine all-clear for the window rather than missing data.")
+                        $"Nothing was waiting on {resolved.DisplayName} in the last {CountText.Plural(hours, "hour")}. The collector HAS sampled this server, so this is a genuine all-clear for the window rather than missing data.")
                     : McpHelpers.Status(
                         "unavailable",
                         $"No waiting-task samples have EVER been recorded for {resolved.DisplayName}, so this is NOT an all-clear: there is nothing to read. Check that collection is running for this server before concluding it was quiet."),
@@ -1623,8 +1623,8 @@ public sealed class McpHealthTools
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
                             factual: database == null
-                                ? $"No blocking or deadlocks recorded for {resolved.DisplayName} in the last {hours} hour(s)"
-                                : $"No blocking{McpDatabaseSelection.ForChosen(new[] { database })} (and no deadlocks, which are not limited by database) recorded for {resolved.DisplayName} in the last {hours} hour(s)",
+                                ? $"No blocking or deadlocks recorded for {resolved.DisplayName} in the last {CountText.Plural(hours, "hour")}"
+                                : $"No blocking{McpDatabaseSelection.ForChosen(new[] { database })} (and no deadlocks, which are not limited by database) recorded for {resolved.DisplayName} in the last {CountText.Plural(hours, "hour")}",
                             /* #8146: a lossy window keeps the runs but not the all-clear; the lost events were never read. */
                             coveredClaim: emptyLoss is null
                                 ? ". The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window."

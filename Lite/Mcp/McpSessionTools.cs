@@ -78,7 +78,7 @@ public sealed class McpSessionTools
                 {
                     return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status(
                         "empty",
-                        $"No active query snapshots on {resolved.DisplayName} in the last {hours_back} hour(s) matched "
+                        $"No active query snapshots on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} matched "
                         + DescribeActiveQueryFilters(filter, blocking_only, waitFilter)
                         + (tagScope.Active ? $" (query tag '{tagScope.Requested}')" : "")
                         + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist: drop them to see what the window holds."

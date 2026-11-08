@@ -313,7 +313,7 @@ public class FindingStore
                announcing a completed analysis for a set the store does not have, and it is the
                behaviour this store has always had. Only the diagnostic is new. */
             AppLogger.Error("AnalysisService", everyRowAccepted
-                ? $"Finding batch for {context.ServerName} had all {findings.Count} row(s) accepted and then failed to COMMIT them, so the batch was rolled back, this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {ex.Message}"
+                ? $"Finding batch for {context.ServerName} had all {CountText.Plural(findings.Count, "row")} accepted and then failed to COMMIT them, so the batch was rolled back, this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {ex.Message}"
                 : $"Finding batch for {context.ServerName} failed at row {row} of {findings.Count} and was rolled back, this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {ex.Message}");
             throw;
         }
