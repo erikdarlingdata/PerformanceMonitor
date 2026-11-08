@@ -120,14 +120,18 @@ internal static class FinOpsServerInventory
     /// A last-known inventory row from a collected <c>server_properties</c> row. The version reads as a live row's does
     /// (the product version with its update level, else its level). The collector stores no host OS, start time or AG
     /// replica role for the inventory, so those cells stay blank, and a 0 socket or core count is a value the store never
-    /// had, so it reads as blank too. Last Updated is the row's collection time on the machine's clock, the clock a live
-    /// row's read time is shown on.
+    /// had, so it reads as blank too. A row with no CPU count and no memory is one the collector stored when the monitoring
+    /// login was denied the hardware read, so it carries the Hardware Note a live row gets for that denial
+    /// (<see cref="LocalDataService.HardwareUnavailableNote"/>). Last Updated is the row's collection time on the machine's
+    /// clock, the clock a live row's read time is shown on.
     /// </summary>
     internal static ServerPropertyRow FromCollected(ServerPropertiesRow collected)
     {
         var level = string.IsNullOrEmpty(collected.ProductUpdateLevel) ? collected.ProductLevel : collected.ProductUpdateLevel;
+        var hardwareDenied = collected.CpuCount == 0 && collected.PhysicalMemoryMb == 0;
         return new ServerPropertyRow
         {
+            HardwareUnavailableReason = hardwareDenied ? LocalDataService.HardwareUnavailableNote : null,
             Edition = collected.Edition,
             ProductVersion = string.IsNullOrEmpty(collected.ProductVersion) || string.IsNullOrEmpty(level)
                 ? collected.ProductVersion
