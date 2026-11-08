@@ -167,7 +167,11 @@ public sealed class ServerTabStripFitTests
                 var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
                 /* Switching to a tab would start that tab's load against a server that is not there. */
                 typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", Instance)!.SetValue(tab, true);
-                var window = new Window { Content = tab, Width = width, Height = height, Left = 0, Top = 0, WindowStyle = WindowStyle.None };
+                /* The host carries the size: a Border with an explicit Width and Height lays its child out at that size whatever the window
+                   is given, so a screen smaller than 1920x1080 (one that clamps any window to itself) leaves the strip's width as asked.
+                   The window itself stays inside such a screen and clips what does not fit, which does not change the layout. */
+                var host = new Border { Width = width, Height = height, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top, Child = tab };
+                var window = new Window { Content = host, Width = Math.Min(width, 1000), Height = Math.Min(height, 700), Left = 0, Top = 0, WindowStyle = WindowStyle.None };
                 window.Resources.MergedDictionaries.Add(LoadTheme(theme));
                 StaTestThread.ShowOffScreen(window);
                 try
