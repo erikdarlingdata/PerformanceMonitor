@@ -1739,8 +1739,8 @@ export const POSTGRES_TABS = [
        were. Hiding it would buy a tidier stock-PostgreSQL page at the price of a tab set that changes shape
        between two PostgreSQL servers in one fleet, and of making the one Aurora-specific capability we have
        invisible to the operator best placed to want it. */
-    note: "Wait Events needs Amazon Aurora and is left off other targets. Sampled Waits and Wait Trend fill on any other PostgreSQL target, from the pg_wait_sampling extension when it is installed and from the service's own once-a-second sampler (a floor that undercounts short waits) when it is not.",
-    noteInfo: "Wait Events comes from aurora_stat_system_waits(), which core PostgreSQL does not have. Sampled Waits says which instrument fed it (instrument). On Amazon Aurora the two sampled panels do not apply and are left off.",
+    note: "Wait Events needs Amazon Aurora and is left off other targets. Sampled Waits fills on any other PostgreSQL target, from the pg_wait_sampling extension when it is installed and from the service's own once-a-second sampler (a floor that undercounts short waits) when it is not. Wait Trend fills everywhere: from the engine's cumulative counters on Amazon Aurora, and from the sampler elsewhere.",
+    noteInfo: "Wait Events comes from aurora_stat_system_waits(), which core PostgreSQL does not have. Sampled Waits says which instrument fed it (instrument). On Amazon Aurora the Sampled Waits panel does not apply and is left off; Wait Trend is drawn there from the engine's cumulative counters.",
     build: (server, ctx) => [
       tablePanel(
         "Wait Events",
