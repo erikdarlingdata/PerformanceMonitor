@@ -63,7 +63,24 @@ internal sealed class StandInUnixModes : IUnixDirectoryModes
     /// (#5366). A path never reported has no owner to check, as on a platform whose stat layout is not known.</summary>
     public void ReportOwner(string path, uint userId, ulong links = 1) => _owners[Key(path)] = new UnixFileOwner(userId, links);
 
-    public UnixFileOwner? OwnerOf(string path) => _owners.TryGetValue(Key(path), out var owner) ? owner : null;
+    /// <summary>Exceptions <see cref="OwnerOf"/> throws for a path, keyed like the other maps (#8141).</summary>
+    public Dictionary<string, Exception> OwnerThrows { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public UnixFileOwner? OwnerOf(string path)
+        => OwnerThrows.TryGetValue(Key(path), out var thrown)
+            ? throw thrown
+            : _owners.TryGetValue(Key(path), out var owner) ? owner : null;
+
+    /// <summary>Directories the stand-in reports as unlistable by the service's user (#8141).</summary>
+    public HashSet<string> Unlistable { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Exceptions <see cref="CanList"/> throws for a directory, keyed like the other maps (#8141).</summary>
+    public Dictionary<string, Exception> ListThrows { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public bool CanList(string directory)
+        => ListThrows.TryGetValue(Key(directory), out var thrown)
+            ? throw thrown
+            : !Unlistable.Contains(Key(directory));
 
     private readonly Dictionary<string, bool> _regularFiles = new(StringComparer.OrdinalIgnoreCase);
 

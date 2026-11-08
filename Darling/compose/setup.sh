@@ -6,14 +6,14 @@
 #   DARLING_SQL_PASSWORD='...' ./setup.sh --no-prompt
 #
 # What it makes, only when the file is missing (a file that exists is never changed):
-#   secrets/                  folder, mode 700
+#   secrets/                  folder, mode 700 (this is what keeps other users on the host out)
 #   secrets/store_password.txt  random store password
 #   secrets/store_connection    the store connection string, with that same password
 #   secrets/web_token.txt       random dashboard access token
 #   secrets/mcp_token.txt       random MCP token (only used once MCP is turned on)
 #   secrets/sql_password.txt    the monitoring login's SQL password, from $DARLING_SQL_PASSWORD or a prompt
 #   darling.json              a copy of darling.sample.json
-# Each secret file is mode 600. This script never prints a secret.
+# Each secret file and darling.json is mode 644, so the container (user 1654) can read them through the bind mounts. This script never prints a secret.
 #
 # Options:
 #   --no-prompt   never ask anything; with no $DARLING_SQL_PASSWORD, skip secrets/sql_password.txt and say so
@@ -54,7 +54,7 @@ random_string() {
 # write_secret FILE VALUE: a private file holding VALUE and a newline (references trim it).
 write_secret() {
   printf '%s\n' "$2" > "$1"
-  chmod 600 "$1"
+  chmod 644 "$1"
 }
 
 made=
@@ -137,6 +137,7 @@ if [ -e darling.json ]; then
   note_kept darling.json
 elif [ -e darling.sample.json ]; then
   cp darling.sample.json darling.json
+  chmod 644 darling.json
   note_made darling.json
 else
   echo "setup.sh: darling.sample.json is not in $(pwd), so darling.json was not made." >&2
@@ -156,7 +157,7 @@ if [ "$sql_password_missing" = 1 ]; then
   echo
   echo "Still needed: $sql_password_file, holding the password of the SQL Server login Darling monitors with."
   echo "Make it with:  DARLING_SQL_PASSWORD='<password>' ./setup.sh --no-prompt"
-  echo "or put the password in that file yourself (chmod 600)."
+  echo "or put the password in that file yourself (chmod 644)."
 fi
 
 echo
@@ -166,3 +167,4 @@ echo "  2. docker compose up -d"
 echo "  3. Open the dashboard at http://127.0.0.1:5153 on this machine."
 echo "     Its access token is in $secrets/web_token.txt. Show it with:  cat $secrets/web_token.txt"
 echo "MCP is off. To turn it on, set mcp.enabled to true in darling.json and uncomment mcp_token in docker-compose.yml (both places)."
+echo "Keep every secret in secrets/ and reference it from darling.json as file:/run/secrets/<name>; never put a secret inline in darling.json, which every user on this host can read."

@@ -22,9 +22,12 @@
 #      on its own (inside a container that would mean unreachable).
 #
 # Secrets never land in darling.json: the config references them (env:NAME / file:/path — #1804 stage 1),
-# and compose delivers them as env vars or mounted secret files. The web/MCP network blocks are honored
-# inside the container (the bind ladder's container gate, stage 2) — the port mappings below are the
-# exposure boundary, and both surfaces still REQUIRE their bearer token.
+# and compose delivers them as env vars or mounted secret files. Never put a secret inline in darling.json:
+# the service runs as user 1654, so setup.sh makes darling.json and the files in secrets/ readable by every
+# user (0644); only secrets/ itself (0700) keeps the secrets from other users on the host, and darling.json
+# sits outside it. The web/MCP network blocks are honored inside the container (the bind ladder's container
+# gate, stage 2) — the port mappings below are the exposure boundary, and both surfaces still REQUIRE their
+# bearer token.
 
 name: performancemonitor-darling
 
@@ -122,18 +125,22 @@ services:
     #   build: { context: ../.., dockerfile: Darling/Dockerfile }
     image: ghcr.io/erikdarlingdata/performancemonitor-darling:latest
     restart: unless-stopped
+    # user: "0:0"   # keeps the pre-1654 behaviour; only until the chown step in the release notes has run
     depends_on:
       store:
         condition: service_healthy
     environment:
       # #4733: where the service leaves a marker file when a startup failure has stopped collection for good (a
-      # rejected config, a migration step that can never apply, a refused login). The healthcheck below tests
-      # for this same path, so change the two together.
+      # rejected config, a migration step that can never apply, a refused login, a credentials directory that
+      # belongs to another user, #8141). The healthcheck below tests for this same path, so change the two together.
       DARLING_STOPPED_MARKER: /tmp/darling-stopped
     volumes:
       - ./darling.json:/config/darling.json:ro
       # #3914: the generated passwords of the admin/viewer/mcp roles the service provisions on the store above,
-      # one owner-only file each. The volume keeps them across a recreated container; without it they are
+      # one owner-only file each. The service runs as user 1654 (#8141), and this volume is seeded owned by that
+      # user, mode 0700. A volume an older (root) install made is root-owned: the service then stops collection and
+      # the container shows unhealthy until the chown step in the release notes has run.
+      # The volume keeps them across a recreated container; without it they are
       # regenerated and re-applied to the roles on every recreation, which works but re-keys them each time.
       # `docker compose exec darling cat /var/lib/darling/credentials/pg-admin-credential` shows the admin
       # password, for connecting a Darling Viewer or psql to the store as admin rather than as the owner.
