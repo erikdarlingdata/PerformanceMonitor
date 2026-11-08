@@ -1828,8 +1828,9 @@ END;", connection);
     /// <para>A completed attempt is final for its server, database and setting value for the life of the process, so an engine
     /// that refuses or ignores the option is not recreated again; a failed one is tried again after an hour
     /// (<see cref="LongQuerySessionRecreateThrottle"/>). A failure is logged at Warning and never fails the run: the session is
-    /// either still there as it was, or missing, and the worker's hourly create pass (<see cref="LongQueryTracePass.CreateOnly"/>)
-    /// creates a missing session with the setting.</para>
+    /// either still there as it was, or missing. A failure, and a start the replica refused, ask the worker for its create pass
+    /// (<see cref="LongQueryTracePass.CreateOnly"/>) on the next collection sweep (<see cref="DarlingCollectorRunner.RequestLongQueryCreatePass"/>),
+    /// which creates a missing session with the setting and starts a stopped one, instead of leaving it to the hourly pass.</para>
     /// </summary>
     internal static async Task RecreateLongQuerySessionsBelowSettingAsync(
         ServerRuntime server, DarlingCollectorRunner runner, IReadOnlyList<LongQuerySessionRecreateRequest> requests, ILogger? logger, CancellationToken cancellationToken)
@@ -1876,14 +1877,19 @@ END;", connection);
                     await EnsureLongQueryCompletionsOnServerAsync(server, runner, sessionName, logger, cancellationToken);
                 }
 
+                /* #8146: the definition now carries the setting, so this value is not recreated again, even when the start below is
+                   still pending: what is left is a start, which the create pass does, not another drop. */
                 runner.LongQuerySessionRecreateThrottle.Completed(serverKey, request.DatabaseName, limit);
 
                 /* #8146: a registration with read-only intent created the definition, and its replica refused the start because
-                   it does not show the definition yet; the next sweep's ensure starts it. Say so rather than "recreated". */
+                   it does not show the definition yet. The recreate runs outside the worker's latch, so nothing else would start
+                   it before the hourly create pass: ask for that pass on the next sweep, as the reconcile keeps its latch open for
+                   the same refusal (#4961). Say so rather than "recreated". */
                 if (startPending)
                 {
+                    runner.RequestLongQueryCreatePass(server.ServerId);
                     logger?.LogInformation(
-                        "{Where} Recreated long-query session {Session} to apply max_events_limit {Limit} (was {Was}); the replica refused its start for now, and the next ensure starts it",
+                        "{Where} Recreated long-query session {Session} to apply max_events_limit {Limit} (was {Was}); the replica refused its start for now, and the next collection sweep starts it",
                         where, sessionName, limit, request.CurrentLimit);
                 }
                 else
@@ -1895,9 +1901,12 @@ END;", connection);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                /* #8146: the drop and the create run on separate connections, so the drop may have succeeded and the session be
+                   missing now. The next sweep's create pass creates it if so, and finds it in place otherwise. */
+                runner.RequestLongQueryCreatePass(server.ServerId);
                 logger?.LogWarning(
                     ex,
-                    "{Where} Failed to recreate long-query session {Session} to apply max_events_limit {Limit} (was {Was}); the next ensure creates it if it is missing, and the recreate is tried again in an hour: {Message}",
+                    "{Where} Failed to recreate long-query session {Session} to apply max_events_limit {Limit} (was {Was}); the next collection sweep creates it if it is missing, and the recreate is tried again in an hour: {Message}",
                     where, sessionName, limit, request.CurrentLimit, AlwaysOnXeSessions.DescribeFailure(ex));
             }
         }

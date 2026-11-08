@@ -99,6 +99,17 @@ public sealed partial class DarlingCollectorRunner
     /// <summary>#8146: replaces the clock the long-query recreate's throttle reads. Null in production.</summary>
     internal Func<DateTime>? LongQuerySessionRecreateUtcNowForTests { get; set; }
 
+    /* #8146: the servers whose own long-query session a recreate left stopped (a start the replica refused) or possibly
+       missing (a failed attempt). The recreate runs in a collector run, outside the worker's reconcile latch, so this is how
+       it tells the worker that the create pass is due on the next sweep and not only on the hour. */
+    private readonly ConcurrentDictionary<int, byte> _longQueryCreatePassDue = new();
+
+    /// <summary>#8146: asks the worker's next long-query reconcile for this server to run at least the create pass.</summary>
+    internal void RequestLongQueryCreatePass(int serverId) => _longQueryCreatePassDue[serverId] = 0;
+
+    /// <summary>#8146: true once per <see cref="RequestLongQueryCreatePass"/>: reading the request clears it.</summary>
+    internal bool TakeLongQueryCreatePassRequest(int serverId) => _longQueryCreatePassDue.TryRemove(serverId, out _);
+
     private DarlingLegacyLongQuerySession? _legacyLongQuery;
 
     /// <summary>

@@ -225,36 +225,170 @@ public sealed class LongQuerySessionRecreateRunnerLiveTests
 
     /// <summary>
     /// A registration with read-only intent whose replica refuses the start (it does not show the new definition yet): the
-    /// log says the start is pending, not that the session was recreated and runs.
+    /// log says the start is pending and that the next collection sweep starts it, and that sweep's long-query reconcile runs
+    /// the create pass, which starts the session, within the hour the latch would otherwise wait. The sweep after it runs
+    /// nothing more.
     /// </summary>
     [Fact]
     public async Task Azure_ReadOnlyIntent_AStartTheReplicaRefuses_IsLoggedAsPending()
     {
         await WithRunnerAsync(async (rig, ct) =>
         {
-            rig.Runner.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { "alpha" });
+            var server = ReadOnlyIntentServer();
+            var state = await LatchedAsync(rig, server, ct);
+
+            var refuseStart = true;
             rig.Runner.LongQueryTraceStepOverrideForTests = (_, database, _, step, session, _) =>
             {
                 rig.Steps.Add((database, step, session));
-                return step == LongQueryTraceStep.Start
-                    ? Task.FromException(LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(
-                        LongQueryTraceDatabases.EventSessionNotVisibleErrorNumber, 16, "Cannot alter the event session, because it does not exist or you do not have permission."))
-                    : Task.CompletedTask;
-            };
-            var server = new ServerRuntime
-            {
-                Config = new MonitoredServer { Name = "lqrecreate", Host = "lqrecreate.database.windows.net", Database = "alpha", ReadOnlyIntent = true },
-                ConnectionString = "Server=azure;Database=alpha;ApplicationIntent=ReadOnly",
-                Target = new CollectorTargetInfo { IsAzureSqlDb = true, Engine = CollectorTargetEngine.SqlServer },
-                StorageName = "lqrecreate",
-                ServerId = LiveServerId,
+                return refuseStart && step == LongQueryTraceStep.Start ? Task.FromException(StartNotVisible()) : Task.CompletedTask;
             };
 
             await rig.Runner.RunAsync(LongQueryCompletionsCollector.Instance, server, ct);
 
-            Assert.Contains("the replica refused its start for now", rig.Logger.Joined, StringComparison.Ordinal);
+            Assert.Contains("the replica refused its start for now, and the next collection sweep starts it", rig.Logger.Joined, StringComparison.Ordinal);
             Assert.Equal(0, rig.Logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+
+            /* The replica now shows the definition, stopped. */
+            refuseStart = false;
+            rig.Runner.LongQueryTraceReplicaStateForTests = (_, _) => new LongQueryTraceReplicaState(DefinitionExists: true, Running: false);
+            rig.Clock = ReadAt.AddMinutes(1);
+            Assert.Equal(
+                new[] { ("alpha", LongQueryTraceStep.Check, OwnSession), ("alpha", LongQueryTraceStep.Start, OwnSession) },
+                await SweepAsync(rig, state, ct));
+
+            rig.Clock = ReadAt.AddMinutes(2);
+            Assert.Empty(await SweepAsync(rig, state, ct));
         });
+    }
+
+    /// <summary>
+    /// The create pass that follows a pending start can meet the same refusal: the replica still does not show the definition.
+    /// The sweep after it tries again, and stops once the session starts.
+    /// </summary>
+    [Fact]
+    public async Task Azure_ReadOnlyIntent_AFollowUpPassWhoseStartIsRefusedAgain_RunsAgainOnTheNextSweep()
+    {
+        await WithRunnerAsync(async (rig, ct) =>
+        {
+            var server = ReadOnlyIntentServer();
+            var state = await LatchedAsync(rig, server, ct);
+
+            var refuseStart = true;
+            rig.Runner.LongQueryTraceStepOverrideForTests = (_, database, _, step, session, _) =>
+            {
+                rig.Steps.Add((database, step, session));
+                return refuseStart && step == LongQueryTraceStep.Start ? Task.FromException(StartNotVisible()) : Task.CompletedTask;
+            };
+
+            await rig.Runner.RunAsync(LongQueryCompletionsCollector.Instance, server, ct);
+
+            rig.Clock = ReadAt.AddMinutes(1);
+            Assert.Contains(("alpha", LongQueryTraceStep.Start, OwnSession), await SweepAsync(rig, state, ct));
+
+            refuseStart = false;
+            rig.Clock = ReadAt.AddMinutes(2);
+            Assert.Contains(("alpha", LongQueryTraceStep.Start, OwnSession), await SweepAsync(rig, state, ct));
+
+            rig.Clock = ReadAt.AddMinutes(3);
+            Assert.Empty(await SweepAsync(rig, state, ct));
+        });
+    }
+
+    /// <summary>
+    /// On any engine the drop and the create run on separate connections, so the drop can succeed and the create fail. The
+    /// session is then missing, and the next collection sweep's create pass creates it, not the hourly one.
+    /// </summary>
+    [Fact]
+    public async Task OnPrem_TheDropSucceedsAndTheCreateFails_TheNextSweepCreatesTheSession()
+    {
+        await WithRunnerAsync(async (rig, ct) =>
+        {
+            var server = OnPremServer();
+            var state = await LatchedAsync(rig, server, ct);
+
+            var refuseCreate = true;
+            rig.Runner.LongQueryTraceStepOverrideForTests = (_, database, _, step, session, _) =>
+            {
+                rig.Steps.Add((database, step, session));
+                return refuseCreate && step == LongQueryTraceStep.CreateAndStart
+                    ? Task.FromException(new InvalidOperationException("A transient error."))
+                    : Task.CompletedTask;
+            };
+
+            await rig.Runner.RunAsync(LongQueryCompletionsCollector.Instance, server, ct);
+
+            Assert.Equal(
+                new[] { (string.Empty, LongQueryTraceStep.Drop, OwnSession), (string.Empty, LongQueryTraceStep.CreateAndStart, OwnSession) },
+                rig.Steps);
+            Assert.Contains("the next collection sweep creates it if it is missing", rig.Logger.Joined, StringComparison.Ordinal);
+
+            refuseCreate = false;
+            rig.Clock = ReadAt.AddMinutes(1);
+            Assert.Equal(new[] { (string.Empty, LongQueryTraceStep.CreateAndStart, OwnSession) }, await SweepAsync(rig, state, ct));
+
+            rig.Clock = ReadAt.AddMinutes(2);
+            Assert.Empty(await SweepAsync(rig, state, ct));
+        });
+    }
+
+    /// <summary>A recreate that completed leaves nothing for the next sweep: the latch holds and no create pass runs.</summary>
+    [Fact]
+    public async Task OnPrem_ACleanRecreate_AddsNoPassToTheNextSweep()
+    {
+        await WithRunnerAsync(async (rig, ct) =>
+        {
+            var server = OnPremServer();
+            var state = await LatchedAsync(rig, server, ct);
+
+            await rig.Runner.RunAsync(LongQueryCompletionsCollector.Instance, server, ct);
+            Assert.Equal(2, rig.Steps.Count);
+
+            rig.Clock = ReadAt.AddMinutes(1);
+            Assert.Empty(await SweepAsync(rig, state, ct));
+        });
+    }
+
+    private static ServerRuntime ReadOnlyIntentServer() => new()
+    {
+        Config = new MonitoredServer { Name = "lqrecreate", Host = "lqrecreate.database.windows.net", Database = "alpha", ReadOnlyIntent = true },
+        ConnectionString = "Server=azure;Database=alpha;ApplicationIntent=ReadOnly",
+        Target = new CollectorTargetInfo { IsAzureSqlDb = true, Engine = CollectorTargetEngine.SqlServer },
+        StorageName = "lqrecreate",
+        ServerId = LiveServerId,
+    };
+
+    private static Exception StartNotVisible() => LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(
+        LongQueryTraceDatabases.EventSessionNotVisibleErrorNumber, 16, "Cannot alter the event session, because it does not exist or you do not have permission.");
+
+    /// <summary>
+    /// The worker's state for this server after the long-query reconcile ran and latched, as it is between the hourly passes:
+    /// the session exists, and the next sweep's reconcile runs nothing unless something asked for it. The steps it sent are
+    /// cleared.
+    /// </summary>
+    private static async Task<DarlingWorker.ServerLoopState> LatchedAsync(Rig rig, ServerRuntime server, CancellationToken ct)
+    {
+        rig.Runner.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { "alpha" });
+        rig.Runner.LongQueryTraceListOverrideForTests = (_, _, _, _) => Task.FromResult(new List<string> { "alpha" });
+        rig.Runner.LegacyLongQueryRecordsForTests = new LongQueryTraceLifecycleTests.InMemoryLegacyRecords();
+        var state = new DarlingWorker.ServerLoopState { Config = server.Config, Runtime = server };
+
+        rig.Clock = ReadAt.AddMinutes(-1);
+        await SweepAsync(rig, state, ct);
+        Assert.True(state.LongQueryTraceApplied);
+        rig.Steps.Clear();
+        rig.Clock = ReadAt;
+        return state;
+    }
+
+    /// <summary>The long-query reconcile of one collection sweep, at the rig's clock; returns the steps it sent.</summary>
+    private static async Task<List<(string Database, LongQueryTraceStep Step, string Session)>> SweepAsync(
+        Rig rig, DarlingWorker.ServerLoopState state, CancellationToken ct)
+    {
+        var before = rig.Steps.Count;
+        await DarlingWorker.ReconcileLongQueryTraceAsync(
+            state, rig.Runner, enabled: true, Array.Empty<LongQueryTraceRegistration>(), Array.Empty<string>(), rig.Clock, rig.Logger, ct);
+        return rig.Steps.Skip(before).ToList();
     }
 
     private static ServerRuntime OnPremServer() => new()

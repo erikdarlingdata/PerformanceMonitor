@@ -2453,6 +2453,9 @@ public sealed partial class DarlingWorker
            cap is due. Otherwise, while the trace is on, the create side runs alone, so a session dropped from outside
            comes back: the read returns no rows for an absent session, the same as for a quiet one. The drop side
            runs once per connect, per change of the state key, or per attempt after the cap. */
+        /* #8146: a recreate in a collector run that left the session stopped or possibly missing asks for the create pass on this
+           sweep. Taken here, whatever pass runs: the whole pass and the attempt after the cap run the create side too. */
+        var createPassRequested = runner.TakeLongQueryCreatePassRequest(server.Runtime.ServerId);
         LongQueryTracePass pass;
         if (server.LongQueryTraceApplied != enabled
             || !string.Equals(server.LongQueryTraceAppliedKey, stateKey, StringComparison.Ordinal))
@@ -2464,8 +2467,8 @@ public sealed partial class DarlingWorker
             pass = LongQueryTracePass.RetryAfterCap;
         }
         else if (enabled
-                 && server.LongQueryTraceAppliedAtUtc is { } appliedAt
-                 && utcNow - appliedAt >= LongQueryTraceDatabases.RetryInterval)
+                 && (createPassRequested
+                     || (server.LongQueryTraceAppliedAtUtc is { } appliedAt && utcNow - appliedAt >= LongQueryTraceDatabases.RetryInterval)))
         {
             pass = LongQueryTracePass.CreateOnly;
         }
@@ -2492,6 +2495,12 @@ public sealed partial class DarlingWorker
                 server.LongQueryTraceApplied = enabled;
                 server.LongQueryTraceAppliedKey = stateKey;
                 server.LongQueryTraceAppliedAtUtc = utcNow;
+            }
+            else if (pass == LongQueryTracePass.CreateOnly)
+            {
+                /* #8146: a create pass a recreate asked for leaves the hourly clock where it was, so the unchanged latch alone would
+                   wait out the hour: ask again, and the next sweep tries the start once more. */
+                runner.RequestLongQueryCreatePass(server.Runtime.ServerId);
             }
 
             /* Only a pass that ran the cleanup ends its retries: the create side alone leaves the hourly attempt. */
