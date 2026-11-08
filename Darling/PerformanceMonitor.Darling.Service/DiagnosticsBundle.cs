@@ -79,6 +79,8 @@ internal static class DiagnosticsBundle
         "DarlingConfig.Postgres", "DarlingConfig.Servers", "DarlingConfig.Analyzer", "DarlingConfig.CapturePlans",
         "DarlingConfig.Mcp", "DarlingConfig.Web", "DarlingConfig.Reads", "ReadsConfig.MaxHeavyReads", "DarlingConfig.QueryStatsDeferredPlanFetch", "DarlingConfig.QueryTextTrigramIndexEnabled", "DarlingConfig.ProcedureStatsDeferredPlanFetch", "PostgresConfig.Managed", "PostgresConfig.ConnectionString",
         "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "McpConfig.AllowWrites", "McpConfig.AllowServerAdmin", "McpConfig.AllowInvestigations", "McpConfig.AllowAgentMuteRules", "McpConfig.AllowWindowsAuthOverUnverifiedTls", "McpConfig.DataDetail", "McpConfig.AllowTokenlessLoopback", "WebConfig.Enabled", "WebConfig.Network", "WebConfig.AllowTokenlessLoopback", "WebConfig.AllowAdminWrites", "WebConfig.AllowWindowsAuthOverUnverifiedTls",
+        /* #8184: the health port is projected as its on/off flag, like mcp_enabled; its port and address stay out, like McpConfig.Port. */
+        "DarlingConfig.Health", "HealthConfig.Enabled",
         "MonitoredServer.Engine", "MonitoredServer.AlertDeliveryModeOverride",
     };
 
@@ -117,6 +119,8 @@ internal static class DiagnosticsBundle
         /* #6542: named MCP tokens hold token names and secrets; the bundle shows only whether the legacy network block exists. */
         "McpConfig.Tokens",
         "WebConfig.Port",
+        "HealthConfig.Port",
+        "HealthConfig.Listen",
         "WebConfig.PublicBaseUrl",
         "MonitoredServer.Name",
         "MonitoredServer.Host",
@@ -195,6 +199,7 @@ internal static class DiagnosticsBundle
             // The PARSED level word, never the raw text; an unknown value runs as metadataOnly, so it reports that.
             ["mcp_data_detail"] = McpDataDetailModes.Word(McpDataDetailModes.Resolve(config.Mcp?.DataDetail)),
             ["web_enabled"] = config.Web?.Enabled ?? false,
+            ["health_enabled"] = config.Health?.Enabled ?? false,
             ["web_network_exposed"] = WebNetworkExposed(config),
             ["web_allow_tokenless_loopback"] = config.Web?.AllowTokenlessLoopback ?? false,
             ["web_allow_admin_writes"] = config.Web?.AllowAdminWrites ?? false,
