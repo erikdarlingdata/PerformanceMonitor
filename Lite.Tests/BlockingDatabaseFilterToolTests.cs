@@ -239,7 +239,7 @@ public sealed class BlockingDatabaseFilterToolTests : IClassFixture<SharedDuckDb
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
         var text = root.GetProperty("message").GetString()!;
-        Assert.Contains("No blocking was recorded for " + ServerName + " for the database NoSuchDb in the last 24 hour(s).", text, StringComparison.Ordinal);
+        Assert.Contains("No blocking was recorded for " + ServerName + " for the database NoSuchDb in the last 24 hours.", text, StringComparison.Ordinal);
         /* The run counts behind the answer are the server's own: a collector looks at every database. */
         Assert.Equal(1, root.GetProperty("hints").GetProperty("capture_count").GetInt64());
     }
@@ -252,7 +252,7 @@ public sealed class BlockingDatabaseFilterToolTests : IClassFixture<SharedDuckDb
         var root = Parse(await McpBlockingTools.GetBlockingTrend(_service, _serverManager, ServerName));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
-        Assert.Contains("No blocking was recorded for " + ServerName + " in the last 24 hour(s).",
+        Assert.Contains("No blocking was recorded for " + ServerName + " in the last 24 hours.",
             root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 

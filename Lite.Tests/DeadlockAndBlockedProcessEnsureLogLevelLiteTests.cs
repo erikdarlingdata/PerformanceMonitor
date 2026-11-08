@@ -201,7 +201,7 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
 
     private static string RefusalLine(string session) => $"Failed to ensure {session} XE session";
 
-    private static string AllRefusedLine(string session) => $"Failed to ensure the {session} XE session in all 3 database(s)";
+    private static string AllRefusedLine(string session) => $"Failed to ensure the {session} XE session in all 3 databases";
 
     private static string ListingLine(string session) => $"Failed to enumerate databases for {session} XE sessions";
 

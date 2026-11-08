@@ -135,7 +135,7 @@ public sealed class McpMissMessageParityPinTests
         ". The unobserved stretch could have held anything, and nothing here speaks for it; check get_collection_health for why collection stopped.",
         "Every fraction-of-period and per-hour value below is per OBSERVED time (period_duration_ms × coverage_fraction, or observed_hours), not per nominal window; the COLLECTION_GAP fact carries the hole.",
         ", so no windowed fact (wait fractions, blocking or deadlock rates) exists to show.",
-        "point-in-time fact(s) (configuration and current state) could still be read; audit_config reports those.",
+        "{CountText.Plural(facts.Count, \"point-in-time fact\")} (configuration and current state) could still be read; audit_config reports those.",
         "The BASELINE window was only partly collected: ",
         "The COMPARISON window was only partly collected: ",
         ". Its rates are per observed time, and its windowed facts are absent where nothing was observed.",
@@ -158,8 +158,8 @@ public sealed class McpMissMessageParityPinTests
         /* get_query_heatmap (#2484) — the three empty branches, one of which (a collected but IDLE
            window) no other read has. */
         "so this is NOT a report of a quiet server: there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.",
-        " hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
-        " hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid",
+        "{CountText.Plural(hours_back, \"hour\")}, so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
+        "{CountText.Plural(hours_back, \"hour\")}, but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid",
         " Delta-based collection also needs a SECOND cycle before the first non-zero row exists.",
 
         /* get_lock_wait_trend (#2484). The all-clear sentence is get_wait_types' own, reused deliberately:
@@ -246,7 +246,7 @@ public sealed class McpMissMessageParityPinTests
            history note. Each is emitted by a helper or envelope builder that lives once per SKU. */
         " is null: no_baseline, ",
         " is 0, so the ratio has no denominator; this is NOT 0% change. Compare ",
-        " collection(s) had no knowable rate: a rate is a collection's work divided by the seconds it accrued over, and that denominator is unknowable two ways, the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the collection is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0: such a collection is left out of its point's rates rather than counted as zero, and a point that held nothing else carries null rates (",
+        "{CountText.Plural(unratedCollections, \"collection\")} had no knowable rate: a rate is a collection's work divided by the seconds it accrued over, and that denominator is unknowable two ways, the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the collection is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0: such a collection is left out of its point's rates rather than counted as zero, and a point that held nothing else carries null rates (",
         "pvs_size_mb was not reported by sys.dm_tran_persistent_version_store_stats in this capture, so the share is unknown, not zero.",
         "database_data_size_mb was not captured for this database, so there is no denominator: the share is unknown, not zero.",
         "database_data_size_mb is 0, so the share has no denominator: the share is unknown, not zero.",

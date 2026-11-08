@@ -422,7 +422,7 @@ public sealed class PurgeNowBackgroundTests
         Assert.Contains(
             log.Lines,
             line => line.StartsWith("Information:", StringComparison.Ordinal)
-                && line.Contains("Manual purge (purge_now, custom retention 30 day(s))", StringComparison.Ordinal));
+                && line.Contains("Manual purge (purge_now, custom retention 30 days)", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -443,7 +443,7 @@ public sealed class PurgeNowBackgroundTests
 
         var warning = Assert.Single(
             log.Lines, line => line.StartsWith("Warning:", StringComparison.Ordinal) && line.Contains("cut short", StringComparison.Ordinal));
-        Assert.Contains("Manual purge (purge_now, custom retention 30 day(s))", warning, StringComparison.Ordinal);
+        Assert.Contains("Manual purge (purge_now, custom retention 30 days)", warning, StringComparison.Ordinal);
         Assert.Contains("The next daily purge uses the configured retention horizons", warning, StringComparison.Ordinal);
     }
 
@@ -501,7 +501,7 @@ public sealed class PurgeNowBackgroundTests
         var record = Assert.Single(written);
         Assert.Equal("WARNING", record.Status);
         var lines = record.Message.Split('\n');
-        Assert.Contains("Manual purge (purge_now, custom retention 30 day(s))", lines[0], StringComparison.Ordinal);
+        Assert.Contains("Manual purge (purge_now, custom retention 30 days)", lines[0], StringComparison.Ordinal);
         Assert.Single(lines, line => line.StartsWith("(all three raw tables): gate_error - ", StringComparison.Ordinal));
 
         /* And the same line at Information, so the service log carries it too. */
@@ -571,7 +571,7 @@ public sealed class PurgeNowBackgroundTests
     public void ManualPurgeLabel_NamesTheCommand_AndTheCustomHorizonWhenSet()
     {
         Assert.Equal("Manual purge (purge_now)", DarlingRetention.BuildManualPurgeLabel(null));
-        Assert.Equal("Manual purge (purge_now, custom retention 30 day(s))", DarlingRetention.BuildManualPurgeLabel(30));
+        Assert.Equal("Manual purge (purge_now, custom retention 30 days)", DarlingRetention.BuildManualPurgeLabel(30));
     }
 
     [Fact]
@@ -584,7 +584,7 @@ public sealed class PurgeNowBackgroundTests
             paced: true, walBytes: 52_428_800, pacedSeconds: 12, runLabel: label);
 
         Assert.Equal("SUCCESS", status);
-        Assert.StartsWith("Manual purge (purge_now, custom retention 14 day(s)): Purged 33 table(s)", message, StringComparison.Ordinal);
+        Assert.StartsWith("Manual purge (purge_now, custom retention 14 days): Purged 33 tables", message, StringComparison.Ordinal);
         Assert.Contains("store WAL during the purge's batches: 50 MB", message, StringComparison.Ordinal);
     }
 
@@ -594,7 +594,7 @@ public sealed class PurgeNowBackgroundTests
         var (_, message) = DarlingRetention.BuildRunRecordSummary(
             tablesPurged: 33, totalRowsDeleted: 1200, totalChunksDropped: 42, tablesFailed: 0);
 
-        Assert.StartsWith("Purged 33 table(s)", message, StringComparison.Ordinal);
+        Assert.StartsWith("Purged 33 tables", message, StringComparison.Ordinal);
         Assert.DoesNotContain("Manual", message, StringComparison.Ordinal);
     }
 

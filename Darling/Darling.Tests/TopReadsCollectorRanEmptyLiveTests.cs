@@ -115,7 +115,7 @@ public sealed class TopReadsCollectorRanEmptyLiveTests
             var second = JsonDocument.Parse(await DarlingMcpPgStatementTools.GetPgTopQueries(postgres, ServerName, 1, as_of: now.ToString("o"))).RootElement;
             Assert.Equal("empty", second.GetProperty("status").GetString());
             Assert.Equal(2, second.GetProperty("hints").GetProperty("successful_runs_in_window").GetInt64());
-            Assert.StartsWith("pg_statement_stats ran 2 time(s) in the last 1 hour(s)", second.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.StartsWith("pg_statement_stats ran 2 times in the last 1 hour", second.GetProperty("message").GetString(), StringComparison.Ordinal);
         });
     }
 

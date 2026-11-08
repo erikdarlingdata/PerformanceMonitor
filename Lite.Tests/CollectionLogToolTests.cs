@@ -124,7 +124,7 @@ public sealed class CollectionLogToolTests : IClassFixture<SharedDuckDbFixture>,
         Assert.Equal("empty", quietRoot.GetProperty("status").GetString());
         var quietText = quietRoot.GetProperty("message").GetString()!;
         Assert.DoesNotContain("EVER", quietText, StringComparison.Ordinal);
-        Assert.Equal($"No collector runs recorded for {ServerName} in the last 1 hour(s). {McpHelpers.CutWindowNothingReadMessage}", quietText);
+        Assert.Equal($"No collector runs recorded for {ServerName} in the last 1 hour. {McpHelpers.CutWindowNothingReadMessage}", quietText);
     }
 
     [Fact]

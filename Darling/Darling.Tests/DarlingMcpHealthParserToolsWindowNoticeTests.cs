@@ -296,7 +296,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             Assert.True(cut.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
             Assert.Equal(McpHelpers.FormatEffectiveStart(added), cut.GetProperty("hints").GetProperty("effective_start").GetString());
             var message = cut.GetProperty("message").GetString()!;
-            Assert.StartsWith($"No {eventType} events were captured for {HealthName("rung2-" + tool)} in the last 168 hour(s). This server has captured them before", message, StringComparison.Ordinal);
+            Assert.StartsWith($"No {eventType} events were captured for {HealthName("rung2-" + tool)} in the last 168 hours. This server has captured them before", message, StringComparison.Ordinal);
             Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, message, StringComparison.Ordinal);
             Assert.DoesNotContain("nothing happened in this window", message, StringComparison.Ordinal);
         });

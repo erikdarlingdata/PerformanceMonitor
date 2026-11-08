@@ -424,7 +424,7 @@ public sealed class McpWindowNoticeConfigAndLogToolTests : IDisposable
 
         Assert.Equal("empty", cut.GetProperty("status").GetString());
         Assert.Equal(JsonValueKind.Null, cut.GetProperty("hints").GetProperty("effective_start").ValueKind);
-        Assert.Equal($"No collector runs recorded for {ServerName} in the last 24 hour(s). {McpHelpers.CutWindowNothingReadMessage}", cut.GetProperty("message").GetString());
+        Assert.Equal($"No collector runs recorded for {ServerName} in the last 24 hours. {McpHelpers.CutWindowNothingReadMessage}", cut.GetProperty("message").GetString());
 
         /* The same cut window, filtered: not the cut sentence, the filtered one with its echo and advice. */
         var cutFiltered = Root(await McpHealthTools.GetCollectionLog(

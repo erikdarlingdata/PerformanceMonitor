@@ -508,7 +508,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.Contains("NOTHING by construction", filtered, StringComparison.Ordinal);
         Assert.Contains("the filter, not the table", filtered, StringComparison.Ordinal);
         Assert.Contains("owner role", filtered, StringComparison.Ordinal);
-        Assert.Contains("9 job(s) started a run", filtered, StringComparison.Ordinal);
+        Assert.Contains("9 jobs started a run", filtered, StringComparison.Ordinal);
         Assert.DoesNotContain("CONTRADICTION", filtered, StringComparison.Ordinal);
 
         /* The contradiction arm: named as such, with the benign cause and how to settle it, and never
@@ -520,7 +520,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.Contains("a finding", contradiction, StringComparison.Ordinal);
 
         /* Rows seen: the flag is a measurement. */
-        Assert.Contains("12 row(s)", proven, StringComparison.Ordinal);
+        Assert.Contains("12 rows", proven, StringComparison.Ordinal);
         Assert.Contains("a measurement here, not a GUC echo", proven, StringComparison.Ordinal);
         Assert.DoesNotContain("CONTRADICTION", proven, StringComparison.Ordinal);
 
@@ -553,7 +553,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
                 DarlingStoreMetricsReader.JobExecutionLoggingStatus.Unreadable, null, null, null),
             Observed(rows: 2));
         Assert.Contains("not classified", gucUnknownAdmitted, StringComparison.Ordinal);
-        Assert.Contains("2 row(s)", gucUnknownAdmitted, StringComparison.Ordinal);
+        Assert.Contains("2 rows", gucUnknownAdmitted, StringComparison.Ordinal);
         Assert.DoesNotContain("CONTRADICTION", gucUnknownAdmitted, StringComparison.Ordinal);
         Assert.DoesNotContain("not a GUC echo", gucUnknownAdmitted, StringComparison.Ordinal);
         Assert.DoesNotContain("any it sees now are FAILED", gucUnknownAdmitted, StringComparison.Ordinal);
@@ -818,9 +818,9 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         }
 
         Assert.Contains("Reading as 'darling' at 2026-09-18T15:00:00.0000000Z", proven, StringComparison.Ordinal);
-        Assert.Contains("48 row(s)", proven, StringComparison.Ordinal);
+        Assert.Contains("48 rows", proven, StringComparison.Ordinal);
         Assert.Contains("newest 2026-09-18T14:47:00.0000000Z", proven, StringComparison.Ordinal);
-        Assert.Contains("110 job(s) started a run", proven, StringComparison.Ordinal);
+        Assert.Contains("110 jobs started a run", proven, StringComparison.Ordinal);
         Assert.Contains("a measurement on this store after all", proven, StringComparison.Ordinal);
         Assert.DoesNotContain("CONTRADICTION", proven, StringComparison.Ordinal);
 
@@ -1064,11 +1064,11 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         var reconciled = DarlingMcpStoreMetricsTools.InventoryNote(inventory, rows, states, largest, existenceRead: true);
 
         Assert.Contains("account for 409.0 GiB of the 415.0 GiB database (98.55%)", reconciled, StringComparison.Ordinal);
-        Assert.Contains("3.0 GiB sits in 14 un-enumerated user-schema relation(s) (object_kind other)", reconciled, StringComparison.Ordinal);
+        Assert.Contains("3.0 GiB sits in 14 un-enumerated user-schema relations (object_kind other)", reconciled, StringComparison.Ordinal);
         Assert.Contains("the largest being collect.store_log_events (2.0 GiB), collect.store_metrics (512.0 MiB)", reconciled, StringComparison.Ordinal);
-        Assert.Contains("2.0 GiB is PostgreSQL catalog and TimescaleDB bookkeeping in 161 relation(s)", reconciled, StringComparison.Ordinal);
+        Assert.Contains("2.0 GiB is PostgreSQL catalog and TimescaleDB bookkeeping in 161 relations", reconciled, StringComparison.Ordinal);
         Assert.Contains("RECONCILED: every row together accounts for 99.76%", reconciled, StringComparison.Ordinal);
-        Assert.Contains("1 of 2 continuous aggregate(s) have compression DISABLED and hold 200.0 GiB", reconciled, StringComparison.Ordinal);
+        Assert.Contains("1 of 2 continuous aggregates has compression DISABLED and hold 200.0 GiB", reconciled, StringComparison.Ordinal);
         Assert.DoesNotContain("NOT RECONCILED", reconciled, StringComparison.Ordinal);
         Assert.DoesNotContain("not from the store row's sweep", reconciled, StringComparison.Ordinal);
         Assert.DoesNotContain("no longer exist", reconciled, StringComparison.Ordinal);
@@ -1102,7 +1102,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         var stale = DarlingMcpStoreMetricsTools.InventoryNote(
             DarlingStoreMetricsReader.ComputeInventory(staleRows, Exists((StoreSelfMetrics.HypertableObjectKind, "old", true)))!,
             staleRows, states, null, existenceRead: true);
-        Assert.Contains("1 object row(s) are for objects that still exist but are not from the store row's sweep, so the newest sweep did not reach them", stale, StringComparison.Ordinal);
+        Assert.Contains("1 object row is for objects that still exist but are not from the store row's sweep, so the newest sweep did not reach them", stale, StringComparison.Ordinal);
         Assert.Contains("an Error starting 'Store self-metrics sweep'", stale, StringComparison.Ordinal);
         Assert.Contains("in a line containing 'plain-PostgreSQL mode'", stale, StringComparison.Ordinal);
         Assert.DoesNotContain("Warning line", stale, StringComparison.Ordinal);
@@ -1248,7 +1248,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
             outside, null, none, existenceRead);
 
         var dropped = Note(false, existenceRead: true);
-        Assert.Contains("1 object row(s) are for objects that no longer exist (dropped or retired since their last row) and are excluded from these sums", dropped, StringComparison.Ordinal);
+        Assert.Contains("1 object row is for objects that no longer exist (dropped or retired since their last row) and are excluded from these sums", dropped, StringComparison.Ordinal);
         Assert.Contains("That is history, not a sweep failure", dropped, StringComparison.Ordinal);
         Assert.Contains($"stays its newest for {StoreSelfMetrics.RetentionDays} days", dropped, StringComparison.Ordinal);
         Assert.Contains("The most recent: perfmon_baseline (continuous_aggregate, last row 2026-09-10T04:00:00.0000000)", dropped, StringComparison.Ordinal);
@@ -1257,13 +1257,13 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.DoesNotContain("no verdict", dropped, StringComparison.Ordinal);
 
         var gap = Note(true, existenceRead: true);
-        Assert.Contains("1 object row(s) are for objects that still exist but are not from the store row's sweep, so the newest sweep did not reach them", gap, StringComparison.Ordinal);
+        Assert.Contains("1 object row is for objects that still exist but are not from the store row's sweep, so the newest sweep did not reach them", gap, StringComparison.Ordinal);
         Assert.Contains("darling-service_yyyyMMdd.log", gap, StringComparison.Ordinal);
         Assert.DoesNotContain("no longer exist", gap, StringComparison.Ordinal);
         Assert.DoesNotContain("no verdict", gap, StringComparison.Ordinal);
 
         var noCheck = Note(null, existenceRead: true);
-        Assert.Contains("1 object row(s) are not from the store row's sweep and are excluded from these sums, with no verdict", noCheck, StringComparison.Ordinal);
+        Assert.Contains("1 object row is not from the store row's sweep and are excluded from these sums, with no verdict", noCheck, StringComparison.Ordinal);
         Assert.Contains("their kind has no existence check on this store", noCheck, StringComparison.Ordinal);
         Assert.DoesNotContain("did not reach them", noCheck, StringComparison.Ordinal);
         Assert.DoesNotContain("no longer exist", noCheck, StringComparison.Ordinal);
@@ -1307,7 +1307,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         const string explained = "collection_health_hourly is uncompressed by design: each refresh re-materializes its last 8 days and its retention keeps 8 days";
 
         var both = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(rows)!, rows, states, none, existenceRead: true);
-        Assert.Contains("1 of 3 continuous aggregate(s) have compression DISABLED and hold 200.0 GiB between them", both, StringComparison.Ordinal);
+        Assert.Contains("1 of 3 continuous aggregates has compression DISABLED and hold 200.0 GiB between them", both, StringComparison.Ordinal);
         Assert.Contains("not counting the one uncompressed by design below.", both, StringComparison.Ordinal);
         Assert.Contains(explained, both, StringComparison.Ordinal);
         Assert.Contains("no chunk of this one gets that old before retention drops it", both, StringComparison.Ordinal);
@@ -1320,7 +1320,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         var enabled = byDesign with { CompressionEnabled = true };
         var handEnabled = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(rows)!, rows, new[] { states[0], states[1], enabled }, none, existenceRead: true);
         Assert.DoesNotContain("uncompressed by design", handEnabled, StringComparison.Ordinal);
-        Assert.Contains("1 of 3 continuous aggregate(s) have compression DISABLED and hold 200.0 GiB between them (compression_enabled on each continuous_aggregate object; the policy job ids beside it).", handEnabled, StringComparison.Ordinal);
+        Assert.Contains("1 of 3 continuous aggregates has compression DISABLED and hold 200.0 GiB between them (compression_enabled on each continuous_aggregate object; the policy job ids beside it).", handEnabled, StringComparison.Ordinal);
 
         Assert.Equal("8 days", TimescaleSupport.CollectionHealthRefreshStartOffset);
         Assert.Equal("8 days", TimescaleSupport.CollectionHealthRetentionInterval);

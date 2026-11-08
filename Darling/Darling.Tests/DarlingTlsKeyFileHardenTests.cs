@@ -282,7 +282,7 @@ public class DarlingTlsKeyFileHardenTests
             var lines = output.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
             var line = lines[0];
             Assert.Equal(2, lines.Length);
-            Assert.Equal("1 of 1 TLS key file(s) are STILL readable by ordinary users or could not be secured.", lines[1]);
+            Assert.Equal("1 of 1 TLS key file is STILL readable by ordinary users or could not be secured.", lines[1]);
             Assert.StartsWith($"  NOT CHANGED (outside the install folder)  {key} (the TLS key file, web.network.tls.keyPath): ordinary users can read it", line, StringComparison.Ordinal);
             Assert.EndsWith(DarlingCliCommands.TlsKeyFileIcaclsLine(key), line, StringComparison.Ordinal);
             Assert.EndsWith(":(R)\"", line, StringComparison.Ordinal);
@@ -385,7 +385,7 @@ public class DarlingTlsKeyFileHardenTests
             Assert.Equal("", error);
             var lines = output.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
             Assert.Equal(5, lines.Length);
-            Assert.Equal("1 of 3 TLS key file(s) are STILL readable by ordinary users or could not be secured.", lines[4]);
+            Assert.Equal("1 of 3 TLS key files is STILL readable by ordinary users or could not be secured.", lines[4]);
             Assert.StartsWith("  SECURED  ", lines[0], StringComparison.Ordinal);
             Assert.StartsWith("  REFUSED  ", lines[1], StringComparison.Ordinal);
             Assert.StartsWith("  MISSING  ", lines[2], StringComparison.Ordinal);
@@ -732,9 +732,9 @@ public class DarlingTlsKeyFileHardenTests
         }
     }
 
-    private const string OtherAccessLine = "1 of 1 TLS key file(s) are open to accounts other than SYSTEM, Administrators and the service account (see the lines above for who).";
-    private const string OwnerLine = "1 of 1 TLS key file(s) have an owner who is not SYSTEM, Administrators or the service account, so the owner can change who may read them.";
-    private const string ReadableLine = "1 of 1 TLS key file(s) are STILL readable by ordinary users or could not be secured.";
+    private const string OtherAccessLine = "1 of 1 TLS key file is open to accounts other than SYSTEM, Administrators and the service account (see the lines above for who).";
+    private const string OwnerLine = "1 of 1 TLS key file has an owner who is not SYSTEM, Administrators or the service account, so the owner can change who may read them.";
+    private const string ReadableLine = "1 of 1 TLS key file is STILL readable by ordinary users or could not be secured.";
 
     private static string LastLine(string text) => text.ReplaceLineEndings("\n").TrimEnd().Split('\n').Last();
 
@@ -928,7 +928,7 @@ public class DarlingTlsKeyFileHardenTests
             var fullExit = DarlingCliCommands.HardenFiles(fullConfig, fullOutput, fullError);
 
             Assert.Equal(1, fullExit);
-            Assert.Contains("1 of 2 item(s) are STILL readable by ordinary users.", Lines(fullError.ToString()));
+            Assert.Contains("1 of 2 items is STILL readable by ordinary users.", Lines(fullError.ToString()));
             Assert.DoesNotContain("open to accounts", fullError.ToString(), StringComparison.Ordinal);
         }
         finally
@@ -944,10 +944,10 @@ public class DarlingTlsKeyFileHardenTests
     {
         Assert.Empty(DarlingCliCommands.TlsKeyFileAccessCountLines(new DarlingCliCommands.TlsKeyFileResult(3, 2, 0, 0)));
         Assert.Equal(
-            new[] { "2 of 3 TLS key file(s) are open to accounts other than SYSTEM, Administrators and the service account (see the lines above for who)." },
+            new[] { "2 of 3 TLS key files are open to accounts other than SYSTEM, Administrators and the service account (see the lines above for who)." },
             DarlingCliCommands.TlsKeyFileAccessCountLines(new DarlingCliCommands.TlsKeyFileResult(3, 0, 0, 0, OtherAccess: 2)));
         Assert.Equal(
-            new[] { "1 of 3 TLS key file(s) have an owner who is not SYSTEM, Administrators or the service account, so the owner can change who may read them." },
+            new[] { "1 of 3 TLS key files has an owner who is not SYSTEM, Administrators or the service account, so the owner can change who may read them." },
             DarlingCliCommands.TlsKeyFileAccessCountLines(new DarlingCliCommands.TlsKeyFileResult(3, 0, 0, 0, UntrustedOwner: 1)));
         Assert.Equal(2, DarlingCliCommands.TlsKeyFileAccessCountLines(new DarlingCliCommands.TlsKeyFileResult(3, 0, 0, 0, 1, 1)).Count());
     }
@@ -1039,7 +1039,7 @@ public class DarlingTlsKeyFileHardenTests
                 + Json(Path.Combine(scratch.FullName, "store", "pg")) + "}}");
             var plain = new StringWriter();
             Assert.Equal(0, DarlingCliCommands.HardenFiles(config, plain, new StringWriter()));
-            Assert.EndsWith("All 1 item(s) secured. The service re-asserts these ACLs at every start.", plain.ToString().TrimEnd(), StringComparison.Ordinal);
+            Assert.EndsWith("All 1 item secured. The service re-asserts these ACLs at every start.", plain.ToString().TrimEnd(), StringComparison.Ordinal);
         }
         finally
         {
@@ -1109,7 +1109,7 @@ public class DarlingTlsKeyFileHardenTests
             Assert.Equal("", error);
             var lines = output.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
             Assert.Equal(3, lines.Length);
-            Assert.Equal("1 of 2 TLS key file(s) are STILL readable by ordinary users or could not be secured.", lines[2]);
+            Assert.Equal("1 of 2 TLS key files is STILL readable by ordinary users or could not be secured.", lines[2]);
             Assert.Equal($"  SECURED  {inside} (the TLS key password file, web.network.tls.pfxPassword)", lines[0]);
             Assert.StartsWith($"  NOT CHANGED (outside the install folder)  {away} (the TLS key password file, mcp.network.tls.pfxPassword): ordinary users can read it", lines[1], StringComparison.Ordinal);
             Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(inside));

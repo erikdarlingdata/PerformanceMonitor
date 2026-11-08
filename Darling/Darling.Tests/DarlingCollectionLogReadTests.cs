@@ -121,7 +121,7 @@ public sealed class DarlingCollectionLogReadTests
                answer says so instead of "genuinely quiet". */
             Assert.True(quietDoc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
             Assert.Equal(JsonValueKind.Null, quietDoc.RootElement.GetProperty("hints").GetProperty("effective_start").ValueKind);
-            Assert.Equal($"No collector runs recorded for {ServerName} in the last 1 hour(s). {McpHelpers.CutWindowNothingReadMessage}", quietText);
+            Assert.Equal($"No collector runs recorded for {ServerName} in the last 1 hour. {McpHelpers.CutWindowNothingReadMessage}", quietText);
 
             /* ── 3. rows in the window: the data path, and the split that makes the log worth reading ── */
             await SeedAsync(connection, ct, "query_store", MinutesAgo(10));
