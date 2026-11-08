@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// Escape in its window; a list that has shown several servers keeps one clock in its header and its range label when a later read
 /// is empty; and Refresh wraps together with the Dismiss buttons.
 /// </summary>
+[Collection("viewer-time-statics")]
 public sealed class ViewerAlertHistoryMenusAndPopupsTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
