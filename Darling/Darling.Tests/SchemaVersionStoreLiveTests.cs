@@ -71,7 +71,8 @@ public sealed class SchemaVersionStoreLiveTests
             key ?? s_key, server, Db, at, by, baseline, complete, read, attribution ?? Array.Empty<SchemaEvent>(),
             new SchemaCaptureStateRow { ServerId = server, DatabaseName = Db, LastCompleteReadAt = complete ? at : null, BaselineAt = baseline ? at : null })
         {
-            TargetedIds = targeted
+            TargetedIds = targeted,
+            OtherServerStampedSince = at.AddDays(-30)
         };
     }
 

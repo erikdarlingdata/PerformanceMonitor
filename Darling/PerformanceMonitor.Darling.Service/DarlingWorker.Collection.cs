@@ -738,7 +738,9 @@ public sealed partial class DarlingWorker
             /* #6211: live provider like its siblings, so a store change to query_store_fetch_top_n takes effect on the next cycle, no restart. */
             queryStoreFetchTopN: () => StoreConfigProvider.ClampQueryStoreFetchTopN(config.QueryStoreFetchTopN),
             /* #8146: clamped and logged once here, because darling.json is read once at start. */
-            xeRingBufferMaxEvents: StoreConfigProvider.ClampXeRingBufferMaxEvents(config.XeRingBufferMaxEvents, _logger));
+            xeRingBufferMaxEvents: StoreConfigProvider.ClampXeRingBufferMaxEvents(config.XeRingBufferMaxEvents, _logger),
+            /* #7643: the schema pass reads the retention the purge applies, live over the same overrides. */
+            collectorRetentionDays: name => StoreConfigProvider.ResolveFleetRetentionDays(name, _scheduleOverrides));
         /* #7067: one gate, one clock, for the worker's and the runner's repeated warnings. */
         runner.RepeatLog = RepeatLog;
         _runner = runner;

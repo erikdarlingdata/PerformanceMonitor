@@ -757,6 +757,27 @@ VALUES ({server.ServerId + 1}, 'SalesDb', '{s_group}', now()) RETURNING 1", ct);
     }
 
     [Fact]
+    public async Task Pass_DatabaseLeavesTheGroupHereWhileAnotherServersRowIsStale_ClosesTheGroupHistory()
+    {
+        await WithRigAsync(async (rig, ct) =>
+        {
+            rig.Source.Probes.Add(Probe(Sales, 5, group: s_group, primary: true));
+            rig.Source.Catalog[Sales] = [Table(100, "Orders", "Id", "Total"), Table(101, "Customers", "Id")];
+            var server = rig.Server();
+            await rig.PassAsync(server, ct);
+            /* The other server stopped stamping the group 40 days ago, past the 30 day window the purge uses. */
+            await rig.ScalarAsync($@"INSERT INTO collect.schema_capture_state (server_id, database_name, history_ag_group_id, last_seen_in_scope_at)
+VALUES ({server.ServerId + 1}, 'SalesDb', '{s_group}', now() - interval '40 days') RETURNING 1", ct);
+
+            rig.Source.Probes[0] = Probe(Sales, 5);
+            await rig.PassAsync(server, ct);
+
+            Assert.Equal("0", await Versions(rig, $"ag_group_id = '{s_group}' AND valid_to IS NULL", ct));
+            Assert.Equal("2", await Versions(rig, $"ag_group_id = '{s_group}' AND valid_to IS NOT NULL", ct));
+        });
+    }
+
+    [Fact]
     public async Task Pass_DatabasesWhoseNamesDifferOnlyInCase_EachKeepTheirOwnState()
     {
         await WithRigAsync(async (rig, ct) =>

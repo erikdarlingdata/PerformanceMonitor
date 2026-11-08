@@ -39,6 +39,13 @@ public sealed record SchemaDatabaseWrite(
     public IReadOnlySet<int>? TargetedIds { get; init; }
 
     /// <summary>
+    /// The oldest <c>last_seen_in_scope_at</c> that still makes another server's capture-state row count as writing an availability
+    /// group's history when this read moves a database out of the group: the collector's retention cutoff, the one the purge uses. A
+    /// row last stamped before it no longer keeps the history open.
+    /// </summary>
+    public required DateTime OtherServerStampedSince { get; init; }
+
+    /// <summary>
     /// The key the database's history was kept under before it joined or left an availability group, when the read is the new key's first
     /// baseline. Its current versions are closed in the same transaction, so they age out with the retention window.
     /// </summary>
@@ -218,7 +225,8 @@ WHERE {keyPredicate} AND database_name = $2 AND valid_to IS NULL", c, tx) { Comm
 
     /* The database's history moved to w.Key: the old key's current versions close at the detection time, their children stop being
        current, and DarlingRetention ages them out over the window. An availability group's history is left open while another server's
-       capture state still writes it (the database left the group on this server only). */
+       capture state still writes it (the database left the group on this server only); a row not stamped within the retention window does
+       not count, so a server that stopped stamping the group cannot keep it open until the purge takes it early. */
     private static async Task CloseMovedHistoryAsync(NpgsqlConnection c, NpgsqlTransaction tx, SchemaDatabaseWrite w, SchemaHistoryKey moved, CancellationToken ct)
     {
         var keyPredicate = moved.AgGroupId is not null
@@ -231,7 +239,7 @@ WHERE {keyPredicate} AND database_name = $2 AND valid_to IS NULL", c, tx) { Comm
 WITH closed AS (
     UPDATE collect.schema_objects AS o SET valid_to = $3
     WHERE {keyPredicate} AND o.database_name = $2 AND o.valid_to IS NULL
-    AND NOT EXISTS (SELECT 1 FROM collect.schema_capture_state AS s WHERE s.server_id <> $4 AND s.database_name = $2 AND {keptElsewhere})
+    AND NOT EXISTS (SELECT 1 FROM collect.schema_capture_state AS s WHERE s.server_id <> $4 AND s.database_name = $2 AND s.last_seen_in_scope_at >= $5 AND {keptElsewhere})
     RETURNING o.version_id),
 columns_closed AS (UPDATE collect.schema_columns SET is_current = FALSE WHERE version_id IN (SELECT version_id FROM closed) AND is_current),
 indexes_closed AS (UPDATE collect.schema_indexes SET is_current = FALSE WHERE version_id IN (SELECT version_id FROM closed) AND is_current),
@@ -250,6 +258,7 @@ SELECT count(*) FROM closed", c, tx) { CommandTimeout = WriteCommandTimeoutSecon
         Param(cmd, NpgsqlDbType.Text, w.DatabaseName);
         Param(cmd, NpgsqlDbType.Timestamp, Naive(w.DetectedAtUtc));
         Param(cmd, NpgsqlDbType.Integer, w.DetectedOnServerId);
+        Param(cmd, NpgsqlDbType.Timestamp, Naive(w.OtherServerStampedSince));
         await cmd.ExecuteScalarAsync(ct);
     }
 

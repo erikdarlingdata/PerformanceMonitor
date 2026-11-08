@@ -108,7 +108,10 @@ public sealed class DarlingMcpSchemaToolsLiveTests
                 HistoryAgGroupId = historyKey.AgGroupId,
                 LastCompleteReadAt = at,
                 BaselineAt = baseline ? at : null
-            });
+            })
+        {
+            OtherServerStampedSince = at.AddDays(-30)
+        };
     }
 
     private static Task Baseline(Store s, CancellationToken ct, params SchemaObjectDefinition[] read) =>

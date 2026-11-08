@@ -491,6 +491,8 @@ public static class DarlingSchemaCapture
                 snapshot.Objects, plan.Attribution, state)
             {
                 TargetedIds = ids,
+                OtherServerStampedSince = _passTime.AddDays(-DarlingRetention.EffectivePurgeRetentionDays(
+                    SchemaObjectsCollector.Instance.Name, _runner.CollectorRetentionDaysFor(SchemaObjectsCollector.Instance.Name))),
                 MovedFrom = string.Equals(plan.Reason, "history_key_changed", StringComparison.Ordinal) && existing is not null
                     ? new SchemaHistoryKey(existing.HistoryServerId, existing.HistoryAgGroupId, null)
                     : null,
