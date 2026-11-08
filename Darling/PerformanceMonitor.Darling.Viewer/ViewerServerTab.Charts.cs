@@ -258,7 +258,7 @@ public partial class ViewerServerTab : IDisposable
 
     // Dedicated chart for tempdb TOTAL allocated size (used + unallocated free space) over time — the
     // growth trend, on its own scale (AutoScaleY) so it doesn't flatten the usage series above. Mirror
-    // of Lite's UpdateTempDbSizeChart (single series, no legend).
+    // of Lite's UpdateTempDbSizeChart (single series).
     private void RenderTempDbSizeChart(List<TempDbSample> data, DateTime startUtc, DateTime endUtc)
     {
         ClearChart(TempDbSizeChart);
@@ -282,6 +282,7 @@ public partial class ViewerServerTab : IDisposable
         var totals = sorted.Select(d => d.TotalReservedMb + d.UnallocatedMb).ToArray();
 
         var sizePlot = TempDbSizeChart.Plot.Add.TimeSeries(times, totals);
+        sizePlot.LegendText = "Allocated MB";
         sizePlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("UnallocatedTempdb"));
         ChartStyle.StyleScatter(sizePlot);
         _tempDbSizeHover?.Add(sizePlot, "Allocated MB");
@@ -291,6 +292,9 @@ public partial class ViewerServerTab : IDisposable
         TempDbSizeChart.Plot.YLabel("MB");
         TempDbSizeChart.Plot.Axes.AutoScaleY();
         TempDbSizeChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbSizeChart.Plot, rangeStart, rangeEnd), rangeEnd);
+        /* #8307: the chart group gives every plot the same bottom, so without a legend of its own this chart kept an empty band
+           under its time axis the height of its siblings' legends. */
+        ShowChartLegend(TempDbSizeChart);
         TempDbSizeChart.Refresh();
     }
 

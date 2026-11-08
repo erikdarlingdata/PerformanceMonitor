@@ -67,7 +67,7 @@ public partial class ViewerServerTab
         if (jobs.Count == 0 && !bannerShows && read.LastGoodCollection is DateTime lastGood
             && RunningJobsNoDataMessage.Text == _ownNoDataText[RunningJobsNoDataMessage])
         {
-            RunningJobsNoDataMessage.Text = PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentNote(lastGood);
+            RunningJobsNoDataMessage.Text = PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentNote(lastGood, utc => ViewerTimeHelper.FormatForDisplay(utc, "yyyy-MM-dd HH:mm:ss"));
             RunningJobsNoDataMessage.Visibility = Visibility.Visible;
         }
 

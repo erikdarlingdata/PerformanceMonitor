@@ -17,6 +17,12 @@ using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
+public partial class ViewerServerTab
+{
+    /// <summary>#8307: the CPU Scheduler page scrolls as one: a wheel over its grid that is at its end moves the page (<see cref="PageScroll.ForwardWheel"/>).</summary>
+    private void PageScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e) => PageScroll.ForwardWheel(sender, e);
+}
+
 /// <summary>
 /// The CPU Scheduler sub-tab (under the CPU tab, alongside CPU Utilization) — the Darling-viewer surface
 /// for the cpu_scheduler_stats collector (scheduler / worker-thread / runnable-task / NUMA / OS-memory
