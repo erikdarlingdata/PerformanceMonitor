@@ -10,14 +10,15 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
-namespace PerformanceMonitorLite.Analysis.Recommendations;
+namespace PerformanceMonitor.Common;
 
 /// <summary>
 /// The words a recommendation card shows for a finding that has no headline and so is named by its fact token. A resource
 /// monitor notification reads as what it means ("Low physical memory"); a wait type keeps its name, since that is what a
 /// reader looks up, and says that it is a wait ("SOS_SCHEDULER_YIELD waits"). A headline that is already prose is unchanged.
+/// Lite's and the Darling Viewer's recommendation cards both read their titles through this.
 /// </summary>
-internal static class RecommendationTitleText
+public static class RecommendationTitleText
 {
     private static readonly Dictionary<string, string> ResourceNotifications = new(StringComparer.Ordinal)
     {
