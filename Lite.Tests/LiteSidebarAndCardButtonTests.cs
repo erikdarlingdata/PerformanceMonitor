@@ -216,9 +216,11 @@ public sealed class LiteSidebarAndCardButtonTests
         }
     }
 
-    /// <summary>A sidebar item the way the list binds one: a server with a connection, under <c>Server.Connection</c>.</summary>
+    /// <summary>A sidebar item the way the list builds one: the server row over a server whose connection carries the names.</summary>
     private static object Item(string serverName, string displayName) =>
-        new { Server = new { Connection = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = serverName, DisplayName = displayName, IsEnabled = true } } };
+        new PerformanceMonitorLite.FleetServerRow(
+            new PerformanceMonitorLite.FleetServer(1, displayName, false, new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = serverName, DisplayName = displayName, IsEnabled = true }),
+            depth: 0);
 
     /// <summary>How many visible text lines in <paramref name="item"/> read exactly <paramref name="text"/>.</summary>
     private static int VisibleLines(FrameworkElement item, string text) =>
