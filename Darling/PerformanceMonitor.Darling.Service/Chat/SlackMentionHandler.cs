@@ -215,20 +215,11 @@ public sealed class SlackMentionHandler : ISlackEventHandlers
         }
     }
 
-    /* A refusal (outside a thread, an old thread, no grant, the waiting caps) answers once per person, channel, kind and hour, and journals the mention
-       (no text) only when it answered, so a channel member cannot drive posts or journal rows by repeating. The mark is written before the send. */
-    private async Task RefuseAsync(Guid? requestId, int? routeId, int? serverId, string channel, string threadTs, string actor, string identity, string kind, string text,
-        SlackInboundEvent inbound, DateTime now, CancellationToken cancellationToken)
-    {
-        var answerKey = InvestigationRequestStore.ChatAnswerKey(kind + ":" + identity + ":" + now.ToString("yyyyMMddHH", CultureInfo.InvariantCulture));
-        var onceKey = "slack_thread:refusal:" + channel + ":" + answerKey;
-        if (!await SlackChatAnswering.AnswerOnceAsync(_store, _posts, _logger, requestId, routeId, serverId, kind, text, channel, threadTs, onceKey, cancellationToken, answerKey))
-        {
-            return;
-        }
-
-        await JournalAsync(requestId, routeId, serverId, actor, kind, inbound, identity, cancellationToken);
-    }
+    /* A refusal (outside a thread, an old thread, no grant, the waiting caps): the shared one, with the mention's channel, ts and event as the journal detail. */
+    private Task RefuseAsync(Guid? requestId, int? routeId, int? serverId, string channel, string threadTs, string actor, string identity, string kind, string text,
+        SlackInboundEvent inbound, DateTime now, CancellationToken cancellationToken) =>
+        SlackChatAnswering.RefuseAsync(_store, _posts, _logger, requestId, routeId, serverId, channel, threadTs, actor, identity, kind, text,
+            inbound.Channel, inbound.Ts, inbound.ThreadTs, inbound.EventType, now, cancellationToken);
 
     /// <summary>The acknowledgement's key: once per request in play, so a later request in the same thread gets its own first acknowledgement.</summary>
     private static string WaitingKey(Guid inPlay) => InvestigationRequestStore.ChatAnswerKey(SlackChatAnswers.WaitingKind + ":" + inPlay.ToString("D"));
@@ -237,26 +228,45 @@ public sealed class SlackMentionHandler : ISlackEventHandlers
         SlackChatAnswering.AnswerOnceAsync(_store, _posts, _logger, thread.ThreadRequestId, thread.RouteId, thread.ServerId, kind, text, thread.ChannelId, thread.ThreadTs,
             SlackThreadPosts.OnceKey(thread.ThreadRequestId, answerKey), cancellationToken, answerKey);
 
-    /* The no-text journal row of a mention that opened nothing: the identity, where it was, and why; never the text, and never a person_id, since
-       the asker check reads that key. */
-    private Task JournalAsync(Guid? requestId, int? routeId, int? serverId, string actor, string outcome, SlackInboundEvent inbound, string identity, CancellationToken cancellationToken) =>
-        _store.JournalPersonMessageAsync(requestId, routeId, serverId, actor, outcome, new JsonObject
-        {
-            ["identity"] = identity,
-            ["channel"] = inbound.Channel,
-            ["ts"] = inbound.Ts,
-            ["thread_ts"] = inbound.ThreadTs,
-            ["event"] = inbound.EventType,
-            ["outcome"] = outcome,
-        }, InvestigationRequestStore.PersonMessageOnceKey(inbound.Channel, inbound.Ts), cancellationToken);
-
     private static string? Text(JsonObject node, string name) =>
         node[name] is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
 }
 
-/// <summary>#7659: what the mention handler and the sweep share: a once-marked answer in a thread, and the open of a chat request under the caps.</summary>
+/// <summary>#7659: what the mention handler and the sweep share: a once-marked answer in a thread, a refusal, and the open of a chat request under the caps.</summary>
 internal static class SlackChatAnswering
 {
+    /// <summary>The event word a refusal journals when the sweep, not a Slack event, refused the message.</summary>
+    public const string SweepEvent = "sweep";
+
+    /// <summary>
+    /// A refusal (outside a thread, an old thread, no grant, the waiting caps) answers once per person, channel, kind and hour, and journals the
+    /// message only when it answered, so a channel member cannot drive posts or journal rows by repeating. The mark is written before the send.
+    /// The journal row is the no-text one of a message that opened nothing: the identity, where it was (<paramref name="messageChannel"/>,
+    /// <paramref name="messageTs"/>, <paramref name="messageThreadTs"/>), the <paramref name="eventType"/> it came as, and why; never the text,
+    /// and never a person_id, since the asker check reads that key.
+    /// </summary>
+    public static async Task RefuseAsync(ISlackChatStore store, ISlackBotPosts posts, ILogger logger, Guid? requestId, int? routeId, int? serverId,
+        string channel, string threadTs, string actor, string identity, string kind, string text, string messageChannel, string messageTs, string? messageThreadTs,
+        string eventType, DateTime now, CancellationToken cancellationToken)
+    {
+        var answerKey = InvestigationRequestStore.ChatAnswerKey(kind + ":" + identity + ":" + now.ToString("yyyyMMddHH", CultureInfo.InvariantCulture));
+        var onceKey = "slack_thread:refusal:" + channel + ":" + answerKey;
+        if (!await AnswerOnceAsync(store, posts, logger, requestId, routeId, serverId, kind, text, channel, threadTs, onceKey, cancellationToken, answerKey))
+        {
+            return;
+        }
+
+        await store.JournalPersonMessageAsync(requestId, routeId, serverId, actor, kind, new JsonObject
+        {
+            ["identity"] = identity,
+            ["channel"] = messageChannel,
+            ["ts"] = messageTs,
+            ["thread_ts"] = messageThreadTs,
+            ["event"] = eventType,
+            ["outcome"] = kind,
+        }, InvestigationRequestStore.PersonMessageOnceKey(messageChannel, messageTs), cancellationToken);
+    }
+
     /// <summary>Marks the answer once (the mark is written before the send, as every bot post is) and posts it as a reply in the thread. False when
     /// another pass or service already answered.</summary>
     public static async Task<bool> AnswerOnceAsync(ISlackChatStore store, ISlackBotPosts posts, ILogger logger, Guid? requestId, int? routeId, int? serverId,
@@ -316,7 +326,9 @@ internal static class SlackChatAnswering
 }
 
 /// <summary>#7659: the sweep's two arms, on the request sweep's tick: a chat request opens for the waiting messages of a thread whose newest request has
-/// ended, and an unclaimed chat request older than <see cref="SlackChatRules.OfflineAfter"/> gets the offline answer once.</summary>
+/// ended (or they join an unclaimed one), under the handler's rules read now: the thread's first request is within the age limit and each asker's
+/// live level is at least 1; a message failing either is refused as the handler refuses a mention. An unclaimed chat request older than
+/// <see cref="SlackChatRules.OfflineAfter"/> gets the offline answer once.</summary>
 public sealed class SlackChatSweep
 {
     private readonly ISlackChatStore _store;
@@ -351,7 +363,7 @@ public sealed class SlackChatSweep
                 continue;
             }
 
-            var thread = new SlackChatThread(waiting.ThreadRequestId, waiting.RouteId, waiting.ServerId, waiting.ChannelId, waiting.ThreadTs, now);
+            var thread = new SlackChatThread(waiting.ThreadRequestId, waiting.RouteId, waiting.ServerId, waiting.ChannelId, waiting.ThreadTs, waiting.OpenedAtUtc);
             var newest = await _store.NewestRequestAsync(thread, cancellationToken);
             var rule = SlackMentionHandler.Decide(newest);
             if (rule == SlackChatRule.Wait)
@@ -365,28 +377,66 @@ public sealed class SlackChatSweep
                 continue;
             }
 
-            /* Each asker's level is read now: a grant removed while the message waited counts, as a join reads the live grant. */
-            var askers = new List<SlackAsker>();
-            foreach (var person in messages.Where(m => m.PersonId is not null).Select(m => (Id: m.PersonId!.Value, m.Identity)).DistinctBy(p => p.Id))
-            {
-                askers.Add(new SlackAsker(person.Id, person.Identity, await _store.RequestLevelAsync(person.Id, thread.ServerId, cancellationToken)));
-            }
-
-            if (rule == SlackChatRule.Join)
+            /* The handler's age rule, applied now: a thread whose first request is past the limit opens nothing, and every waiting message of it
+               is refused as a mention there is refused. */
+            if (SlackMentionHandler.IsTooOld(thread.OpenedAtUtc, now))
             {
                 foreach (var message in messages)
                 {
-                    var asker = askers.FirstOrDefault(a => a.PersonId == message.PersonId);
-                    if (asker is not null)
-                    {
-                        await _store.JoinChatRequestAsync(newest!.RequestId, asker, message, cancellationToken);
-                    }
+                    await RefuseAsync(thread, message, SlackChatAnswers.OldKind, SlackChatAnswers.OldRequest, now, cancellationToken);
                 }
 
                 continue;
             }
 
-            if (await SlackChatAnswering.OpenAsync(_store, _posts, _logger, route, thread, newest?.RequestId ?? thread.ThreadRequestId, askers, messages, now,
+            /* The handler's grant rule, applied now: each asker's level is read live (0 for a disabled person, or once the grant is gone), and a
+               message whose asker reads 0 is refused as a mention without the grant is refused, so no chat request is opened or joined at level 0
+               and no such text reaches the agent. The rest open or join as their askers' live levels say. */
+            var levels = new Dictionary<long, int>();
+            var askers = new List<SlackAsker>();
+            var granted = new List<SlackPersonMessage>();
+            foreach (var message in messages)
+            {
+                var level = 0;
+                if (message.PersonId is long personId)
+                {
+                    if (!levels.TryGetValue(personId, out level))
+                    {
+                        level = await _store.RequestLevelAsync(personId, thread.ServerId, cancellationToken);
+                        levels[personId] = level;
+                        if (level >= 1)
+                        {
+                            askers.Add(new SlackAsker(personId, message.Identity, level));
+                        }
+                    }
+                }
+
+                if (level >= 1)
+                {
+                    granted.Add(message);
+                }
+                else
+                {
+                    await RefuseAsync(thread, message, SlackChatAnswers.NoGrantKind, SlackChatAnswers.NoGrant, now, cancellationToken);
+                }
+            }
+
+            if (granted.Count == 0)
+            {
+                continue;
+            }
+
+            if (rule == SlackChatRule.Join)
+            {
+                foreach (var message in granted)
+                {
+                    await _store.JoinChatRequestAsync(newest!.RequestId, askers.First(a => a.PersonId == message.PersonId), message, cancellationToken);
+                }
+
+                continue;
+            }
+
+            if (await SlackChatAnswering.OpenAsync(_store, _posts, _logger, route, thread, newest?.RequestId ?? thread.ThreadRequestId, askers, granted, now,
                     answerCaps: false, cancellationToken) == SlackChatOpenOutcome.Opened)
             {
                 opened++;
@@ -404,6 +454,16 @@ public sealed class SlackChatSweep
         }
 
         return (opened, offline);
+    }
+
+    /* A waiting message the rules refuse: marked refused first, so no later pass reads it as waiting, then closed out as the handler closes a refused
+       mention: one sentence to the person once an hour, and a journal row with no text and no person_id only when it answered. */
+    private async Task RefuseAsync(SlackChatThread thread, SlackPersonMessage message, string kind, string text, DateTime now, CancellationToken cancellationToken)
+    {
+        await _store.RefuseMessageAsync(message, cancellationToken);
+        var actor = message.PersonId is long personId ? "person:" + personId.ToString(CultureInfo.InvariantCulture) : message.Identity;
+        await SlackChatAnswering.RefuseAsync(_store, _posts, _logger, thread.ThreadRequestId, thread.RouteId, thread.ServerId, thread.ChannelId, thread.ThreadTs, actor,
+            message.Identity, kind, text, message.ChannelId, message.Ts, message.ThreadTs, SlackChatAnswering.SweepEvent, now, cancellationToken);
     }
 }
 

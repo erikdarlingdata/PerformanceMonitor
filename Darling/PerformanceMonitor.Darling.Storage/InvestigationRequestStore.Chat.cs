@@ -356,14 +356,23 @@ WHERE r.trigger_kind = 'chat'
 ORDER BY r.opened_at";
 
     /* The newest messages of a request first, at most the row limit, with the request's whole count: the claim answer keeps the newest inside its
-       character ceiling and says how many it left out. */
+       character ceiling and says how many it left out. Only a message from an enabled person holding ask, request_level_2 or request_level_3 that
+       reaches the request's server (the scope rule of RequestLevelSql) is read: the read itself keeps a disabled or ungranted person's text from
+       the agent, whatever row another path attached. */
     internal const string PersonRequestsSql = @"
 SELECT COALESCE(p.display_name, m.identity), m.person_id, m.message_text, r.server_id,
        count(*) OVER () AS total
 FROM config.investigation_person_messages AS m
 JOIN config.investigation_requests AS r ON r.request_id = m.request_id
-LEFT JOIN config.person AS p ON p.person_id = m.person_id
+JOIN config.person AS p ON p.person_id = m.person_id AND p.enabled
 WHERE m.request_id = $1
+  AND EXISTS (SELECT 1
+              FROM config.person_grant AS g
+              WHERE g.person_id = p.person_id
+                AND g.capability IN ('ask', 'request_level_2', 'request_level_3')
+                AND (   (g.scope_server_id IS NULL AND g.scope_tag_id IS NULL)
+                     OR g.scope_server_id = r.server_id
+                     OR g.scope_tag_id IN (SELECT t.tag_id FROM config.server_tag_map AS t WHERE t.server_id = r.server_id)))
 ORDER BY m.received_at DESC, m.ts DESC
 LIMIT $2";
 
@@ -703,7 +712,8 @@ FOR UPDATE";
     }
 
     /// <summary>The messages of a chat request for the claim answer's <c>person_requests</c>: each person's name, grants for the request's server
-    /// (<c>ask</c>, <c>request_level_2</c>, <c>request_level_3:&lt;kinds&gt;</c>) and text, oldest first. Empty for an alert request.</summary>
+    /// (<c>ask</c>, <c>request_level_2</c>, <c>request_level_3:&lt;kinds&gt;</c>) and text, oldest first, from enabled people whose grants reach the
+    /// server alone. Empty for an alert request.</summary>
     public async Task<PersonRequestsPage> ListPersonRequestsAsync(Guid requestId, CancellationToken cancellationToken)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
