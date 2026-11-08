@@ -180,7 +180,6 @@ public sealed class DarlingMcpFleetSweepTools
                web feed's entry shape (BuildRunNode) is unchanged; ViewerFleetSweepsReadTests compares this reply's
                newest entry with its document taken from latest, field for field. */
             var latestId = latestNode["sweep_id"]?.GetValue<string>();
-            var newestEntryBytes = 0;
             foreach (var entry in entries.OfType<JsonObject>())
             {
                 if (latestId is null || entry["sweep_id"]?.GetValue<string>() != latestId)
@@ -210,8 +209,14 @@ public sealed class DarlingMcpFleetSweepTools
                 }
 
                 entry["report_under"] = "latest";
-                newestEntryBytes = Encoding.UTF8.GetByteCount(entry.ToJsonString());
             }
+
+            /* The window's newest entry is never cut either: the slim entry above when the window holds the
+               newest sweep, or a full document when as_of puts the newest sweep outside the window. Its size,
+               and which of the two it is, feed the OVER BUDGET note. */
+            var newestEntry = entries.Count > 0 ? entries[0] as JsonObject : null;
+            var newestEntryBytes = newestEntry is null ? 0 : Encoding.UTF8.GetByteCount(newestEntry.ToJsonString());
+            var newestEntryIsLatest = newestEntry is not null && newestEntry["sweep_id"]?.GetValue<string>() == latestId;
 
             /* The worklist node is the Viewer's and the web feed's own (BuildWatchItemsNode; the zero-drift rule
                ViewerFleetSweepsReadTests pins covers this reply's watch_items too), so its items keep the
@@ -250,13 +255,15 @@ public sealed class DarlingMcpFleetSweepTools
                 result["watch_items_returned"] = itemsKept;
                 result["truncated"] = sweepsCut || itemsCut;
                 result["over_budget"] = overAtFloor;
-                result["budget_note"] = BudgetNote(entries.Count, sweepsKept, itemNodes.Count, itemsKept, overAtFloor, latestBytes, newestEntryBytes);
+                result["budget_note"] = BudgetNote(entries.Count, sweepsKept, itemNodes.Count, itemsKept, overAtFloor, latestBytes, newestEntryBytes, newestEntryIsLatest);
                 return result.ToJsonString();
             }
 
             /* #8318: two cuts to the shared response budget, in order. The timeline loses its OLDEST sweeps
-               first (the store's order is newest first), and the newest entry always rides (small, since its
-               document is under latest, which is answered whole - the single-item rule every budget read keeps). When the
+               first (the store's order is newest first), and the newest entry always rides: slim when the window
+               holds the newest sweep, whose document is under latest, and a full document when as_of puts the
+               newest sweep outside the window (one sweep's document is answered whole, the single-item rule every
+               budget read keeps). When the
                timeline at its floor still leaves the reply over the budget, the worklist loses items by
                standing (itemKeepOrder). count and watch_items.count still count the whole window and the whole
                worklist. latest is never cut, so a reply can be over the budget at the floor, and then the note
@@ -311,17 +318,19 @@ public sealed class DarlingMcpFleetSweepTools
     /// <summary>#8318: the <c>budget_note</c> for a reply, null when nothing was cut and the reply is under the
     /// budget. It names what was cut (sweeps, watch items, or both) and the reads that reach the rest, and when
     /// the reply at its floor is still over the budget it says OVER BUDGET and names the pieces that are never
-    /// cut with their sizes (latest, and the newest sweep's timeline entry when the window holds it), never that
-    /// the reply fit.</summary>
-    private static string? BudgetNote(int sweepsInWindow, int sweepsKept, int itemsStanding, int itemsKept, bool overAtFloor, int latestBytes, int newestEntryBytes)
+    /// cut with their sizes: latest, and the window's newest timeline entry (slim when it is the newest sweep's,
+    /// a full document when as_of puts the newest sweep outside the window), never that the reply fit.</summary>
+    private static string? BudgetNote(int sweepsInWindow, int sweepsKept, int itemsStanding, int itemsKept, bool overAtFloor, int latestBytes, int newestEntryBytes, bool newestEntryIsLatest)
     {
         var sweepsCut = sweepsKept < sweepsInWindow;
         var itemsCut = itemsKept < itemsStanding;
         if (overAtFloor)
         {
-            var newestEntry = newestEntryBytes > 0
-                ? string.Create(CultureInfo.InvariantCulture, $", and the newest sweep's timeline entry is {newestEntryBytes:#,0} bytes")
-                : string.Empty;
+            var newestEntry = newestEntryBytes == 0
+                ? string.Empty
+                : newestEntryIsLatest
+                    ? string.Create(CultureInfo.InvariantCulture, $", and the newest sweep's timeline entry is {newestEntryBytes:#,0} bytes")
+                    : string.Create(CultureInfo.InvariantCulture, $", and the newest timeline entry in the window is {newestEntryBytes:#,0} bytes, its full document, since the newest sweep lies outside the window");
             return string.Create(CultureInfo.InvariantCulture,
                 $"OVER BUDGET: the reply is over the {McpResponseBudget.DefaultBytes:#,0}-byte response budget at its floor ({sweepsKept:#,0} of {sweepsInWindow:#,0} sweeps in the window and {itemsKept:#,0} of {itemsStanding:#,0} watch items). The pieces that are never cut leave no room under it: latest, the newest sweep's full document with its verdicts, is {latestBytes:#,0} bytes{newestEntry}. Pass sweep_id for one sweep, or watch_state for one state's worklist.");
         }
