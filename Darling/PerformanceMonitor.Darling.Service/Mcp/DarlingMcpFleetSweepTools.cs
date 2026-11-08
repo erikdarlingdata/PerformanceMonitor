@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -63,11 +64,16 @@ public sealed class DarlingMcpFleetSweepTools
         "web feed and the Viewer show), the newest sweep in full (per-server verdicts with band transitions " +
         "pre-computed, plus its would-have-paged ledger when one was taken), and the watch-item worklist with " +
         "its hysteresis position; pass sweep_id (as a STRING - the ids are too large for a JSON number to " +
-        "round-trip) to fetch one sweep in full instead. SIZE: the reply fits the shared 32 KB response budget " +
-        "unless the newest sweep's document alone exceeds it (latest is never cut). The timeline is cut newest " +
-        "first when its sweeps do not all fit - truncated is true, sweeps_returned says how many of count ride, " +
-        "and budget_note says so; narrow hours_back or move as_of to see the older sweeps. latest and the " +
-        "sweep_id read are never cut. Every sweep id the payload carries (sweep_id, previous_sweep_id, the watch items' " +
+        "round-trip) to fetch one sweep in full instead. SIZE: the newest sweep's document ships once, under latest; " +
+        "its timeline entry keeps the row counts (report.fleet.bands, report.watch, report.would_have_paged) and says " +
+        "report_under: latest. The reply is cut to the shared 32 KB response budget in two steps - the timeline loses " +
+        "its oldest sweeps first (the newest entry always rides), then the worklist loses items by standing (carried " +
+        "before open, oldest first, so the open items and the newest survive; the items kept ride in the worklist's " +
+        "usual order). truncated is true only when something was cut; sweeps_returned and watch_items_returned say how " +
+        "many of each count ride, and budget_note names what was cut. latest and the sweep_id read are never cut, so a " +
+        "reply can still be over the budget at its floor: then over_budget is true and budget_note says OVER BUDGET " +
+        "with the never-cut pieces' sizes, rather than claiming a fit. Narrow hours_back or move as_of to see the " +
+        "older sweeps; pass watch_state for one state's worklist. Every sweep id the payload carries (sweep_id, previous_sweep_id, the watch items' " +
         "*_sweep_id anchors) is spelled as a JSON string for the same reason - pass one back verbatim. " +
         "Two honesty rules ride every payload, and both carry field-level meaning an agent must read. " +
         "MUTE SEMANTICS: alerts_enabled on a sweep states the alert master switch AS THE SWEEP RAN - false " +
@@ -158,35 +164,123 @@ public sealed class DarlingMcpFleetSweepTools
             var watchItemNames = await DarlingFleetSweepEndpoints.ReadWatchItemNamesAsync(
                 postgres, watchItems, logger, cancellationToken);
 
-            /* #8081: the timeline entries are the web feed's and the Viewer's own (the zero-drift rule, pinned
-               by ViewerFleetSweepsReadTests), each with its document embedded, so the budget is kept by the
-               cut below rather than by a thinner entry. The three cut fields are seated here, beside sweeps,
+            /* #8081: the timeline entries are the web feed's and the Viewer's own (BuildRunNode, compared field
+               for field by ViewerFleetSweepsReadTests), each older entry with its document embedded; the newest
+               entry's document rides under latest (#8318, below). The cut fields are seated here, beside sweeps,
                and written by the fit. */
             var result = FleetSweepPresentation.BuildTimelineNode(runs, windowStart, windowEnd);
             var entries = ((JsonArray)result["sweeps"]!).ToList();
-            result["sweeps_returned"] = null;
-            result["truncated"] = null;
-            result["budget_note"] = null;
-            result["latest"] = await BuildDetailAsync(postgres, latest, cancellationToken);
-            result["watch_state"] = watch_state ?? "open + carried (default)";
-            result["watch_items"] = FleetSweepPresentation.BuildWatchItemsNode(watchItems, watchItemNames);
+            var latestNode = await BuildDetailAsync(postgres, latest, cancellationToken);
+            var latestBytes = Encoding.UTF8.GetByteCount(latestNode.ToJsonString());
 
-            /* #8081: the entries are cut to the shared response budget newest first (the store's order), so a
-               long window loses its OLDEST sweeps and says so; count still counts the whole window. latest and
-               the worklist are not cut: one sweep's document is answered whole, the single-item rule every
-               budget read keeps. The entry nodes are cloned per fit because a JsonNode has one parent. */
-            return McpResponseBudget.FitPrefix(entries.Count, returned =>
+            /* #8318: the newest sweep's document ships once. latest carries it in full, with its verdicts, so the
+               timeline entry for the same sweep keeps its header facts and a slim report holding exactly the fields
+               the sweep rows draw from (fleet.bands, watch, and would_have_paged when the sweep ran muted), equal to
+               latest's, and names latest with report_under. Older entries keep their documents. The Viewer's and the
+               web feed's entry shape (BuildRunNode) is unchanged; ViewerFleetSweepsReadTests compares this reply's
+               newest entry with its document taken from latest, field for field. */
+            var latestId = latestNode["sweep_id"]?.GetValue<string>();
+            foreach (var entry in entries.OfType<JsonObject>())
             {
-                var cut = returned < entries.Count;
-                result["sweeps"] = new JsonArray(entries.Take(returned).Select(e => e?.DeepClone()).ToArray());
-                result["sweeps_returned"] = returned;
-                result["truncated"] = cut;
-                result["budget_note"] = cut
-                    ? string.Create(CultureInfo.InvariantCulture,
-                        $"TRUNCATED: {entries.Count:#,0} sweeps fell in the window; only the newest {returned:#,0} fit the {McpResponseBudget.DefaultBytes:#,0}-byte response budget. Narrow hours_back, or move as_of, to see the older sweeps; latest and the sweep_id read carry a sweep's full document.")
-                    : null;
+                if (latestId is null || entry["sweep_id"]?.GetValue<string>() != latestId)
+                {
+                    continue;
+                }
+
+                if (entry["report"] is JsonObject full)
+                {
+                    var slim = new JsonObject();
+                    if (full["fleet"] is JsonObject fleet && fleet["bands"] is JsonNode bands)
+                    {
+                        slim["fleet"] = new JsonObject { ["bands"] = bands.DeepClone() };
+                    }
+
+                    if (full["watch"] is JsonNode watch)
+                    {
+                        slim["watch"] = watch.DeepClone();
+                    }
+
+                    if (full["would_have_paged"] is JsonNode wouldHavePaged)
+                    {
+                        slim["would_have_paged"] = wouldHavePaged.DeepClone();
+                    }
+
+                    entry["report"] = slim;
+                }
+
+                entry["report_under"] = "latest";
+            }
+
+            /* The window's newest entry is never cut either: the slim entry above when the window holds the
+               newest sweep, or a full document when as_of puts the newest sweep outside the window. Its size,
+               and which of the two it is, feed the OVER BUDGET note. */
+            var newestEntry = entries.Count > 0 ? entries[0] as JsonObject : null;
+            var newestEntryBytes = newestEntry is null ? 0 : Encoding.UTF8.GetByteCount(newestEntry.ToJsonString());
+            var newestEntryIsLatest = newestEntry is not null && newestEntry["sweep_id"]?.GetValue<string>() == latestId;
+
+            /* The worklist node is the Viewer's and the web feed's own (BuildWatchItemsNode; the zero-drift rule
+               ViewerFleetSweepsReadTests pins covers this reply's watch_items too), so its items keep the
+               store's order. #8318: a budget cut keeps items by STANDING rather than by position - open before
+               carried, newest first within a state, the store's order as the tie - so the items that survive
+               are the ones standing now and the newest of them, and they still ride in the shared order. A
+               watch_state read holds one state, so there the cut keeps the newest. itemNodes and watchItems
+               are index-aligned: the builder writes one node per item in order. */
+            var worklist = FleetSweepPresentation.BuildWatchItemsNode(watchItems, watchItemNames);
+            var itemNodes = ((JsonArray)worklist["items"]!).ToList();
+            var itemKeepOrder = Enumerable.Range(0, itemNodes.Count)
+                .OrderBy(i => WatchStateCutRank(watchItems[i].State))
+                .ThenByDescending(i => watchItems[i].LastSeenAtUtc)
+                .ThenBy(i => i)
+                .ToList();
+
+            result["sweeps_returned"] = null;
+            result["watch_items_returned"] = null;
+            result["truncated"] = null;
+            result["over_budget"] = null;
+            result["budget_note"] = null;
+            result["latest"] = latestNode;
+            result["watch_state"] = watch_state ?? "open + carried (default)";
+            result["watch_items"] = worklist;
+
+            /* The whole reply for the first sweepsKept entries and the first itemsKept worklist items, flags
+               and note included, so the fit measures the bytes the caller gets. The nodes are cloned per fit
+               because a JsonNode has one parent. */
+            string Serialize(int sweepsKept, int itemsKept, bool overAtFloor)
+            {
+                var sweepsCut = sweepsKept < entries.Count;
+                var itemsCut = itemsKept < itemNodes.Count;
+                result["sweeps"] = new JsonArray(entries.Take(sweepsKept).Select(e => e?.DeepClone()).ToArray());
+                worklist["items"] = new JsonArray(itemKeepOrder.Take(itemsKept).OrderBy(i => i).Select(i => itemNodes[i]?.DeepClone()).ToArray());
+                result["sweeps_returned"] = sweepsKept;
+                result["watch_items_returned"] = itemsKept;
+                result["truncated"] = sweepsCut || itemsCut;
+                result["over_budget"] = overAtFloor;
+                result["budget_note"] = BudgetNote(entries.Count, sweepsKept, itemNodes.Count, itemsKept, overAtFloor, latestBytes, newestEntryBytes, newestEntryIsLatest);
                 return result.ToJsonString();
-            }).Json;
+            }
+
+            /* #8318: two cuts to the shared response budget, in order. The timeline loses its OLDEST sweeps
+               first (the store's order is newest first), and the newest entry always rides: slim when the window
+               holds the newest sweep, whose document is under latest, and a full document when as_of puts the
+               newest sweep outside the window (one sweep's document is answered whole, the single-item rule every
+               budget read keeps). When the
+               timeline at its floor still leaves the reply over the budget, the worklist loses items by
+               standing (itemKeepOrder). count and watch_items.count still count the whole window and the whole
+               worklist. latest is never cut, so a reply can be over the budget at the floor, and then the note
+               says so rather than claiming a fit. */
+            var sweepsFit = McpResponseBudget.FitPrefix(entries.Count, kept => Serialize(kept, itemNodes.Count, overAtFloor: false));
+            if (FitsBudget(sweepsFit.Json))
+            {
+                return sweepsFit.Json;
+            }
+
+            var itemsFit = McpResponseBudget.FitPrefix(itemNodes.Count, kept => Serialize(sweepsFit.Count, kept, overAtFloor: false));
+            if (FitsBudget(itemsFit.Json))
+            {
+                return itemsFit.Json;
+            }
+
+            return Serialize(sweepsFit.Count, itemsFit.Count, overAtFloor: true);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -204,6 +298,62 @@ public sealed class DarlingMcpFleetSweepTools
             logger?.LogError(ex, "get_sweep_reports failed: {Message}", ex.Message);
             return McpHelpers.FormatError("get_sweep_reports", ex);
         }
+    }
+
+    private static bool FitsBudget(string json) =>
+        Encoding.UTF8.GetByteCount(json) <= McpResponseBudget.DefaultBytes;
+
+    /// <summary>#8318: the worklist's cut order by state. Open items are what is standing right now and go
+    /// first, carried next; pending and closed only arrive through a <c>watch_state</c> read, where the list
+    /// holds one state and this rank is a tie.</summary>
+    private static int WatchStateCutRank(string state) => state switch
+    {
+        FleetSweepWatchStateMachine.Open => 0,
+        FleetSweepWatchStateMachine.Carried => 1,
+        FleetSweepWatchStateMachine.Pending => 2,
+        FleetSweepWatchStateMachine.Closed => 3,
+        _ => 4,
+    };
+
+    /// <summary>#8318: the <c>budget_note</c> for a reply, null when nothing was cut and the reply is under the
+    /// budget. It names what was cut (sweeps, watch items, or both) and the reads that reach the rest, and when
+    /// the reply at its floor is still over the budget it says OVER BUDGET and names the pieces that are never
+    /// cut with their sizes: latest, and the window's newest timeline entry (slim when it is the newest sweep's,
+    /// a full document when as_of puts the newest sweep outside the window), never that the reply fit.</summary>
+    private static string? BudgetNote(int sweepsInWindow, int sweepsKept, int itemsStanding, int itemsKept, bool overAtFloor, int latestBytes, int newestEntryBytes, bool newestEntryIsLatest)
+    {
+        var sweepsCut = sweepsKept < sweepsInWindow;
+        var itemsCut = itemsKept < itemsStanding;
+        if (overAtFloor)
+        {
+            var newestEntry = newestEntryBytes == 0
+                ? string.Empty
+                : newestEntryIsLatest
+                    ? string.Create(CultureInfo.InvariantCulture, $", and the newest sweep's timeline entry is {newestEntryBytes:#,0} bytes")
+                    : string.Create(CultureInfo.InvariantCulture, $", and the newest timeline entry in the window is {newestEntryBytes:#,0} bytes, its full document, since the newest sweep lies outside the window");
+            return string.Create(CultureInfo.InvariantCulture,
+                $"OVER BUDGET: the reply is over the {McpResponseBudget.DefaultBytes:#,0}-byte response budget at its floor ({sweepsKept:#,0} of {sweepsInWindow:#,0} sweeps in the window and {itemsKept:#,0} of {itemsStanding:#,0} watch items). The pieces that are never cut leave no room under it: latest, the newest sweep's full document with its verdicts, is {latestBytes:#,0} bytes{newestEntry}. Pass sweep_id for one sweep, or watch_state for one state's worklist.");
+        }
+
+        if (sweepsCut && itemsCut)
+        {
+            return string.Create(CultureInfo.InvariantCulture,
+                $"TRUNCATED: {sweepsInWindow:#,0} sweeps fell in the window and {itemsStanding:#,0} watch items stand; only the newest {sweepsKept:#,0} sweeps and the {itemsKept:#,0} watch items standing first (open before carried, newest first) fit the {McpResponseBudget.DefaultBytes:#,0}-byte response budget beside latest. Narrow hours_back, or move as_of, to see the older sweeps; pass watch_state for one state's worklist; latest and the sweep_id read carry a sweep's full document.");
+        }
+
+        if (sweepsCut)
+        {
+            return string.Create(CultureInfo.InvariantCulture,
+                $"TRUNCATED: {sweepsInWindow:#,0} sweeps fell in the window; only the newest {sweepsKept:#,0} fit the {McpResponseBudget.DefaultBytes:#,0}-byte response budget beside latest and the {itemsStanding:#,0}-item worklist. Narrow hours_back, or move as_of, to see the older sweeps; latest and the sweep_id read carry a sweep's full document.");
+        }
+
+        if (itemsCut)
+        {
+            return string.Create(CultureInfo.InvariantCulture,
+                $"TRUNCATED: {itemsStanding:#,0} watch items stand; only the {itemsKept:#,0} standing first (open before carried, newest first) fit the {McpResponseBudget.DefaultBytes:#,0}-byte response budget beside latest and the timeline. Pass watch_state for one state's worklist to see the rest.");
+        }
+
+        return null;
     }
 
     /// <summary>One sweep's full document — the web feed's <c>BuildDetailAsync</c> twin over the same
