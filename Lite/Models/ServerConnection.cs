@@ -310,7 +310,7 @@ public class ServerConnection : INotifyPropertyChanged
         new[]
         {
             /* The sidebar's rail shows dots with no names beside them, so the tooltip opens on the server's name. */
-            DisplayName,
+            string.IsNullOrEmpty(DisplayName) ? ServerName : DisplayName,
             HostChangeNotice is { Length: > 0 } notice ? notice + "\n" + CardStatus.Headline() : CardStatus.Headline(),
             /* #7590: an unreachable server says since when and why, from the in-process connection check. */
             CardStatus == ServerCardStatus.Offline ? UnreachableReason : null,
