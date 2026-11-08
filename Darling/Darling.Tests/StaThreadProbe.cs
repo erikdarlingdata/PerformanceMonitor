@@ -35,6 +35,15 @@ internal static class StaThreadProbe
     private const int ContextRipOffset = 0xF8;
     private const int MaxFrames = 32;
 
+    /* The 16 integer registers, Rax first and R15 last, 8 bytes each from this offset; Rsp and Rbp are among them. */
+    private const int ContextIntegerOffset = 0x78;
+    private const int ContextR15Offset = 0xF0;
+
+    /* #8190: the walk reads a copy of the thread's stack, from its stack pointer to the stack's base, with zeroed slack on either side
+       for a frame pointer that sits a little below the stack pointer. A committed stack larger than the cap is not read. */
+    private const int SnapshotSlack = 4096;
+    private const int MaxSnapshotBytes = 8 << 20;
+
     [DllImport("kernel32.dll")]
     private static extern IntPtr OpenThread(uint access, [MarshalAs(UnmanagedType.Bool)] bool inheritHandle, uint threadId);
 
@@ -43,18 +52,17 @@ internal static class StaThreadProbe
     private static extern bool CloseHandle(IntPtr handle);
 
     [DllImport("kernel32.dll")]
+    [SuppressGCTransition]
     private static extern uint SuspendThread(IntPtr thread);
 
     [DllImport("kernel32.dll")]
+    [SuppressGCTransition]
     private static extern uint ResumeThread(IntPtr thread);
 
     [DllImport("kernel32.dll")]
+    [SuppressGCTransition]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetThreadContext(IntPtr thread, IntPtr context);
-
-    [DllImport("kernel32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ReadProcessMemory(IntPtr process, ulong address, IntPtr buffer, nuint size, out nuint read);
 
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetCurrentProcess();
@@ -65,6 +73,19 @@ internal static class StaThreadProbe
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr GetModuleHandleW(string moduleName);
 
+    [DllImport("dbghelp.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SymInitializeW(IntPtr process, string? searchPath, [MarshalAs(UnmanagedType.Bool)] bool invadeProcess);
+
+    [DllImport("dbghelp.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SymRefreshModuleList(IntPtr process);
+
+    [DllImport("kernel32.dll")]
+    [SuppressGCTransition]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ReadProcessMemory(IntPtr process, ulong address, IntPtr buffer, nuint size, out nuint read);
+
     [DllImport("ntdll.dll")]
     private static extern IntPtr RtlLookupFunctionEntry(ulong controlPc, out ulong imageBase, IntPtr historyTable);
 
@@ -73,10 +94,6 @@ internal static class StaThreadProbe
 
     [DllImport("ntdll.dll")]
     private static extern int NtQueryInformationThread(IntPtr thread, int informationClass, IntPtr information, int length, out int returned);
-
-    [DllImport("dbghelp.dll", CharSet = CharSet.Unicode)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SymInitializeW(IntPtr process, string? searchPath, [MarshalAs(UnmanagedType.Bool)] bool invadeProcess);
 
     [DllImport("dbghelp.dll")]
     private static extern uint SymSetOptions(uint options);
@@ -211,8 +228,9 @@ internal static class StaThreadProbe
             return $"WPF's render engine ({RenderEngine}) is not loaded, so there is no render thread to read.";
         }
 
-        /* Listed again here: the engine may have loaded after the module list was first taken. */
+        /* Listed again here, for this class and for dbghelp: the engine may have loaded after the module list was first taken. */
         s_modules = ListModules();
+        _ = EnsureSymbols();
         var engine = s_modules.Where(m => m.ModuleName.StartsWith("wpfgfx", StringComparison.OrdinalIgnoreCase)).ToArray();
         var self = GetCurrentThreadId();
         var found = new List<string>();
@@ -246,23 +264,38 @@ internal static class StaThreadProbe
     private static bool Within(ulong address, System.Diagnostics.ProcessModule module) =>
         address >= (ulong)module.BaseAddress && address < (ulong)module.BaseAddress + (ulong)module.ModuleMemorySize;
 
+    /// <summary>
+    /// #8190: the instruction addresses on another thread's stack, leaf first. The thread is suspended only to read its registers and to
+    /// copy the used part of its stack: a managed thread held suspended while a garbage collection starts blocks the collection, and
+    /// with it every thread that then polls for one, this one included, so the thread runs again before the walk. The walk reads the
+    /// copy, never the thread's stack. Before each unwind step every register that holds a stack address is moved into the copy, and
+    /// after it moved back, so the step reads its frame from memory that is this method's own and cannot change or go away. A walk over
+    /// the live stack of a thread that has moved on reads garbage where a frame was, and over one that has exited reads freed memory;
+    /// either is an access violation, which no managed handler catches and which ends the test host.
+    /// </summary>
     private static List<ulong> CaptureFrames(uint threadId, out string failure)
     {
-        var frames = new List<ulong>();
+        var frames = new List<ulong>(MaxFrames);
         failure = "";
         var raw = Marshal.AllocHGlobal(ContextSize + 16);
         var scratch = Marshal.AllocHGlobal(64);
+        var snapshot = IntPtr.Zero;
         var thread = IntPtr.Zero;
         try
         {
             var context = new IntPtr((raw.ToInt64() + 15) & ~15L);
 
-            /* Each P/Invoke below is called once on a null handle first: its stub is generated on first use, which takes runtime locks the
-               suspended thread could be holding. After this the window between SuspendThread and ResumeThread makes one call. */
+            /* Each P/Invoke used between SuspendThread and ResumeThread is called once on a null handle first: its stub is generated on
+               first use, which takes runtime locks the suspended thread could be holding. Nothing in that window allocates, for the same
+               reason: the copy's memory is taken before it. Those four calls also suppress the GC transition, so no return inside the
+               window polls for a collection: a collection that starts while a managed thread is held suspended waits for that thread,
+               and a poll here would wait for the collection, which is a deadlock of the whole process. The process handle the read
+               takes is read here too, before the window: GetCurrentProcess is an ordinary P/Invoke, and its return would poll. */
+            var process = GetCurrentProcess();
             _ = SuspendThread(IntPtr.Zero);
             _ = ResumeThread(IntPtr.Zero);
             _ = GetThreadContext(IntPtr.Zero, context);
-            _ = RtlLookupFunctionEntry(0, out _, IntPtr.Zero);
+            _ = ReadMemory(process, 0, scratch, 8);
 
             thread = OpenThread(ThreadSuspendResume | ThreadGetContext | ThreadQueryInformation, false, threadId);
             if (thread == IntPtr.Zero)
@@ -271,9 +304,9 @@ internal static class StaThreadProbe
                 return frames;
             }
 
-            /* The stack's bounds, from the thread's TEB, so an unwind that goes wrong stops instead of reading unmapped memory. */
+            /* The stack's bounds, from the thread's TEB: the copy is sized by the committed stack, and the walk ends at the stack's base. */
             if (NtQueryInformationThread(thread, 0, scratch, 48, out _) != 0
-                || !ReadMemory((ulong)Marshal.ReadInt64(scratch, 8) + 8, scratch + 32, 16))
+                || !ReadMemory(process, (ulong)Marshal.ReadInt64(scratch, 8) + 8, scratch + 32, 16))
             {
                 failure = "the thread's stack bounds could not be read";
                 return frames;
@@ -281,13 +314,33 @@ internal static class StaThreadProbe
 
             var stackHigh = (ulong)Marshal.ReadInt64(scratch, 32);
             var stackLow = (ulong)Marshal.ReadInt64(scratch, 40);
+            if (stackHigh <= stackLow || stackHigh - stackLow > (ulong)MaxSnapshotBytes)
+            {
+                failure = "the thread's stack is not a size this reads";
+                return frames;
+            }
+
+            var capacity = (int)(stackHigh - stackLow) + (2 * SnapshotSlack);
+            snapshot = Marshal.AllocHGlobal(capacity);
+            for (var i = 0; i < SnapshotSlack; i += 8)
+            {
+                Marshal.WriteInt64(snapshot, i, 0);
+                Marshal.WriteInt64(snapshot, capacity - SnapshotSlack + i, 0);
+            }
 
             Marshal.WriteInt32(context, ContextFlagsOffset, ContextControlInteger);
             var suspended = SuspendThread(thread) != uint.MaxValue;
             var gotContext = false;
+            var gotStack = false;
+            ulong rsp = 0;
             try
             {
                 gotContext = suspended && GetThreadContext(thread, context);
+                if (gotContext)
+                {
+                    rsp = (ulong)Marshal.ReadInt64(context, ContextRspOffset);
+                    gotStack = rsp >= stackLow && rsp < stackHigh && ReadMemory(process, rsp, snapshot + SnapshotSlack, (int)(stackHigh - rsp));
+                }
             }
             finally
             {
@@ -303,37 +356,42 @@ internal static class StaThreadProbe
                 return frames;
             }
 
+            if (!gotStack)
+            {
+                failure = "the thread's stack could not be read";
+                return frames;
+            }
+
+            /* A stack address a is at a + delta in the copy. */
+            var delta = (long)snapshot + SnapshotSlack - (long)rsp;
+            var copiedFrom = rsp;
+            var copyEnd = (ulong)snapshot + (ulong)capacity;
             var rip = (ulong)Marshal.ReadInt64(context, ContextRipOffset);
-            var rsp = (ulong)Marshal.ReadInt64(context, ContextRspOffset);
-            while (rip != 0 && frames.Count < MaxFrames && rsp >= stackLow && rsp < stackHigh)
+            while (rip != 0 && frames.Count < MaxFrames && rsp >= copiedFrom && rsp + 8 <= stackHigh)
             {
                 frames.Add(rip);
                 var entry = RtlLookupFunctionEntry(rip, out var imageBase, IntPtr.Zero);
                 if (entry == IntPtr.Zero)
                 {
                     /* A leaf with no unwind data: its return address is the top of the stack. */
-                    if (!ReadMemory(rsp, scratch, 8))
-                    {
-                        break;
-                    }
-
-                    rip = (ulong)Marshal.ReadInt64(scratch);
+                    rip = (ulong)Marshal.ReadInt64(new IntPtr((long)rsp + delta));
                     rsp += 8;
                     Marshal.WriteInt64(context, ContextRipOffset, (long)rip);
                     Marshal.WriteInt64(context, ContextRspOffset, (long)rsp);
+                    continue;
                 }
-                else
-                {
-                    _ = RtlVirtualUnwind(0, imageBase, rip, entry, context, out _, out _, IntPtr.Zero);
-                    var nextRsp = (ulong)Marshal.ReadInt64(context, ContextRspOffset);
-                    if (nextRsp <= rsp)
-                    {
-                        break;
-                    }
 
-                    rip = (ulong)Marshal.ReadInt64(context, ContextRipOffset);
-                    rsp = nextRsp;
+                MoveStackRegisters(context, copiedFrom - SnapshotSlack, stackHigh, delta);
+                _ = RtlVirtualUnwind(0, imageBase, rip, entry, context, out _, out _, IntPtr.Zero);
+                MoveStackRegisters(context, (ulong)snapshot, copyEnd, -delta);
+                var nextRsp = (ulong)Marshal.ReadInt64(context, ContextRspOffset);
+                if (nextRsp <= rsp)
+                {
+                    break;
                 }
+
+                rip = (ulong)Marshal.ReadInt64(context, ContextRipOffset);
+                rsp = nextRsp;
             }
 
             return frames;
@@ -345,16 +403,66 @@ internal static class StaThreadProbe
                 _ = CloseHandle(thread);
             }
 
+            if (snapshot != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(snapshot);
+            }
+
             Marshal.FreeHGlobal(scratch);
             Marshal.FreeHGlobal(raw);
         }
     }
 
-    private static bool ReadMemory(ulong address, IntPtr buffer, int length) =>
-        ReadProcessMemory(GetCurrentProcess(), address, buffer, (nuint)length, out var read) && (int)read == length;
+    /// <summary>
+    /// Moves every integer register whose value lies in [low, high) by delta: before an unwind step from the thread's stack into the
+    /// copy, and after it back. The unwinder reads a frame only through the stack pointer and the frame register, and in a context read
+    /// together with the copy both hold stack addresses; a register the step restored from the copy holds a stack address again and is
+    /// left as it is.
+    /// </summary>
+    private static void MoveStackRegisters(IntPtr context, ulong low, ulong high, long delta)
+    {
+        for (var offset = ContextIntegerOffset; offset <= ContextR15Offset; offset += 8)
+        {
+            var value = (ulong)Marshal.ReadInt64(context, offset);
+            if (value >= low && value < high)
+            {
+                Marshal.WriteInt64(context, offset, (long)value + delta);
+            }
+        }
+    }
 
+    private static bool ReadMemory(IntPtr process, ulong address, IntPtr buffer, int length) =>
+        ReadProcessMemory(process, address, buffer, (nuint)length, out var read) && (int)read == length;
+
+    /// <summary>dbghelp is single-threaded, so every call into it holds this.</summary>
+    private static readonly object s_dbghelp = new();
     private static bool s_symbolsReady;
     private static System.Diagnostics.ProcessModule[]? s_modules;
+
+    /// <summary>
+    /// dbghelp initialized once for this process, with no symbol path (it never goes to a symbol server), and its module list brought
+    /// up to date on every call: a module loaded since the last one (WPF's render engine loads with the first window) is unknown to the
+    /// symbolizer until it is listed.
+    /// </summary>
+    private static bool EnsureSymbols()
+    {
+        lock (s_dbghelp)
+        {
+            var process = GetCurrentProcess();
+            if (!s_symbolsReady)
+            {
+                _ = SymSetOptions(0x00000002 /* SYMOPT_UNDNAME */ | 0x00000004 /* SYMOPT_DEFERRED_LOADS */);
+                s_symbolsReady = SymInitializeW(process, AppContext.BaseDirectory, true);
+            }
+
+            if (s_symbolsReady)
+            {
+                _ = SymRefreshModuleList(process);
+            }
+
+            return s_symbolsReady;
+        }
+    }
 
     private static string Symbolize(ulong address)
     {
@@ -382,11 +490,9 @@ internal static class StaThreadProbe
         const int nameOffset = 84;
         const int nameChars = 200;
         const int size = nameOffset + 4 + (nameChars * 2);
-        var process = GetCurrentProcess();
-        if (!s_symbolsReady)
+        if (!s_symbolsReady && !EnsureSymbols())
         {
-            _ = SymSetOptions(0x00000002 /* SYMOPT_UNDNAME */ | 0x00000004 /* SYMOPT_DEFERRED_LOADS */);
-            s_symbolsReady = SymInitializeW(process, AppContext.BaseDirectory, true);
+            return null;
         }
 
         var symbol = Marshal.AllocHGlobal(size);
@@ -399,7 +505,14 @@ internal static class StaThreadProbe
 
             Marshal.WriteInt32(symbol, 0, 88);
             Marshal.WriteInt32(symbol, 80, nameChars);
-            if (!SymFromAddrW(process, address, out var displacement, symbol))
+            ulong displacement;
+            bool found;
+            lock (s_dbghelp)
+            {
+                found = SymFromAddrW(GetCurrentProcess(), address, out displacement, symbol);
+            }
+
+            if (!found)
             {
                 return null;
             }
