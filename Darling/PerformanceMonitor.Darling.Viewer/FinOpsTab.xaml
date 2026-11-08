@@ -289,9 +289,6 @@
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
 
@@ -317,14 +314,17 @@
                             </Border>
                         </StackPanel>
 
-                        <Grid Grid.Row="1" Margin="10,0,10,0" x:Name="FinOpsUtilizationContent">
+                        <!-- #8226: one scroll area for the page; each block below is a card, and each grid sizes to its rows. -->
+                        <ScrollViewer Grid.Row="1" x:Name="FinOpsUtilizationScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel>
+                        <Grid Margin="10,0,10,0" x:Name="FinOpsUtilizationContent">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
 
-                            <GroupBox Grid.Column="0" Header="CPU" Margin="0,0,5,0" VerticalAlignment="Top" Foreground="{DynamicResource ForegroundBrush}">
-                                <StackPanel Margin="10" Grid.IsSharedSizeScope="True">
+                            <ui:ChartPanel Grid.Column="0" x:Name="FinOpsUtilizationCpuCard" Title="CPU" Subtitle="SQL Server CPU over the last 24 hours" Margin="0,0,4,0" VerticalAlignment="Top">
+                                <StackPanel Grid.IsSharedSizeScope="True">
                                     <Grid Margin="0,0,0,8">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" SharedSizeGroup="FinOpsCpuLabel"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
                                         <TextBlock Grid.Column="0" Text="{x:Static local:ViewerLabels.AvgSqlServerCpu}" Margin="0,0,8,0" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
@@ -367,10 +367,10 @@
                                         <Run x:Name="FinOpsCpuSamplesText" Text="-"/><Run Text=" samples (24h)"/>
                                     </TextBlock>
                                 </StackPanel>
-                            </GroupBox>
+                            </ui:ChartPanel>
 
-                            <GroupBox Grid.Column="1" Header="Memory" Margin="5,0,0,0" VerticalAlignment="Top" Foreground="{DynamicResource ForegroundBrush}">
-                                <StackPanel Margin="10">
+                            <ui:ChartPanel Grid.Column="1" x:Name="FinOpsUtilizationMemoryCard" Title="Memory" Subtitle="Committed against target, buffer pool and stolen memory" Margin="4,0,0,0" VerticalAlignment="Top">
+                                <StackPanel>
                                     <Grid Margin="0,0,0,8">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="120"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
                                         <TextBlock Grid.Column="0" Text="Stolen Mem %" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"
@@ -409,15 +409,15 @@
                                         </StackPanel>
                                     </Grid>
                                 </StackPanel>
-                            </GroupBox>
+                            </ui:ChartPanel>
                         </Grid>
 
-                        <TextBlock x:Name="FinOpsClassificationExplanation" Grid.Row="2" Margin="12,8,10,4" VerticalAlignment="Top"
+                        <TextBlock x:Name="FinOpsClassificationExplanation" Margin="12,8,10,4" VerticalAlignment="Top"
                                    TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
-                        <Expander Header="7-Day Provisioning Trend" IsExpanded="False" Grid.Row="3" Margin="10,4,10,0">
+                        <ui:ChartPanel x:Name="FinOpsProvisioningTrendCard" Title="7-Day Provisioning Trend" Subtitle="Each day's status against its CPU and memory" Margin="10,8,10,0">
                             <DataGrid x:Name="FinOpsProvisioningTrendGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}"
-                                      CanUserSortColumns="False" MaxHeight="200">
+                                      CanUserSortColumns="False">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="100" SortMemberPath="Day"/>
                                     <DataGridTextColumn Header="Status" Binding="{Binding StatusDisplay}" Width="130">
@@ -437,15 +437,14 @@
                                     <DataGridTextColumn Header="Mem Ratio" Binding="{Binding MemoryRatio, StringFormat=N2}" Width="Auto" MinWidth="90" ElementStyle="{StaticResource NumericCell}"/>
                                 </DataGrid.Columns>
                             </DataGrid>
-                        </Expander>
+                        </ui:ChartPanel>
 
-                        <ScrollViewer Grid.Row="4" VerticalScrollBarVisibility="Auto">
                             <Grid x:Name="FinOpsSummaryContent">
                                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                                 <Grid Grid.Row="0" Margin="10,4,10,0">
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                    <GroupBox Grid.Column="0" Header="Top Databases by Total CPU" Margin="0,0,5,0" Foreground="{DynamicResource ForegroundBrush}">
-                                        <DataGrid x:Name="FinOpsTopTotalGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" MinHeight="40" MaxHeight="200">
+                                    <ui:ChartPanel Grid.Column="0" x:Name="FinOpsTopTotalCard" Title="Top Databases by Total CPU" Subtitle="The databases that used the most CPU time" Margin="0,0,4,0">
+                                        <DataGrid x:Name="FinOpsTopTotalGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Header="Database" Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="*"/>
                                                 <DataGridTextColumn Header="CPU %" Binding="{Binding PctCpu, StringFormat=N1}" Width="60" ElementStyle="{StaticResource NumericCell}"/>
@@ -454,9 +453,9 @@
                                                 <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat=N0}" Width="Auto" MinWidth="70" ElementStyle="{StaticResource NumericCell}"/>
                                             </DataGrid.Columns>
                                         </DataGrid>
-                                    </GroupBox>
-                                    <GroupBox Grid.Column="1" Header="Top Databases by Avg CPU / Execution" Margin="5,0,0,0" Foreground="{DynamicResource ForegroundBrush}">
-                                        <DataGrid x:Name="FinOpsTopAvgGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" MinHeight="40" MaxHeight="200">
+                                    </ui:ChartPanel>
+                                    <ui:ChartPanel Grid.Column="1" x:Name="FinOpsTopAvgCard" Title="Top Databases by Avg CPU / Execution" Subtitle="The databases that cost the most CPU per execution" Margin="4,0,0,0">
+                                        <DataGrid x:Name="FinOpsTopAvgGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Header="Database" Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="*"/>
                                                 <DataGridTextColumn Header="Avg CPU (ms)" Binding="{Binding AvgCpuMs, StringFormat=N2}" Width="Auto" MinWidth="95" ElementStyle="{StaticResource NumericCell}"/>
@@ -464,9 +463,9 @@
                                                 <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat=N0}" Width="Auto" MinWidth="70" ElementStyle="{StaticResource NumericCell}"/>
                                             </DataGrid.Columns>
                                         </DataGrid>
-                                    </GroupBox>
+                                    </ui:ChartPanel>
                                 </Grid>
-                                <GroupBox x:Name="FinOpsDbSizeChartGroup" Grid.Row="1" Header="Database Sizes — Allocated vs Used" Margin="10,8,10,10" Foreground="{DynamicResource ForegroundBrush}">
+                                <ui:ChartPanel x:Name="FinOpsDbSizeChartGroup" Grid.Row="1" Title="Database Sizes" Subtitle="Allocated against used" Margin="10,8,10,10">
                                     <DockPanel>
                                         <TextBlock x:Name="FinOpsDbSizeChartCaption" DockPanel.Dock="Bottom" Visibility="Collapsed" Margin="8,2,8,4" TextWrapping="Wrap" FontSize="11.5" Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                         <ItemsControl x:Name="FinOpsDbSizeChart" Margin="8,4,8,4" Grid.IsSharedSizeScope="True">
@@ -488,11 +487,12 @@
                                             </ItemsControl.ItemTemplate>
                                         </ItemsControl>
                                     </DockPanel>
-                                </GroupBox>
+                                </ui:ChartPanel>
                             </Grid>
+                        </StackPanel>
                         </ScrollViewer>
 
-                        <TextBlock x:Name="FinOpsNoUtilizationMessage" Grid.Row="1" Grid.RowSpan="4" Style="{StaticResource EmptyHint}"
+                        <TextBlock x:Name="FinOpsNoUtilizationMessage" Grid.Row="1" Style="{StaticResource EmptyHint}"
                                    Text="No utilization data collected yet for this server." VerticalAlignment="Top" Margin="0,20,0,0"/>
                     </Grid>
                 </TabItem>
@@ -793,13 +793,16 @@
                             <TextBlock Text="Optimization" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="FinOpsOptimizationRefresh_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                         </StackPanel>
-                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="10,0,10,10">
+                        <!-- #8226: one scroll area for the page; each block is a card, and each grid sizes to its rows. -->
+                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="10,0,10,10">
                             <StackPanel>
-                                <Expander Header="Idle Databases" IsExpanded="True" Margin="0,0,0,8">
+                                <ui:ChartPanel x:Name="FinOpsIdleDatabasesCard" Title="Idle Databases" Subtitle="Databases with no recent executions, and what they hold" Margin="0,0,0,8">
+                                    <ui:ChartPanel.HeaderContent>
+                                        <TextBlock x:Name="FinOpsIdleDatabasesCountIndicator" Text="" Style="{DynamicResource PanelSubtitleText}"/>
+                                    </ui:ChartPanel.HeaderContent>
                                     <StackPanel>
-                                        <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBlock x:Name="FinOpsIdleDatabasesCountIndicator" Text="" Style="{DynamicResource PanelSubtitleText}"/></StackPanel>
                                         <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                                        <DataGrid x:Name="FinOpsIdleDatabasesDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" MaxHeight="250">
+                                        <DataGrid x:Name="FinOpsIdleDatabasesDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Binding="{Binding DatabaseName}" Width="180"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                                 <DataGridTextColumn Binding="{Binding TotalSizeMb, StringFormat=N2}" Width="120" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalSizeMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Size MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -810,12 +813,12 @@
                                         <TextBlock Style="{StaticResource EmptyHint}" x:Name="FinOpsIdleDatabasesNoDataMessage" Text="No idle databases detected" Margin="0,28,0,0" Visibility="Collapsed"/>
                                         </Grid>
                                     </StackPanel>
-                                </Expander>
+                                </ui:ChartPanel>
 
-                                <Expander Header="tempdb Pressure" IsExpanded="True" Margin="0,0,0,8">
+                                <ui:ChartPanel x:Name="FinOpsTempdbPressureCard" Title="tempdb Pressure" Subtitle="Current and 24-hour peak use, by metric" Margin="0,0,0,8">
                                     <StackPanel>
                                         <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                                        <DataGrid x:Name="FinOpsTempdbPressureDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" MaxHeight="200">
+                                        <DataGrid x:Name="FinOpsTempdbPressureDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Binding="{Binding Metric}" Width="180"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Metric" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Metric" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                                 <DataGridTextColumn Binding="{Binding CurrentMb, StringFormat=N2}" Width="110" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CurrentMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Current MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -826,19 +829,18 @@
                                         <TextBlock Style="{StaticResource EmptyHint}" x:Name="FinOpsTempdbPressureNoDataMessage" Text="No tempdb data available" Margin="0,28,0,0" Visibility="Collapsed"/>
                                         </Grid>
                                     </StackPanel>
-                                </Expander>
+                                </ui:ChartPanel>
 
-                                <Expander IsExpanded="True" Margin="0,0,0,8">
-                                    <Expander.Header>
+                                <ui:ChartPanel x:Name="FinOpsWaitStatsSummaryCard" Title="Wait Stats Summary" Subtitle="Wait time by category over the chosen range" Margin="0,0,0,8">
+                                    <ui:ChartPanel.HeaderContent>
                                         <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="Wait Stats Summary" VerticalAlignment="Center"/>
-                                            <TextBlock Text="  Time Range:" VerticalAlignment="Center" Margin="12,0,4,0" FontSize="11"/>
+                                            <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="0,0,4,0" Style="{DynamicResource PanelSubtitleText}"/>
                                             <ui:TimeRangePicker x:Name="FinOpsWaitStatsTimeRangeCombo" Compact="True" VerticalAlignment="Center" RangeChanged="FinOpsWaitStatsTimeRange_Changed"/>
                                         </StackPanel>
-                                    </Expander.Header>
+                                    </ui:ChartPanel.HeaderContent>
                                     <StackPanel>
                                         <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                                        <DataGrid x:Name="FinOpsWaitCategorySummaryDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" MaxHeight="250">
+                                        <DataGrid x:Name="FinOpsWaitCategorySummaryDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Binding="{Binding Category}" Width="100"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Category" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Category" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                                 <DataGridTextColumn Binding="{Binding TotalWaitTimeMs, StringFormat=N0}" Width="120" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalWaitTimeMs" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Total Wait ms" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -853,20 +855,19 @@
                                         <TextBlock Style="{StaticResource EmptyHint}" x:Name="FinOpsWaitCategorySummaryNoDataMessage" Text="No wait stats data available" Margin="0,28,0,0" Visibility="Collapsed"/>
                                         </Grid>
                                     </StackPanel>
-                                </Expander>
+                                </ui:ChartPanel>
 
-                                <Expander IsExpanded="True" Margin="0,0,0,8">
-                                    <Expander.Header>
+                                <ui:ChartPanel x:Name="FinOpsExpensiveQueriesCard" Title="Expensive Queries" Subtitle="The top 20 by CPU over the chosen range" Margin="0,0,0,8">
+                                    <ui:ChartPanel.HeaderContent>
                                         <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="Expensive Queries (Top 20 by CPU)" VerticalAlignment="Center"/>
-                                            <TextBlock Text="  Time Range:" VerticalAlignment="Center" Margin="12,0,4,0" FontSize="11"/>
+                                            <TextBlock x:Name="FinOpsExpensiveQueriesCountIndicator" Text="" Style="{DynamicResource PanelSubtitleText}" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                                            <TextBlock Text="Time Range:" VerticalAlignment="Center" Margin="0,0,4,0" Style="{DynamicResource PanelSubtitleText}"/>
                                             <ui:TimeRangePicker x:Name="FinOpsExpensiveQueriesTimeRangeCombo" Compact="True" VerticalAlignment="Center" RangeChanged="FinOpsExpensiveQueriesTimeRange_Changed"/>
                                         </StackPanel>
-                                    </Expander.Header>
+                                    </ui:ChartPanel.HeaderContent>
                                     <StackPanel>
-                                        <StackPanel Orientation="Horizontal" Margin="0,4,0,4"><TextBlock x:Name="FinOpsExpensiveQueriesCountIndicator" Text="" Style="{DynamicResource PanelSubtitleText}"/></StackPanel>
                                         <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                                        <DataGrid x:Name="FinOpsExpensiveQueriesDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsQueryPlanRowStyle}" MaxHeight="350">
+                                        <DataGrid x:Name="FinOpsExpensiveQueriesDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsQueryPlanRowStyle}">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Binding="{Binding DatabaseName}" Width="140"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DatabaseName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                                 <DataGridTemplateColumn Header="Query Preview" Width="400"><DataGridTemplateColumn.CellTemplate><DataTemplate><TextBlock Text="{Binding QueryPreview, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" Margin="5,2" ToolTip="{Binding FullQueryText}"/></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
@@ -882,12 +883,12 @@
                                         <TextBlock Style="{StaticResource EmptyHint}" x:Name="FinOpsExpensiveQueriesNoDataMessage" Text="No expensive queries found" Margin="0,28,0,0" Visibility="Collapsed"/>
                                         </Grid>
                                     </StackPanel>
-                                </Expander>
+                                </ui:ChartPanel>
 
-                                <Expander Header="Memory Grant Efficiency" IsExpanded="True" Margin="0,0,0,8">
+                                <ui:ChartPanel x:Name="FinOpsMemoryGrantEfficiencyCard" Title="Memory Grant Efficiency" Subtitle="Granted against used, by day" Margin="0,0,0,8">
                                     <StackPanel>
                                         <Grid MinHeight="96"><!-- the header, and room for the one sentence the grid shows when it is empty -->
-                                        <DataGrid x:Name="FinOpsMemoryGrantEfficiencyDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" MaxHeight="250">
+                                        <DataGrid x:Name="FinOpsMemoryGrantEfficiencyDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Binding="{Binding DayDisplay}" Width="100" SortMemberPath="Day"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DayDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Day" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                                 <DataGridTextColumn Binding="{Binding AvgGrantedMb, StringFormat='{}{0:#,##0.0###}'}" Width="120" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AvgGrantedMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Avg Granted MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -904,7 +905,7 @@
                                         <TextBlock Style="{StaticResource EmptyHint}" x:Name="FinOpsMemoryGrantEfficiencyNoDataMessage" Text="No memory grant data available" Margin="0,28,0,0" Visibility="Collapsed"/>
                                         </Grid>
                                     </StackPanel>
-                                </Expander>
+                                </ui:ChartPanel>
                             </StackPanel>
                         </ScrollViewer>
                     </Grid>
@@ -1202,7 +1203,8 @@
                      tier, reserved capacity) — NO live target. Lite's sp_IndexCleanup-existence check is dropped
                      (superseded by the native Index Analysis sub-tab). Sorted by severity; the per-server budget
                      drives Est. Savings (0 → blank). -->
-                <TabItem Header="Recommendations">
+                <!-- #8226: named apart from the main window's Recommendations tab. -->
+                <TabItem Header="Cost Savings">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
