@@ -37,6 +37,7 @@ internal sealed class ChartHoverHelper
     private readonly List<SeriesEntry> _series = new();
     private readonly List<(ScottPlot.Plottables.BarPlot BarPlot, string Label)> _barPlots = new();
     private readonly Popup _popup;
+    private readonly Border _frame;
     private readonly TextBlock _text;
     private string _unit;
     private DateTime _lastUpdate;
@@ -93,11 +94,16 @@ internal sealed class ChartHoverHelper
         _enableClickIsolate = enableClickIsolate;
         _displayZone = displayZone;
 
-        _text = new TextBlock
+        _text = new TextBlock { FontSize = 13 };
+
+        _frame = new Border
         {
-            Foreground = new SolidColorBrush(Color.FromRgb(0xE0, 0xE0, 0xE0)),
-            FontSize = 13
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(3),
+            Padding = new Thickness(8, 4, 8, 4),
+            Child = _text
         };
+        PaintPopup();
 
         _popup = new Popup
         {
@@ -105,15 +111,7 @@ internal sealed class ChartHoverHelper
             Placement = PlacementMode.Relative,
             IsHitTestVisible = false,
             AllowsTransparency = true,
-            Child = new Border
-            {
-                Background = new SolidColorBrush(Color.FromRgb(0x33, 0x33, 0x33)),
-                BorderBrush = new SolidColorBrush(Color.FromRgb(0x55, 0x55, 0x55)),
-                BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(3),
-                Padding = new Thickness(8, 4, 8, 4),
-                Child = _text
-            }
+            Child = _frame
         };
 
         chart.MouseMove += OnMouseMove;
@@ -346,11 +344,43 @@ internal sealed class ChartHoverHelper
 
         var plottedX = DateTime.FromOADate(bestPoint.X);
         var time = FormatHoverTime(plottedX, _displayZone, PlainTimeAt?.Invoke(plottedX) == true);
-        string valueFormatted = (bestPoint.Y == Math.Floor(bestPoint.Y))
-            ? bestPoint.Y.ToString("N0")
-            : bestPoint.Y.ToString("N1");
-        return HoverText(bestLabel, valueFormatted, _unit, time, bestDetail);
+        return HoverText(bestLabel, FormatHoverValue(bestPoint.Y), _unit, time, bestDetail);
     }
+
+    /// <summary>
+    /// The value line's number, at the precision its magnitude needs: a whole number as "1,234"; ten and over to one
+    /// decimal; one and over to two; under one to its two leading significant digits with trailing zeros dropped, so an
+    /// IO latency of 0.04 ms or a per-minute rate of 0.5 reads as its value and not as "0.0". The current culture's digits and
+    /// separators, as every other number the hover prints.
+    /// </summary>
+    internal static string FormatHoverValue(double y)
+    {
+        if (!double.IsFinite(y)) return y.ToString(CultureInfo.CurrentCulture);
+        var size = Math.Abs(y);
+        if (y == Math.Floor(y)) return y.ToString("N0", CultureInfo.CurrentCulture);
+        if (size >= 10) return y.ToString("N1", CultureInfo.CurrentCulture);
+        if (size >= 1) return y.ToString("N2", CultureInfo.CurrentCulture);
+
+        var places = Math.Min(6, (int)Math.Ceiling(-Math.Log10(size)) + 1);
+        var culture = CultureInfo.CurrentCulture;
+        var text = y.ToString("F" + places.ToString(CultureInfo.InvariantCulture), culture);
+        return text.TrimEnd('0').TrimEnd(culture.NumberFormat.NumberDecimalSeparator.ToCharArray());
+    }
+
+    /// <summary>
+    /// Paints the popup from the theme dictionary: the raised panel behind the text, the border tone around it and the
+    /// foreground for the words, so a theme switch and a per-user color override (#3577) reach the hover as they reach the
+    /// panels around the chart. The stock dark popup is the fallback for an app with no theme dictionary.
+    /// </summary>
+    private void PaintPopup()
+    {
+        _frame.Background = ThemeBrush("BackgroundLightBrush", 0x33, 0x33, 0x33);
+        _frame.BorderBrush = ThemeBrush("BorderBrush", 0x55, 0x55, 0x55);
+        _text.Foreground = ThemeBrush("ForegroundBrush", 0xE0, 0xE0, 0xE0);
+    }
+
+    private static Brush ThemeBrush(string key, byte r, byte g, byte b) =>
+        Application.Current?.TryFindResource(key) as Brush ?? new SolidColorBrush(Color.FromRgb(r, g, b));
 
     private void OnMouseMove(object sender, MouseEventArgs e)
     {
@@ -379,11 +409,13 @@ internal sealed class ChartHoverHelper
                 if (_needsReanchor)
                 {
                     if (_popup.IsOpen) _popup.IsOpen = false;
+                    PaintPopup();
                     _popup.IsOpen = true;
                     _needsReanchor = false;
                 }
                 else if (!_popup.IsOpen)
                 {
+                    PaintPopup();
                     _popup.IsOpen = true;
                 }
             }

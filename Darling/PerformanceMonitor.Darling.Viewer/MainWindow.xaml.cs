@@ -207,6 +207,8 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        /* #8221: a calm card's border is read from the theme when the card is bound, so a theme change binds the cards again. */
+        ThemeManager.ThemeChanged += _ => { if (_overviewCards.Count > 0) ApplyOverviewCardFilter(); };
         _preferences = _preferencesStore.Load();
         NoteUnreadableSettingsFile(_preferencesStore.FilePath, _preferencesStore.LastLoadState, _preferencesStore.LastLoadProblem,
             _preferencesStore.LastLoadUnreadableMembers);
