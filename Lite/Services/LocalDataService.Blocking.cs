@@ -318,7 +318,7 @@ ORDER BY w.collection_time DESC, w.cpu_time_ms DESC";
             {
                 SessionId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
                 DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : PerformanceMonitor.Common.ElapsedTimeText.WithoutZeroDays(reader.GetString(2)),
                 QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
                 Status = reader.IsDBNull(4) ? "" : reader.GetString(4),
                 BlockingSessionId = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),

@@ -1736,6 +1736,7 @@ public partial class PlanViewerControl
     {
         InsightsPanel.Visibility = Visibility.Visible;
         InsightsHeader.Text = "  Plan Insights";
+        FitInsightsToHeight();
     }
 
     #endregion
