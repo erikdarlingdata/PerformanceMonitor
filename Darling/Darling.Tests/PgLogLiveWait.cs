@@ -48,27 +48,40 @@ internal static class PgLogLiveWait
     /// <summary>
     /// Rotates the server log through <c>pg_rotate_logfile()</c> and returns once the newest file ending in
     /// <paramref name="extension"/> is a new one (#8205). The syslogger rotates on its next pass, not inside the call, so a
-    /// read right after the call could still see the outgoing file. Fails after 10 seconds when no new file appears.
+    /// read right after the call could still see the outgoing file. The server names a log file by the second and reopens the
+    /// same file when a rotation lands in the second an earlier one did, so a rotation requested in the second the server's own
+    /// midnight or <c>log_rotation_size</c> rotation ran produces no new file: when none appears within
+    /// <see cref="SameSecondRotationGrace"/>, the log is rotated again, which the later second names anew. Fails when no new file
+    /// appears after <see cref="RotationRetries"/> further rotations.
     /// </summary>
     public static async Task RotateAsync(NpgsqlConnection connection, string extension, CancellationToken ct)
     {
         var before = await NewestFileAsync(connection, extension, ct);
-        await using (var rotate = new NpgsqlCommand("SELECT pg_catalog.pg_rotate_logfile()", connection))
+        for (var attempt = 0; ; attempt++)
         {
-            await rotate.ExecuteNonQueryAsync(ct);
-        }
-
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (await NewestFileAsync(connection, extension, ct) == before)
-        {
-            if (DateTime.UtcNow >= deadline)
+            await using (var rotate = new NpgsqlCommand("SELECT pg_catalog.pg_rotate_logfile()", connection))
             {
-                Assert.Fail("pg_rotate_logfile() did not produce a new ." + extension + " log file within 10 seconds (newest is still " + before + ").");
+                await rotate.ExecuteNonQueryAsync(ct);
             }
 
-            await Task.Delay(100, ct);
+            var deadline = DateTime.UtcNow + SameSecondRotationGrace;
+            while (DateTime.UtcNow < deadline)
+            {
+                if (await NewestFileAsync(connection, extension, ct) != before)
+                {
+                    return;
+                }
+
+                await Task.Delay(100, ct);
+            }
+
+            Assert.True(attempt < RotationRetries,
+                "pg_rotate_logfile() produced no new ." + extension + " log file after " + (RotationRetries + 1) + " rotations (newest is still " + before + ").");
         }
     }
+
+    /* Long enough for the syslogger's next pass to open the new file, and for the clock to leave the second a colliding file was named for. */
+    private static readonly TimeSpan SameSecondRotationGrace = TimeSpan.FromSeconds(1.5);
 
     public static async Task WaitForTextAsync(NpgsqlConnection connection, string extension, CancellationToken ct, params string[] markers) =>
         await WaitForTextCoreAsync(connection, extension, null, 0, ct, markers);
