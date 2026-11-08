@@ -83,6 +83,9 @@
     <SolidColorBrush x:Key="BackgroundBrush" Color="{StaticResource BackgroundColor}"/>
     <SolidColorBrush x:Key="BackgroundLightBrush" Color="{StaticResource BackgroundLightColor}"/>
     <SolidColorBrush x:Key="BackgroundLighterBrush" Color="{StaticResource BackgroundLighterColor}"/>
+    <!-- #8221: the outline of a button, a text box and a combo box, and the track a bar sits on. Same values as the Lite themes. -->
+    <SolidColorBrush x:Key="ControlBorderBrush" Color="#5F7C95"/>
+    <SolidColorBrush x:Key="BarTrackBrush" Color="#B7CADB"/>
 
     <SolidColorBrush x:Key="ForegroundBrush" Color="{StaticResource ForegroundColor}"/>
     <SolidColorBrush x:Key="ForegroundDimBrush" Color="{StaticResource ForegroundDimColor}"/>
@@ -1482,9 +1485,6 @@
 
     <!-- Viewer secondary-window surfaces (write-back windows that merge ViewerDarkTheme.xaml). Cool-breeze values. -->
     <SolidColorBrush x:Key="CardBorderBrush" Color="{StaticResource BorderLightColor}"/>
-    <!-- #8221: the outline of a button, a text box and a combo box, and the track a bar sits on. Same values as the Lite themes. -->
-    <SolidColorBrush x:Key="ControlBorderBrush" Color="#5F7C95"/>
-    <SolidColorBrush x:Key="BarTrackBrush" Color="#B7CADB"/>
     <SolidColorBrush x:Key="ViewerSelectionBrush" Color="#B7CEE2"/>
     <SolidColorBrush x:Key="ViewerHoverBrush" Color="{StaticResource BackgroundLighterColor}"/>
     <SolidColorBrush x:Key="ViewerGridHeaderBrush" Color="{StaticResource BackgroundLighterColor}"/>
