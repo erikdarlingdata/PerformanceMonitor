@@ -923,7 +923,7 @@
                                            Padding="8,4" FontWeight="Bold"
                                            Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                            Background="#2244AAFF"/>
-                                <Expander Header="Show CPU by database" IsExpanded="False" Margin="4,2,4,8">
+                                <Expander Header="Show CPU by database" IsExpanded="False" Margin="4,0,4,7">
                                     <ScrollViewer MaxHeight="220" VerticalScrollBarVisibility="Auto">
                                         <ui:MetricBarCards x:Name="QueryStatsByDbCards" Margin="4,4,4,8"/>
                                     </ScrollViewer>
