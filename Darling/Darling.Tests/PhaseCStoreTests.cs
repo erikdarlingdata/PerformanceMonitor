@@ -11,6 +11,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
@@ -200,7 +201,12 @@ public sealed class PhaseCStoreTests
     private static async Task PurgeAsync(NpgsqlConnection store, CancellationToken ct)
     {
         await using var dataSource = NpgsqlDataSource.Create(store.ConnectionString);
-        await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, logger: null, ct);
+        var logger = new CapturingTestLogger();
+        await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, logger, ct);
+        /* The purge isolates a failing table and carries on, so a purge that cannot reach the store deletes nothing and
+           returns as if it had. Its own log is the only place that failure shows; a clean purge logs no warning or error. */
+        Assert.True(logger.CountAtLevel(LogLevel.Warning) + logger.CountAtLevel(LogLevel.Error) == 0,
+            "the purge isolated a failure instead of deleting: " + logger.Joined);
     }
 
     private static async Task WithStoreAsync(Func<NpgsqlConnection, CancellationToken, Task> body)

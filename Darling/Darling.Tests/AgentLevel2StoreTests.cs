@@ -13,6 +13,7 @@ using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
@@ -264,7 +265,12 @@ public sealed class AgentLevel2StoreRungTests
             }
 
             await using var dataSource = NpgsqlDataSource.Create(store.ConnectionString);
-            await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, logger: null, TestContext.Current.CancellationToken);
+            var logger = new CapturingTestLogger();
+            await DarlingRetention.PurgeAsync(dataSource, timescaleAvailable: false, logger, ct);
+            /* A purge that cannot reach the store isolates every table's failure and returns as if it had run; only its log
+               says so. A clean purge logs no warning or error. */
+            Assert.True(logger.CountAtLevel(LogLevel.Warning) + logger.CountAtLevel(LogLevel.Error) == 0,
+                "the purge isolated a failure instead of deleting: " + logger.Joined);
 
             Assert.Equal(Young, await ScalarAsync(store, "SELECT string_agg(request_id::text, ',' ORDER BY request_id) FROM config.investigation_requests", ct));
             Assert.Equal(Young, await ScalarAsync(store, "SELECT string_agg(request_id::text, ',' ORDER BY request_id) FROM config.investigation_feedback", ct));
