@@ -103,4 +103,22 @@ public sealed class AzureSweepScopeTests
         first.Add("mutated");
         Assert.Single(second);
     }
+
+    /// <summary>
+    /// #8146: the deadlocks collector skips ring-buffer loss accounting for a logical-server registration, and both runners decide
+    /// that through this one predicate. A catalog-less or <c>master</c> Azure registration is the logical server; a named database
+    /// is not; a non-Azure target never is.
+    /// </summary>
+    [Theory]
+    [InlineData(true, null, true)]
+    [InlineData(true, "", true)]
+    [InlineData(true, "master", true)]
+    [InlineData(true, "db1", false)]
+    [InlineData(false, null, false)]
+    [InlineData(false, "master", false)]
+    [InlineData(false, "db1", false)]
+    public void IsLogicalServerRegistration_FollowsTheCatalogOnAzureOnly(bool azure, string? catalog, bool expected)
+    {
+        Assert.Equal(expected, AzureSweepScope.IsLogicalServerRegistration(new CollectorTargetInfo { IsAzureSqlDb = azure }, catalog));
+    }
 }

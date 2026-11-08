@@ -596,8 +596,16 @@ public sealed partial class DarlingCollectorRunner
 
         var capturePlanXml = ShouldCapturePlanXmlFor(definition.Name, server.ServerId, server.CapturePlans);
         var planFetchFlags = StampPlanFetchFlags(definition.Name, capturePlanXml, server.Target, server.CapturePlans);
+        /* #8146: only the deadlocks collector reads this flag (it skips ring-buffer loss accounting for a logical-server registration). */
+        var registeredAsLogicalServer = server.Target.IsAzureSqlDb
+            && string.Equals(definition.Name, DeadlocksCollector.Instance.Name, StringComparison.Ordinal)
+            && AzureSweepScope.IsLogicalServerRegistration(
+                server.Target, new SqlConnectionStringBuilder(server.ConnectionString).InitialCatalog);
+
         var context = new CollectorContext
         {
+            AzureRegistrationIsLogicalServer = registeredAsLogicalServer,
+            RingBufferMaxEvents = RingBufferMaxEvents,
             ServerId = server.ServerId,
             ServerName = server.StorageName,
             CollectionTime = collectionTime,
@@ -2586,6 +2594,13 @@ public sealed partial class DarlingCollectorRunner
             {
                 await SaveCollectorStateAsync(server.ServerId, definition.Name, context.PendingState, cancellationToken);
             }
+        }
+
+        /* #8146: the long-query read found this install's own session below the setting in an item it landed. Its rows and
+           position are stored above, so the session can be recreated with the setting now. Never fails the run. */
+        if (context.SessionRecreates.Count > 0)
+        {
+            await DarlingXeSessions.RecreateLongQuerySessionsBelowSettingAsync(server, this, context.SessionRecreates, _logger, cancellationToken);
         }
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'",
