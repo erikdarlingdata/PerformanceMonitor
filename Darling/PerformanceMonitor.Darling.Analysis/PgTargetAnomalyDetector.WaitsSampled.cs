@@ -128,7 +128,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        AVG(total_wait_ms / observed_sec) AS mean_ms_per_sec,
        SUM(total_wait_ms)                AS total_wait_ms,
        CAST(count(observed_sec) AS integer)         AS sample_count,
-       (array_agg(collection_time ORDER BY (total_wait_ms / observed_sec) DESC NULLS LAST, collection_time DESC) FILTER (WHERE observed_sec IS NOT NULL))[1] AS peak_time,
+       (array_agg(collection_time ORDER BY (total_wait_ms / observed_sec) DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
        " + WindowTiles.CoverageColumnsSql + @"
 FROM collected
 LEFT JOIN rated USING (collection_time)

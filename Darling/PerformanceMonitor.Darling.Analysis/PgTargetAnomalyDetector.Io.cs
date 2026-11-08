@@ -87,8 +87,8 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(ms_per_read) AS peak_ms_per_read,
        AVG(ms_per_read) AS avg_ms_per_read,
        COUNT(ms_per_read)         AS rated_samples,
-       (array_agg(collection_time ORDER BY ms_per_read DESC NULLS LAST, collection_time DESC) FILTER (WHERE ms_per_read IS NOT NULL))[1] AS peak_sample,
-       (array_agg(reads ORDER BY ms_per_read DESC NULLS LAST, collection_time DESC) FILTER (WHERE ms_per_read IS NOT NULL))[1]           AS peak_sample_reads,
+       (array_agg(collection_time ORDER BY ms_per_read DESC NULLS LAST, collection_time DESC))[1] AS peak_sample,
+       (array_agg(reads ORDER BY ms_per_read DESC NULLS LAST, collection_time DESC))[1]           AS peak_sample_reads,
        " + WindowTiles.CoverageColumnsSql + @"
 FROM collected
 LEFT JOIN rated USING (collection_time)

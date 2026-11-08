@@ -146,7 +146,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(tps)                                                             AS peak_tps,
        AVG(tps)                                                             AS avg_tps,
        COUNT(tps)                                                             AS tps_samples,
-       (array_agg(collection_time ORDER BY tps DESC NULLS LAST, collection_time DESC) FILTER (WHERE tps IS NOT NULL))[1]                    AS peak_time,
+       (array_agg(collection_time ORDER BY tps DESC NULLS LAST, collection_time DESC))[1]                    AS peak_time,
        " + WindowTiles.CoverageColumnsSql + @"
 FROM collected
 LEFT JOIN rated USING (collection_time)
@@ -238,7 +238,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_sessions)                                  AS peak_sessions,
        AVG(total_sessions)                                  AS avg_sessions,
        COUNT(total_sessions)                                              AS sample_count,
-       (array_agg(collection_time ORDER BY total_sessions DESC NULLS LAST, collection_time DESC) FILTER (WHERE total_sessions IS NOT NULL))[1] AS peak_time,
+       (array_agg(collection_time ORDER BY total_sessions DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
        " + WindowTiles.CoverageColumnsSql + @"
 FROM per_collection
 GROUP BY " + WindowTiles.LocalHourSql + @"

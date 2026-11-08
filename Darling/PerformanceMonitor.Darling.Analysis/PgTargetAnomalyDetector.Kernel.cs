@@ -123,7 +123,7 @@ SELECT local_hour,
        MAX(cores_busy) AS peak_cores_busy,
        AVG(cores_busy) AS mean_cores_busy,
        CAST(count(cores_busy) AS integer) AS rated_samples,
-       (array_agg(collection_time ORDER BY cores_busy DESC NULLS LAST, collection_time DESC) FILTER (WHERE cores_busy IS NOT NULL))[1] AS peak_time,
+       (array_agg(collection_time ORDER BY cores_busy DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
        (SELECT query_id FROM by_query AS b WHERE b.local_hour = tiled.local_hour AND b.rk = 1) AS top_query_id,
        " + WindowTiles.CoverageColumnsSql + @"
 FROM (SELECT " + WindowTiles.LocalHourSql + @" AS local_hour, collection_time, cores_busy FROM collected LEFT JOIN per_collection USING (collection_time)) AS tiled

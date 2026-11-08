@@ -442,7 +442,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) FILTER (WHERE delta_cntr_value >= 0 AND sample_interval_seconds > 0) AS peak_batch,
        AVG(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) FILTER (WHERE delta_cntr_value >= 0 AND sample_interval_seconds > 0) AS avg_batch,
        COUNT(*) FILTER (WHERE delta_cntr_value >= 0 AND sample_interval_seconds > 0) AS sample_count,
-       (array_agg(collection_time ORDER BY delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0) DESC NULLS LAST, collection_time DESC) FILTER (WHERE delta_cntr_value >= 0 AND sample_interval_seconds > 0))[1] AS peak_time,
+       (array_agg(collection_time ORDER BY CASE WHEN delta_cntr_value >= 0 AND sample_interval_seconds > 0 THEN delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0) END DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
        " + WindowTiles.CoverageColumnsSql + @"
 FROM v_perfmon_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
@@ -482,7 +482,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_connections) AS peak_connections,
        AVG(total_connections) AS avg_connections,
        COUNT(total_connections) AS sample_count,
-       (array_agg(collection_time ORDER BY total_connections DESC NULLS LAST, collection_time DESC) FILTER (WHERE total_connections IS NOT NULL))[1] AS peak_time,
+       (array_agg(collection_time ORDER BY total_connections DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
        " + WindowTiles.CoverageColumnsSql + @"
 FROM instants
 GROUP BY local_hour
@@ -522,7 +522,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_elapsed) AS peak_elapsed,
        AVG(total_elapsed) AS avg_elapsed,
        COUNT(total_elapsed) AS sample_count,
-       (array_agg(collection_time ORDER BY total_elapsed DESC NULLS LAST, collection_time DESC) FILTER (WHERE total_elapsed IS NOT NULL))[1] AS peak_time,
+       (array_agg(collection_time ORDER BY total_elapsed DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
        " + WindowTiles.CoverageColumnsSql + @"
 FROM instants
 GROUP BY local_hour
@@ -536,7 +536,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) FILTER (WHERE target_server_memory_mb > 0) AS peak_pressure,
        AVG(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) FILTER (WHERE target_server_memory_mb > 0) AS avg_pressure,
        COUNT(*) FILTER (WHERE target_server_memory_mb > 0) AS sample_count,
-       (array_agg(collection_time ORDER BY total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) DESC NULLS LAST, collection_time DESC) FILTER (WHERE target_server_memory_mb > 0))[1] AS peak_time,
+       (array_agg(collection_time ORDER BY CASE WHEN target_server_memory_mb > 0 THEN total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) END DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
        " + WindowTiles.CoverageColumnsSql + @"
 FROM v_memory_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
