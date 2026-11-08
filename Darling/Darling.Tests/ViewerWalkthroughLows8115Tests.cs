@@ -123,7 +123,7 @@ public sealed class ViewerWalkthroughLows8115Tests
             var grid = (DataGrid)control.FindName(tab == "alerts" ? "AlertsDataGrid" : "JobHistoryDataGrid")!;
             grid.ItemsSource = new List<ServerRow> { new() { ServerName = name }, new() { ServerName = "SHORT" } };
             var window = new Window { Content = control, Width = 1640, Height = 800, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 Settle(window);
@@ -194,7 +194,7 @@ public sealed class ViewerWalkthroughLows8115Tests
         {
             var store = new ViewerAppSettingsStore(Path.Combine(Path.GetTempPath(), "settings-tabs-8115-" + Guid.NewGuid().ToString("N") + ".json"));
             var window = new SettingsWindow(new ViewerPreferences(), store, null) { Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 Settle(window);

@@ -311,7 +311,7 @@ public sealed class ViewerGridPolishRound2Tests
             parent.Children.Remove(list);
             var window = new Window { Content = list, Width = 280, Height = 400, Left = 0, Top = 0 };
             list.ItemsSource = new[] { new SelectableItem { DisplayName = LongName, IsSelected = false } };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ClippedTextProbe.Settle(window);

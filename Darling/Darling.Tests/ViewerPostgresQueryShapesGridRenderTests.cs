@@ -56,7 +56,7 @@ public sealed class ViewerPostgresQueryShapesGridRenderTests
                     new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
                     new DarlingServer(1, "pg-shapes-test", "pg-shapes-test", true, null, engineKind: "postgres"));
                 var window = new Window { Content = tab, Width = 1800, Height = 1000 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     /* Switching tabs starts the tab's own database read on a thread-pool continuation; the viewer's own drill-down skips it the same way. */

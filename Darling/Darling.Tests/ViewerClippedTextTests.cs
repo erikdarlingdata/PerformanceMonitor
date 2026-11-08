@@ -42,7 +42,7 @@ public sealed class ViewerClippedTextTests
             var store = new ViewerAppSettingsStore(Path.Combine(Path.GetTempPath(), "clipped-" + Guid.NewGuid().ToString("N") + ".json"));
             var window = new SettingsWindow(new ViewerPreferences(), store, null);
             window.Resources.MergedDictionaries.Add(Theme());
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             var tabs = (TabControl)window.FindName("SettingsTabs");
             var found = new List<string>();
             for (var i = 0; i < tabs.Items.Count; i++)
@@ -74,7 +74,7 @@ public sealed class ViewerClippedTextTests
                 /* The tab sits right of the sidebar, so it is narrower than the window: 1100 is what is left of 1550 on a busy fleet. */
                 var window = new Window { Content = tab, Width = 1100, Height = 925 };
                 window.Resources.MergedDictionaries.Add(Theme());
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 foreach (var (indicator, text) in new[]
                 {
                     ("AgentStatusIndicator", "Agents: 5/7 running, 2 stopped"),
@@ -109,7 +109,7 @@ public sealed class ViewerClippedTextTests
             var tab = new JobHistoryTab();
             var window = new Window { Content = tab, Width = 1550, Height = 925 };
             window.Resources.MergedDictionaries.Add(Theme());
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             ClippedTextProbe.Settle(window);
             /* What a load does once the clock mode is known: the title gets its clock suffix. */
             ((TextBlock)tab.FindName("RunTimeHeaderText")).Text = "Run Time (server time zone, long form)";

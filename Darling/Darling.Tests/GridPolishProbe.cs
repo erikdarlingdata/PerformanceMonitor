@@ -80,7 +80,7 @@ internal static class GridPolishProbe
     private static T Layout<T>(DataGrid grid, IList rows, double width, Func<DataGrid, T> read, string? png)
     {
         var window = new Window { Content = grid, Width = width, Height = 600, Left = 0, Top = 0 };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         try
         {
             ClippedTextProbe.Settle(window);
@@ -189,7 +189,7 @@ internal static class GridPolishProbe
     internal static List<(string Theme, List<HeaderLook> Looks)> HeaderLooksAfterThemeSwitches(DataGrid grid, IList rows, double width, string built, IEnumerable<string> switchTo, Func<string, string?>? png = null)
     {
         var window = new Window { Content = grid, Width = width, Height = 600, Left = 0, Top = 0 };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         try
         {
             ClippedTextProbe.Settle(window);

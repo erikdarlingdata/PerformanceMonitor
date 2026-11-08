@@ -52,7 +52,7 @@ public sealed class ViewerOverviewCardDetailColumnTests
             };
             var window = new Window { Content = host, Width = 1920, Height = 1080, Left = 0, Top = 0 };
             window.Resources["BoolToVisibility"] = new BooleanToVisibilityConverter();
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ClippedTextProbe.Settle(window);

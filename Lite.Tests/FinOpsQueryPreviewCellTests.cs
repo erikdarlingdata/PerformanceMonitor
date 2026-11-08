@@ -71,7 +71,7 @@ public sealed class FinOpsQueryPreviewCellTests
         Detach(grid);
         grid.ItemsSource = new[] { row };
         var window = new Window { Content = grid, Width = 1280, Height = 400, Left = 0, Top = 0 };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         try
         {
             ClippedTextProbe.Settle(window);

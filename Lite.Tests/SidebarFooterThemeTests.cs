@@ -42,7 +42,7 @@ public sealed class SidebarFooterThemeTests
             {
                 var footer = new SidebarFooter { VerticalAlignment = VerticalAlignment.Top };
                 var window = new Window { Content = footer, Width = 280, Height = 400, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     StaTestThread.Settle(window);

@@ -190,7 +190,7 @@ public sealed class FlatTabsFocusTests
                 typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", Instance)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = width, Height = height, Left = 0, Top = 0 };
                 window.Resources.MergedDictionaries.Add(LoadTheme(theme));
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     StaTestThread.Settle(window);
@@ -311,7 +311,8 @@ public sealed class FlatTabsFocusTests
             var footer = new SidebarFooter { Width = 260, VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Left };
             var window = new Window { Content = footer, Width = 900, Height = 600, Left = 0, Top = 0 };
             window.Resources.MergedDictionaries.Add(LoadTheme(theme));
-            window.Show();
+            /* #8289: the menu opens beside its button, and WPF moves a popup back onto a monitor, so this window has to be on one. */
+            StaTestThread.ShowOnAMonitor(window);
             try
             {
                 StaTestThread.Settle(window);
@@ -444,7 +445,7 @@ public sealed class FlatTabsFocusTests
 
         var window = new Window { Content = host, Width = width, Height = height, Left = 0, Top = 0, WindowStyle = WindowStyle.None };
         window.Resources.MergedDictionaries.Add(theme);
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         StaTestThread.Settle(window);
         return window;
     }

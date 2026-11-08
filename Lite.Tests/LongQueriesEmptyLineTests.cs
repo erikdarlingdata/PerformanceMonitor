@@ -59,7 +59,7 @@ public sealed class LongQueriesEmptyLineTests
             var oneLine = new TextBlock { Style = style, Text = "x", Visibility = Visibility.Visible };
             var host = new Grid { Children = { sentence, oneLine } };
             var window = new Window { Content = host, Width = 900, Height = 600, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ClippedTextProbe.Settle(window);
