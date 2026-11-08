@@ -673,15 +673,17 @@
     <!-- ============================================ -->
     <!-- TabControl Style                             -->
     <!-- ============================================ -->
+    <!-- #8169: the tab strip is ONE row that scrolls. The template puts the tabs in a horizontal ScrollViewer beside a "»"
+         button; TabStripOverflow (PerformanceMonitor.Ui) shows the button only while a tab does not fit, lists exactly the
+         tabs that do not fit, selects the one clicked and scrolls it into view. A row that scrolls cannot reorder, so the
+         F18 problem the stock TabPanel had (the row holding the selected tab jumps to the bottom, and the tabs under the
+         cursor change) cannot happen. Same parts as the stock template (the tab strip on top, the selected content below). -->
     <Style TargetType="TabControl">
         <Setter Property="Background" Value="{StaticResource BackgroundBrush}"/>
         <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding" Value="0"/>
-        <!-- F18 (Lite click-through): the stock template lays the tabs out in a TabPanel, which moves the row holding the
-             selected tab to the bottom, so clicking a tab in an upper row swaps the rows and every tab under the cursor changes.
-             A WrapPanel wraps the same way and never reorders its rows. Same parts as the stock template (the tab strip
-             on top, the selected content below). -->
+        <Setter Property="helpers:TabStripOverflow.Enabled" Value="True"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="TabControl">
@@ -690,10 +692,44 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <WrapPanel x:Name="HeaderPanel" Grid.Row="0" IsItemsHost="True" Panel.ZIndex="1"
-                                   KeyboardNavigation.TabIndex="1"
-                                   KeyboardNavigation.TabNavigation="Once"
-                                   KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                        <Grid Grid.Row="0" Panel.ZIndex="1" Margin="{Binding Path=(helpers:TabStripOverflow.HeaderMargin), RelativeSource={RelativeSource TemplatedParent}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <ScrollViewer x:Name="PART_TabStripScroll" Grid.Column="0" Focusable="False"
+                                          HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
+                                <StackPanel x:Name="HeaderPanel" Orientation="Horizontal" IsItemsHost="True"
+                                            KeyboardNavigation.TabIndex="1"
+                                            KeyboardNavigation.TabNavigation="Once"
+                                            KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                            </ScrollViewer>
+                            <Button x:Name="PART_TabOverflowButton" Grid.Column="1" Visibility="Collapsed"
+                                    Content="&#187;" ToolTip="Tabs that do not fit"
+                                    AutomationProperties.Name="More tabs" Focusable="False" Cursor="Hand"
+                                    Foreground="{StaticResource ForegroundBrush}" Padding="10,0">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="overflowBorder" Background="Transparent" CornerRadius="3,3,0,0"
+                                                Padding="{TemplateBinding Padding}">
+                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True">
+                                                <ContentPresenter.Resources>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="FontSize" Value="16"/>
+                                                        <Setter Property="FontWeight" Value="Bold"/>
+                                                    </Style>
+                                                </ContentPresenter.Resources>
+                                            </ContentPresenter>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="overflowBorder" Property="Background" Value="{StaticResource BackgroundLighterBrush}"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
+                        </Grid>
                         <Border x:Name="ContentPanel" Grid.Row="1"
                                 Background="{TemplateBinding Background}"
                                 BorderBrush="{TemplateBinding BorderBrush}"

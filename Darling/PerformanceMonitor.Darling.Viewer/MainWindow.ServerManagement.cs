@@ -1076,11 +1076,39 @@ public partial class MainWindow
 
     // ── Sidebar collapse toggle ─────────────────────────────────────────────────────
 
+    /* #8266: false until the user collapses or opens the sidebar with its button. From then on the window width no longer
+       switches it. */
+    private bool _sidebarChosenByUser;
+
+    /* The content grid's width (the window less its 10 DIP margins) below which the sidebar's 280 leaves too little for the tabs:
+       it shows its rail instead. A 900 wide window is under it; 1280 is not. */
+    private const double SidebarAutoCollapseWidth = 1080;
+
     private void ToggleSidebar_Click(object sender, RoutedEventArgs e)
     {
-        _sidebarCollapsed = !_sidebarCollapsed;
+        _sidebarChosenByUser = true;
+        SetSidebarCollapsed(!_sidebarCollapsed);
+    }
 
-        if (_sidebarCollapsed)
+    private void RootGrid_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (_sidebarChosenByUser || !e.WidthChanged)
+        {
+            return;
+        }
+
+        var narrow = e.NewSize.Width < SidebarAutoCollapseWidth;
+        if (narrow != _sidebarCollapsed)
+        {
+            SetSidebarCollapsed(narrow);
+        }
+    }
+
+    private void SetSidebarCollapsed(bool collapsed)
+    {
+        _sidebarCollapsed = collapsed;
+
+        if (collapsed)
         {
             SidebarColumn.Width = new GridLength(40);
             SidebarHeaderText.Visibility = Visibility.Collapsed;
