@@ -653,8 +653,8 @@ public static class MonitoringGrantScript
 
         var text = $"{count} online user database(s) cannot be entered by this login, so the per-database collectors skip them";
         return awsRds
-            ? text + $": Amazon RDS has no CONNECT ANY DATABASE, so run CREATE USER {Quote(principal)} FOR LOGIN {Quote(principal)} in each of them. The --grant-script --rds command prints it for every current database."
-            : text + $": run CREATE USER {Quote(principal)} FOR LOGIN {Quote(principal)} in each of them, or grant CONNECT ANY DATABASE.";
+            ? text + $": Amazon RDS has no CONNECT ANY DATABASE, so give {Quote(principal)} a user in each of them. The --grant-script --rds command prints the statement for every current database."
+            : text + $": give {Quote(principal)} a user in each of them, or grant CONNECT ANY DATABASE.";
     }
 
     private static string Quote(string name) => "[" + name.Replace("]", "]]", StringComparison.Ordinal) + "]";
