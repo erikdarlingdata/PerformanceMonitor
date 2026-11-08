@@ -217,6 +217,30 @@ public sealed class PlanGuideTests
         }
     }
 
+    /// <summary>
+    /// A module created WITH ENCRYPTION shows its definition to no login, so the batch sees the statement as not in the module. With ALTER held the refusal is still
+    /// statement_not_in_module, but it says the module is encrypted and its text cannot be read, not that the statement should be copied from OBJECT_DEFINITION.
+    /// </summary>
+    [Fact]
+    public void AnObjectGuideOnAnEncryptedModule_IsRefusedForTheStatement_SayingTheModuleIsEncrypted()
+    {
+        var obj = new PlanGuideDefinition("g", "OBJECT", Statement, "[dbo].[p]", null, "OPTION (RECOMPILE)");
+        var encrypted = SqlServerRemediationExecutor.CreatePlanGuideRefusal("create_plan_guide", true, obj, "d", false, true, "P", false, true, true, "stmt", null, moduleEncrypted: true);
+        Assert.Equal(RemediationResult.Reasons.StatementNotInModule, encrypted?.Reason);
+        Assert.Contains("encrypted", encrypted!.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("[dbo].[p]", encrypted.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("OBJECT_DEFINITION", encrypted.Message, StringComparison.Ordinal);
+
+        var plain = SqlServerRemediationExecutor.CreatePlanGuideRefusal("create_plan_guide", true, obj, "d", false, true, "P", false, true, true, "stmt", null, moduleEncrypted: false);
+        Assert.Equal(RemediationResult.Reasons.StatementNotInModule, plain?.Reason);
+        Assert.Contains("OBJECT_DEFINITION", plain!.Message, StringComparison.Ordinal);
+
+        /* An encrypted module the statement was found in (nothing is encrypted and found at once, but the flag alone refuses nothing), and the grant still comes first. */
+        Assert.Null(SqlServerRemediationExecutor.CreatePlanGuideRefusal("create_plan_guide", true, obj, "d", false, true, "P", true, true, true, "stmt", null, moduleEncrypted: true));
+        Assert.Equal(RemediationResult.Reasons.GuidePermissionDenied,
+            SqlServerRemediationExecutor.CreatePlanGuideRefusal("create_plan_guide", true, obj, "d", false, true, "P", false, true, false, "stmt", null, moduleEncrypted: true)?.Reason);
+    }
+
     [Fact]
     public void TheMatchWords_SayWhatAGuideAppliesTo()
     {

@@ -191,7 +191,10 @@ schema rather than against each other. `ViewerDataService.RequiredStoreSchemaVer
 `Migration(version, name, sql)`. On startup the service reads `MAX(version)` from `darling_schema_version`
 and applies every rung above it, each in its own transaction, stamping the table as it goes. V1 is
 generated from the collector definitions (`PgSchemaGenerator.GenerateFullSchema()`); later rungs are
-appended, never edited, because a store that already ran a rung will never read it again. TimescaleDB
+appended, never edited, because a store that already ran a rung will never read it again. The one
+exception is V23, whose `collection_log` compression policy line was removed in #8275, because that policy
+started unscheduled on a new store whose database already had TimescaleDB, and startup adds the scheduled
+one. TimescaleDB
 conversion is deliberately *not* on the ladder — it is runtime setup (`TimescaleSupport`) applied only when
 the extension is present, so the same store works on plain PostgreSQL.
 

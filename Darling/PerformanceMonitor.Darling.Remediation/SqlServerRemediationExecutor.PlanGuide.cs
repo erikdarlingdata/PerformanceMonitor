@@ -124,7 +124,7 @@ public sealed partial class SqlServerRemediationExecutor
     /// OBJECT guide, <c>ALTER</c> on the database for a SQL or TEMPLATE guide; the other is not required. <c>@disable</c> is 1 only for an Undo that re-creates a guide that was disabled: it disables the guide after it validated. The cached-plan count needs <c>VIEW SERVER STATE</c>, so it sits in a TRY block: a login without it gets null, not an error.
     /// </summary>
     internal static readonly string CreatePlanGuideBatchSql = @"
-DECLARE @exists bit = 0, @id integer = NULL, @otype varchar(2) = NULL, @module nvarchar(600) = NULL, @parent nvarchar(600) = NULL, @in_module bit = 0, @target nvarchar(max) = NULL,
+DECLARE @exists bit = 0, @id integer = NULL, @otype varchar(2) = NULL, @module nvarchar(600) = NULL, @parent nvarchar(600) = NULL, @in_module bit = 0, @encrypted bit = 0, @target nvarchar(max) = NULL,
         @can_db bigint = 0, @can_mod bigint = 1, @cached bigint = NULL, @ran bit = 0, @dropped bit = 0, @vmsg nvarchar(2048) = NULL, @gid integer = NULL;
 IF EXISTS (SELECT 1 FROM sys.plan_guides AS pg WHERE pg.name = @name) SET @exists = 1;
 SET @can_db = CONVERT(bigint, ISNULL(HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'ALTER'), 0));
@@ -139,6 +139,7 @@ BEGIN
         FROM sys.objects AS o
         WHERE o.object_id = @id;
         SET @can_mod = CONVERT(bigint, ISNULL(HAS_PERMS_BY_NAME(@module, N'OBJECT', N'ALTER'), 0));
+        SET @encrypted = CONVERT(bit, ISNULL(OBJECTPROPERTY(@id, 'IsEncrypted'), 0));
         IF CHARINDEX(@stmt COLLATE Latin1_General_BIN2, OBJECT_DEFINITION(@id) COLLATE Latin1_General_BIN2) > 0 SET @in_module = 1;
     END;
     SET @target = @module;
@@ -178,7 +179,7 @@ BEGIN
 END;
 SELECT name_taken = CONVERT(bigint, @exists), module_found = CASE WHEN @id IS NULL THEN CONVERT(bigint, 0) ELSE CONVERT(bigint, 1) END, module_type = @otype,
        statement_in_module = CONVERT(bigint, @in_module), can_db = @can_db, can_module = @can_mod, cached_matches = @cached,
-       ran = CONVERT(bigint, @ran), dropped = CONVERT(bigint, @dropped), validation = @vmsg, parent_table = @parent;";
+       ran = CONVERT(bigint, @ran), dropped = CONVERT(bigint, @dropped), validation = @vmsg, parent_table = @parent, module_encrypted = CONVERT(bigint, @encrypted);";
 
     /// <summary>
     /// The one batch of a plan guide drop (#6569), run in the request's database: it reads the guide by name (its scope, its statement and hints), the grants, and, when the
@@ -242,7 +243,7 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
 
         return await RunAsync(name, dryRun, database, async (connection, secret) =>
         {
-            bool taken, found, inModule, ran, dropped;
+            bool taken, found, inModule, encrypted, ran, dropped;
             string? type, validation, parentTable;
             bool grantedDb, grantedModule;
             long? cached;
@@ -271,6 +272,7 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
                 dropped = Flag(reader, 8);
                 validation = reader.IsDBNull(9) ? null : reader.GetString(9);
                 parentTable = reader.IsDBNull(10) ? null : reader.GetString(10);
+                encrypted = Flag(reader, 11);
             }
             catch (Exception ex) when (!dryRun && (ex is OperationCanceledException || IsOutcomeUnknown(ex, connection.State == ConnectionState.Open, ct.IsCancellationRequested)))
             {
@@ -279,7 +281,7 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
                     $"The create of plan guide {guide.Name} in {database} was sent, but its reply was lost ({detail}). The guide may exist: read sys.plan_guides before you try again.");
             }
 
-            if (CreatePlanGuideRefusal(name, dryRun, guide, database, taken, found, type, inModule, grantedDb, grantedModule, statement, parentTable) is { } refusal)
+            if (CreatePlanGuideRefusal(name, dryRun, guide, database, taken, found, type, inModule, grantedDb, grantedModule, statement, parentTable, encrypted) is { } refusal)
                 return refusal;
 
             var matches = guide.Type == "SQL" ? cached : null;
@@ -313,10 +315,11 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
     /// The only refusals of a plan guide create, in the order the batch gathered their facts: the name is taken, an OBJECT guide's module does not resolve, is not a procedure,
     /// function or trigger, the login lacks <c>ALTER</c>, or the statement is not in the module. The grant comes before the statement: <c>OBJECT_DEFINITION</c> is NULL for a
     /// login without <c>VIEW DEFINITION</c>, which <c>ALTER</c> implies, so a login that lacks the grant also fails the statement check, and it is told the grant it is missing
-    /// rather than to copy a definition it cannot read. Null when none applies. Pure, so a test needs no server.
+    /// rather than to copy a definition it cannot read. A module created WITH ENCRYPTION has no readable definition for any login, so with
+    /// <paramref name="moduleEncrypted"/> the statement refusal says the module is encrypted and its text cannot be read. Null when none applies. Pure, so a test needs no server.
     /// </summary>
     internal static RemediationResult? CreatePlanGuideRefusal(string name, bool dryRun, PlanGuideDefinition guide, string database, bool taken, bool moduleFound, string? moduleType,
-        bool statementInModule, bool grantedDb, bool grantedModule, string statement, string? parentTable = null)
+        bool statementInModule, bool grantedDb, bool grantedModule, string statement, string? parentTable = null, bool moduleEncrypted = false)
     {
         if (taken)
             return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.GuideExists,
@@ -339,10 +342,13 @@ SELECT found = CONVERT(bigint, @found), same = CONVERT(bigint, @same), can_db = 
                         : $"The remediation login does not hold ALTER on {guide.ModuleOrBatch}, which sp_create_plan_guide needs for an OBJECT guide."
                     : $"The remediation login does not hold ALTER on the database {database}, which sp_create_plan_guide needs for a {(guide.Type == "TEMPLATE" ? "TEMPLATE" : "SQL")} guide.") + " Nothing was run.") with { Statement = statement };
 
-        /* With ALTER held the login can read the definition, so a statement the batch did not find there is a statement that is not in the module. */
+        /* With ALTER held the login can read the definition, so a statement the batch did not find there is a statement that is not in the module, unless the module
+           is encrypted: then the server shows its definition to nobody, and the statement cannot be checked against it. */
         if (guide.Type == "OBJECT" && !statementInModule)
             return RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.StatementNotInModule,
-                $"The statement does not appear exactly (character for character, case and spacing included) in the definition of {guide.ModuleOrBatch}. Copy it from OBJECT_DEFINITION. Nothing was run.") with { Statement = statement };
+                moduleEncrypted
+                    ? $"{guide.ModuleOrBatch} is encrypted (created WITH ENCRYPTION), so its statement text cannot be read and the statement cannot be matched against it. An OBJECT plan guide needs the statement exactly as the module holds it; without the module's source, use a SQL plan guide on the statement's own batch text, or re-create the module without encryption. Nothing was run."
+                    : $"The statement does not appear exactly (character for character, case and spacing included) in the definition of {guide.ModuleOrBatch}. Copy it from OBJECT_DEFINITION. Nothing was run.") with { Statement = statement };
         return null;
     }
 
