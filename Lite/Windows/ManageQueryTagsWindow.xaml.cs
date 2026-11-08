@@ -285,7 +285,7 @@ public partial class ManageQueryTagsWindow : Window
         var id = _selected.Tag.Id;
         var casualties = await Task.Run(() => _model.CountDeleteCasualtiesAsync(id));
         var children = Flatten(new[] { _selected }).Count() - 1;
-        var childNote = children > 0 ? $" and its {children} child tag(s)" : string.Empty;
+        var childNote = children > 0 ? $" and its {PerformanceMonitor.Common.CountText.Plural(children, "child tag")}" : string.Empty;
         var note = casualties > 0 ? $" This also removes {casualties} hand assignment(s) and rule(s) that use it." : string.Empty;
         var confirm = MessageBox.Show(this, $"Delete ‘{_selected.Tag.Name}’{childNote}?{note} Collected data is not affected.",
             "Delete Query Tag", MessageBoxButton.OKCancel, MessageBoxImage.Warning);

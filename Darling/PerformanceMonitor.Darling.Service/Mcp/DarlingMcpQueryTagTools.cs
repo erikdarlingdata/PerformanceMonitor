@@ -233,6 +233,15 @@ public sealed class DarlingMcpQueryTagTools
         }
     }
 
+    /// <summary>
+    /// The refusal a delete without confirm=true gets while the tag has a subtree: each count reads as a person says it
+    /// ("1 child tag", "3 hand assignments"), the way the apps' count labels do.
+    /// </summary>
+    internal static string TagInUseMessage(int tagId, QueryTagDeleteImpact impact) =>
+        string.Create(
+            CultureInfo.InvariantCulture,
+            $"Tag {tagId} has {CountText.Plural(impact.ChildTags, "child tag")}, {CountText.Plural(impact.Assignments, "hand assignment")} and {CountText.Plural(impact.Rules, "rule")} in its subtree, and deleting it deletes them all. Nothing was deleted. Repeat with confirm=true to proceed.");
+
     /// <summary>delete_query_tag's body over the store.</summary>
     internal static async Task<string> DeleteQueryTagCore(
         QueryTagStore store, int tagId, bool confirm, CancellationToken ct = default)
@@ -248,9 +257,7 @@ public sealed class DarlingMcpQueryTagTools
                 {
                     ["status"] = "confirm_required",
                     ["refusal"] = "tag_in_use",
-                    ["message"] = string.Create(
-                        CultureInfo.InvariantCulture,
-                        $"Tag {tagId} has {needed.Impact.ChildTags} child tag(s), {needed.Impact.Assignments} hand assignment(s) and {needed.Impact.Rules} rule(s) in its subtree, and deleting it deletes them all. Nothing was deleted. Repeat with confirm=true to proceed."),
+                    ["message"] = TagInUseMessage(tagId, needed.Impact),
                     ["tag_id"] = tagId,
                     ["child_tags"] = needed.Impact.ChildTags,
                     ["assignments"] = needed.Impact.Assignments,

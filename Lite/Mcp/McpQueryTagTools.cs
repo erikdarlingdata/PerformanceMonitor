@@ -287,7 +287,7 @@ public sealed class McpQueryTagTools
                     ["refusal"] = "tag_in_use",
                     ["message"] = string.Create(
                         CultureInfo.InvariantCulture,
-                        $"Tag {tagId} has {children} child tag(s), {assignments} hand assignment(s) and {rules} rule(s) in its subtree, and deleting it deletes them all. Nothing was deleted. Repeat with confirm=true to proceed."),
+                        $"Tag {tagId} has {CountText.Plural(children, "child tag")}, {CountText.Plural(assignments, "hand assignment")} and {CountText.Plural(rules, "rule")} in its subtree, and deleting it deletes them all. Nothing was deleted. Repeat with confirm=true to proceed."),
                     ["tag_id"] = tagId,
                     ["child_tags"] = children,
                     ["assignments"] = assignments,
