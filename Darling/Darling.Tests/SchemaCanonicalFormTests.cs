@@ -50,6 +50,19 @@ public class SchemaCanonicalFormTests
         Assert.Equal(SchemaCanonicalForm.Hash(a), SchemaCanonicalForm.Hash(b));
     }
 
+    /// <summary>
+    /// A BULK INSERT or bcp run without CHECK_CONSTRAINTS flips a constraint to not trusted with no DDL. Were the flag in the hash, the next
+    /// unrelated full read would write a false altered version, credited to whoever caused that read.
+    /// </summary>
+    [Fact]
+    public void Hash_IgnoresWhetherAConstraintIsTrusted()
+    {
+        var a = SchemaTestDefinitions.Orders();
+        var b = a with { Constraints = a.Constraints.Select(k => k with { IsNotTrusted = !k.IsNotTrusted }).ToList() };
+
+        Assert.Equal(SchemaCanonicalForm.Hash(a), SchemaCanonicalForm.Hash(b));
+    }
+
     private static SchemaColumn Change(string field, SchemaColumn c) => field switch
     {
         "TypeName" => c with { TypeName = "bigint" },

@@ -20,7 +20,9 @@ namespace PerformanceMonitor.Collectors;
 /// definition always gives the same bytes whatever order the catalog returned its rows in: columns by ordinal, indexes by name,
 /// constraints by kind then name, triggers by name; key columns stay in key order, included columns are sorted. Names of columns,
 /// indexes, constraints and triggers are part of it. The object's own schema and name, its object_id and its modify_date are not,
-/// and neither is an index's index_id or a trigger's enabled state.
+/// and neither is an index's index_id or a trigger's enabled state. Nor is a constraint's is_not_trusted: a BULK INSERT or bcp run without
+/// CHECK_CONSTRAINTS flips it with no DDL, and in the hash the next unrelated full read would write a false altered version. It is still
+/// stored and shown with each version.
 /// </summary>
 public static class SchemaCanonicalForm
 {
@@ -56,7 +58,7 @@ public static class SchemaCanonicalForm
         foreach (var k in d.Constraints.OrderBy(k => k.Kind).ThenBy(k => k.Name, StringComparer.Ordinal))
         {
             Line(sb, "constraint", k.Kind.ToString(), k.Name, k.Definition, List(k.FkColumns), k.ReferencedSchema, k.ReferencedTable,
-                List(k.ReferencedColumns), k.DeleteAction, k.UpdateAction, Flag(k.IsDisabled), Flag(k.IsNotTrusted), Flag(k.IsSystemNamed));
+                List(k.ReferencedColumns), k.DeleteAction, k.UpdateAction, Flag(k.IsDisabled), Flag(k.IsSystemNamed));
         }
 
         foreach (var g in d.Triggers.OrderBy(g => g.Name, StringComparer.Ordinal))
