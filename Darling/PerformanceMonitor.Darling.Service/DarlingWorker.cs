@@ -1153,6 +1153,12 @@ public sealed partial class DarlingWorker : BackgroundService
     /* #4970: the in-flight hourly store-maintenance tick. Only the launch loop writes it. */
     private Task? _storeMaintenanceTick;
 
+    /// <summary>#8244: the fleet self-alert step in flight (<see cref="TryStartFleetSelfAlertStep"/>), null before the first;
+    /// when it started, and whether its overrun has been warned about once.</summary>
+    private Task? _fleetSelfAlertStep;
+    private DateTime _fleetSelfAlertStepStartedUtc;
+    private bool _fleetSelfAlertStepOverranWarned;
+
     /* #4970: the in-flight hourly store self-metrics tick. Only the launch loop writes it. */
     private Task? _storeMetricsTick;
 
