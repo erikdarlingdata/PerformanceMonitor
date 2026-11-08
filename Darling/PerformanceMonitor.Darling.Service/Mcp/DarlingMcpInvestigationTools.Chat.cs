@@ -45,8 +45,10 @@ public sealed partial class DarlingMcpInvestigationTools
         DarlingMcpServedPolicy? served = null,
         DarlingAgentActionSeat? seat = null,
         CancellationToken cancellationToken = default) =>
-        /* The owner-only agent_message row is written as the store owner, through the seat the Level 2 action tools use for their own owner writes. */
-        PostMessageAsync(Store(seat?.Owner?.Read() ?? postgres), request_id, claim_id, text, cancellationToken, served?.Policy.AgentTokenName, served?.NamedAgentNames);
+        /* The store is built as every action tool builds its own: the mcp login for the reads, the owner's source for the owner-only agent_message
+           row. With no owner's source the row runs on the mcp login and the journal's trigger refuses it: the post fails closed. */
+        PostMessageAsync(new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: seat?.Owner?.Read()),
+            request_id, claim_id, text, cancellationToken, served?.Policy.AgentTokenName, served?.NamedAgentNames);
 
     /// <summary>The message over a given store (#7659): the claim must be live and the caller's, the text non-blank; the row is bounded and journaled
     /// as the agent's, and the thread pass posts it.</summary>

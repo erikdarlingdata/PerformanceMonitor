@@ -637,7 +637,9 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     private readonly Func<DateTime> _utcNow;
 
     /// <summary>The data source <see cref="RunAgentActionAsync"/> runs on: the store owner's, when the caller gave one. The journal rows an agent
-    /// action writes (<see cref="AgentActionEvents"/>) are the owner's alone, so the whole change, its checks and its rows, runs on that login.</summary>
+    /// action writes (<see cref="AgentActionEvents"/>) are the owner's alone, so the whole change, its checks and its rows, runs on that login. The
+    /// gate's asker kind read (<see cref="AskersHoldKindSql"/>) and the agent's message (<see cref="PostAgentMessageAsync"/>) run on it too: the asker
+    /// table and the <see cref="AgentMessage"/> row are the owner's, which the mcp login neither reads nor writes.</summary>
     private NpgsqlDataSource AgentActionSource => _agentActionSource ?? _dataSource;
 
     /// <summary>

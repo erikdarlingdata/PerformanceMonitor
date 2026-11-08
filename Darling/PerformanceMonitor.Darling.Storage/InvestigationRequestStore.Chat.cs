@@ -826,13 +826,15 @@ FOR UPDATE";
     /// An agent's message to the thread (<c>post_investigation_message</c>): while <paramref name="claimId"/> is the live claim of
     /// <paramref name="requestId"/> (the row held <c>FOR UPDATE</c>), journals <see cref="AgentMessage"/> as <c>agent:&lt;agentId&gt;</c> with the
     /// text bounded to <see cref="SlackChatRules.TextLimit"/>, under the request's agent journal cap (<see cref="InvestigationRules.MaxAgentJournalRows"/>).
+    /// The row is the owner's alone (the journal's trigger refuses it from any other login), so the whole post runs on <see cref="AgentActionSource"/>,
+    /// as the agent action rows do: the tool's own data source is the mcp login.
     /// </summary>
     public async Task<AgentMessageResult> PostAgentMessageAsync(Guid requestId, Guid claimId, string agentId, string text, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(agentId);
         var now = Now();
         var actor = "agent:" + agentId;
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await AgentActionSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         string? state = null;
         Guid? currentClaim = null;
