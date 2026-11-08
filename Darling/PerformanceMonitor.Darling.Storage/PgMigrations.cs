@@ -3393,7 +3393,9 @@ $rung$;";
        SHA-256 of its canonical definition, and the properties of a table or a view. History is keyed by a server, or by an availability group
        for a database that belongs to one (exactly one of the two, a CHECK). The four child tables hold the columns, indexes, constraints and
        triggers of a version, and go with it (ON DELETE CASCADE). collect.schema_capture_state is the per-server and per-database cursor of
-       the capture: the event session position, the recovery fork, the baseline and the last complete read. collect.schema_capture_passes is the
+       the capture: the event session position (and session_ensured_at, the mark a pass leaves as soon as it finds the session running), the
+       recovery fork, the baseline and the last complete read. idx_schema_objects_key_valid_from serves get_schema_changes' window (a history
+       key and a valid_from range), which no other index leads with. collect.schema_capture_passes is the
        pass log, a collector table whose columns and index are exactly PgSchemaGenerator's output. Owner-written and read through the collect
        schema's blanket SELECT, so no grant. New tables, no data moves. Every statement is idempotent. */
     private const string V256Sql = @"
@@ -3454,6 +3456,9 @@ CREATE INDEX IF NOT EXISTS idx_schema_objects_current_name
 
 CREATE INDEX IF NOT EXISTS idx_schema_objects_object_history
     ON collect.schema_objects (server_id, ag_group_id, database_name, object_id, valid_from);
+
+CREATE INDEX IF NOT EXISTS idx_schema_objects_key_valid_from
+    ON collect.schema_objects (server_id, ag_group_id, valid_from);
 
 CREATE INDEX IF NOT EXISTS idx_schema_objects_closed
     ON collect.schema_objects (valid_to) WHERE valid_to IS NOT NULL;
