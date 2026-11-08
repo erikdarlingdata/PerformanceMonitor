@@ -72,7 +72,10 @@ public sealed class MuteThisAlertScopeTests
             }
         }));
 
-        var missing = AlertFamily.MetricFamilies.Keys
+        /* Lite raises the performance and agent-job alerts (the connection and AG names among them) and no PostgreSQL alert. */
+        var missing = AlertFamily.MetricFamilies
+            .Where(pair => pair.Value is AlertFamily.Performance or AlertFamily.AgentJobs && !pair.Key.StartsWith("PostgreSQL ", StringComparison.Ordinal))
+            .Select(pair => pair.Key)
             .Where(metric => !listed.Contains(metric, StringComparer.OrdinalIgnoreCase)).ToArray();
         Assert.True(missing.Length == 0, "the Metric list lacks: " + string.Join(", ", missing));
         Assert.Equal("(any)", listed[0]);
