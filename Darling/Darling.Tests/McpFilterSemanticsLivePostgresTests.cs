@@ -459,7 +459,11 @@ public sealed class McpFilterSemanticsLivePostgresTests
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
-            var now = DateTime.UtcNow;
+            /* One reading of the clock (#5496), through LiveClock so a run can be placed at a day's last second: every
+               seed, the expected horizon and today's row come from this instant. The reader's own horizon and default-date
+               clock is pinned to the same instant, since a midnight between the two readings moves both by a day. */
+            var now = LiveClock.Now();
+            DarlingHealthReader.ClockForTests = () => now;
             var today = now.Date;
             /* Inside the collection log's 60-day horizon, outside the signals' 30 — the ghost stretch. */
             var ghostDay = today.AddDays(-45);
@@ -547,7 +551,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
                `survived` warmed. */
             DarlingHealthReader.ResetRangeCacheForTests();
             var shortened = JsonDocument.Parse(await DarlingMcpHealthTools.GetDailySummaryRange(postgres, ServerName, 60)).RootElement;
-            Assert.Equal(DailySummaryRetention.HorizonFor(DateTime.UtcNow, 10).ToString("yyyy-MM-dd"), shortened.GetProperty("retention_horizon").GetString());
+            Assert.Equal(DailySummaryRetention.HorizonFor(now, 10).ToString("yyyy-MM-dd"), shortened.GetProperty("retention_horizon").GetString());
             Assert.Equal(2, shortened.GetProperty("days_before_horizon").GetInt32());
             var near = Assert.Single(shortened.GetProperty("days").EnumerateArray(), d => d.GetProperty("summary_date").GetString() == nearDay.ToString("yyyy-MM-dd"));
             Assert.Equal("purged", near.GetProperty("data_state").GetString());
@@ -556,6 +560,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         }
         finally
         {
+            DarlingHealthReader.ClockForTests = null;
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
