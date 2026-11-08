@@ -390,7 +390,7 @@ public sealed class DarlingAnomalyBaselineTests
         Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!, StringComparison.Ordinal);
         Assert.Equal(
-            PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!.Replace("FROM wait_stats_interval_baseline", "FROM wait_stats_cadence_baseline", StringComparison.Ordinal),
+            PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.WaitMsPerSec)!.Replace(TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.WaitStatsCadenceBaselineView, StringComparison.Ordinal),
             PgBaselineProvider.GetBaselineQuery(MetricNames.WaitMsPerSec)!);
         Assert.DoesNotContain("sample_interval_seconds", PgBaselineProvider.GetLegacyBaselineQuery(MetricNames.BatchRequests)!, StringComparison.Ordinal);
     }
@@ -584,7 +584,7 @@ public sealed class DarlingAnomalyBaselineTests
         var sql = PgAnomalyDetector.WaitRateTileWindowSql;
         var expectedColumns = new[]
         {
-            /* #8106: the per-collection rate is computed in the CTE (each row over its own interval, summed), so the
+            /* #8106: the per-collection rate is computed in the CTE (the collection's positive-interval deltas over its cadence), so the
                outer aggregates read ms_per_sec; a collection with no rate is NULL to all three and is not a sample. */
             "MAX(ms_per_sec) AS peak_ms_per_sec",
             "AVG(ms_per_sec) AS avg_ms_per_sec",

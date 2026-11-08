@@ -47,7 +47,7 @@ public sealed class WaitRateRowIntervalLiveTests
     private static DateTime SeededHour => DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2).Date.AddHours(9), DateTimeKind.Unspecified);
 
     [Fact]
-    public async Task TheAnomalyWindowAndTheYoungBaselineBar_RateEachRowOverItsOwnInterval()
+    public async Task TheAnomalyWindowAndTheYoungBaselineBar_CreditTheCollectionsRowsWholeOverItsCadence()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -110,7 +110,7 @@ public sealed class WaitRateRowIntervalLiveTests
     /// seeded hour; the provider's supply choice takes the successor, which reads the corrected baseline; and the interval supply
     /// stays until the successor covers the 35-day tier.</summary>
     [Fact]
-    public async Task AStoreWithTheIntervalSupply_UpgradesToTheRateSupply_AndReadsTheCorrectedBaseline()
+    public async Task AStoreWithTheIntervalSupply_UpgradesToTheCadenceSupply_AndReadsTheCorrectedBaseline()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),

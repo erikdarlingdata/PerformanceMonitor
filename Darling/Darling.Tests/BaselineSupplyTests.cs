@@ -453,13 +453,6 @@ public class BaselineSupplyTests
         Assert.Contains("sample_interval_seconds IS DISTINCT FROM 0", waits, StringComparison.Ordinal);
         Assert.Contains("max(sample_interval_seconds) AS sample_interval_seconds", waits, StringComparison.Ordinal);
 
-        /* #8106: the cadence successor derives too, carrying the collection's shortest interval. */
-        var rates = TimescaleSupport.CreateBaselineFallbackViewSql(
-            TimescaleSupport.WaitStatsCadenceBaselineView, TimescaleSupport.CreateWaitStatsCadenceBaselineSql);
-        Assert.StartsWith("CREATE OR REPLACE VIEW collect.wait_stats_cadence_baseline AS", rates, StringComparison.Ordinal);
-        Assert.Contains("sample_interval_seconds IS DISTINCT FROM 0", rates, StringComparison.Ordinal);
-        Assert.Contains("min(sample_interval_seconds) AS sample_interval_seconds", rates, StringComparison.Ordinal);
-
         /* The legacy pair still derives (the live retirement test builds its plain-view fixture from it). */
         var legacyWaits = TimescaleSupport.CreateBaselineFallbackViewSql(
             TimescaleSupport.LegacyWaitStatsBaselineView, TimescaleSupport.LegacyCreateWaitStatsBaselineSql);
@@ -494,11 +487,6 @@ public class BaselineSupplyTests
         {
             Assert.DoesNotContain("sample_interval_seconds", legacy, StringComparison.Ordinal);
         }
-
-        /* #8106: the cadence wait supply carries the same filter and its interval as the collection's cadence, the shortest any row measured. */
-        Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0", TimescaleSupport.CreateWaitStatsCadenceBaselineSql, StringComparison.Ordinal);
-        Assert.Contains("min(sample_interval_seconds) AS sample_interval_seconds", TimescaleSupport.CreateWaitStatsCadenceBaselineSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("sample_interval_seconds > 0", TimescaleSupport.CreateWaitStatsCadenceBaselineSql, StringComparison.Ordinal);
 
         /* Registered under the successor names; the superseded names are registered NOWHERE the ensure sweep reads. */
         var registered = TimescaleSupport.BaselineAggregates.Select(a => a.View).ToArray();

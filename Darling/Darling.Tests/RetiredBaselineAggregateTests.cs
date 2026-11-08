@@ -427,6 +427,89 @@ WITH NO DATA", ct);
         }
     }
 
+    /// <summary>
+    /// #8106: a store whose last build predates the interval supply carries <c>wait_stats_baseline</c> and no interval relation, and
+    /// this build's ensure sweep creates only the cadence supply. The retirement sweep judges that legacy against the cadence
+    /// successor, the newest registered one, because its named successor is absent and no longer created: it holds on day one while
+    /// the successor is short of the tier and drops, policy and all, once the clock says the successor covers it.
+    /// </summary>
+    [Fact]
+    public async Task Supersession_ALegacyWhoseNamedSuccessorIsGone_IsJudgedAgainstTheCadenceSupply_AndRetiresOnCoverage_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live supersession test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = 9108; // own id — this test cleans its own rows
+        const string serverName = "supersession-chain";
+        const string waitType = "SUPERSESSION_CHAIN_WAIT";
+        var legacy = TimescaleSupport.LegacyWaitStatsBaselineView;
+        var skipped = TimescaleSupport.WaitStatsIntervalBaselineView;
+        var successor = TimescaleSupport.WaitStatsCadenceBaselineView;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.SkipWhen(!await TimescaleSupport.DetectAsync(connection, ct),
+            "The live supersession test needs TimescaleDB: the coverage it judges exists only between materializations.");
+
+        await ExecuteAsync(connection,
+            "SELECT create_hypertable('collect.wait_stats', by_range('collection_time', INTERVAL '1 day'), if_not_exists => true, migrate_data => true)", ct);
+        await ExecuteAsync(connection, TimescaleSupport.DropRetiredBaselineRelationSql(legacy), ct);
+        await ExecuteAsync(connection, TimescaleSupport.DropRetiredBaselineRelationSql(skipped), ct);
+        await ExecuteAsync(connection, TimescaleSupport.DropRetiredBaselineRelationSql(successor), ct);
+        await ExecuteAsync(connection, $"DELETE FROM collect.wait_stats WHERE server_id = {serverId}", ct);
+
+        try
+        {
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var hour = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+            var collectionId = 910001L;
+            for (var i = 0; i < 12; i++)
+            {
+                await InsertWaitAsync(connection, collectionId++, hour.AddMinutes(5 * i), serverId, serverName, waitType, 60000, 300, ct);
+            }
+
+            /* The pre-interval legacy with the refresh policy its build gave it, refreshed over the hour; the cadence successor as the
+               ensure sweep makes it, refreshed over the same hour; no interval relation anywhere. */
+            await ExecuteAsync(connection, TimescaleSupport.LegacyCreateWaitStatsBaselineSql, ct);
+            await ExecuteAsync(connection,
+                $"SELECT add_continuous_aggregate_policy('collect.{legacy}', start_offset => INTERVAL '1 day', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', initial_start => now() + INTERVAL '1 day')", ct);
+            await RefreshFromAsync(connection, legacy, hour, ct);
+            await ExecuteAsync(connection, TimescaleSupport.CreateWaitStatsCadenceBaselineSql, ct);
+            await RefreshFromAsync(connection, successor, hour, ct);
+            Assert.False(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(skipped), null, ct));
+            Assert.Equal(12L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{legacy} WHERE server_id = {serverId}", null, ct));
+            Assert.Equal(hour, await ScalarAsync<DateTime>(connection, $"SELECT min(bucket) FROM collect.{successor} WHERE server_id = {serverId}", null, ct));
+
+            /* Day one: the successor reaches the hour, eight days back, short of the tier; the legacy holds. */
+            await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, DateTime.UtcNow, ct);
+            Assert.True(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(legacy), null, ct), "the legacy holds on day one");
+
+            /* Day forty: the successor covers the tier; the legacy drops with its policy. A concurrent refresh can make one DROP
+               fail and the sweep retries on its next pass, so the outcome is asserted, not the first call. */
+            var dayForty = DateTime.UtcNow.AddDays(40);
+            for (var attempt = 0; attempt < 3 && await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(legacy), null, ct); attempt++)
+            {
+                await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, dayForty, ct);
+            }
+
+            Assert.False(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(legacy), null, ct), "the legacy drops once the cadence supply covers the tier");
+            Assert.Equal(0L, await ScalarAsync<long>(connection,
+                $"SELECT count(*) FROM timescaledb_information.jobs WHERE hypertable_schema = 'collect' AND hypertable_name = '{legacy}' AND proc_name = 'policy_refresh_continuous_aggregate'", null, ct));
+            Assert.True(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(successor), null, ct), "the cadence supply stays");
+        }
+        finally
+        {
+            await ExecuteAsync(connection, TimescaleSupport.DropRetiredBaselineRelationSql(legacy), ct);
+            await ExecuteAsync(connection, TimescaleSupport.DropRetiredBaselineRelationSql(successor), ct);
+            await ExecuteAsync(connection, $"DELETE FROM collect.wait_stats WHERE server_id = {serverId}", ct);
+        }
+    }
+
     private static async Task InsertWaitAsync(
         NpgsqlConnection connection, long collectionId, DateTime at, int serverId, string serverName, string waitType, long deltaWaitMs, int? intervalSeconds, System.Threading.CancellationToken ct)
     {

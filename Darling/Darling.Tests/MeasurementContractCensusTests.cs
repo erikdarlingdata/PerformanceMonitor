@@ -976,7 +976,7 @@ public sealed class MeasurementContractCensusTests
             }.OrderBy(v => v, StringComparer.Ordinal),
             carrying);
         /* #8106: a carrying aggregate is registered, or is a superseded legacy (wait_stats_interval_baseline carries the predicate and
-           retires through SupersededBaselineRelations once its per-row rate successor covers the tier). */
+           retires through SupersededBaselineRelations once its cadence successor covers the tier). */
         var registeredHourlyOrBaseline = TimescaleSupport.HourlyAggregates.Concat(TimescaleSupport.BaselineAggregates).Select(a => a.View).ToHashSet(StringComparer.Ordinal);
         var supersededLegacies = TimescaleSupport.SupersededBaselineRelations.Select(s => s.Legacy).ToHashSet(StringComparer.Ordinal);
         Assert.All(carrying, view => Assert.True(registeredHourlyOrBaseline.Contains(view) || supersededLegacies.Contains(view), $"{view} carries the predicate but is neither registered nor superseded"));

@@ -1140,7 +1140,7 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
     /// collections and 610 on 12, so the hour's mean is 602, the sum of the per-type rates, rather than the 504.4 of twelve
     /// collections read at 122.</summary>
     [Fact]
-    public async Task WaitMsPerSecBaseline_RatesEachRowOverItsOwnInterval_SoAReturningWaitTypeDoesNotDeflateTheCollection()
+    public async Task WaitMsPerSecBaseline_CreditsAReturningWaitTypesDeltaWhole_OverTheCollectionsCadence()
     {
         /* The hour is seeded on the hour: the baseline's bucket is the analysis hour's hour of day, truncated, so a start part way
            through the hour would leave the collections before it outside the bucket. */
@@ -1161,6 +1161,32 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
 
         Assert.Equal(60, baseline.SampleCount);
         Assert.Equal(602.0, baseline.Mean, precision: 2);
+    }
+
+    /// <summary>#8106: the detector's window read over the issue's rows, ten times over so the profile clears the seeded baseline's bar:
+    /// two steady types at 5,000 and 1,000 ms/s every minute, and CXCONSUMER every fifth minute with 6,000 ms over its own 300 s. The
+    /// collection credits the returning row whole and rates the sum over its cadence (60 s), so every fifth collection reads 6,100 and the
+    /// hour's mean is 6,020: the sum of the per-type rates. Dividing by the longest row interval read those collections at 1,220.</summary>
+    [Fact]
+    public async Task DetectWaitAnomalies_CreditsAReturningWaitTypesDeltaWhole_SoTheWindowPeakAndMeanAreTheSumOfTheParts()
+    {
+        await SeedBaselineWaitRates();
+        await SeedBaselineCpu(10, variance: 2);
+        for (var m = 0; m < 60; m++)
+        {
+            var at = _analysisStart.AddMinutes(m);
+            await SeedWaitStatAsync(at, "SOS_SCHEDULER_YIELD", 300_000, sampleIntervalSeconds: 60);
+            await SeedWaitStatAsync(at, "PAGEIOLATCH_SH", 60_000, sampleIntervalSeconds: 60);
+            if (m % 5 == 0)
+            {
+                await SeedWaitStatAsync(at, "CXCONSUMER", 6_000, sampleIntervalSeconds: 300);
+            }
+        }
+
+        var anomalies = await _detector.DetectAnomaliesAsync(CreateContext());
+        var profile = Assert.Single(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
+        Assert.Equal(6100.0, profile.Metadata["current_ms_per_sec"], precision: 2);
+        Assert.Equal(6020.0, profile.Metadata["avg_ms_per_sec"], precision: 2);
     }
 
     private async Task SeedWaitStatAsync(DateTime time, string waitType, long deltaWaitMs, int? sampleIntervalSeconds = null)
