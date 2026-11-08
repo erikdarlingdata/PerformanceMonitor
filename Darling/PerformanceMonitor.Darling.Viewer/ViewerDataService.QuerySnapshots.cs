@@ -186,6 +186,8 @@ public sealed partial class ViewerDataService
     /// the closest stored analogue of Lite's point-in-time "currently running" view. $1 server_id, $2 database filter, $3 include the monitor's statements.
     /// The anchor applies the $3 predicate too (#7573): "latest" is the newest capture that has rows the grid shows, so a capture holding only the monitor's
     /// statements does not empty the read and read as "No snapshots stored" while older captures hold application rows.
+    /// A <c>WAITFOR</c> row of the capture stays when another row of it names it as its blocker, as <see cref="LatestQuerySnapshotsSql"/> keeps it,
+    /// so the grid this read feeds shows the head blocker too.
     /// </summary>
     public static readonly string LatestQuerySnapshotBatchSql = $"""
         SELECT
@@ -196,7 +198,13 @@ public sealed partial class ViewerDataService
                                  AND ($3::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}))
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
         AND   ($3::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate})
-        AND   query_text NOT LIKE 'WAITFOR%'
+        AND   (query_text NOT LIKE 'WAITFOR%' OR EXISTS (
+                  SELECT 1
+                  FROM query_snapshots AS b
+                  WHERE b.server_id = query_snapshots.server_id
+                  AND   b.collection_time = query_snapshots.collection_time
+                  AND   b.blocking_session_id = query_snapshots.session_id
+                  AND   b.session_id <> b.blocking_session_id))
         ORDER BY cpu_time_ms DESC
         """;
 
