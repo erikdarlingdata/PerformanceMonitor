@@ -12,6 +12,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -19,6 +20,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -232,6 +234,76 @@ public sealed class McpSweepReportsWorklistBudgetLiveTests
         Assert.Equal(2, root.GetProperty("watch_items_returned").GetInt32());
     }
 
+    /// <summary>A past <c>as_of</c>: two sweeps two hours apart, both with 150-server documents, and a window that holds only the
+    /// older one. <c>latest</c> (the newer sweep) lies outside the window, so the window's newest entry keeps its full document
+    /// and is never cut. The reply is over the budget at its floor, and the OVER BUDGET note names that entry with its size and
+    /// says why it is whole, beside latest.</summary>
+    [Fact]
+    public async Task GetSweepReports_APastAsOf_NamesTheWindowsNewestEntry_WithItsFullDocument_InTheOverBudgetNote()
+    {
+        var cs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live sweep-report past-window test.");
+        var ct = Ct;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        await using var postgres = NpgsqlDataSource.Create(WithSearchPath(scratch));
+
+        var ids = await SeedSweepsAsync(postgres, sweepCount: 2, serversPerReport: 150, openItems: 0, carriedItems: 0, ct, cadence: TimeSpan.FromHours(2));
+        var asOf = DateTime.UtcNow.AddMinutes(-91).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
+
+        var json = await DarlingMcpFleetSweepTools.GetSweepReports(postgres, NullLogger.Instance, hours_back: 1, as_of: asOf, cancellationToken: ct);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.Equal(1, root.GetProperty("count").GetInt32());
+        var entry = Assert.Single(root.GetProperty("sweeps").EnumerateArray());
+        Assert.Equal(ids[1].ToString(CultureInfo.InvariantCulture), entry.GetProperty("sweep_id").GetString());
+        Assert.Equal(ids[0].ToString(CultureInfo.InvariantCulture), root.GetProperty("latest").GetProperty("sweep_id").GetString());
+        Assert.False(entry.TryGetProperty("report_under", out _), "the window's newest entry is not the newest sweep, so it carries its own document");
+        Assert.Equal(150, entry.GetProperty("report").GetProperty("servers").GetArrayLength());
+
+        Assert.True(root.GetProperty("over_budget").GetBoolean());
+        var note = root.GetProperty("budget_note").GetString();
+        Assert.NotNull(note);
+        Assert.StartsWith("OVER BUDGET", note, StringComparison.Ordinal);
+        var entryBytes = Encoding.UTF8.GetByteCount(entry.GetRawText());
+        Assert.Contains(string.Create(CultureInfo.InvariantCulture, $"{entryBytes:#,0} bytes, its full document"), note, StringComparison.Ordinal);
+        Assert.Contains("lies outside the window", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("fit", note, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>A muted newest sweep whose document carries a would_have_paged array: the slim entry keeps it, equal to latest's,
+    /// and the Viewer's row builder over the reply reads the newest row's would-have-paged count from it.</summary>
+    [Fact]
+    public async Task GetSweepReports_AMutedNewestSweep_KeepsWouldHavePagedOnTheSlimEntry_AndTheRowCountsIt()
+    {
+        var cs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live sweep-report muted-row test.");
+        var ct = Ct;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        await using var postgres = NpgsqlDataSource.Create(WithSearchPath(scratch));
+
+        await SeedSweepsAsync(postgres, sweepCount: 2, serversPerReport: 6, openItems: 0, carriedItems: 0, ct, newestMuted: true);
+
+        var json = await DarlingMcpFleetSweepTools.GetSweepReports(postgres, NullLogger.Instance, cancellationToken: ct);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        var latest = root.GetProperty("latest");
+        Assert.False(latest.GetProperty("alerts_enabled").GetBoolean());
+        var newest = Assert.Single(root.GetProperty("sweeps").EnumerateArray(), e => e.GetProperty("sweep_id").GetString() == latest.GetProperty("sweep_id").GetString());
+        Assert.Equal("latest", newest.GetProperty("report_under").GetString());
+        var slim = newest.GetProperty("report");
+        Assert.Equal(new[] { "fleet", "watch", "would_have_paged" }, slim.EnumerateObject().Select(p => p.Name).OrderBy(k => k, StringComparer.Ordinal));
+        Assert.Equal(latest.GetProperty("report").GetProperty("would_have_paged").GetRawText(), slim.GetProperty("would_have_paged").GetRawText());
+        Assert.Equal(1, slim.GetProperty("would_have_paged").GetArrayLength());
+
+        var rows = FleetSweepsRows.Runs(JsonNode.Parse(json)!.AsObject());
+        Assert.Equal(latest.GetProperty("sweep_id").GetString(), rows[0].SweepId);
+        Assert.Equal("1 would have paged", rows[0].WouldHavePagedText);
+    }
+
     /* ---------------- seeding ---------------- */
 
     /// <summary>Sweeps at a 15-minute cadence ending a minute ago, newest id highest, each with a <paramref name="serversPerReport"/>-card
@@ -239,15 +311,16 @@ public sealed class McpSweepReportsWorklistBudgetLiveTests
     /// (servers 1.., last seen 1.. seconds BEFORE the sweep, so server 1 is the newest open item) then <paramref name="carriedItems"/>
     /// carried ones (last seen seconds AFTER the sweep, newer than every open item), each about 900 bytes on the wire.</summary>
     private static async Task<List<long>> SeedSweepsAsync(
-        NpgsqlDataSource postgres, int sweepCount, int serversPerReport, int openItems, int carriedItems, CancellationToken ct)
+        NpgsqlDataSource postgres, int sweepCount, int serversPerReport, int openItems, int carriedItems, CancellationToken ct,
+        TimeSpan? cadence = null, bool newestMuted = false)
     {
         var newest = DateTime.UtcNow.AddMinutes(-1);
-        var cadence = TimeSpan.FromMinutes(15);
+        var step = cadence ?? TimeSpan.FromMinutes(15);
         var ids = new List<long>(sweepCount);
         const long idBase = 8_318_000_000_000_000_000L;
         for (var i = 0; i < sweepCount; i++)
         {
-            var sweptAt = newest - (cadence * i);
+            var sweptAt = newest - (step * i);
             var id = idBase + (sweepCount - i);
             ids.Add(id);
             var cards = string.Join(",", Enumerable.Range(1, serversPerReport).Select(n =>
@@ -255,16 +328,16 @@ public sealed class McpSweepReportsWorklistBudgetLiveTests
             var run = new FleetSweepRun(
                 SweepId: id,
                 SweptAtUtc: sweptAt,
-                SpanStartUtc: sweptAt - cadence,
+                SpanStartUtc: sweptAt - step,
                 SpanEndUtc: sweptAt,
                 PreviousSweepId: i + 1 < sweepCount ? idBase + (sweepCount - i - 1) : null,
-                AlertsEnabled: true,
+                AlertsEnabled: !(i == 0 && newestMuted),
                 ServersExpected: serversPerReport,
                 ServersReported: serversPerReport,
                 InstrumentsAlive: true,
                 InstrumentLivenessJson: """{"alert_pass_counter":{"read":true,"advancing":true}}""",
                 ReportJson: string.Create(CultureInfo.InvariantCulture,
-                    $"{{\"sweep_id\":{id},\"fleet\":{{\"bands\":{{\"Healthy\":{serversPerReport - 1},\"Warning\":1}}}},\"watch\":{{\"opened\":{(i == 0 ? openItems : 0)},\"carried\":{(i == 0 ? carriedItems : 0)},\"closed\":0}},\"servers\":[{cards}]}}"));
+                    $"{{\"sweep_id\":{id},\"fleet\":{{\"bands\":{{\"Healthy\":{serversPerReport - 1},\"Warning\":1}}}},\"watch\":{{\"opened\":{(i == 0 ? openItems : 0)},\"carried\":{(i == 0 ? carriedItems : 0)},\"closed\":0}},{(i == 0 && newestMuted ? "\"would_have_paged\":[{\"server_id\":2,\"family\":\"cpu\"}]," : string.Empty)}\"servers\":[{cards}]}}"));
 
             var items = i == 0
                 ? Enumerable.Range(1, openItems)
