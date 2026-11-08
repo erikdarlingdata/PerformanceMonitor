@@ -285,7 +285,7 @@ public sealed class PgTargetIoTests
         Assert.Contains("FROM pg_io_stats", sql, StringComparison.Ordinal);
         Assert.Contains("date_bin('15 minutes', collection_time, TIMESTAMP '2000-01-01') AS sample_start", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(ms_per_read) AS peak_ms_per_read", sql, StringComparison.Ordinal);
-        Assert.Contains("COUNT(*)         AS rated_samples", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(ms_per_read)         AS rated_samples", sql, StringComparison.Ordinal);
         Assert.Contains("server_id = $1 AND collection_time >= $2 AND collection_time <= $3", sql, StringComparison.Ordinal);
         /* The baseline and the window differ only in the closed upper bound — same CTEs, same grain, same floor. */
         var baseline = PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgIoReadLatency)!;

@@ -115,14 +115,23 @@ rated AS (
     FROM per_collection
     WHERE interval_sec > 0
     AND   coalesce(sampled_ms / 1000.0, interval_sec) > 0
+),
+collected AS (
+    /* #8293: every collection the collector wrote, so the coverage columns count collector instants; a collection
+       without a rate (the window's first, or one with nothing observed) joins as NULL and is not a sample. */
+    SELECT DISTINCT collection_time
+    FROM pg_wait_sampling
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_wait_ms / observed_sec) AS peak_ms_per_sec,
        AVG(total_wait_ms / observed_sec) AS mean_ms_per_sec,
        SUM(total_wait_ms)                AS total_wait_ms,
-       CAST(count(*) AS integer)         AS sample_count,
-       (array_agg(collection_time ORDER BY (total_wait_ms / observed_sec) DESC NULLS LAST, collection_time DESC))[1] AS peak_time
-FROM rated
+       CAST(count(observed_sec) AS integer)         AS sample_count,
+       (array_agg(collection_time ORDER BY (total_wait_ms / observed_sec) DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
+       " + WindowTiles.CoverageColumnsSql + @"
+FROM collected
+LEFT JOIN rated USING (collection_time)
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;
 
