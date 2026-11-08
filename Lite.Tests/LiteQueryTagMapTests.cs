@@ -661,7 +661,7 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
             using var writeLock = _fixture.DuckDb.AcquireWriteLock(timeout: LocalDataService.WriteLockBudget);
             held.Set();
             /* Let go at three times the app's limit even when the drain is still waiting: a drain whose wait is longer than
-               the app's limit then takes the lock, writes its row and empties the buffer, and the asserts below fail. */
+               three times the app's limit then takes the lock, writes its row and empties the buffer, and the asserts below fail. */
             release.Wait(RemoteCollectorService.ShutdownFlushLimit * 3, TestContext.Current.CancellationToken);
         }, TestContext.Current.CancellationToken);
         held.Wait(TestContext.Current.CancellationToken);
