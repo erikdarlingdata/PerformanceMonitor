@@ -91,9 +91,15 @@ internal static class PageLayoutProbe
         }
     }
 
+    /// <summary>
+    /// Shows <paramref name="content"/> laid out by a host of exactly <paramref name="width"/> x <paramref name="height"/>. The host, not the
+    /// window, gives the content its size: a window wider than the screen is clamped to it (a 1024x768 screen cannot show a maximized
+    /// 1550x925 window), and a Border with an explicit Width and Height is not.
+    /// </summary>
     internal static Window Open(FrameworkElement content, int width, int height)
     {
-        var window = new Window { Content = content, Width = width, Height = height, Left = 0, Top = 0, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize };
+        var host = new Border { Width = width, Height = height, Child = content };
+        var window = new Window { Content = host, Width = Math.Min(width, 1000), Height = Math.Min(height, 700), Left = 0, Top = 0, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize };
         StaTestThread.ShowOffScreen(window);
         Settle(window);
         return window;
@@ -101,10 +107,14 @@ internal static class PageLayoutProbe
 
     internal static void Resize(Window window, int width, int height)
     {
-        window.Width = width;
-        window.Height = height;
+        var host = (Border)window.Content;
+        host.Width = width;
+        host.Height = height;
         Settle(window);
     }
+
+    /// <summary>The width the content is laid out at: the host's, which the window's own size does not bound.</summary>
+    internal static double HostWidth(Window window) => ((Border)window.Content).Width;
 
     internal static void Settle(Window window)
     {

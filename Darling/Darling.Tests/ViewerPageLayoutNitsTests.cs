@@ -107,7 +107,7 @@ public sealed class ViewerPageLayoutNitsTests
 
             Assert.NotNull(footer);
             /* The footer just wide enough for the label and not for its value: a break must fall somewhere, and the pair must not be parted by it. */
-            var chrome = window.Width - footer.ActualWidth;
+            var chrome = HostWidth(window) - footer.ActualWidth;
             Resize(window, (int)Math.Ceiling(Bounds(label, footer).Right + 2 + chrome), 800);
             var labelTop = Bounds(label, tab).Top;
             var valueTop = Bounds(value, tab).Top;
