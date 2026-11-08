@@ -267,7 +267,7 @@
                                 <TextBlock x:Name="SidebarTitle" Text="SQL Servers" FontSize="16" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <TextBlock x:Name="SidebarSubtitle" Text="Double-click or press Enter to open a server tab" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,0,0"/>
                             </StackPanel>
-                            <Button Grid.Column="1" x:Name="SidebarToggleButton" Content="«" Click="ToggleSidebar_Click"
+                            <Button Grid.Column="1" x:Name="SidebarToggleButton" AutomationProperties.AutomationId="SidebarToggleButton" Content="«" Click="ToggleSidebar_Click"
                                     ToolTip="Toggle sidebar" VerticalAlignment="Top"
                                     Width="24" Height="24" Padding="0" FontSize="14"/>
                         </Grid>
