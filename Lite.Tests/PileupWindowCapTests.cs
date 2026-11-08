@@ -25,11 +25,14 @@ namespace PerformanceMonitorLite.Tests;
 /// when the cap fills before the read reaches the baseline floor the finding would state, the sweep evaluates nothing
 /// and says so in the log once, instead of handing the detector a baseline shorter than the one its finding describes.
 /// The floor is strict: a cap that fills with its oldest row exactly on the floor instant has cut a snapshot the
-/// detector's baseline keeps, so that read is skipped too. A cap that fills past the floor changes nothing.
+/// detector's baseline keeps, so that read is skipped too. A cap that fills past the floor changes nothing: the detector
+/// gets at most the cap of rows. A window of exactly cap rows is whole, not cut, and stands however short it is.
 ///
 /// <para>The cap is lowered through the reader's seam so the seed stays small: 56 one-minute snapshots of 120 user
-/// sessions on one statement, 6,720 rows, at a fixed instant. A cap of 3,000 rows is 25 snapshots, 20 minutes short
-/// of the 45-minute floor; 5,520 is 46 snapshots, the oldest exactly on it; 6,000 is 50, four minutes past it.</para>
+/// sessions on one statement, 6,720 rows, at a fixed instant. The read binds one row more than the cap, so a cap of
+/// 3,000 reads 3,001 rows, 25 snapshots and one row of the next, 20 minutes short of the 45-minute floor; 5,519 reads
+/// 5,520, 46 snapshots whose oldest sits exactly on the floor; 6,000 reads 6,001, 50 snapshots and a row past them, and
+/// hands 6,000 on. A 24-minute window of 3,000 rows at a cap of 3,000 is exactly cap rows, and stands.</para>
 /// </summary>
 public sealed class PileupWindowCapTests : IClassFixture<SharedDuckDbFixture>
 {
@@ -56,7 +59,7 @@ public sealed class PileupWindowCapTests : IClassFixture<SharedDuckDbFixture>
     {
         await SeedAsync();
 
-        /* 3,000 rows is 25 snapshots: the cap fills 20 minutes short of the 45-minute floor. */
+        /* A cap of 3,000 reads 3,001 rows, 25 snapshots and one row of the 26th: the cut lands 20 minutes short of the floor. */
         var log = new CapturingLogger();
         var rows = await new PileupSnapshotReader(_duckDb, log, rowCap: 3_000).ReadWindowAsync(ServerId, Floor, CancellationToken.None);
 
@@ -71,10 +74,10 @@ public sealed class PileupWindowCapTests : IClassFixture<SharedDuckDbFixture>
     {
         await SeedAsync();
 
-        /* 5,520 rows is 46 snapshots: the newest and the 45 behind it, so the cap fills with its oldest row on the floor
-           instant itself. The detector's baseline keeps that instant, so the read has to reach past it to stand. */
+        /* A cap of 5,519 reads 5,520 rows, 46 snapshots: the newest and the 45 behind it, so the read's oldest row sits on the
+           floor instant itself. The detector's baseline keeps that instant, so the read has to reach past it to stand. */
         var log = new CapturingLogger();
-        var cap = (SameStatementPileupDetector.BaselineLookbackMinutes + 1) * SessionsPerSnapshot;
+        var cap = (SameStatementPileupDetector.BaselineLookbackMinutes + 1) * SessionsPerSnapshot - 1;
         var rows = await new PileupSnapshotReader(_duckDb, log, rowCap: cap).ReadWindowAsync(ServerId, Floor, CancellationToken.None);
 
         Assert.Empty(rows);
@@ -86,7 +89,8 @@ public sealed class PileupWindowCapTests : IClassFixture<SharedDuckDbFixture>
     {
         await SeedAsync();
 
-        /* 6,000 rows is 50 snapshots: the cap fills with the floor already four minutes behind, so the rows stand. */
+        /* A cap of 6,000 reads 6,001 rows, 50 snapshots and one row past them, with the floor four minutes behind: the rows
+           stand, and the detector gets the cap of them. */
         var log = new CapturingLogger();
         var rows = await new PileupSnapshotReader(_duckDb, log, rowCap: 6_000).ReadWindowAsync(ServerId, Floor, CancellationToken.None);
 
@@ -98,6 +102,20 @@ public sealed class PileupWindowCapTests : IClassFixture<SharedDuckDbFixture>
         /* The default cap is a tripwire, not a working bound: every seeded row comes back. */
         var all = await new PileupSnapshotReader(_duckDb, log).ReadWindowAsync(ServerId, Floor, CancellationToken.None);
         Assert.Equal(Snapshots * SessionsPerSnapshot, all.Count);
+        Assert.DoesNotContain(log.Lines, line => line.Level == LogLevel.Warning);
+    }
+
+    [Fact]
+    public async Task ExactlyCapRowsThatStopShortOfTheFloor_AreAWholeWindow_NotATrip()
+    {
+        await SeedAsync();
+
+        /* A 24-minute window (a server added minutes ago) holds 25 snapshots, 3,000 rows. At a cap of 3,000 the read returns
+           exactly cap rows and no extra one: the window is whole, however short, so every row stands with nothing logged. */
+        var log = new CapturingLogger();
+        var rows = await new PileupSnapshotReader(_duckDb, log, rowCap: 3_000).ReadWindowAsync(ServerId, Latest.AddMinutes(-24), CancellationToken.None);
+
+        Assert.Equal(3_000, rows.Count);
         Assert.DoesNotContain(log.Lines, line => line.Level == LogLevel.Warning);
     }
 
