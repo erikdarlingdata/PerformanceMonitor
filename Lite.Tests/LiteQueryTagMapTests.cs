@@ -636,18 +636,6 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         return service;
     }
 
-    /// <summary>
-    /// Holds the process-wide write lock on another thread until <paramref name="release"/> is set, and signals
-    /// <paramref name="held"/> once it has it. The caller releases in a finally and awaits the task.
-    /// </summary>
-    private Task HoldWriteLock(System.Threading.ManualResetEventSlim held, System.Threading.ManualResetEventSlim release) =>
-        Task.Run(() =>
-        {
-            using var writeLock = _fixture.DuckDb.AcquireWriteLock(timeout: TimeSpan.FromSeconds(30));
-            held.Set();
-            release.Wait(TestContext.Current.CancellationToken);
-        }, TestContext.Current.CancellationToken);
-
     /* The write lock is one for the whole test process, so a neighbouring class can hold it for longer than the app's
        ShutdownFlushLimit while this runs. The drain is checked with this host's own budget, which WriteLockBudgetTests
        proves outlasts every deliberate hold in the suite; the app's limit has its own pin below. */
@@ -668,7 +656,14 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         var service = ServiceWithOneBufferedSighting();
         var held = new System.Threading.ManualResetEventSlim();
         var release = new System.Threading.ManualResetEventSlim();
-        var holder = HoldWriteLock(held, release);
+        var holder = Task.Run(() =>
+        {
+            using var writeLock = _fixture.DuckDb.AcquireWriteLock(timeout: LocalDataService.WriteLockBudget);
+            held.Set();
+            /* Let go at three times the app's limit even when the drain is still waiting: a drain whose wait is longer than
+               the app's limit then takes the lock, writes its row and empties the buffer, and the asserts below fail. */
+            release.Wait(RemoteCollectorService.ShutdownFlushLimit * 3, TestContext.Current.CancellationToken);
+        }, TestContext.Current.CancellationToken);
         held.Wait(TestContext.Current.CancellationToken);
         try
         {
@@ -691,7 +686,7 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         var held = new System.Threading.ManualResetEventSlim();
         var holder = Task.Run(() =>
         {
-            using var writeLock = _fixture.DuckDb.AcquireWriteLock(timeout: TimeSpan.FromSeconds(30));
+            using var writeLock = _fixture.DuckDb.AcquireWriteLock(timeout: LocalDataService.WriteLockBudget);
             held.Set();
             /* Held for longer than the app's limit: a drain on that limit gives up while this holds. */
             TestWait.Elapse(RemoteCollectorService.ShutdownFlushLimit + TimeSpan.FromSeconds(1));
