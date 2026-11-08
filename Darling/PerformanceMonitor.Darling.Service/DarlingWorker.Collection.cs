@@ -738,7 +738,9 @@ public sealed partial class DarlingWorker
             /* #6211: live provider like its siblings, so a store change to query_store_fetch_top_n takes effect on the next cycle, no restart. */
             queryStoreFetchTopN: () => StoreConfigProvider.ClampQueryStoreFetchTopN(config.QueryStoreFetchTopN),
             /* #8146: clamped and logged once here, because darling.json is read once at start. */
-            xeRingBufferMaxEvents: StoreConfigProvider.ClampXeRingBufferMaxEvents(config.XeRingBufferMaxEvents, _logger));
+            xeRingBufferMaxEvents: StoreConfigProvider.ClampXeRingBufferMaxEvents(config.XeRingBufferMaxEvents, _logger),
+            /* #7643: the schema pass reads the cadence the dispatch schedules it at, live over the same overrides. */
+            collectorFrequencyMinutes: (name, serverId) => StoreConfigProvider.ResolveSchedule(name, serverId, _scheduleOverrides).FrequencyMinutes);
         /* #7067: one gate, one clock, for the worker's and the runner's repeated warnings. */
         runner.RepeatLog = RepeatLog;
         _runner = runner;
@@ -1514,7 +1516,7 @@ public sealed partial class DarlingWorker
 
             /* #4999: the hang watchdog above reads only the per-server bodies, and a daily run no longer runs in
                one: it is detached and can go for hours, so a stuck one showed up only as stale data. The same goes
-               for the three runs detached by name (query_store, plan_correction, pg_wait_sampling). Same tick, the
+               for the four runs detached by name (query_store, plan_correction, pg_wait_sampling, schema_objects). Same tick, the
                same kind of Warning, one per run, naming the server and collector; the threshold is its own, 15
                minutes (DailyRunWatchdogSeconds), where the bodies' is 60 seconds. After the launch loop and outside
                it, because a detached run belongs to no single body and the loop may leave early. */
@@ -2135,6 +2137,9 @@ public sealed partial class DarlingWorker
                never dispatched by RunDueCollectorsAsync and so the DROP-on-disable has nowhere else to run. */
             await ReconcileLongQueryTraceAsync(server, runner, stoppingToken);
 
+            /* #7643: the schema-changes session of a collector that is off is dropped once, for a server the store shows ran it. */
+            await DropSchemaSessionWhenOffAsync(server, runner, stoppingToken);
+
             /* #4961: the always-on deadlock and blocked-process sessions are ensured at connect and then once an hour, so a
                session dropped from outside comes back within the hour. */
             await EnsureAlwaysOnXeSessionsAsync(
@@ -2284,6 +2289,36 @@ public sealed partial class DarlingWorker
         }
 
         await ReconcileLongQueryTraceAsync(server, runner, enabled, registrations, serverSeparatelyMonitored, DateTime.UtcNow, _logger, cancellationToken, instanceGuard);
+    }
+
+    /// <summary>
+    /// #7643: drops this install's schema-changes session on a server whose <c>schema_objects</c> collector is off, where the store shows the
+    /// collector once ran there. A server that never ran it costs one store read and then nothing, and a dropped session is forgotten by the
+    /// store, so neither is retried on every sweep. SQL Server only: XE is not a PostgreSQL concept.
+    /// </summary>
+    private async Task DropSchemaSessionWhenOffAsync(ServerLoopState server, DarlingCollectorRunner runner, CancellationToken cancellationToken)
+    {
+        if (server.Runtime is not { } runtime || server.Retired || runtime.Target.Engine != CollectorTargetEngine.SqlServer)
+        {
+            return;
+        }
+
+        var serverId = server.Config.ServerId;
+        if (SchemaObjectsOn(serverId))
+        {
+            return;
+        }
+
+        var live = _registryState.Read()?.Servers;
+        var others = (live ?? Array.Empty<MonitoredServer>()).Where(other => other.ServerId != serverId).ToList();
+        await DarlingSchemaCapture.DropWhenDisabledAsync(
+            runner,
+            runtime,
+            others,
+            SchemaObjectsOn,
+            token => LongQueryTraceInstanceGuardFor(serverId, live, SchemaObjectsOn, (otherId, carrier) => runner.GetCollectorStateAsync(otherId, carrier, token)),
+            _logger,
+            cancellationToken);
     }
 
     /// <summary>

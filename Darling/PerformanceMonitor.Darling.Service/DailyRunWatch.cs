@@ -13,7 +13,7 @@ namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
 /// #4999: one detached run as the hang watchdog sees it (<see cref="DarlingWorker.WatchDailyRuns"/>), a daily
-/// collector's run or one of the three that are detached by name: which server and collector it is, when it began
+/// collector's run or one of the four that are detached by name: which server and collector it is, when it began
 /// executing, and whether the watchdog has warned about it yet. It is created once the run is executing (for a daily
 /// run, once it holds its permit), so the clock it carries is the run's own execution time and never the time it
 /// spent waiting for a permit, and it ends when the run does.
