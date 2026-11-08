@@ -390,16 +390,16 @@ public sealed class PgTargetSessionsTests
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(fact));
 
         Assert.NotNull(block);
-        Assert.Equal("Connections peaked at 93% of the usable ceiling (90 of 97) — PostgreSQL refuses the next one, it does not queue it", block!.Headline);
+        Assert.Equal("Connections peaked at 93% of the usable ceiling (90 of 97): PostgreSQL refuses the next one, it does not queue it", block!.Headline);
 
         /* THE EXIT CRITERION: sessions / (max − reserved) stated as arithmetic the reader can redo. */
         Assert.Contains("90 / (100 − 3) = 93%", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("90 sessions were connected against 97 usable connections — max_connections 100 minus superuser_reserved_connections 3", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("90 sessions were connected against 97 usable connections: max_connections 100 minus superuser_reserved_connections 3", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("2 h before the window's end", block.Investigation, StringComparison.Ordinal);
         /* The state breakdown of the PEAK capture, so the operator sees which population fills the pool. */
         Assert.Contains("40 active, 30 idle in transaction, 20 other", block.Investigation, StringComparison.Ordinal);
         /* 30 / 90 is past the parked bar: the population is named. */
-        Assert.Contains("33% of the peak — the pool is being filled by PARKED connections", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("33% of the peak: the pool is being filled by PARKED connections", block.Investigation, StringComparison.Ordinal);
         /* The cliff is an outage, not a wait; the count's known bias; the exception-table caveat; the lineage. */
         Assert.Contains("FATAL: too many clients already", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("a refusal is an outage, not a slowdown", block.Investigation, StringComparison.Ordinal);
@@ -434,7 +434,7 @@ public sealed class PgTargetSessionsTests
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(fact, workMem));
 
         Assert.NotNull(block);
-        Assert.Equal("Connections peaked at 82% of the usable ceiling (80 of 97) — PostgreSQL refuses the next one, it does not queue it", block!.Headline);
+        Assert.Equal("Connections peaked at 82% of the usable ceiling (80 of 97): PostgreSQL refuses the next one, it does not queue it", block!.Headline);
         /* Value-stated from THIS server's work_mem: 4 MB × 97 usable connections. */
         Assert.Contains("work_mem is 4 MB here, so 97 connections each running one such node could claim 388 MB", block.Remediation, StringComparison.Ordinal);
         /* 5 of 80 is under the parked bar: the breakdown is stated, the parked population is not claimed. */
@@ -450,11 +450,11 @@ public sealed class PgTargetSessionsTests
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.MonitoringPermissions, Lookup(Permissions(64, 96)));
 
         Assert.NotNull(block);
-        Assert.Equal("The monitoring login cannot see session state on this server — 67% of the stored session rows are redacted", block!.Headline);
+        Assert.Equal("The monitoring login cannot see session state on this server: 67% of the stored session rows are redacted", block!.Headline);
         Assert.Contains("64 of the 96 pg_session_states rows stored across 48 captures in the window (67%) came back state_is_redacted", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("the privileged role saw four idle-in-transaction sessions and the unprivileged one zero of the same nine backends", block.Investigation, StringComparison.Ordinal);
         /* The peak COUNT is stated; its share of the ceiling is not — no ratio, no ceiling, no percentage of it. */
-        Assert.Contains("The peak capture counted 95 sessions — a bare count, which survives redaction", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("The peak capture counted 95 sessions (a bare count, which survives redaction", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("emits no connection-saturation ratio", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("usable", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("max_connections", block.Investigation, StringComparison.Ordinal);
@@ -693,8 +693,8 @@ public sealed class PgTargetSessionsTests
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(fact))!;
 
         /* THE EXIT SHAPE: N client backends of M usable at peak, from pg_stat_database.numbackends. */
-        Assert.Equal("Connections peaked at 96% of the usable ceiling (93 client backends of 97) — PostgreSQL refuses the next one, it does not queue it", block.Headline);
-        Assert.StartsWith("At the window's peak minute, 1.5 h before the window's end, 93 client backends were connected against 97 usable connections — pg_stat_database.numbackends summed over every database at that one instant, against max_connections 100 minus superuser_reserved_connections 3 — that is 93 / (100 − 3) = 96%.", block.Investigation, StringComparison.Ordinal);
+        Assert.Equal("Connections peaked at 96% of the usable ceiling (93 client backends of 97): PostgreSQL refuses the next one, it does not queue it", block.Headline);
+        Assert.StartsWith("At the window's peak minute, 1.5 h before the window's end, 93 client backends were connected against 97 usable connections: pg_stat_database.numbackends summed over every database at that one instant, against max_connections 100 minus superuser_reserved_connections 3, that is 93 / (100 − 3) = 96%.", block.Investigation, StringComparison.Ordinal);
         /* The capture is introduced as the breakdown's source, at ITS instant and ITS count; the split is unchanged. */
         Assert.Contains("State breakdown at the peak session capture (40 sessions, 2 h before the window's end): 15 active, 5 idle in transaction, 20 other", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("The numerator above is the level, not that capture", block.Investigation, StringComparison.Ordinal);
@@ -715,7 +715,7 @@ public sealed class PgTargetSessionsTests
            says whose 90 the 30 were. */
         var parked = WithLevel(Saturation(90, active: 40, idleInTransaction: 30), peakNumbackends: 93, numbackendsSamples: 241);
         block = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(parked))!;
-        Assert.Contains("Idle-in-transaction sessions were 33% of the peak capture — the pool is being filled by PARKED connections, not work.", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("Idle-in-transaction sessions were 33% of the peak capture: the pool is being filled by PARKED connections, not work.", block.Investigation, StringComparison.Ordinal);
         Assert.StartsWith("30 of the 90 peak capture sessions were idle in transaction", block.Remediation, StringComparison.Ordinal);
     }
 
@@ -725,8 +725,8 @@ public sealed class PgTargetSessionsTests
         /* Not collected: lane 3's text byte for byte, plus the one fallback sentence naming the instrument. */
         var none = WithLevel(Saturation(90), peakNumbackends: 0, numbackendsSamples: 0);
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(none))!;
-        Assert.Equal("Connections peaked at 93% of the usable ceiling (90 of 97) — PostgreSQL refuses the next one, it does not queue it", block.Headline);
-        Assert.Contains("90 sessions were connected against 97 usable connections — max_connections 100 minus superuser_reserved_connections 3 — that is 90 / (100 − 3) = 93%.", block.Investigation, StringComparison.Ordinal);
+        Assert.Equal("Connections peaked at 93% of the usable ceiling (90 of 97): PostgreSQL refuses the next one, it does not queue it", block.Headline);
+        Assert.Contains("90 sessions were connected against 97 usable connections: max_connections 100 minus superuser_reserved_connections 3, that is 90 / (100 − 3) = 93%.", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("State breakdown at the peak: 40 active, 30 idle in transaction, 20 other", block.Investigation, StringComparison.Ordinal);
         Assert.Contains(" The numerator is the peak of the session captures (exception-driven; numbackends not yet collected on this store).", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("client backends", block.Investigation, StringComparison.Ordinal);
@@ -741,8 +741,8 @@ public sealed class PgTargetSessionsTests
            what the level peaked at over the part that did. */
         var partial = WithLevel(Saturation(90), peakNumbackends: 93, numbackendsSamples: 101);
         block = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(partial))!;
-        Assert.Equal("Connections peaked at 93% of the usable ceiling (90 of 97) — PostgreSQL refuses the next one, it does not queue it", block.Headline);
-        Assert.Contains(" The numerator is the peak of the session captures (exception-driven): pg_stat_database.numbackends is present on only 101 of the window's 241 pg_database_stats samples — a store mid-migration — so the level is not used until at least half of them carry it; over the samples that do, it peaked at 93.", block.Investigation, StringComparison.Ordinal);
+        Assert.Equal("Connections peaked at 93% of the usable ceiling (90 of 97): PostgreSQL refuses the next one, it does not queue it", block.Headline);
+        Assert.Contains(" The numerator is the peak of the session captures (exception-driven): pg_stat_database.numbackends is present on only 101 of the window's 241 pg_database_stats samples (a store mid-migration), so the level is not used until at least half of them carry it; over the samples that do, it peaked at 93.", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("numbackends not yet collected", block.Investigation, StringComparison.Ordinal);
 
         /* The static block names both instruments and the rule between them, and still claims no figure. */
@@ -842,10 +842,10 @@ public sealed class PgTargetSessionsTests
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(LevelOnly(93)))!;
 
         /* The level's headline and division, as lane 25 states them. */
-        Assert.Equal("Connections peaked at 96% of the usable ceiling (93 client backends of 97) — PostgreSQL refuses the next one, it does not queue it", block.Headline);
-        Assert.StartsWith("At the window's peak minute, 1.5 h before the window's end, 93 client backends were connected against 97 usable connections — pg_stat_database.numbackends summed over every database at that one instant, against max_connections 100 minus superuser_reserved_connections 3 — that is 93 / (100 − 3) = 96%.", block.Investigation, StringComparison.Ordinal);
+        Assert.Equal("Connections peaked at 96% of the usable ceiling (93 client backends of 97): PostgreSQL refuses the next one, it does not queue it", block.Headline);
+        Assert.StartsWith("At the window's peak minute, 1.5 h before the window's end, 93 client backends were connected against 97 usable connections: pg_stat_database.numbackends summed over every database at that one instant, against max_connections 100 minus superuser_reserved_connections 3, that is 93 / (100 − 3) = 96%.", block.Investigation, StringComparison.Ordinal);
         /* THE SENTENCE: what the count is, and what is unobserved — in place of the breakdown, never a breakdown of zeros. */
-        Assert.Contains(" No session capture in the window: the count is pg_stat_database.numbackends — the backends attached to a database, every minute, whether or not any session tripped a capture rule — and state, application and idle-in-transaction shares are unobserved", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains(" No session capture in the window: the count is pg_stat_database.numbackends, the backends attached to a database, every minute, whether or not any session tripped a capture rule, and state, application and idle-in-transaction shares are unobserved", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("a window with none is a pool that tripped no rule, not an empty one", block.Investigation, StringComparison.Ordinal);
         Assert.Contains(" numbackends carried a value at 241 of the window's 241 one-minute pg_database_stats samples; no capture stored session rows in the window.", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("State breakdown", block.Investigation, StringComparison.Ordinal);
@@ -1276,7 +1276,7 @@ public sealed class PgTargetSessionsTests
         new FactScorer().ScoreAll(pair);
         var advice = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, pair.ToFactLookup())!;
         Assert.Contains(
-            " Connections rose to 4.3× this hour of the week's norm while throughput stayed at its norm — arrivals are queueing, not working:",
+            " Connections rose to 4.3× this hour of the week's norm while throughput stayed at its norm, arrivals are queueing, not working:",
             advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("accepting more connections than usual and completing no more transactions than usual", advice.Investigation, StringComparison.Ordinal);
         /* The parked-share sentence still precedes it; the capture sentence still follows — the block is lane 3's plus one sentence. */
@@ -1295,7 +1295,7 @@ public sealed class PgTargetSessionsTests
         var uncentred = Saturation(90);
         uncentred.Metadata[PgTargetScorer.OfferedVsDeliveredKey] = 1;
         uncentred.Metadata[PgTargetScorer.SessionSpikeRatioKey] = 0;
-        Assert.Contains("Connections rose to a level above this hour of the week's norm while throughput stayed at its norm —", PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(uncentred))!.Investigation, StringComparison.Ordinal);
+        Assert.Contains("Connections rose to a level above this hour of the week's norm while throughput stayed at its norm, arrivals are queueing", PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, Lookup(uncentred))!.Investigation, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1327,8 +1327,8 @@ public sealed class PgTargetSessionsTests
         var chronic = Parked(900_000, horizonAge: 5_000_000, holderCaptures: 6, recurring: 6);
         new FactScorer().ScoreAll([chronic]);
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.IdleInTransaction, Lookup(chronic))!;
-        Assert.Equal("billing-worker as billing idle in transaction for 15 min — the application never committed or rolled back, and it is holding the xmin horizon back", block.Headline);
-        Assert.Contains("billing-worker as billing in appdb — had held its transaction open for 15 min, last seen 5 min before the window's end, and was over the 1 min floor in 6 of the 48 captures", block.Investigation, StringComparison.Ordinal);
+        Assert.Equal("billing-worker as billing idle in transaction for 15 min: the application never committed or rolled back, and it is holding the xmin horizon back", block.Headline);
+        Assert.Contains("billing-worker as billing in appdb, had held its transaction open for 15 min, last seen 5 min before the window's end, and was over the 1 min floor in 6 of the 48 captures", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("1 session was parked past the floor at once; 6 of the captures had at least one, from 1 distinct holder", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("PINS THE XMIN HORIZON: PostgreSQL reports the xid / xmin it holds at an age of 5,000,000 transactions", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("graded one band higher", block.Investigation, StringComparison.Ordinal);
@@ -1361,14 +1361,14 @@ public sealed class PgTargetSessionsTests
         var lockWait = new Fact { Source = PgTargetSources.WaitsSource, Key = PgTargetFactKeys.WaitKey("Lock", "relation"), BaseSeverity = 0.6 };
         new FactScorer().ScoreAll([oneOff, saturation]);
         var busy = PgTargetAdvice.Compose(PgTargetFactKeys.IdleInTransaction, Lookup(oneOff, saturation, hold, lockWait))!;
-        Assert.Equal("reporting as analyst idle in transaction for 4 min 12 s (3 parked at once at the peak) — the application never committed or rolled back", busy.Headline);
+        Assert.Equal("reporting as analyst idle in transaction for 4 min 12 s (3 parked at once at the peak): the application never committed or rolled back", busy.Headline);
         Assert.Contains("This holder pins NOTHING", busy.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("graded one band higher", busy.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("recurred in", busy.Investigation, StringComparison.Ordinal);
         Assert.Contains("3 sessions were parked past the floor at once", busy.Investigation, StringComparison.Ordinal);
         Assert.Contains("PG_XMIN_HOLD fired on this server with a SESSION as the winning holder (xmin age 4,000,000)", busy.Investigation, StringComparison.Ordinal);
         Assert.Contains("Lock waits fired in the same window", busy.Investigation, StringComparison.Ordinal);
-        Assert.Contains("PG_CONNECTION_SATURATION fired: the pool peaked at 93% of its usable ceiling with 33% of the peak capture idle in transaction — parked transactions are the population filling the slots", busy.Investigation, StringComparison.Ordinal);
+        Assert.Contains("PG_CONNECTION_SATURATION fired: the pool peaked at 93% of its usable ceiling with 33% of the peak capture idle in transaction: parked transactions are the population filling the slots", busy.Investigation, StringComparison.Ordinal);
         Assert.Contains("get_pg_xmin_horizon", busy.Remediation, StringComparison.Ordinal);
         Assert.Contains("get_pg_blocking", busy.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("it recurred in", busy.Remediation, StringComparison.Ordinal);
@@ -1712,7 +1712,7 @@ public sealed class PgTargetSessionsTests
                 Assert.Equal(90 / 97.0, card.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 9);
 
                 var advice = card.GetProperty("advice");
-                Assert.Equal("Connections peaked at 93% of the usable ceiling (90 of 97) — PostgreSQL refuses the next one, it does not queue it", advice.GetProperty("headline").GetString());
+                Assert.Equal("Connections peaked at 93% of the usable ceiling (90 of 97): PostgreSQL refuses the next one, it does not queue it", advice.GetProperty("headline").GetString());
                 var investigation = advice.GetProperty("investigation").GetString()!;
                 Assert.Contains("90 / (100 − 3) = 93%", investigation, StringComparison.Ordinal);
                 Assert.Contains("40 active, 30 idle in transaction, 20 other", investigation, StringComparison.Ordinal);
@@ -1736,7 +1736,7 @@ public sealed class PgTargetSessionsTests
                 var card = Assert.Single(findings, f => f.GetProperty("root_fact").GetProperty("key").GetString() == PgTargetFactKeys.MonitoringPermissions);
                 Assert.Equal(0.5, card.GetProperty("severity").GetDouble(), precision: 9);
                 var advice = card.GetProperty("advice");
-                Assert.Equal("The monitoring login cannot see session state on this server — 67% of the stored session rows are redacted", advice.GetProperty("headline").GetString());
+                Assert.Equal("The monitoring login cannot see session state on this server: 67% of the stored session rows are redacted", advice.GetProperty("headline").GetString());
                 Assert.Contains("96 of the 144 pg_session_states rows stored across 48 captures", advice.GetProperty("investigation").GetString(), StringComparison.Ordinal);
                 Assert.Contains("The peak capture counted 95 sessions", advice.GetProperty("investigation").GetString(), StringComparison.Ordinal);
                 Assert.Contains("idle_in_transaction_unobservable = 1", advice.GetProperty("investigation").GetString(), StringComparison.Ordinal);
@@ -1758,7 +1758,7 @@ public sealed class PgTargetSessionsTests
                 Assert.Equal(900, card.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 9);
 
                 var advice = card.GetProperty("advice");
-                Assert.Equal("billing-worker as billing idle in transaction for 15 min — the application never committed or rolled back, and it is holding the xmin horizon back", advice.GetProperty("headline").GetString());
+                Assert.Equal("billing-worker as billing idle in transaction for 15 min: the application never committed or rolled back, and it is holding the xmin horizon back", advice.GetProperty("headline").GetString());
                 var investigation = advice.GetProperty("investigation").GetString()!;
                 Assert.Contains("was over the 1 min floor in 6 of the 48 captures", investigation, StringComparison.Ordinal);
                 Assert.Contains("PINS THE XMIN HORIZON: PostgreSQL reports the xid / xmin it holds at an age of 5,000,000 transactions", investigation, StringComparison.Ordinal);
@@ -1788,9 +1788,9 @@ public sealed class PgTargetSessionsTests
                 Assert.Equal(1.0, card.GetProperty("severity").GetDouble(), precision: 9);
                 Assert.Equal(93 / 97.0, card.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 9);
                 var advice = card.GetProperty("advice");
-                Assert.Equal("Connections peaked at 96% of the usable ceiling (93 client backends of 97) — PostgreSQL refuses the next one, it does not queue it", advice.GetProperty("headline").GetString());
+                Assert.Equal("Connections peaked at 96% of the usable ceiling (93 client backends of 97): PostgreSQL refuses the next one, it does not queue it", advice.GetProperty("headline").GetString());
                 var investigation = advice.GetProperty("investigation").GetString()!;
-                Assert.Contains("At the window's peak minute, 1.5 h before the window's end, 93 client backends were connected against 97 usable connections — pg_stat_database.numbackends summed over every database at that one instant", investigation, StringComparison.Ordinal);
+                Assert.Contains("At the window's peak minute, 1.5 h before the window's end, 93 client backends were connected against 97 usable connections: pg_stat_database.numbackends summed over every database at that one instant", investigation, StringComparison.Ordinal);
                 Assert.Contains("93 / (100 − 3) = 96%", investigation, StringComparison.Ordinal);
                 Assert.Contains("State breakdown at the peak session capture (40 sessions, 2 h before the window's end): 15 active, 5 idle in transaction, 20 other", investigation, StringComparison.Ordinal);
                 Assert.Contains("numbackends carried a value at 241 of the window's 241 one-minute pg_database_stats samples", investigation, StringComparison.Ordinal);
@@ -1821,7 +1821,7 @@ public sealed class PgTargetSessionsTests
                 Assert.Equal(1.0, card.GetProperty("severity").GetDouble(), precision: 9);
                 Assert.Equal(93 / 97.0, card.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 9);
                 var advice = card.GetProperty("advice");
-                Assert.Equal("Connections peaked at 96% of the usable ceiling (93 client backends of 97) — PostgreSQL refuses the next one, it does not queue it", advice.GetProperty("headline").GetString());
+                Assert.Equal("Connections peaked at 96% of the usable ceiling (93 client backends of 97): PostgreSQL refuses the next one, it does not queue it", advice.GetProperty("headline").GetString());
                 var investigation = advice.GetProperty("investigation").GetString()!;
                 Assert.Contains("At the window's peak minute, 1.5 h before the window's end, 93 client backends were connected against 97 usable connections", investigation, StringComparison.Ordinal);
                 Assert.Contains("No session capture in the window: the count is pg_stat_database.numbackends", investigation, StringComparison.Ordinal);
@@ -1869,7 +1869,7 @@ public sealed class PgTargetSessionsTests
             Assert.Equal(93, partial.Metadata[PgTargetScorer.PeakNumbackendsKey]);
             Assert.Equal(40, partial.Metadata["peak_total_sessions"]);
             var partialAdvice = PgTargetAdvice.Compose(PgTargetFactKeys.ConnectionSaturation, partialFacts.ToFactLookup())!;
-            Assert.Contains("pg_stat_database.numbackends is present on only 101 of the window's 241 pg_database_stats samples — a store mid-migration", partialAdvice.Investigation, StringComparison.Ordinal);
+            Assert.Contains("pg_stat_database.numbackends is present on only 101 of the window's 241 pg_database_stats samples (a store mid-migration)", partialAdvice.Investigation, StringComparison.Ordinal);
             Assert.Contains("over the samples that do, it peaked at 93", partialAdvice.Investigation, StringComparison.Ordinal);
 
             /* ── The same store with numbackends NULL everywhere: v1's reading, 40 / 97, stated as the capture peak. */
@@ -2201,7 +2201,7 @@ FROM generate_series(0, $6) AS n");
                 Assert.Equal(90 / 97.0, card.GetProperty("root_fact").GetProperty("value").GetDouble(), precision: 9);
                 var investigation = card.GetProperty("advice").GetProperty("investigation").GetString()!;
                 Assert.Contains("Connections rose to ", investigation, StringComparison.Ordinal);
-                Assert.Contains("this hour of the week's norm while throughput stayed at its norm — arrivals are queueing, not working", investigation, StringComparison.Ordinal);
+                Assert.Contains("this hour of the week's norm while throughput stayed at its norm, arrivals are queueing, not working", investigation, StringComparison.Ordinal);
                 Assert.Contains("PARKED connections", investigation, StringComparison.Ordinal);
             }
 

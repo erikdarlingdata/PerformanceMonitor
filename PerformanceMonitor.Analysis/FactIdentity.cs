@@ -246,7 +246,7 @@ public static class FactIdentity
         var severity = hop.Severity.ToString("0.00", CultureInfo.InvariantCulture);
         var trimmedHeadline = string.IsNullOrWhiteSpace(headline) ? null : headline.Trim();
         var body = trimmedHeadline is null ? hop.Identity : $"{hop.Identity}: {trimmedHeadline}";
-        return $" {SentenceMarker} `{hop.Key}` (severity {severity}) — {body}{(EndsWithTerminator(body) ? string.Empty : ".")}";
+        return $" {SentenceMarker} `{hop.Key}` (severity {severity}): {body}{(EndsWithTerminator(body) ? string.Empty : ".")}";
     }
 
     private static bool EndsWithTerminator(string text) =>

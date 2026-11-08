@@ -151,6 +151,6 @@ internal static class DarlingIncidentFingerprint
         $"Examined {examined} {kind} for server '{fingerprintName}'. " +
         "The fingerprint is scoped to the server's DISPLAY name and to the incident's involved objects, so check " +
         "that hours_back reaches back to when the alert fired, that the key came from this server, and that the " +
-        "server has not been renamed since — a rename changes the key for every incident on it. Re-run without " +
+        "server has not been renamed since: a rename changes the key for every incident on it. Re-run without " +
         "dedup_key to see what the window does contain.";
 }

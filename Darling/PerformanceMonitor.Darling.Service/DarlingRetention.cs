@@ -20,6 +20,7 @@ using NpgsqlTypes;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -1200,6 +1201,70 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* #7643: collect.schema_objects (the schema versions) purges its CLOSED versions on valid_to at the schema_objects
+               collector's retention, resolved like the catalog loop above (fleet-wide override, never under 1 day). NOT
+               reachable from that loop: the collector's catalog table is collect.schema_capture_passes (the pass log, which the
+               loop does purge), while the versions are keyed by valid_from/valid_to, not by a collection time. A CURRENT version
+               has valid_to NULL and does not expire by age while a pass still sees its database: the predicate keeps it out of
+               the DELETE and out of both min() subqueries of the time slice, so an old current row cannot anchor an empty slice.
+               The four child tables (columns, indexes, constraints, triggers) go with their version by ON DELETE CASCADE, so
+               nothing else purges them. A plain table, so the time-sliced DELETE on every store; idx_schema_objects_closed
+               (valid_to) WHERE valid_to IS NOT NULL serves the slice.
+               Then the histories no pass saw for the whole window (the v1 spec's rule): every version, current too, of a
+               (history key, database) that no collect.schema_capture_state row of any server points at with a last_seen_in_scope_at
+               inside the window. That is a dropped or renamed database, a removed server, a database that left the collector's
+               scope. A history with a version closed inside the window stays until that version ages out: the old key of a database
+               that joined or left an availability group, whose current versions the pass closed at the move, goes that way. An
+               availability group's history stays while any of its servers still sees it. One statement each, and the stale database
+               state rows after the versions, so a failed version purge is retried by the next sweep (no fresh row points at it).
+               The server rows (empty database name) stay: they hold the event session's position, which the drop of a disabled
+               collector's session reads. */
+            var schemaCutoff = utcNow.AddDays(-EffectivePurgeRetentionDays(
+                "schema_objects",
+                retentionDaysFor?.Invoke("schema_objects") ?? CollectorScheduleDefaults.All["schema_objects"].RetentionDays));
+            /* Each PurgeOneAsync is counted on its own, as every sibling's is: the wall budget's gate counts each call it keeps from
+               starting (TablesNotReached), and that count is taken back out of tablesPurged below (#5592). */
+            var schemaVersionsDeleted = await PurgeOneAsync(
+                postgres, "collect.schema_objects",
+                TimeSlicedDeleteSql("collect.schema_objects", "valid_to", "valid_to IS NOT NULL"),
+                schemaCutoff, logger, cancellationToken, pacer: walPacer);
+            if (schemaVersionsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += schemaVersionsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            var staleSchemaHistoriesDeleted = await PurgeOneAsync(
+                postgres, "collect.schema_objects", StaleSchemaHistoryDeleteSql, schemaCutoff, logger, cancellationToken,
+                batchSize: SingleShotStatement, pacer: walPacer);
+            if (staleSchemaHistoriesDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += staleSchemaHistoriesDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            var staleSchemaStateDeleted = await PurgeOneAsync(
+                postgres, "collect.schema_capture_state",
+                "DELETE FROM collect.schema_capture_state WHERE database_name <> '' AND (last_seen_in_scope_at IS NULL OR last_seen_in_scope_at < $1)",
+                schemaCutoff, logger, cancellationToken, batchSize: SingleShotStatement, pacer: walPacer);
+            if (staleSchemaStateDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += staleSchemaStateDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             /* collect.query_stats_hour_ledger (#4605, V164): the hourly row-count ledger that the long-window count
                guard compares with the hourly rollup, in place of counting raw. NOT in CollectorCatalog.All (the
                collector runner's COPY transaction writes it, not a collector definition), so the loop above skips
@@ -1519,8 +1584,8 @@ public static class DarlingRetention
     {
         var status = tablesFailed == 0 ? "SUCCESS" : "WARNING";
         var message = tablesFailed == 0
-            ? $"Purged {tablesPurged.ToString(CultureInfo.InvariantCulture)} table(s): {totalRowsDeleted.ToString(CultureInfo.InvariantCulture)} row(s) deleted, {totalChunksDropped.ToString(CultureInfo.InvariantCulture)} chunk(s) dropped"
-            : $"Purged {tablesPurged.ToString(CultureInfo.InvariantCulture)} table(s), {tablesFailed.ToString(CultureInfo.InvariantCulture)} failed (see prior warnings): {totalRowsDeleted.ToString(CultureInfo.InvariantCulture)} row(s) deleted, {totalChunksDropped.ToString(CultureInfo.InvariantCulture)} chunk(s) dropped";
+            ? $"Purged {CountText.Plural(tablesPurged, "table")}: {CountText.Plural(totalRowsDeleted, "row")} deleted, {CountText.Plural(totalChunksDropped, "chunk")} dropped"
+            : $"Purged {CountText.Plural(tablesPurged, "table")}, {tablesFailed.ToString(CultureInfo.InvariantCulture)} failed (see prior warnings): {CountText.Plural(totalRowsDeleted, "row")} deleted, {CountText.Plural(totalChunksDropped, "chunk")} dropped";
 
         /* #4823: a paced run says how much WAL the store wrote during its batches and how long it waited, so a
            long purge reads as pacing rather than as a stall. The figure is the WHOLE store's WAL across those
@@ -1553,7 +1618,7 @@ public static class DarlingRetention
     /// </summary>
     internal static string BuildManualPurgeLabel(int? customRetentionDays)
         => customRetentionDays is int days
-            ? $"Manual purge (purge_now, custom retention {days.ToString(CultureInfo.InvariantCulture)} day(s))"
+            ? $"Manual purge (purge_now, custom retention {CountText.Plural(days, "day")})"
             : "Manual purge (purge_now)";
 
     /// <summary>
@@ -1604,6 +1669,43 @@ public static class DarlingRetention
              + $" AND {timeColumn} >= (SELECT min({timeColumn}) FROM {table} WHERE {expired})"
              + $" AND {timeColumn} < (SELECT min({timeColumn}) FROM {table} WHERE {expired}) + INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'";
     }
+
+    /// <summary>
+    /// #7643: every schema version of a (history key, database) that no capture-state row points at with a <c>last_seen_in_scope_at</c>
+    /// at or after <c>$1</c>, and none of whose versions closed at or after <c>$1</c>: a history moved to another key (the pass closed its
+    /// current versions at the move) ages out over the window through the closed-version purge. The key is written as
+    /// <c>SchemaHistoryReader</c> writes it (a server key has no group, a group key no server). Children go by ON DELETE CASCADE.
+    /// </summary>
+    /* The histories to keep are listed once, then every version is anti-joined against that list on plain equality, so the planner can
+       hash it: a per-row probe of schema_objects for a stale history scanned every version of that history for each of its versions.
+       The key is one text value per kind ('g' and the group id, or 's' and the server id): the CHECK on schema_objects makes exactly one
+       of the two set, and a state row names the group when it has one. The closed versions inside the window are found through
+       idx_schema_objects_closed (valid_to). */
+    internal const string StaleSchemaHistoryDeleteSql = @"
+WITH keep AS
+(
+    SELECT
+        CASE WHEN s.history_ag_group_id IS NOT NULL THEN 'g' || s.history_ag_group_id::text ELSE 's' || s.history_server_id::text END AS history_key,
+        s.database_name
+    FROM collect.schema_capture_state AS s
+    WHERE s.last_seen_in_scope_at >= $1
+    AND   (s.history_ag_group_id IS NOT NULL OR s.history_server_id IS NOT NULL)
+    UNION
+    SELECT
+        CASE WHEN v.ag_group_id IS NOT NULL THEN 'g' || v.ag_group_id::text ELSE 's' || v.server_id::text END,
+        v.database_name
+    FROM collect.schema_objects AS v
+    WHERE v.valid_to >= $1
+)
+DELETE FROM collect.schema_objects AS o
+WHERE NOT EXISTS
+(
+    SELECT
+        1
+    FROM keep AS k
+    WHERE k.database_name = o.database_name
+    AND   k.history_key = CASE WHEN o.ag_group_id IS NOT NULL THEN 'g' || o.ag_group_id::text ELSE 's' || o.server_id::text END
+)";
 
     /// <summary>
     /// The CEILING on rows per statement for the plan dimension's purge (#2386, reframed by #4130) — not a

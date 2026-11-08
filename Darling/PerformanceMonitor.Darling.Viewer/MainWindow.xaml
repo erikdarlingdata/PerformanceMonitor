@@ -242,7 +242,7 @@
             </ResourceDictionary>
     </Window.Resources>
 
-    <Grid Margin="10">
+    <Grid Margin="10" SizeChanged="RootGrid_SizeChanged">
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
@@ -267,7 +267,7 @@
                         <TextBlock Text="Servers" Style="{StaticResource SectionHeader}" Margin="0,0,0,2"/>
                         <TextBlock Text="Double-click or press Enter to open a server tab" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,0,0,6"/>
                     </StackPanel>
-                    <Button Grid.Column="1" x:Name="SidebarToggleButton" AutomationProperties.Name="Collapse/expand the sidebar" Content="«" Click="ToggleSidebar_Click"
+                    <Button Grid.Column="1" x:Name="SidebarToggleButton" AutomationProperties.AutomationId="SidebarToggleButton" AutomationProperties.Name="Collapse/expand the sidebar" Content="«" Click="ToggleSidebar_Click"
                             Style="{StaticResource DarkButton}"
                             ToolTip="Collapse/expand the sidebar" VerticalAlignment="Top"
                             Width="24" Height="24" Padding="0" FontSize="14"/>
@@ -1375,7 +1375,8 @@
                                                 Visibility="{Binding ShowCopyFix, Converter={StaticResource RecoBoolToVis}}"
                                                 Click="CopyFix_Click"
                                                 ToolTip="Copy the suggested T-SQL to the clipboard"/>
-                                        <Button Content="Ask AI" Padding="10,3"
+                                        <!-- #8226: the accent style, since the plain button's fill is the card's own background. -->
+                                        <Button Content="Ask AI" Padding="10,3" Style="{DynamicResource AccentButton}"
                                                 Visibility="{Binding ShowAskAi, Converter={StaticResource RecoBoolToVis}}"
                                                 Click="AskAi_Click"
                                                 ToolTip="Copy an MCP investigation prompt to the clipboard"/>

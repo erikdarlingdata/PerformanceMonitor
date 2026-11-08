@@ -85,6 +85,8 @@ Invoke-RestMethod http://localhost:5153/api/ping
 | 503 | `degraded` | A startup step failed transiently and the service retries it. `step`, `attempt`, `attempts` and `detail` say which step and why. The state clears itself, or becomes `stopped`. |
 | 503 | `stopped` | A startup step failed terminally. Collection will not start until the service is restarted. `detail` carries the reason that the critical log line gives. |
 
+For Kubernetes or another orchestrator's probes, use the [health port](network-endpoints.md#the-health-port): it needs no token.
+
 Point an uptime check at this route and alert on the status code. In the two 503 states the service is up, the dashboard still answers, and the Windows service still reports **Running**, but nothing is collected. `Invoke-RestMethod` throws on a 503. That is the behavior you want from a scripted check. Catch the error and read `$_.ErrorDetails.Message` for the body.
 
 ## What it does and does not do

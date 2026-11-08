@@ -95,7 +95,8 @@ public sealed class PgOwnStatementLiveTests
             try
             {
                 await DarlingMcpTestData.ExecAsync(connection, ct, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements");
-                await DarlingMcpTestData.ExecAsync(connection, ct, "SELECT pg_stat_statements_reset()");
+                /* This database's entries only: the hash table is cluster-wide, and the classes running beside this one keep theirs. */
+                await DarlingMcpTestData.ExecAsync(connection, ct, "SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)");
             }
             catch (PostgresException ex) when (ex.SqlState is "55000" or "58P01" or "0A000" or "42501")
             {

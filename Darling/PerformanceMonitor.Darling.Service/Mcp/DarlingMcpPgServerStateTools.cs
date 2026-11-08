@@ -78,7 +78,7 @@ public sealed class DarlingMcpPgServerStateTools
                     ?? McpHelpers.Status(
                         "empty",
                         $"No buffer pool contents recorded for {resolved.DisplayName} in the last "
-                        + $"{hours_back} hour(s). This needs the pg_buffercache extension in the database "
+                        + $"{CountText.Plural(hours_back, "hour")}. This needs the pg_buffercache extension in the database "
                         + "the collector connects to."), cancellationToken, windowEnd.AddHours(-hours_back));
             }
 
@@ -126,7 +126,7 @@ public sealed class DarlingMcpPgServerStateTools
                    buffer COUNT is the measurement and the megabyte figure is a convenience beside it. */
                 pool_buffers_total = newest.PoolBuffersTotal,
                 pool_buffers_used = newest.PoolBuffersUsed,
-                note = "Residency, not read volume — a small hot table and a large one scanned once can "
+                note = "Residency, not read volume: a small hot table and a large one scanned once can "
                      + "read alike and occupy the pool completely differently. avg_usage_count is what the "
                      + "clock-sweep eviction reads; buffer sizes assume the standard 8 kB block."
                      + (truncated
@@ -205,9 +205,9 @@ public sealed class DarlingMcpPgServerStateTools
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd,
                     DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(
                         "empty",
-                        $"No extension inventory for {resolved.DisplayName} in the last {hours_back} "
-                        + "hour(s). This collector runs DAILY, so a short window can be empty on a healthy "
-                        + "server — widen it before concluding anything."
+                        $"No extension inventory for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}"
+                        + ". This collector runs DAILY, so a short window can be empty on a healthy "
+                        + "server: widen it before concluding anything."
                         + (scope is null
                             ? string.Empty
                             : $" You filtered to database_name '{scope}': check the spelling and "
@@ -327,8 +327,8 @@ public sealed class DarlingMcpPgServerStateTools
                 remedy: "install_census in this response answers what is created where, aggregated per "
                       + "extension and unaffected by any row limit. For the per-database ROWS, pass "
                       + "database_name: one database is "
-                      + extensionNameCount.ToString(CultureInfo.InvariantCulture)
-                      + " row(s) here, so a host is that many completable calls.");
+                      + CountText.Plural(extensionNameCount, "row")
+                      + " here, so a host is that many completable calls.");
 
             var extensions = rows.Select(r => new
             {
@@ -427,15 +427,15 @@ public sealed class DarlingMcpPgServerStateTools
                     }),
 
                 note = "Per DATABASE, not per cluster: installed_version describes the database the row "
-                     + "names. 'available' means the files are present and CREATE EXTENSION would work — "
+                     + "names. 'available' means the files are present and CREATE EXTENSION would work, "
                      + "usually a one-line fix for an empty panel elsewhere. Rows are the PRODUCT of "
                      + "databases and extension names, so this row list outgrows any row limit on a "
-                     + "multi-database host — read install_census for what is installed where, because it "
+                     + "multi-database host: read install_census for what is installed where, because it "
                      + "is aggregated per extension and no limit touches it."
                      + (truncated
                          ? " TRUNCATED at the row limit, so the state totals are WITHHELD: counting them "
                            + "over a capped result would describe this page rather than the server. And the "
-                           + "cut is NOT a random slice — the ordering places non-relevant 'installed' rows "
+                           + "cut is NOT a random slice: the ordering places non-relevant 'installed' rows "
                            + "behind every non-relevant 'available' one, so what a cap removes first is "
                            + "precisely what an install census needs. Do not read this page as one; use "
                            + "install_census, or pass database_name to complete one database at a time."
@@ -496,10 +496,10 @@ public sealed class DarlingMcpPgServerStateTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No lock activity sampled on {resolved.DisplayName} in the last {hours_back} "
-                                + "hour(s). This is a SAMPLE of pg_locks rather than an event log",
+                            factual: $"No lock activity sampled on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}"
+                                + ". This is a SAMPLE of pg_locks rather than an event log",
                             coveredClaim: ", so this is the "
-                                + "healthy state on a server without sustained contention — and it is not proof "
+                                + "healthy state on a server without sustained contention, and it is not proof "
                                 + "that nothing was ever locked."),
                         emptyNotice.AsHints()), cancellationToken, emptyStart);
             }
@@ -547,11 +547,11 @@ public sealed class DarlingMcpPgServerStateTools
                 /* Counted over the returned rows, and reported only when they are all of them. */
                 ungranted_count = truncated ? (int?)null : ungranted,
                 note = (truncated
-                         ? "TRUNCATED at the row limit — the ungranted total is WITHHELD, because counting "
+                         ? "TRUNCATED at the row limit: the ungranted total is WITHHELD, because counting "
                            + "over a capped result would describe this page rather than the server. "
                          : string.Empty)
                      + "A SAMPLE of pg_locks, not an event log: a lock taken and released between two "
-                     + "captures does not appear. Read `captures` against `total_captures` — that ratio is "
+                     + "captures does not appear. Read `captures` against `total_captures`, that ratio is "
                      + "how much of the window the lock was present for. `total_captures` counts the "
                      + "collector's successful runs in the window, the runs that saw no lock included, so a "
                      + "lock seen in 3 of 60 runs reads as 3 of 60. Ungranted rows are the contended "
@@ -594,7 +594,7 @@ public sealed class DarlingMcpPgServerStateTools
                     ?? McpHelpers.Status(
                         "empty",
                         $"No checkpoint or WAL activity recorded for {resolved.DisplayName} in the last "
-                        + $"{hours_back} hour(s). These are differenced across snapshots, so a single "
+                        + $"{CountText.Plural(hours_back, "hour")}. These are differenced across snapshots, so a single "
                         + "collection has nothing to difference against and the window fills on the "
                         + "second one.",
                         /* #4966: the window keys ride on an empty answer under hints, from the coverage probe; not_collected (above) stays bare. */
@@ -958,7 +958,7 @@ public sealed class DarlingMcpPgServerStateTools
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
                             factual: $"No configuration parameter changed value on {resolved.DisplayName} in the last "
-                                + $"{hours_back} hour(s)",
+                                + $"{CountText.Plural(hours_back, "hour")}",
                             coveredClaim: ". That is a real finding rather than missing data - this "
                                 + "read compares consecutive snapshots, so an unchanged server produces no rows."),
                         emptyNotice.AsHints()), cancellationToken, emptyStart);

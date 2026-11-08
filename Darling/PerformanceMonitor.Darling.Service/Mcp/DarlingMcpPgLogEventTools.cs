@@ -99,7 +99,7 @@ public sealed class DarlingMcpPgLogEventTools
                         "empty",
                         $"No log event{(familyFilter is null ? string.Empty : $" in family '{familyFilter}'")}"
                         + $"{(minRank > 1 ? $" at {severityLabel} or worse" : string.Empty)} was stored for "
-                        + $"{resolved.DisplayName} in the last {hours_back} hour(s). Four things produce that: "
+                        + $"{resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}. Four things produce that: "
                         + "the server wrote none, which is the healthy answer for the error and lock_wait "
                         + "families; the setting that family depends on is off on the target "
                         + "(log_connections / log_disconnections for connection, log_lock_waits for "

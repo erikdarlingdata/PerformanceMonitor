@@ -44,4 +44,55 @@
         <Setter Property="IsHitTestVisible" Value="False"/>
         <Setter Property="Visibility" Value="Collapsed"/>
     </Style>
+
+    <!-- #8219: a server toolbar row with the app's colors: no gradient, no grip, and an overflow button that opens the controls that did not fit. A ToolBar gives its own flat face to every Button in it, so a Button in one names the theme's Button style (Style="{DynamicResource {x:Type Button}}") to keep the face. Both apps' server tabs use it (#8266). -->
+    <Style x:Key="ServerToolbarStyle" TargetType="ToolBar">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
+        <Setter Property="Padding" Value="0,2"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToolBar">
+                    <DockPanel Background="{TemplateBinding Background}" LastChildFill="True">
+                        <ToggleButton x:Name="OverflowButton" DockPanel.Dock="Right" Visibility="Collapsed" VerticalAlignment="Center"
+                                      ToolTip="More controls" AutomationProperties.Name="More controls" ClickMode="Press" Margin="8,0,0,0"
+                                      IsChecked="{Binding Path=IsOverflowOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
+                                      IsEnabled="{TemplateBinding HasOverflowItems}">
+                            <ToggleButton.Template>
+                                <ControlTemplate TargetType="ToggleButton">
+                                    <Border x:Name="face" Background="{DynamicResource BackgroundLightBrush}" BorderBrush="{DynamicResource BorderBrush}"
+                                            BorderThickness="1" CornerRadius="3" Padding="8,2">
+                                        <TextBlock Text="&#x22EF;" FontSize="14" Foreground="{DynamicResource ForegroundBrush}" HorizontalAlignment="Center"/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="face" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                                        </Trigger>
+                                        <Trigger Property="IsChecked" Value="True">
+                                            <Setter TargetName="face" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                                            <Setter TargetName="face" Property="Background" Value="{DynamicResource BackgroundDarkBrush}"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </ToggleButton.Template>
+                        </ToggleButton>
+                        <Popup x:Name="OverflowPopup" AllowsTransparency="False" Placement="Bottom" Focusable="False" StaysOpen="False"
+                               IsOpen="{Binding Path=IsOverflowOpen, RelativeSource={RelativeSource TemplatedParent}}"
+                               PlacementTarget="{Binding ElementName=OverflowButton}">
+                            <Border Background="{DynamicResource BackgroundDarkBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="6">
+                                <ToolBarOverflowPanel x:Name="PART_ToolBarOverflowPanel" WrapWidth="300" Focusable="True"
+                                                      KeyboardNavigation.TabNavigation="Cycle" KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                            </Border>
+                        </Popup>
+                        <ToolBarPanel x:Name="PART_ToolBarPanel" IsItemsHost="True"/>
+                    </DockPanel>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="HasOverflowItems" Value="True">
+                            <Setter TargetName="OverflowButton" Property="Visibility" Value="Visible"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
 </ResourceDictionary>

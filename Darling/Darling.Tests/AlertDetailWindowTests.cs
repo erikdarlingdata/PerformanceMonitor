@@ -334,7 +334,7 @@ public sealed class AlertDetailWindowTests
             AlertDetailWindow? dialog = null;
             try
             {
-                owner.Show();
+                StaTestThread.ShowOffScreen(owner);
                 tabs.SelectedItem = historyTab;
                 historyBox.Focus();
 
@@ -346,6 +346,9 @@ public sealed class AlertDetailWindowTests
                     tabs.SelectedItem = serverTab;
                 }));
                 dialog.Owner = owner;
+                /* #8289: the dialog is shown modally by the code under test, so it is placed off the screen here. It and its owner still
+                   take keyboard focus: focus going back to the owner when the dialog closes is what this test is about (#7554). */
+                StaTestThread.PlaceOffScreen(dialog);
                 var link = dialog.FullChainLink;
                 dialog.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, () =>
                     link.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent)));

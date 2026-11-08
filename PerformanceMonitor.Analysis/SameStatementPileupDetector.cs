@@ -640,11 +640,11 @@ public static class SameStatementPileupDetector
 
         return FactAdvice.SerializeForStoryText(new AdviceBlock(
             Headline:
-                $"{sessions} concurrent sessions piled up on one statement in {db} — every copy past "
+                $"{sessions} concurrent sessions piled up on one statement in {db}: every copy past "
                 + $"{minElapsedMs / 1000.0:F0} seconds on a statement observed at {baselineMaxMs} ms minutes earlier",
             Investigation:
                 $"The active-query snapshot caught {sessions} sessions executing the SAME statement at one instant, "
-                + $"all past {minElapsedMs / 1000.0:F1} s elapsed, {ioWaiters} suspended on {waits} — while the same "
+                + $"all past {minElapsedMs / 1000.0:F1} s elapsed, {ioWaiters} suspended on {waits}, while the same "
                 + $"statement's {baselineObservations} in-flight observation(s) over the prior {BaselineLookbackMinutes} minutes "
                 + $"topped out at {baselineMaxMs} ms. That is the live signature of a shared parameterized plan flipping to an "
                 + "IO-heavy shape: every caller inherits the flip at once, the copies convoy on page reads, and client "
@@ -652,12 +652,12 @@ public static class SameStatementPileupDetector
                 + "the sub-second baseline rows this conclusion is computed from.",
             Remediation:
                 "Confirm and clear the plan: find the statement's current plan in the plan cache and evict it "
-                + "(DBCC FREEPROCCACHE with the plan handle, or sp_recompile on the object) — the incident class "
+                + "(DBCC FREEPROCCACHE with the plan handle, or sp_recompile on the object), the incident class "
                 + "self-clears when the plan churns out, and eviction forces that churn now. Where Query Store is "
                 + "readable on this server, the PLAN_REGRESSION finding and its force-plan drill-down will surface the "
                 + "flip on the next analysis pass as confirmation and offer the durable fix (forcing the historical "
                 + "plan); this finding deliberately does not wait for it (#2296 deployments have no Query Store to "
-                + "read). If the pileup recurs — episodes fold onto one incident id — the statement is re-drawing its "
+                + "read). If the pileup recurs (episodes fold onto one incident id), the statement is re-drawing its "
                 + "bad plan on plan-cache churn, and the parameter-sensitivity playbook applies to the statement itself."));
     }
 

@@ -109,8 +109,8 @@ public sealed class DarlingMcpIdentityCapacityTools
                 var noScan = await NoticeAsync(emptyAnswer: true);
                 return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("unavailable",
                         $"No identity capacity scan{where} in the {hours_back}-hour window ending {Format(windowEnd)}" +
-                        (unscanned.Count == 0 ? "" : $", and {unscanned.Count} database(s) not yet scanned ({string.Join(", ", unscanned.Take(10).Select(u => u.DatabaseName))}{(unscanned.Count > 10 ? ", ..." : "")})") +
-                        (skipped.Count == 0 ? "" : $", and {skipped.Count} database(s) skipped on purpose ({string.Join("; ", skipped.Take(10).Select(u => $"{u.DatabaseName} - {u.Text}"))}{(skipped.Count > 10 ? "; ..." : "")})") +
+                        (unscanned.Count == 0 ? "" : $", and {CountText.Plural(unscanned.Count, "database")} not yet scanned ({string.Join(", ", unscanned.Take(10).Select(u => u.DatabaseName))}{(unscanned.Count > 10 ? ", ..." : "")})") +
+                        (skipped.Count == 0 ? "" : $", and {CountText.Plural(skipped.Count, "database")} skipped on purpose ({string.Join("; ", skipped.Take(10).Select(u => $"{u.DatabaseName} - {u.Text}"))}{(skipped.Count > 10 ? "; ..." : "")})") +
                         ". The identity_capacity collector has not run in it, " +
                         "or has not reached the database yet (it runs every 6 hours, stops a pass after 5 minutes and starts the next one where the last stopped). " +
                         "A snapshot, a readable secondary or a database the monitoring login cannot enter is skipped on purpose and listed with its reason. " +
@@ -172,7 +172,7 @@ public sealed class DarlingMcpIdentityCapacityTools
                 {
                     server = resolved.DisplayName,
                     status = "empty",
-                    message = $"{read.Databases.Count} database(s){where} scanned in the window and none has an identity column above 10 percent used.",
+                    message = $"{CountText.Plural(read.Databases.Count, "database")}{where} scanned in the window and none has an identity column above 10 percent used.",
                     as_of = Format(windowEnd),
                     hours_back,
                     hints = notice.AsHints(),

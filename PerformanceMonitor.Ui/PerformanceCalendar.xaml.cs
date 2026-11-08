@@ -28,7 +28,6 @@ namespace PerformanceMonitor.Ui
     /// </summary>
     public partial class PerformanceCalendar : UserControl
     {
-        private const int WeeksShown = 6;
         private const int DaysPerWeek = 7;
 
         public PerformanceCalendar()
@@ -80,7 +79,7 @@ namespace PerformanceMonitor.Ui
         /// <summary>The weekday column headers in the current culture's week order.</summary>
         public ObservableCollection<string> WeekdayHeaders { get; } = new();
 
-        /// <summary>The 42 rendered day cells (6 weeks x 7 days).</summary>
+        /// <summary>The rendered day cells: the weeks the month spans (four to six), seven cells each.</summary>
         public ObservableCollection<PerformanceCalendarCell> Cells { get; } = new();
 
         /// <summary>The supplied days indexed by date, for O(1) day-detail-panel lookup on click. Rebuilt
@@ -137,8 +136,11 @@ namespace PerformanceMonitor.Ui
             var offset = ((int)month.DayOfWeek - firstDayOfWeek + DaysPerWeek) % DaysPerWeek;
             var gridStart = month.AddDays(-offset);
 
+            // Only the weeks the month spans: a week row that holds no day of the month is not drawn.
+            var weeks = (offset + DateTime.DaysInMonth(month.Year, month.Month) + DaysPerWeek - 1) / DaysPerWeek;
+
             Cells.Clear();
-            for (var i = 0; i < WeeksShown * DaysPerWeek; i++)
+            for (var i = 0; i < weeks * DaysPerWeek; i++)
             {
                 var date = gridStart.AddDays(i);
                 var inMonth = date.Year == month.Year && date.Month == month.Month;

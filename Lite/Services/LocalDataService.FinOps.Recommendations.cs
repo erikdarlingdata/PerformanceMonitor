@@ -194,7 +194,7 @@ SELECT @count;";
                         Category = "Licensing",
                         Severity = "Low",
                         Confidence = "High",
-                        Finding = "Enterprise Edition — Availability Group secondary replica",
+                        Finding = "Enterprise Edition: Availability Group secondary replica",
                         Detail = "This instance is currently a secondary replica in an Availability Group. " +
                                  "Every replica in an AG must run the same SQL Server edition, so edition and " +
                                  "licensing decisions apply to the whole group and should be evaluated on the " +
@@ -277,7 +277,7 @@ END;", sqlConn);
                             Severity = "High",
                             Confidence = advancedAgCount > 0 ? "Medium" : "High",
                             Finding = advancedAgCount > 0
-                                ? "Enterprise Edition — review Availability Group requirements before downgrading"
+                                ? "Enterprise Edition: review Availability Group requirements before downgrading"
                                 : "Enterprise Edition with no Enterprise-only features detected",
                             Detail = "No databases use Transparent Data Encryption (TDE), the only feature " +
                                      "still restricted to Enterprise Edition since SQL Server 2016 SP1. " +
@@ -293,7 +293,7 @@ END;", sqlConn);
                             Category = "Licensing",
                             Severity = "Low",
                             Confidence = "High",
-                            Finding = "TDE in use — Enterprise Edition downgrade blocker",
+                            Finding = "TDE in use: Enterprise Edition downgrade blocker",
                             Detail = $"The following databases use Transparent Data Encryption: {string.Join(", ", tdeDbNames.Take(20))}" +
                                      (tdeDbNames.Count > 20 ? $" and {tdeDbNames.Count - 20} more" : "") +
                                      ". TDE must be removed before downgrading to Standard Edition."
@@ -569,7 +569,7 @@ ORDER BY
                     Category = "Databases",
                     Severity = idleDbs.Count >= 3 ? "High" : "Medium",
                     Confidence = "High",
-                    Finding = $"{idleDbs.Count} idle database(s) consuming {totalSizeGb:N1}GB",
+                    Finding = $"{CountText.Plural(idleDbs.Count, "idle database")} consuming {totalSizeGb:N1}GB",
                     Detail = $"No query activity in 7 days: {dbNames}" +
                              (idleDbs.Count > 5 ? $" and {idleDbs.Count - 5} more" : "") +
                              ". Consider archiving or removing these databases.",
@@ -611,7 +611,7 @@ AND   database_id > 4", sqlConn);
                     Category = "Environment",
                     Severity = "Medium",
                     Confidence = "Low",
-                    Finding = $"{devDbs.Count} possible dev/test database(s) on production server",
+                    Finding = $"{CountText.Plural(devDbs.Count, "possible dev/test database")} on production server",
                     Detail = $"Databases matching dev/test patterns: {string.Join(", ", devDbs.Take(10))}" +
                              (devDbs.Count > 10 ? $" and {devDbs.Count - 10} more" : "") +
                              ". If these are non-production workloads, consider moving to a lower-cost tier or separate server."
@@ -898,7 +898,7 @@ HAVING COUNT(*) >= 24";
                             Category = "Cloud",
                             Severity = "Low",
                             Confidence = confidence,
-                            Finding = $"Stable CPU utilization (avg {avgCpu:N1}%, CV {cv:N2}) — reserved capacity candidate",
+                            Finding = $"Stable CPU utilization (avg {avgCpu:N1}%, CV {cv:N2}): reserved capacity candidate",
                             Detail = $"CPU utilization is consistently {avgCpu:N1}% with low variance (±{stddevCpu:N1}%). " +
                                      "Reserved pricing typically saves 30-40% over pay-as-you-go for predictable workloads."
                         });

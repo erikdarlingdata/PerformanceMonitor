@@ -96,7 +96,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
                 postgres, "get_pg_cpu_utilization", resolved.ServerName, windowEnd.AddHours(-hours_back), windowEnd, emptyAnswer: true, logger, cancellationToken);
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                     "empty",
-                    $"No CPU utilization data for {resolved.DisplayName} in the last {hours_back} hour(s).",
+                    $"No CPU utilization data for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}.",
                     emptyNotice.AsHints()), cancellationToken, windowEnd.AddHours(-hours_back));
             }
 

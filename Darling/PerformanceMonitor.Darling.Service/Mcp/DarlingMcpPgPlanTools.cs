@@ -49,7 +49,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgPlanTools
 {
-    [McpServerTool(Name = "get_pg_plans"), Description("Gets PostgreSQL execution plans captured by auto_explain, grouped by plan shape and ranked by total time. Returns the plan JSON ITSELF, not a reference. Plan redacted at collection (no statement text or literals). query_text is the statement behind queryid. queryid is a STRING: a 64-bit id a JSON number silently rounds. Window ends at as_of. Empty separates three causes: capture not configured, no statement crossed the duration threshold, or plans aged out of retention - read get_pg_plan_capture_readiness first. PostgreSQL-only; get_plan_xml covers SQL Server. <<GUIDE>> Gets execution plans captured from PostgreSQL by auto_explain, grouped by plan shape and ranked by total time. Returns the plan JSON ITSELF, not a reference to it. The plan is REDACTED at collection and that is not a limitation to work around: auto_explain emits the statement text and its filter literals verbatim, so the query text is dropped entirely and every literal inside the plan tree is replaced with a placeholder before the plan is ever stored — node types, relation names, costs, row estimates and the tree shape all survive intact, which is what a plan is read for. Each row carries query_text, the statement's normalized text from the hourly statement capture (a 400-character preview, query_text_truncated says it was cut, full_text: true returns it whole), null until that capture reaches the queryid and always null for queryid 0; join query_id to get_pg_top_queries for its call count and its timing. queryid is returned as a STRING because it is a signed 64-bit value spread over the whole int8 range: most ids exceed what a JSON number survives and a numeric wire form is silently rounded by any parser decoding numbers as IEEE-754 doubles, after which it matches nothing. When there are no plans this tool distinguishes three genuinely different causes rather than reporting one vague absence: capture is not configured on the server (with the specific missing precondition), capture is configured but this window's statements never crossed the duration threshold, or plans existed and aged out of retention. This is PostgreSQL-only and separate from get_plan_xml, which covers SQL Server. This is what bounds the page - read truncated to know whether the window held more shapes than were returned; it is observed by fetching one row past this cap, never inferred from a full page. The filter is applied in the store over EVERY capture in the window, not over the top-duration page, so a statement ranked far below the busiest shapes is still found - and an empty answer with this set genuinely means no plan for it was captured in the window.")]
+    [McpServerTool(Name = "get_pg_plans"), Description("Gets PostgreSQL execution plans captured by auto_explain, grouped by plan shape and ranked by total time. Returns the plan JSON ITSELF, not a reference. Plan redacted at collection (no statement text or literals). query_text is the statement behind queryid. queryid is a STRING: a 64-bit id a JSON number silently rounds. Window ends at as_of. Empty separates three causes: capture not configured, no statement crossed the duration threshold, or plans aged out of retention - read get_pg_plan_capture_readiness first. PostgreSQL-only; get_plan_xml covers SQL Server. <<GUIDE>> Gets execution plans captured from PostgreSQL by auto_explain, grouped by plan shape and ranked by total time. Returns the plan JSON ITSELF, not a reference to it. The plan is REDACTED at collection and that is not a limitation to work around: auto_explain emits the statement text and its filter literals verbatim, so the query text is dropped entirely and every literal inside the plan tree is replaced with a placeholder before the plan is ever stored, node types, relation names, costs, row estimates and the tree shape all survive intact, which is what a plan is read for. Each row carries query_text, the statement's normalized text from the hourly statement capture (a 400-character preview, query_text_truncated says it was cut, full_text: true returns it whole), null until that capture reaches the queryid and always null for queryid 0; join query_id to get_pg_top_queries for its call count and its timing. queryid is returned as a STRING because it is a signed 64-bit value spread over the whole int8 range: most ids exceed what a JSON number survives and a numeric wire form is silently rounded by any parser decoding numbers as IEEE-754 doubles, after which it matches nothing. When there are no plans this tool distinguishes three genuinely different causes rather than reporting one vague absence: capture is not configured on the server (with the specific missing precondition), capture is configured but this window's statements never crossed the duration threshold, or plans existed and aged out of retention. This is PostgreSQL-only and separate from get_plan_xml, which covers SQL Server. This is what bounds the page - read truncated to know whether the window held more shapes than were returned; it is observed by fetching one row past this cap, never inferred from a full page. The filter is applied in the store over EVERY capture in the window, not over the top-duration page, so a statement ranked far below the busiest shapes is still found - and an empty answer with this set genuinely means no plan for it was captured in the window.")]
     public static async Task<string> GetPgPlans(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -80,7 +80,7 @@ public sealed class DarlingMcpPgPlanTools
                 return McpHelpers.Refusal(
                     "query_id",
                     $"query_id '{query_id}' is not a 64-bit integer. PostgreSQL queryids are signed int8 "
-                    + "values and must be passed as their exact decimal text — if this one arrived through a "
+                    + "values and must be passed as their exact decimal text, if this one arrived through a "
                     + "JSON number it has already been rounded and no longer matches anything.");
             }
 
@@ -213,10 +213,10 @@ public sealed class DarlingMcpPgPlanTools
 
         return await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, serverName, windowEnd, McpHelpers.Status(
             "empty",
-            $"No plan-capture readiness state for {serverName} in the last {hoursBack} hour(s). This is NOT "
+            $"No plan-capture readiness state for {serverName} in the last {CountText.Plural(hoursBack, "hour")}. This is NOT "
             + "the healthy case for this read: the collector writes one row per facet on every run whatever "
             + "it finds, so an absence means nothing was collected rather than that nothing was wrong. It "
-            + "runs HOURLY, so widen hours_back before concluding anything — a window shorter than the "
+            + "runs HOURLY, so widen hours_back before concluding anything: a window shorter than the "
             + "cadence is legitimately empty on a server that is collecting normally."), cancellationToken, windowEnd.AddHours(-hoursBack));
     }
 
@@ -280,7 +280,7 @@ public sealed class DarlingMcpPgPlanTools
             unsatisfied_facets = truncated ? null : unsatisfied,
             note = "Every facet is reported, satisfied or not, in CAUSAL order rather than alphabetically: "
                  + "fix them in the order they are listed. detail carries the remedy for the state that "
-                 + "facet is actually in — including, on Aurora/RDS, whether the change needs a custom "
+                 + "facet is actually in, including, on Aurora/RDS, whether the change needs a custom "
                  + "cluster parameter group and a writer reboot rather than a SET. This is readiness only "
                  + "and never a claim that a plan was captured; get_pg_plans is that read."
                  + (truncated
@@ -343,7 +343,7 @@ public sealed class DarlingMcpPgPlanTools
             "This server cannot capture execution plans yet, so an empty result here says nothing about "
             + "the query. Unsatisfied precondition(s), from pg_plan_capture_readiness: "
             + string.Join(" | ", unmet)
-            + " — the pg_plan_capture_readiness collector stores the full detail and the remedy "
+            + ", the pg_plan_capture_readiness collector stores the full detail and the remedy "
             + "beside each observation, and get_pg_plan_capture_readiness returns them: every facet, "
             + "satisfied or not, in the order they have to be fixed in.",
             /* #7410: the page's plain sentence is built from the count, not from the message. */
@@ -360,20 +360,20 @@ public sealed class DarlingMcpPgPlanTools
     /// it collapses three different causes into the most reassuring one.</para>
     /// </summary>
     internal static string NoPlanCapturedMessage(long? wantedQueryId, int hoursBack) => wantedQueryId is null
-        ? $"Capture is configured on this server and nothing was captured in the last {hoursBack} hour(s) — "
+        ? $"Capture is configured on this server and nothing was captured in the last {CountText.Plural(hoursBack, "hour")}: "
           + "this read has no filter, so that is a fact about every statement, not about a page of them. "
           + "Two things produce it and they are different: no statement ran longer than "
           + "auto_explain.log_min_duration, which is the healthy answer on a server whose statements are "
           + "all fast; or plans were captured earlier and have aged out, which plan_content_retention_days "
-          + "governs — widen hours_back to tell those apart, because a plan that exists further back will "
+          + "governs, widen hours_back to tell those apart, because a plan that exists further back will "
           + "reappear and one that never existed will not."
-        : $"Every capture in the last {hoursBack} hour(s) was searched for this query_id — the whole "
-          + "window, in the store, not a top-N page — and none matches, so no plan for this statement was "
+        : $"Every capture in the last {CountText.Plural(hoursBack, "hour")} was searched for this query_id: the whole "
+          + "window, in the store, not a top-N page, and none matches, so no plan for this statement was "
           + "captured in this window. That has three different causes with three different remedies: the "
           + "statement did not run in this window at all, which get_pg_top_queries can confirm from its "
           + "call counts; it ran but never crossed auto_explain.log_min_duration, so auto_explain never "
-          + "wrote a plan — the healthy reading for a statement that is fast HERE, not a verdict about it "
-          + "at other times; or capture was not working when it ran — get_pg_plan_capture_readiness "
+          + "wrote a plan, the healthy reading for a statement that is fast HERE, not a verdict about it "
+          + "at other times; or capture was not working when it ran, get_pg_plan_capture_readiness "
           + "reports every precondition with the remedy beside it, and its facets are the latest reading "
           + "rather than the window's history, so a server that is ready now can still have missed an "
           + "earlier run. A plan captured before this window has aged out under "

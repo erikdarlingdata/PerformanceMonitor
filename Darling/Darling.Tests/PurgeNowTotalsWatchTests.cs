@@ -33,7 +33,7 @@ public sealed class PurgeNowTotalsWatchTests
     private static readonly DateTime Started = new(2026, 9, 29, 11, 59, 59, 500, DateTimeKind.Unspecified);
 
     private const string TotalsMessage =
-        "Manual purge (purge_now): Purged 33 table(s): 1200 row(s) deleted, 42 chunk(s) dropped; store WAL during the purge's batches: 50 MB, paced 12 s";
+        "Manual purge (purge_now): Purged 33 tables: 1,200 rows deleted, 42 chunks dropped; store WAL during the purge's batches: 50 MB, paced 12 s";
 
     private static DateTime At(int seconds) => Started.AddSeconds(seconds);
 
@@ -247,7 +247,7 @@ public sealed class PurgeNowTotalsWatchTests
 
         var text = Assert.Single(rig.Shown, t => t.StartsWith("Purge finished, ", StringComparison.Ordinal));
         Assert.StartsWith("Purge finished, SUCCESS: ", text, StringComparison.Ordinal);
-        Assert.Contains("Purged 33 table(s): 1200 row(s) deleted, 42 chunk(s) dropped; store WAL during the purge's batches: 50 MB, paced 12 s", text, StringComparison.Ordinal);
+        Assert.Contains("Purged 33 tables: 1,200 rows deleted, 42 chunks dropped; store WAL during the purge's batches: 50 MB, paced 12 s", text, StringComparison.Ordinal);
         Assert.DoesNotContain("Manual purge", text, StringComparison.Ordinal);
         Assert.Equal(1, rig.Reloads);
     }
@@ -271,11 +271,11 @@ public sealed class PurgeNowTotalsWatchTests
         var rig = new Rig();
         rig.Script = n => n < 2
             ? L()
-            : L(Totals(At(20), message: "Manual purge (purge_now, custom retention 30 day(s)): Purged 3 table(s): 9 row(s) deleted, 0 chunk(s) dropped"));
+            : L(Totals(At(20), message: "Manual purge (purge_now, custom retention 30 days): Purged 3 tables: 9 rows deleted, 0 chunks dropped"));
 
         await rig.RunAsync();
 
-        Assert.Contains("Purge finished, SUCCESS: Purged 3 table(s): 9 row(s) deleted, 0 chunk(s) dropped", rig.Shown);
+        Assert.Contains("Purge finished, SUCCESS: Purged 3 tables: 9 rows deleted, 0 chunks dropped", rig.Shown);
     }
 
     [Theory]
@@ -320,14 +320,14 @@ public sealed class PurgeNowTotalsWatchTests
     public async Task Watch_DoesNotTakeTheNextRunsRawRecord_ForTheRunItIsWatching()
     {
         var rig = new Rig();
-        var nextRunTotals = Totals(At(200), message: "Manual purge (purge_now): Purged 1 table(s): 5 row(s) deleted, 0 chunk(s) dropped");
+        var nextRunTotals = Totals(At(200), message: "Manual purge (purge_now): Purged 1 table: 5 rows deleted, 0 chunks dropped");
         rig.Script = n => n < 2 ? L() : L(Totals(At(20)), nextRunTotals, Raw(At(230)));
 
         await rig.RunAsync();
 
         Assert.DoesNotContain(rig.Shown, t => t.Contains("raw tables", StringComparison.Ordinal));
-        Assert.Contains(rig.Shown, t => t.Contains("Purged 33 table(s)", StringComparison.Ordinal));
-        Assert.DoesNotContain(rig.Shown, t => t.Contains("Purged 1 table(s)", StringComparison.Ordinal));
+        Assert.Contains(rig.Shown, t => t.Contains("Purged 33 tables", StringComparison.Ordinal));
+        Assert.DoesNotContain(rig.Shown, t => t.Contains("Purged 1 table", StringComparison.Ordinal));
     }
 
     [Fact]

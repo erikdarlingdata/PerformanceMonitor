@@ -637,7 +637,7 @@ public sealed class DarlingPasswordKeyFileTests
 
                 modes.ReportOwner(keyPath, userId: 1001);
                 var foreign = DarlingPasswordKeyFile.Load(directory, NullLogger.Instance);
-                AssertRefusedUntrusted(foreign, directory, "owned by another user");
+                AssertRefusedUntrusted(foreign, directory, "owned by user 1001, not by user 1000");
 
                 modes.ReportOwner(keyPath, userId: 1000, links: 2);
                 var linked = DarlingPasswordKeyFile.Load(directory, NullLogger.Instance);

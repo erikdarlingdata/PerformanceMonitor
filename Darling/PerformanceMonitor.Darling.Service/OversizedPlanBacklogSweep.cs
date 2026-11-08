@@ -288,15 +288,15 @@ WHERE tqp.query_plan IS NOT NULL;";
             : "WARNING";
 
         var message =
-            $"Swept {tally.ServersSwept.ToString(CultureInfo.InvariantCulture)} server(s): "
-            + $"{tally.PlansClaimed.ToString(CultureInfo.InvariantCulture)} plan(s) claimed, "
+            $"Swept {CountText.Plural(tally.ServersSwept, "server")}: "
+            + $"{CountText.Plural(tally.PlansClaimed, "plan")} claimed, "
             + $"{tally.PlansCaptured.ToString(CultureInfo.InvariantCulture)} captured, "
             + $"{tally.PlansExpired.ToString(CultureInfo.InvariantCulture)} expired, "
-            + $"{tally.FetchFailures.ToString(CultureInfo.InvariantCulture)} fetch failure(s)";
+            + $"{CountText.Plural(tally.FetchFailures, "fetch failure")}";
 
         if (tally.ServersFaulted > 0)
         {
-            message += $", {tally.ServersFaulted.ToString(CultureInfo.InvariantCulture)} server(s) faulted (see prior warnings)";
+            message += $", {CountText.Plural(tally.ServersFaulted, "server")} faulted (see prior warnings)";
         }
 
         if (tally.Interrupted)

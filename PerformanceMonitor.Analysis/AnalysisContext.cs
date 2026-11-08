@@ -503,7 +503,7 @@ public static class CollectionCaveats
             .ToList();
         var list = string.Join(", ", byFamily);
         var total = familiesTotal > 0 ? familiesTotal.ToString(System.Globalization.CultureInfo.InvariantCulture) : "an unknown number of";
-        return $"{byFamily.Count} of {total} fact families could not be read ({list}) — the absence of findings is not evidence: nothing from those families was scored this pass, and a finding they would have rooted or corroborated is simply missing. The service log carries each failure; check get_collection_health for the store.";
+        return $"{byFamily.Count} of {total} fact families could not be read ({list}), the absence of findings is not evidence: nothing from those families was scored this pass, and a finding they would have rooted or corroborated is simply missing. The service log carries each failure; check get_collection_health for the store.";
     }
 
     /// <summary>The structured block: <c>families_failed</c> (DISTINCT families — a family whose two reads both
@@ -721,7 +721,7 @@ public sealed class WindowCoverage
         var observedHours = ObservedMs / 3_600_000.0;
         var gapHours = LargestGapMs / 3_600_000.0;
         return !IsObserved
-            ? $"the collector observed NONE of this {nominalHours:0.#}h window — no collection interval landed inside it"
+            ? $"the collector observed NONE of this {nominalHours:0.#}h window: no collection interval landed inside it"
             : $"the collector observed {Fraction:P0} of this {nominalHours:0.#}h window ({observedHours:0.##}h of collected time; " +
               $"largest unobserved stretch {gapHours:0.##}h)";
     }

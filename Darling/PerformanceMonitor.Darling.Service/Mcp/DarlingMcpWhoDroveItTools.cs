@@ -97,7 +97,7 @@ public sealed class DarlingMcpWhoDroveItTools
                 var emptyNotice = await CpuNoticeAsync(postgres, resolved.ServerName, planRoute.Hourly, start, windowEnd, emptyAnswer: true, cancellationToken);
                 /* #7167: an offline server's empty window answers unavailable, as the get_pg_* reads do. */
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status("empty",
-                    $"No statement CPU for {resolved.DisplayName} in the last {hours_back} hour(s): the plan cache collector wrote no interval with executions in the window. "
+                    $"No statement CPU for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}: the plan cache collector wrote no interval with executions in the window. "
                     + "Procedure stats are not a substitute, because they count the same work.",
                     emptyNotice.IsUnavailable
                         ? new Dictionary<string, object?> { ["statements_window"] = planRoute.Disclosure }
@@ -227,7 +227,7 @@ public sealed class DarlingMcpWhoDroveItTools
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
                     ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status("empty",
-                        $"No active-query snapshots for {resolved.DisplayName} in the last {hours_back} hour(s): nothing was running at a capture, or the collector did not run in the window.",
+                        $"No active-query snapshots for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}: nothing was running at a capture, or the collector did not run in the window.",
                         notice.AsHints()), cancellationToken, start);
             }
 
@@ -346,7 +346,7 @@ public sealed class DarlingMcpWhoDroveItTools
                 var anySnapshots = notice.EffectiveStart is not null || notice.WindowTruncated;
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
                     ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status("empty",
-                        $"No capture in the last {hours_back} hour(s) on {resolved.DisplayName} had {min_sessions} or more sessions running the same query_hash. "
+                        $"No capture in the last {CountText.Plural(hours_back, "hour")} on {resolved.DisplayName} had {min_sessions} or more sessions running the same query_hash. "
                         + "A pile-up between two captures is not seen; a lower min_sessions or a longer window may find one.",
                         notice.AsHints()), cancellationToken, start);
             }

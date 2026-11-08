@@ -24,7 +24,7 @@ public sealed partial class PgTargetRelationshipGraph
     private partial void BuildMemoryEdges()
     {
         AddEdge(PgTargetFactKeys.BufferCachePressure, PgTargetFactKeys.ConfigSharedBuffers, "buffer_cache_pressure",
-            "shared_buffers at the initdb default — the cache under pressure was never sized for this host",
+            "shared_buffers at the initdb default: the cache under pressure was never sized for this host",
             facts => facts.TryGetValue(PgTargetFactKeys.ConfigSharedBuffers, out var knob) && knob.BaseSeverity > 0);
 
         /* Lane 5's wait edge into this chain (#3542 step 5): IO:DataFileRead is the wait a backend feels on a
@@ -33,7 +33,7 @@ public sealed partial class PgTargetRelationshipGraph
            scores 0 whenever a named IO standout fired (PgTargetScorer.Waits.cs — one wait is graded once), so
            the standout is the root. The predicate reads the destination's verdict; the bars are the scorer's. */
         AddEdge(PgTargetFactKeys.WaitKey("IO", "DataFileRead"), PgTargetFactKeys.BufferCachePressure, "buffer_cache_pressure",
-            "The buffer cache is measurably short for this working set — these data file reads are misses",
+            "The buffer cache is measurably short for this working set: these data file reads are misses",
             facts => facts.TryGetValue(PgTargetFactKeys.BufferCachePressure, out var pressure) && pressure.BaseSeverity > 0);
     }
 }

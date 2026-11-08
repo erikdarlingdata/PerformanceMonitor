@@ -297,7 +297,7 @@ public sealed partial class DarlingWorker
             : "PLAN_REGRESSION read did not run or was not measured";
         var slot = insideFleetSlot ? "inside this server's fleet collection slot" : "outside any fleet collection slot";
         var detail = string.Create(CultureInfo.InvariantCulture,
-            $"Scheduled analysis pass {outcome} in {DarlingCycleSkip.Format(elapsedMs)}, {findingCount} finding(s), {planRegression}, {slot}.");
+            $"Scheduled analysis pass {outcome} in {DarlingCycleSkip.Format(elapsedMs)}, {CountText.Plural(findingCount, "finding")}, {planRegression}, {slot}.");
         if (!string.IsNullOrWhiteSpace(message))
         {
             detail += " " + message;

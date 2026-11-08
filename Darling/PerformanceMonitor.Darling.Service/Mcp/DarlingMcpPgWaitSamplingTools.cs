@@ -122,7 +122,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No sampled waits for {resolved.DisplayName} in the last {hours_back} hour(s). The "
+                            factual: $"No sampled waits for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}. The "
                                 + "figures here are per-interval deltas, so a single collection has nothing to "
                                 + "difference against and the window fills on the second one",
                             coveredClaim: ". On a genuinely idle "
@@ -272,7 +272,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
                 ? Math.Round((double)returnedSamples / windowTotalSamples * 100, 1)
                 : 0,
             note = "Sample COUNTS from a periodic profiler, not measured durations. estimated_wait_ms "
-                 + "is samples multiplied by the sampling period and is approximate — most so for rare "
+                 + "is samples multiplied by the sampling period and is approximate: most so for rare "
                  + "events. event_type CPU means the backend was running rather than waiting. "
                  + "total_samples is the WHOLE window's sample count across every series, computed in the "
                  + "same statement as the rows; each row's pct_of_samples divides by it, so the shares on a "
@@ -288,7 +288,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
                        + "since the profile started. The tally behind these counts is kept in the monitoring "
                        + "store's own collector_state and reloaded every cycle, so it SURVIVES a service restart; "
                        + "a series starts over only when the tally's 500-key cap evicted it as least-sampled and "
-                       + "it was seen again, or when the target moved to the extension tier and back — and "
+                       + "it was seen again, or when the target moved to the extension tier and back, and "
                        + "counter_reset reports either the same way it reports an extension reset."
                      : string.Empty)
                  + (resetInWindow

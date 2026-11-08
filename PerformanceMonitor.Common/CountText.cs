@@ -11,7 +11,7 @@ using System.Globalization;
 namespace PerformanceMonitor.Common;
 
 /// <summary>
-/// A count with its noun, the way a person says it: "1 event", "3 events", "12 recommendations". A label that counts rows
+/// A count with its noun, the way a person says it: "1 event", "3 events", "12 recommendations", "2,000 runs". A label that counts rows
 /// uses this instead of the "N event(s)" form, so the same count reads the same on every tab.
 /// </summary>
 public static class CountText
@@ -27,5 +27,12 @@ public static class CountText
     /// otherwise, for a noun whose plural is not a plain "s": "1 index" and "3 indexes", "1 query" and "3 queries".
     /// </summary>
     public static string Plural(int count, string singular, string plural) =>
-        count == 1 ? $"1 {singular}" : $"{count.ToString(CultureInfo.InvariantCulture)} {plural}";
+        count == 1 ? $"1 {singular}" : $"{count.ToString("N0", CultureInfo.InvariantCulture)} {plural}";
+
+    /// <summary>The <see cref="Plural(int, string)"/> form for a count the store returns as a 64-bit integer.</summary>
+    public static string Plural(long count, string singular) => Plural(count, singular, singular + "s");
+
+    /// <summary>The <see cref="Plural(int, string, string)"/> form for a count the store returns as a 64-bit integer.</summary>
+    public static string Plural(long count, string singular, string plural) =>
+        count == 1 ? $"1 {singular}" : $"{count.ToString("N0", CultureInfo.InvariantCulture)} {plural}";
 }

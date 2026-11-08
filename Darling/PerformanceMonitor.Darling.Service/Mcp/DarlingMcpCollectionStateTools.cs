@@ -123,7 +123,7 @@ public sealed class DarlingMcpCollectionStateTools
                 ["storage_name"] = server.StorageName,
                 ["what_changed"] = after.Count == 0
                     ? $"{server.Name} has no excluded databases now; every database is collected."
-                    : $"{server.Name} now excludes {after.Count} database(s): {string.Join(", ", after)}.",
+                    : $"{server.Name} now excludes {CountText.Plural(after.Count, "database")}: {string.Join(", ", after)}.",
                 ["previous"] = new JsonObject { ["excluded_databases"] = Strings(server.Excluded) },
                 ["current"] = new JsonObject { ["excluded_databases"] = Strings(after) },
                 ["undo"] = Undo(tool, new JsonObject { ["server_name"] = server.StorageName, ["databases"] = Strings(server.Excluded) }),
@@ -183,7 +183,7 @@ public sealed class DarlingMcpCollectionStateTools
                 ["storage_name"] = server.StorageName,
                 ["what_changed"] = after.Count == 0
                     ? $"{server.Name} has no Extended Events session database list now; every database gets sessions (the excluded databases still do not)."
-                    : $"{server.Name} now puts Extended Events sessions only in {after.Count} database(s): {string.Join(", ", after)}.",
+                    : $"{server.Name} now puts Extended Events sessions only in {CountText.Plural(after.Count, "database")}: {string.Join(", ", after)}.",
                 ["previous"] = new JsonObject { ["xe_session_databases"] = Strings(before) },
                 ["current"] = new JsonObject { ["xe_session_databases"] = Strings(after) },
                 ["undo"] = Undo(tool, new JsonObject { ["server_name"] = server.StorageName, ["databases"] = Strings(before) }),
@@ -241,7 +241,7 @@ public sealed class DarlingMcpCollectionStateTools
                 ["config_version"] = service.ConfigVersion,
                 ["summary"] = service.Paused
                     ? "Collection is PAUSED: no new pass starts until resume_collection."
-                    : $"Collection is running. {servers.Count(s => s.Enabled)} of {servers.Count} server(s) enabled.",
+                    : $"Collection is running. {servers.Count(s => s.Enabled)} of {CountText.Plural(servers.Count, "server")} enabled.",
                 ["servers"] = new JsonArray(servers.Select(ServerJson).ToArray<JsonNode?>()),
             }.ToJsonString();
         }

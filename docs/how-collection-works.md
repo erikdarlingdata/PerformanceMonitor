@@ -158,7 +158,7 @@ Lite runs a daily collector only while it is open, one collector at a time per s
 
 A skipped day crosses the 36-hour stale line before the next slot. In both apps, the row says so in `run_time_note`. A full row always carries it (empty when no day was skipped). A partial row carries it only for a collector that has a run time. A compact row never carries it. Lite's note also says that Lite collects only while it is open.
 
-A partial row leaves out every key whose value is null, false or 0, so a missing key means one of those. Only `collector`, `status`, `partial_detail`, `total_runs` and `errors` are always there. `full_detail=true` returns every field.
+A partial row leaves out every key whose value is null, false or 0, so a missing key means one of those. Only `collector`, `status`, `partial_detail`, `total_runs` and `errors` are always there. A partial row writes its times to the whole second. `full_detail=true` returns every field, with full precision.
 
 ### Retention
 
@@ -169,6 +169,28 @@ Three independent mechanisms:
 - **Bounded deletes** for the non-hypertable tables (alert history at 90 days, terminal commands at 30 — a pending command is never purged at any age, and the force-plan bot's decision journal at 365, the longest horizon in the store because it audits writes to production servers rather than measuring them).
 
 Darling deliberately does not archive before deleting; compression is the archive.
+
+### Schema tracking
+
+Darling can keep a versioned history of the tables and views of the databases it monitors (#7643). It is the `schema_objects` collector, Darling only (Lite has no twin) and **off by default**. Enabling it creates this install's own `PerformanceMonitor_Darling_<id>_SchemaChanges` Extended Events session on the server; disabling it drops the session. A pass runs every 15 minutes by default (the collector's schedule; `set_collector_frequency` changes it), and `run_collectors_now` runs one at once. The history lives in the store's `schema_*` tables and is read through `get_object_definition`, `get_schema_changes` and `find_schema_objects`. Names, types and structure are returned at every `mcp.dataDetail` level; the expression texts (check, computed, default and filter definitions, and a view's text) are masked below `full`, and `find_schema_objects`' `definition_contains` needs `full`.
+
+How a pass works, in the order it happens:
+
+1. **Baseline.** The first pass over a database reads every user table and view (columns, indexes, constraints, triggers) and stores each as version 1, `change_kind = baseline`. A system database, a tool database in the identity-capacity skip list and a database outside the collector's database scope are not read.
+2. **Events.** The session records committed DDL (`object_created`, `object_altered`, `object_deleted`, and the end of `sp_rename`, `sp_refreshview` and `sp_refreshsqlmodule`). Each later pass reads the new events and re-reads only the tables and views they name; an index event names its table, and DDL that names an object in three parts from another database is filed under the object's own database. A re-read that finds no difference in the canonical definition writes nothing, so a no-op `ALTER` leaves no version. Each version carries the login, application and host that the event named; the session records no statement text.
+3. **Full reads.** Some events and every gap have the pass read the whole database and write only the differences, labelled `reconcile`. The pass log's `reason` says which: `session_started` (the session runs where no earlier pass had one, or a first pass stopped before it stored its position), `session_restarted` (a later create time, a counter that went back, or a reused event number), `events_lost` (a hole in the event sequence, events the full buffer pushed out, events the session itself dropped, or a cut XML read), `restored` (the database's `recovery_fork_guid` moved), `became_primary`, `returned_to_scope` (a database that a pass did not finish or did not see), `schema_transfer`, `renamed`, `module_refreshed` (a view refresh), `trigger_changed` and `run_now`. A database that joins or leaves an Availability Group starts the history of its new key with a baseline (`history_key_changed`). There is no periodic full re-read: with no gap and no event, a pass reads nothing and the pass log says so.
+4. **Drops.** An object is recorded as `dropped` only after a complete read. A read that hit the cap of 10,000 objects per database, that was denied `VIEW ANY DEFINITION`, or that was interrupted is marked incomplete and drops nothing. The permission check is per database (`HAS_PERMS_BY_NAME` on `VIEW DEFINITION` for the database): a `DENY VIEW DEFINITION` on one schema or object hides those rows from a read that still counts as complete, so their objects are recorded as dropped. No cheap exact check exists, so do not deny it to the monitoring login below the database level.
+
+Each pass writes one row per database to `collect.schema_capture_passes` (what was read and written, whether it was complete, and a note), so "nothing changed" and "nothing was read" are different stored answers.
+
+Limits worth knowing:
+
+- The pass runs detached from the server's other collectors, as `query_store` does, so a long baseline or full read does not hold up the one-minute collectors. A pass that is still going when the next one comes due skips that tick, and the next pass reads the events from where the last one stopped.
+- Only writable databases are tracked: a standalone database, an Availability Group primary or an Azure SQL Database. Secondaries, standby, restoring, read-only and snapshot databases are skipped. An Availability Group database keeps one history under the group, not one per replica.
+- Whether a check or foreign key constraint is trusted (`is_not_trusted`) is stored and shown with each version but is not part of the definition a version is told apart by: a `BULK INSERT` or bcp run without `CHECK_CONSTRAINTS` changes it with no DDL. So a change of that flag alone, an `ALTER TABLE ... WITH CHECK CHECK CONSTRAINT` included, writes no new version.
+- Trigger DDL reconciles its database, because the event names the trigger and not the table it belongs to. A rename reconciles its database too, so the old name is closed and the new one opened in one pass.
+- The Azure SQL Database path (one session and one history per database) is covered by fakes only and has not been run against a real Azure instance.
+- Closed versions are kept 30 days (the collector's retention). A current version stays while a pass still sees its database. When no pass has seen a database for the whole retention window (it was dropped or renamed, its server was removed, or it left the collector's scope), its whole history is removed, current versions too, with its state rows. A database that joins or leaves an Availability Group starts a new history under its new key with a baseline. The pass closes the old key's current versions at that time, so the old history is kept for the retention window and then ages out like any closed version. A group's history that another server of the group still writes is left open. See [Retention](#retention).
 
 ---
 

@@ -1,0 +1,277 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "performancemonitor-darling.fullname" . }}
+  labels:
+    {{- include "performancemonitor-darling.labels" . | nindent 4 }}
+  {{- with .Values.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  # One service per credentials volume, and never two at once: the start's check of the credentials directory is not
+  # locked across processes, so a second pod starting beside the first could read planted files between the first one's
+  # chmod and its removal (docs/darling/security.md, and the compose file's comment on the darling-credentials volume).
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "performancemonitor-darling.selectorLabels" . | nindent 6 }}
+  {{- $secretKeys := include "performancemonitor-darling.referencedSecretKeys" . | fromJsonArray }}
+  template:
+    metadata:
+      labels:
+        {{- include "performancemonitor-darling.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654
+        runAsGroup: 1654
+        fsGroup: 1654
+        # OnRootMismatch: the kubelet changes ownership only when the volume root does not match. A recursive change on
+        # every mount would open credentials/ to the group, and the service then rotates its keys at each start.
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: render-config
+          image: {{ include "performancemonitor-darling.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "/scripts/render-config.sh", "/scripts/darling.json", "/config/darling.json"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          # Fixed and small (it copies one file), so a namespace with a ResourceQuota accepts the pod.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+          {{- with .Values.configSubstitutions }}
+          env:
+            {{- range $i, $s := . }}
+            - name: DARLING_SUBST_{{ $i }}_PLACEHOLDER
+              value: {{ $s.placeholder | quote }}
+            - name: DARLING_SUBST_{{ $i }}_VALUE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "performancemonitor-darling.secretName" $ }}
+                  key: {{ $s.secretKey | quote }}
+            {{- end }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: config-template
+              mountPath: /scripts
+              readOnly: true
+      containers:
+        - name: darling
+          image: {{ include "performancemonitor-darling.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          # Named ports. The probes use `health` and never the web or MCP port: #8141's ownership stop (a state volume
+          # the non-root user cannot write) keeps those surfaces down on purpose, so a probe on them would restart the
+          # pod into a loop. Port 5154 is fixed and has no Service: the kubelet probes the pod IP.
+          ports:
+            {{- if .Values.web.enabled }}
+            - name: web
+              containerPort: {{ int .Values.web.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.mcp.enabled }}
+            - name: mcp
+              containerPort: {{ int .Values.mcp.port }}
+              protocol: TCP
+            {{- end }}
+            - name: health
+              containerPort: 5154
+              protocol: TCP
+          # Readiness follows the collector (a degraded or stopped collector is not Ready, by design). /livez answers
+          # in every phase including stopped, so liveness only catches a hung process. There is no /startupz: a startup
+          # probe that waited on a verdict would kill a long schema migration.
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: health
+            periodSeconds: 10
+            failureThreshold: 30
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: health
+            periodSeconds: 20
+            failureThreshold: 3
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+          env:
+            - name: DARLING_CONFIG
+              value: /config/darling.json
+            - name: DARLING_STOPPED_MARKER
+              value: /tmp/darling-stopped
+            {{- with include "performancemonitor-darling.pgPasswordRef" . }}
+            {{- $ref := splitList "|" . }}
+            # The store password stays out of the connection string: Npgsql reads it from PGPASSWORD.
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ index $ref 0 | quote }}
+                  key: {{ index $ref 1 | quote }}
+            {{- end }}
+            {{- if and .Values.passwordKey.existingSecret (eq .Values.passwordKey.source "env") }}
+            - name: DARLING_PASSWORD_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.passwordKey.existingSecret | quote }}
+                  key: {{ .Values.passwordKey.secretKey | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/darling
+            - name: config
+              mountPath: /config
+            - name: app-share
+              mountPath: /usr/share/PerformanceMonitorDarling
+            - name: tmp
+              mountPath: /tmp
+            {{- if $secretKeys }}
+            - name: secrets
+              mountPath: /run/secrets/darling
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.passwordKey.existingSecret (eq .Values.passwordKey.source "file") }}
+            - name: password-key
+              mountPath: /run/secrets/darling-password-key
+              readOnly: true
+            {{- end }}
+            {{- if and (eq .Values.store.mode "external") .Values.store.external.connectionStringSecret.name }}
+            - name: store-connection
+              mountPath: /run/secrets/darling-store
+              readOnly: true
+            {{- end }}
+            {{- if and (eq .Values.store.mode "external") .Values.store.external.caSecret.name }}
+            - name: store-ca
+              mountPath: /etc/darling/store-ca
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: {{ include "performancemonitor-darling.claimName" . }}
+        - name: config
+          emptyDir:
+            sizeLimit: 1Mi
+        - name: app-share
+          emptyDir:
+            sizeLimit: 512Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: config-template
+          configMap:
+            name: {{ include "performancemonitor-darling.fullname" . }}
+        {{- /* Only the keys darling.json references (file:/run/secrets/darling/<key>): a key that only configSubstitutions
+        uses reaches the init container through env and is never a file here, so no server can name it as a password. */}}
+        {{- if $secretKeys }}
+        - name: secrets
+          secret:
+            secretName: {{ include "performancemonitor-darling.secretName" . }}
+            defaultMode: 288
+            items:
+              {{- range $secretKeys }}
+              - key: {{ . | quote }}
+                path: {{ . | quote }}
+              {{- end }}
+        {{- end }}
+        {{- if and .Values.passwordKey.existingSecret (eq .Values.passwordKey.source "file") }}
+        - name: password-key
+          secret:
+            secretName: {{ .Values.passwordKey.existingSecret | quote }}
+            defaultMode: 288
+            items:
+              - key: {{ .Values.passwordKey.secretKey | quote }}
+                path: {{ .Values.passwordKey.secretKey | quote }}
+        {{- end }}
+        {{- if and (eq .Values.store.mode "external") .Values.store.external.connectionStringSecret.name }}
+        - name: store-connection
+          secret:
+            secretName: {{ .Values.store.external.connectionStringSecret.name | quote }}
+            defaultMode: 288
+            items:
+              - key: {{ .Values.store.external.connectionStringSecret.key | quote }}
+                path: {{ .Values.store.external.connectionStringSecret.key | quote }}
+        {{- end }}
+        {{- if and (eq .Values.store.mode "external") .Values.store.external.caSecret.name }}
+        - name: store-ca
+          secret:
+            secretName: {{ .Values.store.external.caSecret.name | quote }}
+            defaultMode: 288
+            items:
+              - key: {{ .Values.store.external.caSecret.key | quote }}
+                path: ca.crt
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

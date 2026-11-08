@@ -199,8 +199,11 @@ Then restore the credentials volume from its backup and start the service. The s
 
 ```
 docker run --rm -v performancemonitor-darling_darling-credentials:/data -v "$PWD":/backup alpine tar xzf /backup/darling-credentials.tgz -C /data
+docker run --rm --user 0 --entrypoint chown -v performancemonitor-darling_darling-credentials:/var/lib/darling/credentials ghcr.io/erikdarlingdata/performancemonitor-darling:latest -R 1654:1654 /var/lib/darling/credentials
 docker compose up -d
 ```
+
+The service runs as user 1654, so the `chown` is needed: a backup taken before the upgrade restores root-owned.
 
 The store container runs PostgreSQL 17 (`timescale/timescaledb:latest-pg17`). Do not restore a dump from a newer major version into it.
 
@@ -243,7 +246,7 @@ A purge runs on the first sweep after the service starts, and then once a day. W
 |---|---|
 | 7 | `query_snapshots`, `waiting_tasks`, `running_jobs`, `agent_status` |
 | 14 | `pg_plan_capture` |
-| 30 | Every other collector, 53 in all. Examples are `wait_stats`, `query_stats`, `query_store`, `cpu_utilization`, `deadlocks`, `pg_wait_stats` and `pg_log_events` |
+| 30 | Every other collector, 54 in all. Examples are `wait_stats`, `query_stats`, `query_store`, `cpu_utilization`, `deadlocks`, `pg_wait_stats` and `pg_log_events` |
 | 90 | `database_size_stats`, `index_object_stats`, `database_protection`, `identity_capacity`, `pvs_stats`, `pg_wraparound_stats`, `pg_deadlocks`, `pg_replication_slots`, `pg_autovacuum_stats`, `pg_index_usage_stats`, `pg_table_bloat_stats`, `pg_index_bloat` |
 | 365 | `server_properties`, `job_history`, `pg_server_config`, `pg_plan_capture_readiness`, `pg_extension_availability`, `pg_column_stats`, `pg_database_size_stats` |
 
@@ -253,7 +256,7 @@ Some data follows its own horizon, not a collector's.
 |---|---|
 | Raw `query_stats`, `procedure_stats` and `query_store_stats`, with TimescaleDB | 4, then the hourly and daily rollups hold the history |
 | Query Store interval tables `collect.query_store_interval_wide` and `collect.query_store_interval_latest` | 10 and 15 |
-| `analysis_findings` and finished rows of `config.config_command` | 30 |
+| `analysis_findings`, finished rows of `config.config_command`, and closed versions in `collect.schema_objects` (a current version stays while a pass still sees its database) | 30 |
 | `collection_log` | 60 |
 | Hourly history rollups, and `config_alert_log` | 90 |
 | `collect.plan_force_actions` | 365 |

@@ -203,6 +203,8 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "GET \"/api/investigation-export\""] = null, // #6236: admitted like the other heavy reads; up to 2000 cases, read a page at a time
         [WebFile + "GET \"/api/catalog\""] = null, // round 2, L5: it reads the schedule overrides and resolves ?server=
         [WebFile + "GET \"/api/ping\""] = "health: answers without reading the store (D8)",
+        ["Hosting/DarlingHealthHostService.cs: GET \"/livez\""] = "health port (#8184): one word from the in-process startup state, no store read",
+        ["Hosting/DarlingHealthHostService.cs: GET \"/readyz\""] = "health port (#8184): one word from the in-process startup state, no store read",
         [WebFile + "GET \"/api/webhook-signing\""] = "status: answers from what the worker read when it applied the configuration, no store read (#5998)",
         [WebFile + "GET \"/api/ag/count\""] = "the nav-gate probe: one aggregate count over the AG topology, light by construction (#4189)",
         [WebFile + "GET \"/api/session\""] = "the seat's capability probe: reads no store",

@@ -114,7 +114,7 @@ public sealed class ChartAxisStartTests
                     new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
                     new DarlingServer(1, "axis-start-test", "axis-start-test", true, null));
                 var window = new Window { Content = tab, Width = 1800, Height = 1000 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     tab.ServerDataStartUtc = dataStart;

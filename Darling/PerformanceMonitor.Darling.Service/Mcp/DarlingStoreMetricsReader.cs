@@ -1604,7 +1604,7 @@ LIMIT $1";
             {
                 return $"toast_utilisation_pct is not measured: the {DarlingMcpStoreMetricsTools.Gib(file)} TOAST file size is real, but the live "
                     + $"bytes inside it need the {StoreSelfMetrics.FreespacemapExtensionName} extension, which the bundled store image "
-                    + "ships and does not install — installing it is the maintainer's call (CREATE EXTENSION IF NOT EXISTS "
+                    + "ships and does not install, installing it is the maintainer's call (CREATE EXTENSION IF NOT EXISTS "
                     + $"{StoreSelfMetrics.FreespacemapExtensionName} on the store; the next hourly sweep then fills toast_live_bytes and "
                     + "this reads as a percentage, and the slack self-alert arms itself). Nothing here is computed from "
                     + "total_bytes or from a tuple share: after a VACUUM the dead tuples are gone and the file keeps its "

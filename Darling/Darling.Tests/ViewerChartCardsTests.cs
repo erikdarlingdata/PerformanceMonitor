@@ -69,7 +69,7 @@ public sealed class ViewerChartCardsTests
                     new DarlingServer(1, "chart-cards-test", "chart-cards-test", true, null));
                 typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     // The overview's correlated lanes (CorrelatedTimelineLanesControl) are one stack of lane plots that share an axis, named by
@@ -118,7 +118,7 @@ public sealed class ViewerChartCardsTests
             {
                 var tab = new FinOpsTab();
                 var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var charts = ChartLayoutProbe.Logical<WpfPlot>(tab).ToList();
@@ -149,7 +149,7 @@ public sealed class ViewerChartCardsTests
                 host.Children.Add(card);
                 ViewerChartCards.Attach(host);
                 var window = new Window { Content = host, Width = 600, Height = 400, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     ChartLayoutProbe.Layout(window);
@@ -184,7 +184,7 @@ public sealed class ViewerChartCardsTests
                     new DarlingServer(1, "chart-cards-test", "chart-cards-test", true, null));
                 typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var t0 = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -224,7 +224,7 @@ public sealed class ViewerChartCardsTests
                     new DarlingServer(1, "chart-cards-test", "chart-cards-test", true, null));
                 typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
                 var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var t0 = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -253,6 +253,43 @@ public sealed class ViewerChartCardsTests
     /// A unit is short (twelve characters at most, the length ChartAxisTitle treats as a unit) and has no spaces ("ms", "MB", "GB", "%", "count", "ms/sec", "reports/min"); a name or a name with its unit
     /// ("Lock wait ms/sec", "Memory (GB)") has spaces or is long. The label is read from the plot's left axis after the render methods ran.
     /// </summary>
+    /// <summary>#8226: the chart cards' titles are in one case in both apps: title case, the case most of the two apps' titles already had.</summary>
+    [Fact]
+    public void EveryChartCardTitle_OnTheServerTab_IsInTitleCase() =>
+        StaTestThread.Run(() =>
+        {
+            var problems = new List<string>();
+            WithTheme(() =>
+            {
+                var tab = new ViewerServerTab(
+                    new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
+                    new DarlingServer(1, "chart-cards-test", "chart-cards-test", true, null));
+                typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
+                var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
+                StaTestThread.ShowOffScreen(window);
+                try
+                {
+                    var cards = ChartLayoutProbe.Logical<ChartPanel>(tab).ToList();
+                    Assert.NotEmpty(cards);
+                    problems.AddRange(cards.Select(c => c.Title).Where(t => !IsTitleCase(t)).Select(t => $"'{t}' is not in title case"));
+                }
+                finally
+                {
+                    window.Close();
+                }
+            });
+
+            Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+        });
+
+    /// <summary>
+    /// Title case as the chart cards use it: every word of four or more letters starts with a capital, "tempdb" excepted since
+    /// that is the database's name. Short words (and, by, of, vs), acronyms and units are free.
+    /// </summary>
+    internal static bool IsTitleCase(string title) =>
+        title.Split(new[] { ' ', '-', '/' }, StringSplitOptions.RemoveEmptyEntries)
+            .All(word => word.Length < 4 || word == "tempdb" || !char.IsLetter(word[0]) || char.IsUpper(word[0]));
+
     private static List<string> Check(WpfPlot chart)
     {
         var found = new List<string>();

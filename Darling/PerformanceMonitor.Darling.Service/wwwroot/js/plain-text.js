@@ -33,7 +33,7 @@ export const MCP_TOOL_NAMES = [
   "get_health_parser_severe_errors", "get_health_parser_significant_waits", "get_health_parser_system_health",
   "get_identity_capacity", "get_index_usage", "get_investigation_evidence", "get_investigation_reports", "get_job_history", "get_latch_stats", "get_load_by_caller", "get_lock_wait_trend", "get_long_query_completions",
   "get_memory_clerks", "get_memory_grants", "get_memory_pressure_events", "get_memory_stats", "get_memory_trend",
-  "get_mute_rules", "get_notification_routes", "get_object_locking", "get_oversized_plan_backlog", "get_people",
+  "get_mute_rules", "get_notification_routes", "get_object_definition", "get_object_locking", "get_oversized_plan_backlog", "get_people",
   "get_perfmon_stats", "get_perfmon_trend", "get_pg_autovacuum_health", "get_pg_blocking", "get_pg_buffer_usage",
   "get_pg_column_stats", "get_pg_cpu_utilization", "get_pg_database_stats", "get_pg_database_trend",
   "get_pg_deadlock_detail", "get_pg_deadlocks", "get_pg_extensions", "get_pg_index_bloat", "get_pg_index_usage",
@@ -47,7 +47,7 @@ export const MCP_TOOL_NAMES = [
   "get_query_fleet_summary", "get_query_heatmap", "get_query_pileups", "get_query_repro_script", "get_query_store_aborts", "get_query_store_clutter", "get_query_store_duration_trend",
   "get_query_store_health", "get_query_store_plan_xml", "get_query_store_query_history",
   "get_query_store_regressions", "get_query_store_top", "get_query_trend", "get_read_latency",
-  "get_resource_semaphore", "get_resource_use_by_tag", "get_running_jobs", "get_server_actions", "get_server_config", "get_server_config_changes", "get_server_settings",
+  "get_resource_semaphore", "get_schema_changes", "get_resource_use_by_tag", "get_running_jobs", "get_server_actions", "get_server_config", "get_server_config_changes", "get_server_settings",
   "get_server_properties", "get_server_summary", "get_server_trend", "get_session_stats", "get_slow_reads",
   "get_spinlock_stats", "get_store_host", "get_store_log", "get_store_metrics", "get_store_query_history",
   "get_store_query_stats", "get_sweep_reports", "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide",
@@ -66,7 +66,7 @@ export const MCP_ACTION_TOOL_NAMES = [
   "create_notification_route", "create_query_tag", "create_query_tag_rule", "create_server_tag", "delete_custom_alert_rule",
   "delete_custom_view", "delete_known_pattern", "delete_mute_rule", "delete_notification_route", "delete_query_tag", "delete_query_tag_rule",
   "delete_server_tag", "describe_custom_view_catalog", "disable_collector", "disable_server", "dismiss_alert_history", "edit_server",
-  "enable_collector", "enable_server", "evict_cached_plan", "find_database", "find_queries_by_text", "force_query_store_plan", "generate_webhook_signing_key", "kill_session",
+  "enable_collector", "enable_server", "evict_cached_plan", "find_database", "find_queries_by_text", "find_schema_objects", "force_query_store_plan", "generate_webhook_signing_key", "kill_session",
   "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "list_investigation_requests", "list_query_tag_rules",
   "list_query_tags", "list_servers", "merge_deadlock_signatures", "mute_analysis_finding", "pause_collection", "purge_expired_mute_rules", "purge_now",
   "create_plan_guide", "drop_plan_guide", "recompile_module",
@@ -201,7 +201,7 @@ function namedTokenText(text) {
   let t = text;
 
   /* A pointer into the MCP answer's own `hints`, which the page never shows. */
-  t = t.replace(/\s*[—–-]+\s*see hints\.captures for which collectors ran and when/g, "");
+  t = t.replace(/\s*[:—–-]+\s*see hints\.captures for which collectors ran and when/g, "");
 
   /* The health sentence's denial flag, said in words. The "true" form carries its own explanation after the dash. */
   t = t.replace(/, and denied_since_last_success is true - the newest denial postdates the newest success,/g, ", and the newest denial is newer than the newest success,");
@@ -439,7 +439,7 @@ export function plainText(text) {
 
   /* "raise limit": the pages have no row-limit control. "...filter - raise limit to see more." and "...returned; raise limit
      (now 50) for more." lose the clause; ", or raise limit," and ", and raise limit if none ... shows one" lose theirs. */
-  t = t.replace(/\s*[;—–-]+\s*raise (?:the )?limit(?: \(now [\d,]+\))?(?: (?:to see|for) (?:more|the rest(?: of the rows)?))?(?=\.)/g, "");
+  t = t.replace(/\s*[;:—–-]+\s*raise (?:the )?limit(?: \(now [\d,]+\))?(?: (?:to see|for) (?:more|the rest(?: of the rows)?))?(?=\.)/g, "");
   t = t.replace(/Scope by server_name(?:, or raise limit,)? (to see the rest|to see them)\./g, "Select a single server $1.");
   t = t.replace(/, or raise (?:the )?limit(?=[.,])/g, "");
   t = t.replace(/, and raise limit if none of the databases returned shows one/g, "");
@@ -478,12 +478,12 @@ export function plainText(text) {
   t = t.replace(/dropped at collection by IgnoredWaitDefaults on both SKUs, and dropped again here by name if a row ever carried one/g, "dropped when they are collected, and dropped again here if one ever slipped through");
   /* #7690: the Extensions note and the Wait Trend empty text name a field and a tier of the read. The page names the panel and the sampler. */
   t = t.replace(/Per DATABASE, not per cluster: installed_version describes the database the row names\./g, "Each row describes one database, not the whole server: the installed version is the one in that database.");
-  t = t.replace(/\s[—–-]\s+read install_census for what is installed where, because it is aggregated per extension and no limit touches it/g, ". The Extension Install Census shows what is installed where, because it counts every extension and no limit touches it");
+  t = t.replace(/(?:\s[—–-]\s+|:\s+)read install_census for what is installed where, because it is aggregated per extension and no limit touches it/g, ". The Extension Install Census shows what is installed where, because it counts every extension and no limit touches it");
   t = t.replace(/\binstall_census\b/g, "the Extension Install Census");
   t = t.replace(/\bthe service_sampled tier\b/g, "the service sampler");
   t = t.replace(/\bservice_sampled\b/g, "service sampler");
   /* #7690: the Index Bloat note sets its pointer to the exact-measurement command off with a dash; the page says it as its own sentence. */
-  t = t.replace(/\s[—–-]\s+use (?:exact_measurement_command|the Measure It Exactly column) for that/g, ". Use the Measure It Exactly column for that");
+  t = t.replace(/(?:\s[—–-]\s+|:\s+)use (?:exact_measurement_command|the Measure It Exactly column) for that/g, ". Use the Measure It Exactly column for that");
   /* #7410: the Query Heatmap's empty text. */
   t = t.replace(/\bdatabase_name filter\b/g, "database filter");
   t = t.replace(/\ba SECOND cycle\b/g, "a second collection");

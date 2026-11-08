@@ -747,6 +747,16 @@ ALTER TABLE IF EXISTS config.investigation_requests DROP COLUMN IF EXISTS chat_t
         // fallback view, so the rewind drops whichever shape stands (the product's own discriminating drop), and a re-run of V255 or the
         // ensure sweep creates it again. Safe on a store that never had it.
         new(255, "hasWaitStatsCadenceBaseline", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.WaitStatsCadenceBaselineView)),
+        // V256 (#7643): the schema tracking tables. The probe's sentinel is the object table, so the rewind drops all seven (the four child tables
+        // reference it, so they go first) and a re-run of V256 makes them again. Safe on a store that never had them.
+        new(256, "hasSchemaTracking",
+            @"DROP TABLE IF EXISTS collect.schema_triggers;
+DROP TABLE IF EXISTS collect.schema_constraints;
+DROP TABLE IF EXISTS collect.schema_indexes;
+DROP TABLE IF EXISTS collect.schema_columns;
+DROP TABLE IF EXISTS collect.schema_objects;
+DROP TABLE IF EXISTS collect.schema_capture_state;
+DROP TABLE IF EXISTS collect.schema_capture_passes;"),
     ];
 
     /// <summary>

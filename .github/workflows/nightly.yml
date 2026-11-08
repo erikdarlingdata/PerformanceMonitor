@@ -1605,6 +1605,15 @@ jobs:
     if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
     uses: ./.github/workflows/darling-linux-store.yml
 
+  # #8017: the Darling Helm chart (darling-helm.yml, the same workflow a pull request touching the chart runs): lint, render
+  # and schema checks, then installs of both store modes on a kind cluster. Gated like the other jobs here and NOT in
+  # publish's needs, for the same reason as the web UI smoke above.
+  darling-helm:
+    name: Darling Helm chart
+    needs: check
+    if: (needs.check.outputs.has_changes == 'true' || inputs.from_schedule != true) && inputs.map_only != true
+    uses: ./.github/workflows/darling-helm.yml
+
   # #5745: the WPF smoke check (wpf-smoke.yml, the same workflow a pull request touching Lite runs): the real Lite exe on a
   # seeded data folder, walked with FlaUI. Gated like the other jobs here and NOT in publish's needs, for the same reason
   # as the web UI smoke above. Its screenshots are the run's `wpf-smoke` artifact.

@@ -179,7 +179,7 @@ public class AnalysisService
     /// does not persist — see <see cref="AnalysisContext.PersistFindings"/>.</param>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1068:CancellationToken parameters must come last",
         Justification = "The token is at position 4 and the scheduler passes it POSITIONALLY. Moving asOfUtc ahead " +
-                        "of it to satisfy the rule would silently rebind that call site's arguments — a compiling " +
+                        "of it to satisfy the rule would silently rebind that call site's arguments: a compiling " +
                         "change of meaning on the one caller that matters. Appending is the only edit that cannot " +
                         "do that, and the Darling twin keeps the same order so the two stay transplantable.")]
     public async Task<List<AnalysisFinding>> AnalyzeAsync(
@@ -340,7 +340,7 @@ public class AnalysisService
                 AppLogger.Warn("AnalysisService",
                     $"No observed collection in the analysis window for {context.ServerName} " +
                     $"({context.TimeRangeStart:o} to {context.TimeRangeEnd:o}) " +
-                    $"despite {dataSpanHours:F1}h of total history — collection may be down ({facts.Count} point-in-time fact(s) only)");
+                    $"despite {dataSpanHours:F1}h of total history: collection may be down ({facts.Count} point-in-time fact(s) only)");
 
                 LastAnalysisTime = DateTime.UtcNow;
                 return [];
@@ -373,7 +373,7 @@ public class AnalysisService
                 AppLogger.Info("AnalysisService",
                     $"The collector observed the analysis window for {context.ServerName} " +
                     $"({context.TimeRangeStart:o} to {context.TimeRangeEnd:o}) " +
-                    $"but emitted no fact over it — {context.Coverage!.Describe()}; nothing rose to a fact, and an all-clear from this pass rests on that coverage");
+                    $"but emitted no fact over it: {context.Coverage!.Describe()}; nothing rose to a fact, and an all-clear from this pass rests on that coverage");
             }
 
             if (context.Coverage is { IsPartial: true } partial)
@@ -381,7 +381,7 @@ public class AnalysisService
                 /* Logged, not just carried: a scheduled pass has no payload to put the caveat in, and
                    the persisted findings from this pass were rated against the observed hours. */
                 AppLogger.Warn("AnalysisService",
-                    $"Partial collection coverage for {context.ServerName}: {partial.Describe()} — " +
+                    $"Partial collection coverage for {context.ServerName}: {partial.Describe()}, " +
                     "rates in this pass are per observed time, and the COLLECTION_GAP fact records the hole");
             }
 
@@ -505,7 +505,7 @@ public class AnalysisService
             AppLogger.Info("AnalysisService",
                 $"Analysis complete for {context.ServerName}: {findings.Count} finding(s), " +
                 $"highest severity {(findings.Count > 0 ? findings.Max(f => f.Severity) : 0):F2}" +
-                (context.PersistFindings ? string.Empty : " (anchored window — exploratory, not persisted)"));
+                (context.PersistFindings ? string.Empty : " (anchored window, exploratory, not persisted)"));
 
             _passFailures.Succeeded(context.ServerId);
             return findings;
@@ -529,7 +529,7 @@ public class AnalysisService
                AnalysisShutdown.IsExpectedAbandon discipline — signalled token AND a shape the
                cancellation really produces — narrowed to the one shape that arises here. */
             AppLogger.Info("AnalysisService",
-                $"Analysis abandoned for {context.ServerName} — this pass's findings are lost by design; the next pass recomputes them ({ex.Message})");
+                $"Analysis abandoned for {context.ServerName}: this pass's findings are lost by design; the next pass recomputes them ({ex.Message})");
             return [];
         }
         catch (Exception ex)
@@ -1053,7 +1053,7 @@ ORDER BY event_time";
             AppLogger.Info("AnalysisService",
                 $"Configuration change attributed for {context.ServerName} ({latest.Families}): {string.Join(ConfigChangeAttribution.SettingSeparator, latest.Changes.Select(c => c.Name))} " +
                 $"{(anchor is null ? "first observed at" : "changed at")} {anchorTime:u} ({(anchor is null ? "configuration snapshot" : "default trace, msg 15457")}), " +
-                $"compare over ±{ConfigChangeAttribution.CompareWindowHours} h ({windows.AfterHoursObserved:0.#} h after so far) — " +
+                $"compare over ±{ConfigChangeAttribution.CompareWindowHours} h ({windows.AfterHoursObserved:0.#} h after so far), " +
                 $"{worse} worse, {better} better{(notYetComparable > 0 ? $", {notYetComparable} not yet comparable" : string.Empty)}, {compare?.Stable ?? 0} stable{(compare is null ? " (compare unavailable this pass)" : string.Empty)}");
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))

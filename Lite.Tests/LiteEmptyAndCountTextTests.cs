@@ -220,6 +220,8 @@ public sealed class LiteEmptyAndCountTextTests
                         var label = Find<TextBlock>(tab, name);
                         label.Text = name == "IndexAnalysisStatusText" ? "4 indexes found" : "3 databases";
                         Reveal(label);
+                        /* Optimization scrolls as one page, so a count in a lower card is brought into view before it is measured. */
+                        label.BringIntoView();
                         Settle(window);
                         found.AddRange(Muted(label, tab, muted, $"{at}: {name}"));
                     }
@@ -435,7 +437,7 @@ public sealed class LiteEmptyAndCountTextTests
     private static Window Open(FrameworkElement content, int width, int height)
     {
         var window = new Window { Content = content, Width = width, Height = height, Left = 0, Top = 0, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         Settle(window);
         return window;
     }

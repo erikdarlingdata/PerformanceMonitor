@@ -128,20 +128,20 @@ public sealed partial class DarlingMcpServerAdminTools
         "duplicate does not stop the rest. Returns requested/added/skipped/collided/failed counts that sum to " +
         "requested; only added servers are monitored, so check skipped/collided/failed before calling a batch " +
         "done. A password or client secret is encrypted at rest and never returned. <<GUIDE>> " +
-        "Adds one or more database servers to the fleet the Darling service monitors — BULK onboarding: pass a JSON " +
+        "Adds one or more database servers to the fleet the Darling service monitors, BULK onboarding: pass a JSON " +
         "ARRAY of server objects and each is validated, connection-tested, and (if new and reachable) saved to the " +
         "central monitoring store, which the running service picks up within one collection sweep (no restart). " +
-        "Each object: host (REQUIRED); display_name (optional, defaults to host); database (optional — set it only " +
+        "Each object: host (REQUIRED); display_name (optional, defaults to host); database (optional, set it only " +
         "to monitor a single database, e.g. one Azure SQL Database); engine (\"sqlserver\" default, or \"postgres\" " +
         "for PostgreSQL / Amazon Aurora PostgreSQL); auth (\"Windows\" for integrated security, \"SQL\" for a SQL " +
         "login, or the non-interactive Microsoft Entra modes \"ServicePrincipal\" (Entra app/client id + secret) " +
-        "and \"ManagedIdentity\" for Entra-authenticated Azure SQL — default \"Windows\"; a PostgreSQL target " +
-        "REQUIRES \"SQL\"); username + password (REQUIRED for \"SQL\" auth — and for \"ServicePrincipal\", where " +
+        "and \"ManagedIdentity\" for Entra-authenticated Azure SQL, default \"Windows\"; a PostgreSQL target " +
+        "REQUIRES \"SQL\"); username + password (REQUIRED for \"SQL\" auth, and for \"ServicePrincipal\", where " +
         "username is the application/client id and password is the client secret; for \"ManagedIdentity\" both are " +
-        "optional — set username to a user-assigned identity's client id, omit it for system-assigned; ignored for " +
-        "\"Windows\"); port (optional, PostgreSQL only — omit for 5432); " +
+        "optional, set username to a user-assigned identity's client id, omit it for system-assigned; ignored for " +
+        "\"Windows\"); port (optional, PostgreSQL only, omit for 5432); " +
         "encrypt_mode (\"Optional\"|\"Mandatory\"|\"Strict\", default \"Mandatory\"); " +
-        "trust_server_certificate (bool, default false — set true to accept a self-signed server cert, and " +
+        "trust_server_certificate (bool, default false, set true to accept a self-signed server cert, and " +
         "typically REQUIRED for Aurora, which presents an RDS CA a stock trust store does not know); " +
         "read_only_intent (bool, default false); multi_subnet_failover (bool, default false); aws_role_arn (optional, " +
         "PostgreSQL on Amazon RDS or Aurora only: the IAM role ARN to assume, such as " +
@@ -154,11 +154,11 @@ public sealed partial class DarlingMcpServerAdminTools
         "status \"connection_failed\" and does NOT stop the rest of the batch. If saving an entry fails, that entry " +
         "and every entry after it are reported as \"not_saved\" without being tested, and the entries before it stay " +
         "added. The INTERACTIVE Microsoft Entra modes " +
-        "(MFA / device-code / default-credential) are rejected (status \"invalid\") — they need a broker or a " +
+        "(MFA / device-code / default-credential) are rejected (status \"invalid\"): they need a broker or a " +
         "signed-in user and cannot run headless; ServicePrincipal and ManagedIdentity are non-interactive and are " +
         "supported. A server whose probed connection lands in a database that ANOTHER monitored server already " +
         "covers (it names one database but connects to a different one, e.g. a wrong Initial Catalog) is refused as " +
-        "status \"collides\" — adding it would store one database's history under two identities and alert twice. " +
+        "status \"collides\": adding it would store one database's history under two identities and alert twice. " +
         "So is a server whose id is already held by a different server (two identities that hash to one id). " +
         "A new database or read_only_intent on a machine (engine, host and port) another registration already holds is added as usual, " +
         "unless a route with an agent setting is scoped to that registration (its id, one of its tags or a tag above one; a route with no scope does not count) " +
@@ -169,10 +169,10 @@ public sealed partial class DarlingMcpServerAdminTools
         "rejected as \"invalid\", because references are set in the configuration file. " +
         "Returns {requested:N, added:N, skipped:N, collided:N, failed:N, results:[{server, " +
         "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"not_saved\"|\"invalid\", detail, undo}]}. An added entry's undo is the remove_server call for it; every other entry has undo null. requested is " +
-        "the number of entries you sent and the four counters SUM to it — every entry lands in exactly one: " +
+        "the number of entries you sent and the four counters SUM to it, every entry lands in exactly one: " +
         "\"added\" → added, \"duplicate\" → skipped, \"collides\" → collided, \"connection_failed\", " +
         "\"not_saved\" and \"invalid\" → failed. Only added servers are monitored; read the other three counters before treating " +
-        "the batch as done. An added server's detail reports what the probe found — for a PostgreSQL target that " +
+        "the batch as done. An added server's detail reports what the probe found, for a PostgreSQL target that " +
         "includes writer-vs-reader, Aurora-vs-not, and how many of the PostgreSQL collectors apply to it. NOTE: the " +
         "password travels to this endpoint in the request. MCP serves HTTPS on its network listener when mcp.network.tls " +
         "is set, so on a LAN set it; a TLS reverse proxy in front of the endpoint also works. " +
@@ -420,18 +420,18 @@ public sealed partial class DarlingMcpServerAdminTools
         "connected registry, so an unconnected server can still be removed. <<GUIDE>> " +
         "Removes a monitored server from the fleet by name (its display name or storage name / address, as " +
         "list_servers reports them). The name is resolved against the monitored-server DEFINITIONS in the central " +
-        "store (config_monitored_servers — the table add_servers writes and this tool deletes from), NOT against the " +
+        "store (config_monitored_servers, the table add_servers writes and this tool deletes from), NOT against the " +
         "registry of servers that have connected, so a server that was added but has never connected can be removed " +
         "by the tool that added it. Matching is exact first (case-insensitive, against the storage name and the " +
         "display name); a PARTIAL match is honored ONLY when exactly one defined server contains the text. When " +
-        "the name is ambiguous — an exact name shared by two definitions, or a fragment such as \"-01\" that " +
-        "several servers contain — NOTHING is deleted and the response is {status:\"ambiguous\", candidates:[{server, " +
+        "the name is ambiguous: an exact name shared by two definitions, or a fragment such as \"-01\" that " +
+        "several servers contain, NOTHING is deleted and the response is {status:\"ambiguous\", candidates:[{server, " +
         "display_name, ever_connected}], message}; re-issue with one candidate's full name. Deletes the server's " +
         "definition from the central monitoring store; the running service drops it from its collection set within " +
         "one sweep and drops this install's own Extended Events sessions on the server, leaving the shared ones and " +
         "any session another registration of this install keeps. Already-collected historical data is NOT deleted. Returns {status:\"removed\", server, " +
         "display_name, matched_by:\"exact\"|\"partial\", matched_in:\"config_monitored_servers\", ever_connected, previous (the removed definition in the keys add_servers takes; the stored password cannot be read back, so a SQL or service-principal row carries the placeholder <password> in its place, and the AWS external ID is left out), undo (the add_servers call that re-adds it, with that same password placeholder), undo_note (what a re-add does not bring back)} on " +
-        "success — ever_connected says whether the connected-servers registry (populated on a server's first " +
+        "success: ever_connected says whether the connected-servers registry (populated on a server's first " +
         "successful connection) also had a row for it, i.e. whether any history exists under its id; " +
         "{status:\"ambiguous\", ...} as above; or {status:\"not_found\", ...} when no definition matches the name. A " +
         "not_found whose matched_in is \"servers\" means the name IS a connected server but has no definition in the " +
@@ -440,7 +440,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "server_name is matched as list_servers / get_alert_history report it.")]
     public static async Task<string> RemoveServer(
         NpgsqlDataSource postgres,
-        [Description("The name of the monitored server to remove — its display name or storage name / address. A partial name is accepted only when it matches exactly one server.")] string server_name)
+        [Description("The name of the monitored server to remove: its display name or storage name / address. A partial name is accepted only when it matches exactly one server.")] string server_name)
     {
         try
         {
@@ -490,7 +490,7 @@ public sealed partial class DarlingMcpServerAdminTools
                         matched_in = "servers",
                         matched_by = connectedOnly.MatchedBy,
                         candidates = connectedOnly.Candidates.Select(c => new { server = c.ServerName, display_name = c.DisplayName }),
-                        message = $"'{server_name}' matches {connectedOnly.Candidates.Count} server(s) in the connected-servers registry but none of the " +
+                        message = $"'{server_name}' matches {CountText.Plural(connectedOnly.Candidates.Count, "server")} in the connected-servers registry but none of the " +
                                   "monitored-server definitions in the central store, so there is nothing for this tool to delete: the server is " +
                                   "defined in darling.json (remove it there and restart the service), or its store definition was already removed. " +
                                   "Nothing was changed.",
@@ -879,7 +879,7 @@ ORDER BY d.host, d.database";
 
         if (array.Count == 0)
         {
-            return (entries, invalid, "servers_json must be a non-empty JSON array — provide at least one server object.");
+            return (entries, invalid, "servers_json must be a non-empty JSON array: provide at least one server object.");
         }
 
         for (var i = 0; i < array.Count; i++)
@@ -1560,7 +1560,7 @@ ON CONFLICT (server_id) DO NOTHING";
         return (ServerStoreAuth.Integrated,
             "auth must be \"Windows\", \"SQL\", \"ServicePrincipal\", or \"ManagedIdentity\". The interactive " +
             "Microsoft Entra modes (MFA, device-code, default-credential) are not supported for a headless " +
-            "collector — they need a broker or a signed-in user. Use ServicePrincipal (client id + secret) or " +
+            "collector: they need a broker or a signed-in user. Use ServicePrincipal (client id + secret) or " +
             "ManagedIdentity, both non-interactive, for Entra-authenticated Azure SQL targets.");
     }
 
@@ -1735,7 +1735,7 @@ ON CONFLICT (server_id) DO NOTHING";
     /// <c>--test-connection</c> CLI line uses (<see cref="DarlingServerConnector.DescribeProbeFacts"/>), so the
     /// two cannot drift and a PostgreSQL target reads as one here too.</summary>
     private static string DescribeProbe(ConnectionProbeResult probe, string? replicaLine = null) =>
-        $"Connected — {DarlingServerConnector.DescribeProbeFacts(probe)}." + (replicaLine is null ? "" : " " + replicaLine)
+        $"Connected: {DarlingServerConnector.DescribeProbeFacts(probe)}." + (replicaLine is null ? "" : " " + replicaLine)
         /* #6472: the base grants the connecting login lacks, each with the statement that adds it. A note, never a refusal. */
         + (string.IsNullOrEmpty(probe.MissingGrantsNote) ? "" : " " + probe.MissingGrantsNote);
 
@@ -1788,7 +1788,7 @@ ON CONFLICT (server_id) DO NOTHING";
             "sqlserver" or "sql" or "mssql" => (EngineSqlServer, null),
             "postgres" or "postgresql" or "pg" or "aurora-postgresql" or "aurora" => (EnginePostgres, null),
             _ => (EngineSqlServer,
-                "engine must be \"sqlserver\" (default) or \"postgres\" — also accepted: \"postgresql\", " +
+                "engine must be \"sqlserver\" (default) or \"postgres\", also accepted: \"postgresql\", " +
                 "\"pg\", \"aurora\", \"aurora-postgresql\"."),
         };
     }

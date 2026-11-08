@@ -51,20 +51,20 @@ public sealed partial class PgTargetRelationshipGraph
 
            Symptom → cause: parked and queued sessions hold the heavyweight locks the rest are waiting for. */
         AddEdge(PgTargetFactKeys.WaitKey("Lock", "relation"), PgTargetFactKeys.ConnectionSaturation, "connection_saturation",
-            "Sessions are at the connection ceiling — parked or queued sessions are the usual relation-lock holders",
+            "Sessions are at the connection ceiling: parked or queued sessions are the usual relation-lock holders",
             facts => facts.TryGetValue(PgTargetFactKeys.ConnectionSaturation, out var saturation) && saturation.BaseSeverity > 0);
         AddEdge(PgTargetFactKeys.WaitKey("Lock", null), PgTargetFactKeys.ConnectionSaturation, "connection_saturation",
-            "Sessions are at the connection ceiling — parked or queued sessions hold what these backends wait for",
+            "Sessions are at the connection ceiling: parked or queued sessions hold what these backends wait for",
             facts => facts.TryGetValue(PgTargetFactKeys.ConnectionSaturation, out var saturation) && saturation.BaseSeverity > 0);
 
         /* Cause → symptom (lane 3's shape, written by lane 5 against its keys): when the pool is near its ceiling
            AND Lock waits fired, the slots are held by sessions waiting on each other's locks (a blocked holder
            keeps its connection), so the pool is short because of contention, not arrivals. */
         AddEdge(PgTargetFactKeys.ConnectionSaturation, PgTargetFactKeys.WaitKey("Lock", "relation"), "connection_saturation",
-            "Lock:relation waits fired while the pool was near its ceiling — blocked sessions are holding the slots",
+            "Lock:relation waits fired while the pool was near its ceiling: blocked sessions are holding the slots",
             facts => facts.TryGetValue(PgTargetFactKeys.WaitKey("Lock", "relation"), out var relation) && relation.BaseSeverity > 0);
         AddEdge(PgTargetFactKeys.ConnectionSaturation, PgTargetFactKeys.WaitKey("Lock", null), "connection_saturation",
-            "Lock waits fired while the pool was near its ceiling — blocked sessions are holding the slots",
+            "Lock waits fired while the pool was near its ceiling: blocked sessions are holding the slots",
             facts => facts.TryGetValue(PgTargetFactKeys.WaitKey("Lock", null), out var lockWait) && lockWait.BaseSeverity > 0);
 
         /* Lane 14 (#3691, design §3.10) — saturation ↔ PG_IDLE_IN_TRANSACTION: the parked-connections leaf with a
@@ -83,11 +83,11 @@ public sealed partial class PgTargetRelationshipGraph
            two are reached, one story. A saturation finding with NO idle fact in the set sees no active edge from
            any of this and is byte-identical to lane 5's mesh (pinned). */
         AddEdge(PgTargetFactKeys.ConnectionSaturation, PgTargetFactKeys.IdleInTransaction, "connection_saturation",
-            "Long idle-in-transaction sessions are a quarter or more of the peak pool — parked transactions are holding the slots the pool is short of",
+            "Long idle-in-transaction sessions are a quarter or more of the peak pool: parked transactions are holding the slots the pool is short of",
             facts => facts.TryGetValue(PgTargetFactKeys.IdleInTransaction, out var parked) && parked.BaseSeverity > 0
                 && ParkedShareAtBar(facts));
         AddEdge(PgTargetFactKeys.IdleInTransaction, PgTargetFactKeys.ConnectionSaturation, "connection_saturation",
-            "The pool is near its ceiling and idle-in-transaction sessions are a quarter or more of it — this parked transaction is one of the slots the next connection will be refused for",
+            "The pool is near its ceiling and idle-in-transaction sessions are a quarter or more of it: this parked transaction is one of the slots the next connection will be refused for",
             facts => facts.TryGetValue(PgTargetFactKeys.ConnectionSaturation, out var saturation) && saturation.BaseSeverity > 0
                 && ParkedShareAtBar(facts));
 
@@ -95,10 +95,10 @@ public sealed partial class PgTargetRelationshipGraph
            it took, so the Lock waits are on work nobody is doing. One wait is graded once (the rollup scores 0
            when its standout fired), so at most one of these two is active. */
         AddEdge(PgTargetFactKeys.IdleInTransaction, PgTargetFactKeys.WaitKey("Lock", "relation"), "connection_saturation",
-            "Lock:relation waits fired while a transaction sat idle holding its locks — the waiters are queued behind work that is not being done",
+            "Lock:relation waits fired while a transaction sat idle holding its locks: the waiters are queued behind work that is not being done",
             facts => facts.TryGetValue(PgTargetFactKeys.WaitKey("Lock", "relation"), out var relation) && relation.BaseSeverity > 0);
         AddEdge(PgTargetFactKeys.IdleInTransaction, PgTargetFactKeys.WaitKey("Lock", null), "connection_saturation",
-            "Lock waits fired while a transaction sat idle holding its locks — the waiters are queued behind work that is not being done",
+            "Lock waits fired while a transaction sat idle holding its locks: the waiters are queued behind work that is not being done",
             facts => facts.TryGetValue(PgTargetFactKeys.WaitKey("Lock", null), out var lockWait) && lockWait.BaseSeverity > 0);
 
         /* The blocking chain, symptom → cause (#3691 between waves; lane 14 reported it out-of-lane because a Lock
@@ -112,10 +112,10 @@ public sealed partial class PgTargetRelationshipGraph
            fact's verdict (BaseSeverity), the file's rule. A Lock wait with no idle fact in the set keeps exactly its
            previous single active edge (saturation), byte-identical to lane 5's mesh — pinned. */
         AddEdge(PgTargetFactKeys.WaitKey("Lock", "relation"), PgTargetFactKeys.IdleInTransaction, "connection_saturation",
-            "A long idle-in-transaction holder fired alongside these Lock:relation waits — the waiters are queued behind a parked transaction's locks",
+            "A long idle-in-transaction holder fired alongside these Lock:relation waits: the waiters are queued behind a parked transaction's locks",
             facts => facts.TryGetValue(PgTargetFactKeys.IdleInTransaction, out var parked) && parked.BaseSeverity > 0);
         AddEdge(PgTargetFactKeys.WaitKey("Lock", null), PgTargetFactKeys.IdleInTransaction, "connection_saturation",
-            "A long idle-in-transaction holder fired alongside these Lock waits — the waiters are queued behind a parked transaction's locks",
+            "A long idle-in-transaction holder fired alongside these Lock waits: the waiters are queued behind a parked transaction's locks",
             facts => facts.TryGetValue(PgTargetFactKeys.IdleInTransaction, out var parked) && parked.BaseSeverity > 0);
 
         /* The sampled chain, symptom → the reading that names the root (#3691 lane 17, design §2a). A Lock wait is the
@@ -127,10 +127,10 @@ public sealed partial class PgTargetRelationshipGraph
            wait with no chain in the set keeps exactly its previous edges — the pins in PgTargetWaitTests moved from
            two destinations to three, deliberately. */
         AddEdge(PgTargetFactKeys.WaitKey("Lock", "relation"), PgTargetFactKeys.BlockingChain, "blocking",
-            "A sampled blocking chain fired alongside these Lock:relation waits — the chain names the head the wait cannot",
+            "A sampled blocking chain fired alongside these Lock:relation waits: the chain names the head the wait cannot",
             facts => facts.TryGetValue(PgTargetFactKeys.BlockingChain, out var chain) && chain.BaseSeverity > 0);
         AddEdge(PgTargetFactKeys.WaitKey("Lock", null), PgTargetFactKeys.BlockingChain, "blocking",
-            "A sampled blocking chain fired alongside these Lock waits — the chain names the head the wait cannot",
+            "A sampled blocking chain fired alongside these Lock waits: the chain names the head the wait cannot",
             facts => facts.TryGetValue(PgTargetFactKeys.BlockingChain, out var chain) && chain.BaseSeverity > 0);
 
         /* The idle holder → the chain it heads (#3691 lane 17): when the idle fact outranks the chain (a 15-minute
@@ -140,7 +140,7 @@ public sealed partial class PgTargetRelationshipGraph
            holder and a chain under an active head stay two findings. The idle fact's edges are declared here
            because lane 14 declared them here; the reverse edge is the chain file's. */
         AddEdge(PgTargetFactKeys.IdleInTransaction, PgTargetFactKeys.BlockingChain, "blocking",
-            "PG_BLOCKING_CHAIN fired with an idle-in-transaction head — the sessions queued behind this parked transaction's locks",
+            "PG_BLOCKING_CHAIN fired with an idle-in-transaction head: the sessions queued behind this parked transaction's locks",
             facts => facts.TryGetValue(PgTargetFactKeys.BlockingChain, out var chain) && chain.BaseSeverity > 0
                 && chain.Metadata.GetValueOrDefault(PgTargetScorer.BlockingHeadIsIdleInTransactionKey) > 0);
 
@@ -152,7 +152,7 @@ public sealed partial class PgTargetRelationshipGraph
            holder_source is the collector's code for the winning source (PgTargetAdvice.HolderSourceCode), and
            only "session" qualifies — a slot or a standby holding the horizon is not this leaf's story. */
         AddEdge(PgTargetFactKeys.XminHold, PgTargetFactKeys.IdleInTransaction, VacuumCategory,
-            "PG_IDLE_IN_TRANSACTION fired with a horizon claim — the session holding the xmin horizon back is a parked transaction the application never closed",
+            "PG_IDLE_IN_TRANSACTION fired with a horizon claim: the session holding the xmin horizon back is a parked transaction the application never closed",
             facts => facts.TryGetValue(PgTargetFactKeys.IdleInTransaction, out var parked) && parked.BaseSeverity > 0
                 && parked.Metadata.GetValueOrDefault(PgTargetScorer.IdleInTransactionHolderHorizonAgeKey, -1) > 0
                 && facts.TryGetValue(PgTargetFactKeys.XminHold, out var hold)

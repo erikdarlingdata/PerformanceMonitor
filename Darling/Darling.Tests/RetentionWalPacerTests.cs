@@ -393,7 +393,7 @@ public sealed class RetentionWalPacerTests
             paced: true, walBytes: 6_890_000_000, pacedSeconds: 412.4);
 
         Assert.Equal("SUCCESS", status);
-        Assert.Contains("1200 row(s) deleted", message, StringComparison.Ordinal);
+        Assert.Contains("1,200 rows deleted", message, StringComparison.Ordinal);
         Assert.Contains("store WAL during the purge's batches: 6571 MB", message, StringComparison.Ordinal);
         Assert.Contains("paced 412 s", message, StringComparison.Ordinal);
     }

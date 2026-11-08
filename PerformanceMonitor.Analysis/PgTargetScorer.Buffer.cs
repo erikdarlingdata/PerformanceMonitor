@@ -132,7 +132,7 @@ public static partial class PgTargetScorer
                 [
                     new AmplifierDefinition
                     {
-                        Description = "PG_BUFFER_CACHE_PRESSURE co-fires — the cache is measurably short: misses, evictions or a halting bgwriter",
+                        Description = "PG_BUFFER_CACHE_PRESSURE co-fires, the cache is measurably short: misses, evictions or a halting bgwriter",
                         /* unmeasured: KnobCoFireBoost (see PgTargetScorer.Write.cs) — 0.4 × 1.25 = 0.5, the D5 line. */
                         Boost = KnobCoFireBoost,
                         Predicate = facts => facts.TryGetValue(PgTargetFactKeys.BufferCachePressure, out var pressure) && pressure.BaseSeverity > 0,
@@ -144,7 +144,7 @@ public static partial class PgTargetScorer
                 [
                     new AmplifierDefinition
                     {
-                        Description = "shared_buffers at the initdb default — the cache was never sized for this host",
+                        Description = "shared_buffers at the initdb default: the cache was never sized for this host",
                         /* unmeasured: BufferCauseBoost (see the constant). */
                         Boost = BufferCauseBoost,
                         Predicate = facts => facts.TryGetValue(PgTargetFactKeys.ConfigSharedBuffers, out var knob) && knob.BaseSeverity > 0,

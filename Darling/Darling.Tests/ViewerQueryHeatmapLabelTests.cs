@@ -46,7 +46,7 @@ public sealed class ViewerQueryHeatmapLabelTests
                 new DarlingServer(1, "heatmap", "heatmap", true, null));
             typeof(ViewerServerTab).GetField("_refreshInFlight", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.SetValue(tab, true);
             var window = new Window { Content = ChartLayoutProbe.HostLikeMainWindow(tab), Width = width, Height = height, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var chart = (WpfPlot)tab.FindName("QueryHeatmapChart");

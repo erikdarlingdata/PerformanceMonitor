@@ -131,7 +131,7 @@ public static class MonitoringGrantScript
         new(GrantSet.Base, GrantScope.Server, "VIEW ANY DEFINITION", null, true,
             "Catalog visibility. Catalog views hide rows instead of raising an error, so without this the index, object, identity column capacity and availability group collectors see nothing. The identity check also stops on a database where it is missing, rather than report it clean."),
         new(GrantSet.Base, GrantScope.Server, "ALTER ANY EVENT SESSION", null, true,
-            "The deadlock, blocked-process and attention Extended Events sessions."),
+            "The deadlock, blocked-process, attention and schema-changes Extended Events sessions."),
         new(GrantSet.Base, GrantScope.Server, "ALTER TRACE", null, false,
             "Optional: the default-trace collector reads sys.traces. ALTER TRACE is not read-only; withhold it and the collector records a permissions skip."),
         new(GrantSet.Base, GrantScope.Server, "ALTER SETTINGS", null, false,

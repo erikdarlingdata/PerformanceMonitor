@@ -413,7 +413,7 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         /* #4966: the window is cut, so the healthy-answer claim gives way to the cut sentence; the event count and the reason
            nothing qualified (the first sentence) are kept. */
         var message = root.GetProperty("message").GetString()!;
-        Assert.StartsWith("1 " + eventType + " event(s) were captured for " + ServerName, message, StringComparison.Ordinal);
+        Assert.StartsWith("1 " + eventType + " event was captured for " + ServerName, message, StringComparison.Ordinal);
         Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, message, StringComparison.Ordinal);
         Assert.DoesNotContain("healthy answer", message, StringComparison.Ordinal);
     }
@@ -443,7 +443,7 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         Assert.Equal("empty", root.GetProperty("status").GetString());
         AssertCovered(root.GetProperty("hints"), WindowStart);
         var message = root.GetProperty("message").GetString()!;
-        Assert.StartsWith("1 " + eventType + " event(s) were captured for " + ServerName, message, StringComparison.Ordinal);
+        Assert.StartsWith("1 " + eventType + " event was captured for " + ServerName, message, StringComparison.Ordinal);
         Assert.EndsWith(". Events ARE being captured, so this is the healthy answer for this read rather than missing data.", message, StringComparison.Ordinal);
     }
 
@@ -507,7 +507,7 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         var root = Root(await CallAsync(tool));
 
         AssertCovered(root.GetProperty("hints"), WindowStart);
-        Assert.EndsWith(", so nothing happened in this window — widen hours_back to reach the most recent events.", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.EndsWith(", so nothing happened in this window: widen hours_back to reach the most recent events.", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
     /// <summary>The tool's type was captured before the window and not in it (the second rung): the keys say nothing in the window was read.</summary>

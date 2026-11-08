@@ -48,7 +48,7 @@ public sealed class FinOpsSubTabIndexPinTests
         ("FinOpsApplicationConnectionsSubTabIndex", "Application Connections"),
         ("FinOpsServerInventorySubTabIndex", "Server Inventory"),
         ("FinOpsIndexAnalysisSubTabIndex", "Index Analysis"),
-        ("FinOpsRecommendationsSubTabIndex", "Recommendations"),
+        ("FinOpsRecommendationsSubTabIndex", "Cost Savings"),
     ];
 
     [Fact]

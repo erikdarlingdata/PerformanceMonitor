@@ -316,7 +316,7 @@ public sealed class DarlingWebHostService : BackgroundService
 
                 case WebSupervisorAction.RestartForWebCredential:
                     _logger.LogInformation(
-                        "The managed Postgres web-role credential has appeared — restarting the web dashboard so it stops using the read-only viewer login");
+                        "The managed Postgres web-role credential has appeared: restarting the web dashboard so it stops using the read-only viewer login");
                     await StopServerAsync(stoppingToken);
                     if (!await TryStartServerAsync(config, toggle, stoppingToken))
                     {
@@ -325,13 +325,13 @@ public sealed class DarlingWebHostService : BackgroundService
                     break;
 
                 case WebSupervisorAction.Stop:
-                    _logger.LogInformation("Web dashboard disabled via the control plane — stopping (no restart needed)");
+                    _logger.LogInformation("Web dashboard disabled via the control plane: stopping (no restart needed)");
                     await StopServerAsync(stoppingToken);
                     break;
 
                 case WebSupervisorAction.Restart:
                     _logger.LogInformation(
-                        "Web dashboard port changed via the control plane ({Old} -> {New}) — rebinding", _runningPort, toggle.Port);
+                        "Web dashboard port changed via the control plane ({Old} -> {New}): rebinding", _runningPort, toggle.Port);
                     await StopServerAsync(stoppingToken);
                     if (!await TryStartServerAsync(config, toggle, stoppingToken))
                     {
@@ -582,7 +582,7 @@ public sealed class DarlingWebHostService : BackgroundService
             if (usedPlaintext)
             {
                 logger.LogWarning(
-                    "web.network.token is set in plaintext (dev convenience) — prefer web.network.encryptedToken " +
+                    "web.network.token is set in plaintext (dev convenience): prefer web.network.encryptedToken " +
                     "(produced by --encrypt-password). This token gates web dashboard access, loopback included.");
             }
 
@@ -664,7 +664,7 @@ public sealed class DarlingWebHostService : BackgroundService
                     if (floor.Problem is not null)
                     {
                         _logger.LogCritical(
-                            "Web dashboard token {Problem} — refusing to expose; binding loopback-only.",
+                            "Web dashboard token {Problem}: refusing to expose; binding loopback-only.",
                             floor.Problem);
                         _logger.LogCritical("{Message}", ShortTokenReadsOnlyLine(floor.Problem));
                         networkMode = floor.NetworkMode;
@@ -677,7 +677,7 @@ public sealed class DarlingWebHostService : BackgroundService
                         if (usedPlaintext)
                         {
                             _logger.LogWarning(
-                                "web.network.token is set in plaintext (dev convenience) — prefer web.network.encryptedToken " +
+                                "web.network.token is set in plaintext (dev convenience): prefer web.network.encryptedToken " +
                                 "(produced by --encrypt-password). This token gates web dashboard network access.");
                         }
                     }
@@ -732,7 +732,7 @@ public sealed class DarlingWebHostService : BackgroundService
                         if (usedPlaintextSecret)
                         {
                             _logger.LogWarning(
-                                "web.network.oidc.clientSecret is set in plaintext (dev convenience) — prefer encryptedClientSecret (produced by --encrypt-password).");
+                                "web.network.oidc.clientSecret is set in plaintext (dev convenience): prefer encryptedClientSecret (produced by --encrypt-password).");
                         }
                     }
                     catch (Exception ex)
@@ -744,7 +744,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 if (problem is not null)
                 {
                     _logger.LogCritical(
-                        "web.network.oidc is misconfigured ({Problem}) — OIDC sign-in is DISABLED this start; the shared token remains the only web credential.",
+                        "web.network.oidc is misconfigured ({Problem}): OIDC sign-in is DISABLED this start; the shared token remains the only web credential.",
                         problem);
                 }
                 else
@@ -763,13 +763,13 @@ public sealed class DarlingWebHostService : BackgroundService
                     if (clientSecret is null)
                     {
                         _logger.LogWarning(
-                            "web.network.oidc has no client secret — the code exchange will run as a PUBLIC client on PKCE alone. Some providers refuse this for web apps; register a confidential client and set encryptedClientSecret if sign-ins fail at the exchange.");
+                            "web.network.oidc has no client secret: the code exchange will run as a PUBLIC client on PKCE alone. Some providers refuse this for web apps; register a confidential client and set encryptedClientSecret if sign-ins fail at the exchange.");
                     }
 
                     /* Name the redirect-URI shape at start, because it is the one thing the operator has to
                        register at the IdP and the one thing some IdPs (Okta) refuse for a bare IP. */
                     _logger.LogInformation(
-                        "OIDC sign-in enabled — authority {Authority}, clientId {ClientId}, role mapping {RoleMapping}. Register the redirect URI(s) your browsers will actually use: {{scheme}}://{{host}}:{Port}/auth/oidc/callback (host = {Hosts}). The shared token keeps working beside OIDC as the scripted-caller/break-glass path.",
+                        "OIDC sign-in enabled: authority {Authority}, clientId {ClientId}, role mapping {RoleMapping}. Register the redirect URI(s) your browsers will actually use: {{scheme}}://{{host}}:{Port}/auth/oidc/callback (host = {Hosts}). The shared token keeps working beside OIDC as the scripted-caller/break-glass path.",
                         oidcClient.Options.Authority,
                         oidcClient.Options.ClientId,
                         oidcClient.Options.RoleClaim is null
@@ -789,7 +789,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 && !DarlingHostBinding.TryParseTrustedProxies(network!.TrustedProxies, out trustedProxies, out var proxyProblem))
             {
                 _logger.LogCritical(
-                    "web.network.trustedProxies is misconfigured ({Problem}) — refusing to expose; binding loopback-only.",
+                    "web.network.trustedProxies is misconfigured ({Problem}): refusing to expose; binding loopback-only.",
                     proxyProblem);
                 networkMode = false;
                 trustedProxies = null;
@@ -831,7 +831,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 if (tlsOutcome.ExposesWithoutItsCertificate)
                 {
                     _logger.LogCritical(
-                        "Web dashboard TLS is configured ({Shape}) but no certificate came back — refusing to expose; binding loopback-only.",
+                        "Web dashboard TLS is configured ({Shape}) but no certificate came back: refusing to expose; binding loopback-only.",
                         tlsOutcome.Shape);
                     networkMode = false;
                 }
@@ -845,7 +845,7 @@ public sealed class DarlingWebHostService : BackgroundService
                firewall check so a bail here reports nothing about the firewall. */
             if (await PortUtilityService.IsTcpPortListeningAsync(effectivePort, primaryBind, stoppingToken))
             {
-                _logger.LogError("Port {Port} is already in use — web dashboard not started this attempt; will retry", effectivePort);
+                _logger.LogError("Port {Port} is already in use: web dashboard not started this attempt; will retry", effectivePort);
                 await DisposeFailedStartAsync();
                 return false;
             }
@@ -2205,7 +2205,7 @@ public sealed class DarlingWebHostService : BackgroundService
                    line — the #2479 flood, reintroduced on a new path. */
                 refusals.Report(
                     _logger, "Web dashboard", DarlingRefusalGate.SignIn, StatusCodes.Status502BadGateway, remote,
-                    $"the OIDC discovery document could not be fetched/parsed from {oidcClient.Options.Authority} — the next sign-in attempt retries",
+                    $"the OIDC discovery document could not be fetched/parsed from {oidcClient.Options.Authority}: the next sign-in attempt retries",
                     DateTime.UtcNow);
                 await WriteSignInErrorAsync(context, StatusCodes.Status502BadGateway,
                     "Single sign-on is temporarily unavailable (the identity provider did not answer). Use the access token, or try again.");
@@ -2342,7 +2342,7 @@ public sealed class DarlingWebHostService : BackgroundService
         {
             ReportSignInRefusal(refusals, remote, StatusCodes.Status403Forbidden, oidcClient.Options.SubjectClaim is null
                 ? "the ID token carries none of the subject claims (preferred_username/email/sub)"
-                : $"the ID token does not carry the configured subjectClaim '{oidcClient.Options.SubjectClaim}' — refusing rather than falling back to a claim the operator did not choose");
+                : $"the ID token does not carry the configured subjectClaim '{oidcClient.Options.SubjectClaim}': refusing rather than falling back to a claim the operator did not choose");
             await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
                 "Signed in at the provider, but the token carries no usable identity for this dashboard. The service log names the missing claim.");
             return;
@@ -2741,7 +2741,7 @@ public sealed class DarlingWebHostService : BackgroundService
         var html =
             "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Darling Web</title>" + IconLinkHtml + "</head>"
             + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
-            + $"<p>Signed in — continuing to <a id='go' style='color:#2eaef1' href='{linkTarget}' data-target='{linkTarget}'>the dashboard</a>…</p>"
+            + $"<p>Signed in: continuing to <a id='go' style='color:#2eaef1' href='{linkTarget}' data-target='{linkTarget}'>the dashboard</a>…</p>"
             + LandingScriptBlock
             + "</body></html>";
         /* The page's one inline script is constant text (the return path travels in the data-target attribute),
@@ -3008,21 +3008,21 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
         {
             case DarlingHostBinding.BindReason.ListenInvalid:
                 _logger.Log(level.Value,
-                    "Web dashboard network exposure requested but web.network.listen '{Listen}' is not a valid IP address — " +
+                    "Web dashboard network exposure requested but web.network.listen '{Listen}' is not a valid IP address: " +
                     "refusing to expose; binding loopback-only. Use a specific IP (e.g. 192.168.1.205), or 0.0.0.0 for all interfaces.",
                     web.Network?.Listen);
                 break;
 
             case DarlingHostBinding.BindReason.TokenMissing:
                 _logger.Log(level.Value,
-                    "Web dashboard network exposure requested (web.network.listen is non-loopback) but no access token is set — " +
+                    "Web dashboard network exposure requested (web.network.listen is non-loopback) but no access token is set: " +
                     "refusing to expose; binding loopback-only. Set web.network.encryptedToken (via --encrypt-password) or web.network.token.");
                 break;
 
             case DarlingHostBinding.BindReason.AllowFromInvalid:
                 _logger.Log(level.Value,
                     "Web dashboard network exposure requested but web.network.allowFrom '{AllowFrom}' is not a valid CIDR list or an " +
-                    "entry's address family does not match web.network.listen — refusing to expose; binding loopback-only. " +
+                    "entry's address family does not match web.network.listen: refusing to expose; binding loopback-only. " +
                     "Use one CIDR (e.g. 192.168.1.0/24) or several, separated by commas " +
                     "(e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address), with each IPv4 " +
                     "address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same " +
@@ -3123,7 +3123,7 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
             return viewer;
         }
 
-        _logger.LogError("Web dashboard not started: the managed Postgres web-role and viewer-role credentials never appeared — see the worker log for the bootstrap failure");
+        _logger.LogError("Web dashboard not started: the managed Postgres web-role and viewer-role credentials never appeared, see the worker log for the bootstrap failure");
         return null;
     }
 

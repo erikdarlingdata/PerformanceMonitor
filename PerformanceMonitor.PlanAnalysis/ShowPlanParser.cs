@@ -1814,7 +1814,7 @@ public static class ShowPlanParser
             result.Add(new PlanWarning
             {
                 WarningType = "Sort Spill",
-                Message = $"{prefix} — Granted: {granted:N0} KB, Used: {used:N0} KB, Writes: {writes:N0}, Reads: {reads:N0}",
+                Message = $"{prefix}. Granted: {granted:N0} KB, Used: {used:N0} KB, Writes: {writes:N0}, Reads: {reads:N0}",
                 Severity = PlanWarningSeverity.Warning,
                 SpillDetails = new SpillDetail
                 {
@@ -1840,7 +1840,7 @@ public static class ShowPlanParser
             result.Add(new PlanWarning
             {
                 WarningType = "Hash Spill",
-                Message = $"{prefix} — Granted: {granted:N0} KB, Used: {used:N0} KB, Writes: {writes:N0}, Reads: {reads:N0}",
+                Message = $"{prefix}. Granted: {granted:N0} KB, Used: {used:N0} KB, Writes: {writes:N0}, Reads: {reads:N0}",
                 Severity = PlanWarningSeverity.Warning,
                 SpillDetails = new SpillDetail
                 {
@@ -1865,7 +1865,7 @@ public static class ShowPlanParser
             var reads = ParseLong(spillToTempDbEl.Attribute("ReadsFromTempDb")?.Value);
             if (grantedKB > 0 || writes > 0)
             {
-                msg += $" — Granted: {grantedKB:N0} KB, Used: {usedKB:N0} KB";
+                msg += $". Granted: {grantedKB:N0} KB, Used: {usedKB:N0} KB";
                 if (writes > 0) msg += $", Writes: {writes:N0}";
                 if (reads > 0) msg += $", Reads: {reads:N0}";
             }
@@ -1883,7 +1883,7 @@ public static class ShowPlanParser
             result.Add(new PlanWarning
             {
                 WarningType = "Exchange Spill",
-                Message = $"Exchange spill — {ParseLong(exchSpillEl.Attribute("WritesToTempDb")?.Value):N0} writes to TempDB. The parallel exchange operator ran out of memory buffers and spilled rows to disk. This typically means the memory grant was too small for the data volume flowing through this exchange.",
+                Message = $"Exchange spill: {ParseLong(exchSpillEl.Attribute("WritesToTempDb")?.Value):N0} writes to TempDB. The parallel exchange operator ran out of memory buffers and spilled rows to disk. This typically means the memory grant was too small for the data volume flowing through this exchange.",
                 Severity = PlanWarningSeverity.Warning,
                 SpillDetails = new SpillDetail
                 {

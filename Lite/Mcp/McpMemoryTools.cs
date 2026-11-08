@@ -127,10 +127,10 @@ public sealed class McpMemoryTools
                 return await McpQueryTools.WithEmptyWindowNoticeAsync(await dataService.HasAnyMemoryStatAsync(resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
-                        await McpQueryTools.QuietWindowMessageAsync(dataService, QueryWindowRelation.MemoryStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "memory_stats", $"No memory samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s)", ". This server HAS collected memory stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples."))
+                        await McpQueryTools.QuietWindowMessageAsync(dataService, QueryWindowRelation.MemoryStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "memory_stats", $"No memory samples recorded for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}", ". This server HAS collected memory stats before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent samples."))
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No memory stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the memory_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_memory_stats will be equally empty until it does."),
+                        $"No memory stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window: the memory_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_memory_stats will be equally empty until it does."),
                     dataService, QueryWindowRelation.MemoryStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "memory_stats");
             }
 
@@ -156,7 +156,7 @@ public sealed class McpMemoryTools
     }
 
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
-    [McpServerTool(Name = "get_memory_clerks"), Description("Gets the top memory consumers by memory clerk type — shows which SQL Server components are using the most memory. LATEST IS A TIME: this reads the newest clerk snapshot, not a window, and captured_at is the instant it was collected.")]
+    [McpServerTool(Name = "get_memory_clerks"), Description("Gets the top memory consumers by memory clerk type: shows which SQL Server components are using the most memory. LATEST IS A TIME: this reads the newest clerk snapshot, not a window, and captured_at is the instant it was collected.")]
     public static async Task<string> GetMemoryClerks(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -181,7 +181,7 @@ public sealed class McpMemoryTools
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_clerks", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status(
                         "unavailable",
-                        $"No memory-clerk snapshot is available for {resolved.DisplayName}. This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks. It means nothing the memory_clerks collector stored is still retained, either because it has not run for this server or because its rows have aged out. Check get_collection_health and get_collection_log for the memory_clerks collector.");
+                        $"No memory-clerk snapshot is available for {resolved.DisplayName}. This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period: a live SQL Server always has memory clerks. It means nothing the memory_clerks collector stored is still retained, either because it has not run for this server or because its rows have aged out. Check get_collection_health and get_collection_log for the memory_clerks collector.");
 
             var result = rows.Select(r => new
             {

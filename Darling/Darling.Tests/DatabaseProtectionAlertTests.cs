@@ -144,9 +144,9 @@ public sealed class DatabaseProtectionAlertTests
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("601 overdue", fired.CurrentValue);
-        Assert.Contains("on 601 database(s)", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("on 601 databases", fired.DetailText, StringComparison.Ordinal);
         Assert.Contains($", and {601 - DarlingSelfAlertEvaluator.OverdueDetailDatabases} more.", fired.DetailText, StringComparison.Ordinal);
-        Assert.StartsWith("Backup Overdue: 601 database(s) - Never_Backed_Up, " + string.Join(", ", oldest.Take(4)) + ", ...", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.StartsWith("Backup Overdue: 601 databases - Never_Backed_Up, " + string.Join(", ", oldest.Take(4)) + ", ...", fired.ShortMessage, StringComparison.Ordinal);
         Assert.Contains("Never_Backed_Up (no backup on record)", fired.DetailText, StringComparison.Ordinal);
         foreach (var name in oldest.Take(DarlingSelfAlertEvaluator.OverdueDetailDatabases - 1))
         {

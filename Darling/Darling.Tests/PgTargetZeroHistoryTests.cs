@@ -164,7 +164,7 @@ public sealed class PgTargetZeroHistoryTests
         var block = Compose(fact);
 
         var span = $"{BaselineMath.BaselineWindowDays}-day";
-        Assert.Contains($"deadlocks this window ({perHour:0.#}/hour) — against a {span} baseline in which this hour saw none", block.Headline, StringComparison.Ordinal);
+        Assert.Contains($"deadlocks this window ({perHour:0.#}/hour), against a {span} baseline in which this hour saw none", block.Headline, StringComparison.Ordinal);
         Assert.Contains("measured ZERO: 300 baseline samples across 5 distinct days, not one of them above zero", block.Investigation, StringComparison.Ordinal);
         Assert.Contains($"This server's {span} baseline for this hour-of-week is not thin", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("a rate that is zero has no multiple to print", block.Investigation, StringComparison.Ordinal);
@@ -185,7 +185,7 @@ public sealed class PgTargetZeroHistoryTests
             ("current_count", 1), ("current_rate_per_hour", 5.5), ("observed_hours", 0.2), ("is_new", 1), ("ratio", 0),
             ("baseline_zero_history", 1), ("baseline_samples", 1), ("baseline_distinct_days", 1));
         var block = Compose(one);
-        Assert.Contains("1 deadlock this window (5.5/hour) — against a", block.Headline, StringComparison.Ordinal);
+        Assert.Contains("1 deadlock this window (5.5/hour), against a", block.Headline, StringComparison.Ordinal);
         Assert.Contains("measured ZERO: 1 baseline sample across 1 distinct day, not one of them above zero", block.Investigation, StringComparison.Ordinal);
 
         // A fact that carries the stamp but no sample count (nothing to rest the claim on) still reads as a zero, plainly.
@@ -243,7 +243,7 @@ public sealed class PgTargetZeroHistoryTests
         var block = Compose(fact);
 
         var span = $"{BaselineMath.BaselineWindowDays}-day";
-        Assert.Equal($"The cluster's wait profile reached 900 ms/sec — against a {span} baseline in which this hour saw no waiting", block.Headline);
+        Assert.Equal($"The cluster's wait profile reached 900 ms/sec, against a {span} baseline in which this hour saw no waiting", block.Headline);
         Assert.Contains("measured ZERO: 300 baseline samples across 5 distinct days, not one of them above zero", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("(CPU excluded; the window's mean was about 640 ms/sec), led by Lock:relation, IO:DataFileRead", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("the engine measured", block.Investigation, StringComparison.Ordinal);

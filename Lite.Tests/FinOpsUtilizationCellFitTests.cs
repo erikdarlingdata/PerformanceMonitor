@@ -37,7 +37,7 @@ public sealed class FinOpsUtilizationCellFitTests
         {
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = 1280, Height = 900 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ((FrameworkElement)tab.FindName("UtilizationContent")).Visibility = Visibility.Visible;

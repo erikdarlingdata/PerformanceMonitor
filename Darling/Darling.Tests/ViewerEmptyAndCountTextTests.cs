@@ -79,7 +79,7 @@ public sealed class ViewerEmptyAndCountTextTests
     [InlineData(0, "0 events")]
     [InlineData(1, "1 event")]
     [InlineData(2, "2 events")]
-    [InlineData(1500, "1500 events")]
+    [InlineData(1500, "1,500 events")]
     public void ACount_ReadsAsANaturalPlural(int count, string expected)
     {
         Assert.Equal(expected, PerformanceMonitor.Common.CountText.Plural(count, "event"));
@@ -433,7 +433,7 @@ public sealed class ViewerEmptyAndCountTextTests
     {
         var problems = new List<string>();
         var window = new Window { Content = tab, Width = width, Height = height, Left = 0, Top = 0, WindowStyle = WindowStyle.None };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         try
         {
             Settle(window);
@@ -477,7 +477,7 @@ public sealed class ViewerEmptyAndCountTextTests
     private static Window Open(FrameworkElement content, int width, int height)
     {
         var window = new Window { Content = content, Width = width, Height = height, Left = 0, Top = 0, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize };
-        window.Show();
+        StaTestThread.ShowOffScreen(window);
         Settle(window);
         return window;
     }

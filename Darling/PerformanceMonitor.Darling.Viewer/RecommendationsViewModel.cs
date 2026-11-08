@@ -198,10 +198,10 @@ public sealed class RecommendationCardViewModel
         _ => ""                                 // info
     };
 
-    /// <summary>The card heading.</summary>
-    public string Title => Item.Title;
+    /// <summary>The card heading: the finding's headline, or its fact token read as words (<see cref="RecommendationTitleText"/>).</summary>
+    public string Title => RecommendationTitleText.Readable(Item.Title);
 
-    /// <summary>#6159: false when the card is the only finding in its section, whose expander header already carries the title.</summary>
+    /// <summary>#6159: false when the section's header already carries this card's title, so the title is read once.</summary>
     public bool ShowTitle { get; internal set; } = true;
 
     /// <summary>
@@ -759,7 +759,8 @@ public sealed class RecommendationsViewModel
             .Select(i => new RecommendationCardViewModel(i, serverClock))
             .ToList();
         var primary = cards[0]; // severity-desc sorted -> the first card is the incident primary
-        if (cards.Count == 1) primary.ShowTitle = false; // the section header already names it (#6159)
+        foreach (var card in cards)
+            card.ShowTitle = card.Title != primary.Title; // the section header already names the primary (#6159)
         var severity = primary.Severity;
         var label = severity switch
         {

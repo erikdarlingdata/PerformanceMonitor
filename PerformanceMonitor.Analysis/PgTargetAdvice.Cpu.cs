@@ -31,7 +31,7 @@ public static partial class PgTargetAdvice
     private static readonly AdviceBlock s_cpuFactStatic = new(
         Headline: "Instance CPU is near its configured capacity ceiling (Aurora)",
         Investigation:
-            "Percent of the CONFIGURED capacity ceiling in use (acu_utilization_percent from pg_cpu_utilization — " +
+            "Percent of the CONFIGURED capacity ceiling in use (acu_utilization_percent from pg_cpu_utilization, " +
             "AWS Performance Insights, collected for Aurora targets only), the window's peak of the collector's " +
             "five-minute averages. This is the figure the fleet card and the High CPU alert band on; the raw " +
             "cpu_percent is percent of the capacity currently allocated and is reported beside it, never graded, " +
@@ -58,7 +58,7 @@ public static partial class PgTargetAdvice
         var samplesClause = samples > 0 ? $" across {samples.ToString("N0", CultureInfo.InvariantCulture)} five-minute samples" : string.Empty;
         var rawPeak = fact.Metadata.TryGetValue(PgTargetScorer.CpuPeakPercentKey, out var rp) ? rp : (double?)null;
         var rawClause = rawPeak is { } raw
-            ? $" The raw cpu_percent peaked at {Pct(raw)} of the capacity currently allocated — a core was pinned — which is reported, not graded."
+            ? $" The raw cpu_percent peaked at {Pct(raw)} of the capacity currently allocated (a core was pinned), which is reported, not graded."
             : string.Empty;
 
         if (!measured)
@@ -66,8 +66,8 @@ public static partial class PgTargetAdvice
             return s_cpuFactStatic with
             {
                 Headline = rawPeak is { } r
-                    ? $"Instance CPU peaked at {Pct(r)} of allocated capacity — not graded, no capacity reading in the window"
-                    : "Instance CPU was collected but carried no capacity reading in the window — not graded",
+                    ? $"Instance CPU peaked at {Pct(r)} of allocated capacity, not graded, no capacity reading in the window"
+                    : "Instance CPU was collected but carried no capacity reading in the window, not graded",
                 Investigation =
                     $"pg_cpu_utilization holds rows for this instance{samplesClause}, but none in the window carried " +
                     "acu_utilization_percent, so there is no percent-of-configured-ceiling to grade and this pass assigns the " +
@@ -80,7 +80,7 @@ public static partial class PgTargetAdvice
         var peak = fact.Metadata.GetValueOrDefault(PgTargetScorer.CpuPeakCapacityPctKey, fact.Value);
         var avg = fact.Metadata.GetValueOrDefault(PgTargetScorer.CpuAvgCapacityPctKey);
         var acuClause = fact.Metadata.TryGetValue(PgTargetScorer.CpuPeakCapacityAcuKey, out var acu) && fact.Metadata.TryGetValue(PgTargetScorer.CpuMaxConfiguredAcuKey, out var max)
-            ? $" — {acu.ToString("0.#", CultureInfo.InvariantCulture)} of {max.ToString("0.#", CultureInfo.InvariantCulture)} configured ACUs at the peak"
+            ? $": {acu.ToString("0.#", CultureInfo.InvariantCulture)} of {max.ToString("0.#", CultureInfo.InvariantCulture)} configured ACUs at the peak"
             : string.Empty;
         var fired = fact.BaseSeverity > 0;
 
@@ -88,13 +88,13 @@ public static partial class PgTargetAdvice
         {
             Headline = fired
                 ? $"Instance CPU peaked at {Pct(peak)} of its configured capacity ceiling{acuClause}"
-                : $"Instance CPU peaked at {Pct(peak)} of its configured capacity ceiling — under the warning bar",
+                : $"Instance CPU peaked at {Pct(peak)} of its configured capacity ceiling, under the warning bar",
             Investigation =
                 $"Percent of the CONFIGURED capacity ceiling peaked at {Pct(peak)} and averaged {Pct(avg)}{samplesClause}{acuClause} " +
-                "(acu_utilization_percent from pg_cpu_utilization — AWS Performance Insights, Aurora only; the window's peak of the " +
+                "(acu_utilization_percent from pg_cpu_utilization, AWS Performance Insights, Aurora only; the window's peak of the " +
                 "collector's five-minute averages). This is the figure the fleet card and the High CPU alert band on." + rawClause +
                 (fired
-                    ? " At or past the 80% warning bar the instance has little headroom for a burst; the 80% / 95% bands are the fleet ladder repeated and are fleet-measured — about the 99.8th and 99.9th percentile of the measured fleet's five-minute samples (threshold_lineage = 1)."
+                    ? " At or past the 80% warning bar the instance has little headroom for a burst; the 80% / 95% bands are the fleet ladder repeated and are fleet-measured, about the 99.8th and 99.9th percentile of the measured fleet's five-minute samples (threshold_lineage = 1)."
                     : " Under the 80% warning bar this fact is context: it is stated so a sibling finding can read it, and it roots nothing."),
         };
     }

@@ -1,0 +1,198 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "definitions": {
+    "secretRef": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "key": { "type": "string" }
+      },
+      "if": { "properties": { "name": { "type": "string", "minLength": 1 } }, "required": ["name"] },
+      "then": { "properties": { "key": { "type": "string", "minLength": 1 } }, "required": ["key"] }
+    },
+    "storeField": { "type": "string", "pattern": "^[^;=]*$" }
+  },
+  "properties": {
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": ["string", "number"] },
+        "digest": { "type": "string" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "imagePullSecrets": { "type": "array" },
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "resources": { "type": "object" },
+    "persistence": {
+      "type": "object",
+      "properties": {
+        "size": { "type": "string" },
+        "storageClass": { "type": "string" },
+        "existingClaim": { "type": "string" }
+      }
+    },
+    "deploymentAnnotations": { "type": "object" },
+    "podAnnotations": { "type": "object" },
+    "podLabels": { "type": "object" },
+    "nodeSelector": { "type": "object" },
+    "tolerations": { "type": "array" },
+    "affinity": { "type": "object" },
+    "priorityClassName": { "type": "string" },
+    "hostAliases": { "type": "array" },
+    "extraEnv": { "type": "array" },
+    "extraEnvFrom": { "type": "array" },
+    "extraVolumes": { "type": "array" },
+    "extraVolumeMounts": { "type": "array" },
+    "config": { "type": "object" },
+    "passwordKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": { "type": "string" },
+        "secretKey": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "enum": ["file", "env"] }
+      }
+    },
+    "configSubstitutions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "placeholder": { "type": "string", "pattern": "^@@[A-Za-z0-9_]+@@$" },
+          "secretKey": { "type": "string", "minLength": 1 }
+        },
+        "required": ["placeholder", "secretKey"]
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "properties": {
+        "existingSecret": { "type": "string" },
+        "values": { "type": "object" },
+        "webTokenKey": { "type": "string", "minLength": 1 },
+        "mcpTokenKey": { "type": "string", "minLength": 1 }
+      }
+    },
+    "network": {
+      "type": "object",
+      "properties": {
+        "allowFrom": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "trustedProxies": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "web": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "publicBaseUrl": { "type": "string" },
+        "network": {
+          "type": "object",
+          "properties": { "allowFrom": { "type": "array", "items": { "type": "string", "minLength": 1 } }, "trustedProxies": { "type": "array", "items": { "type": "string", "minLength": 1 } } }
+        },
+        "ingress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "className": { "type": "string" },
+            "hosts": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "tls": { "type": "array" },
+            "annotations": { "type": "object" }
+          }
+        }
+      }
+    },
+    "mcp": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "network": {
+          "type": "object",
+          "properties": { "allowFrom": { "type": "array", "items": { "type": "string", "minLength": 1 } } }
+        },
+        "ingress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "className": { "type": "string" },
+            "hosts": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "tls": { "type": "array" },
+            "annotations": { "type": "object" }
+          }
+        }
+      }
+    },
+    "store": {
+      "type": "object",
+      "properties": {
+        "mode": { "type": "string", "enum": ["bundled", "external"] },
+        "bundled": {
+          "type": "object",
+          "properties": {
+            "image": { "type": "string", "minLength": 1 },
+            "persistence": {
+              "type": "object",
+              "properties": {
+                "size": { "type": "string" },
+                "storageClass": { "type": "string" }
+              }
+            },
+            "auth": {
+              "type": "object",
+              "properties": { "existingSecret": { "type": "string" } }
+            },
+            "resources": { "type": "object" }
+          }
+        },
+        "external": {
+          "type": "object",
+          "properties": {
+            "host": { "$ref": "#/definitions/storeField" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "database": { "$ref": "#/definitions/storeField" },
+            "username": { "$ref": "#/definitions/storeField" },
+            "sslMode": {
+              "type": "string",
+              "enum": ["Disable", "Allow", "Prefer", "Require", "VerifyCA", "VerifyFull"]
+            },
+            "passwordSecret": { "$ref": "#/definitions/secretRef" },
+            "connectionStringSecret": { "$ref": "#/definitions/secretRef" },
+            "caSecret": { "$ref": "#/definitions/secretRef" }
+          },
+          "not": {
+            "properties": {
+              "passwordSecret": { "properties": { "name": { "type": "string", "minLength": 1 } }, "required": ["name"] },
+              "connectionStringSecret": { "properties": { "name": { "type": "string", "minLength": 1 } }, "required": ["name"] }
+            },
+            "required": ["passwordSecret", "connectionStringSecret"]
+          }
+        }
+      },
+      "if": { "properties": { "mode": { "const": "external" } }, "required": ["mode"] },
+      "then": {
+        "required": ["external"],
+        "properties": {
+          "external": {
+            "if": {
+              "properties": { "connectionStringSecret": { "properties": { "name": { "type": "string", "minLength": 1 } }, "required": ["name"] } },
+              "required": ["connectionStringSecret"]
+            },
+            "else": {
+              "required": ["host", "database", "username"],
+              "properties": {
+                "host": { "minLength": 1 },
+                "database": { "minLength": 1 },
+                "username": { "minLength": 1 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -48,6 +48,10 @@ namespace Darling.Tests;
 /// single-run cost that would starve the fast tier if it sat in the body, whether measured or designed. It
 /// sits on the five-minute tier, so the one-minute-tier invariant below holds for it as for the others.</para>
 ///
+/// <para><b>The fourth member (#7643).</b> <c>schema_objects</c> reads only the change-tracking session's events on a quiet pass,
+/// but a first baseline, a reconcile after a restart or lost events, or run_collectors_now reads every database's catalog, up to
+/// 120 s each within a five-minute pass budget: the bimodal shape of query_store again. It sits on the fifteen-minute tier.</para>
+///
 /// <para><b>The 4.5x evidence.</b> use2 runs the same Balanced preset with Query Store dead since
 /// 2026-08-17 17:36. Its <c>query_stats</c> delivered cadence stepped from 4.69-9.02 min (Query Store
 /// live) to 1.44-1.57 min (dead) the following day, and held there for two weeks.</para>
@@ -55,11 +59,11 @@ namespace Darling.Tests;
 public sealed class SweepBodyDetachPolicyTests
 {
     /// <summary>The collectors #2700/#2717 detach, by the criterion documented on this class.</summary>
-    private static readonly string[] ExpectedDetached = { "query_store", "plan_correction", "pg_wait_sampling" };
+    private static readonly string[] ExpectedDetached = { "query_store", "plan_correction", "pg_wait_sampling", "schema_objects" };
 
     private static bool IsDetached(string name) =>
         DarlingWorker.IsQueryStoreCollector(name) || DarlingWorker.IsPlanCorrectionCollector(name)
-        || DarlingWorker.IsPgWaitSamplingCollector(name);
+        || DarlingWorker.IsPgWaitSamplingCollector(name) || DarlingWorker.IsSchemaObjectsCollector(name);
 
     /// <summary>
     /// The invariant that makes detaching safe, and the one that GENERALISES: a detached collector runs

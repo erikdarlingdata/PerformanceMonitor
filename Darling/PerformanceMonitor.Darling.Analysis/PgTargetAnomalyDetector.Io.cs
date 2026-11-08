@@ -76,14 +76,22 @@ rated AS (
     SELECT sample_start AS collection_time, reads, read_ms / reads AS ms_per_read
     FROM per_sample
     WHERE reads >= 250 /* PgTargetScorer.IoBaselineBucketMinimumReads — the per-sample reads floor */
+),
+collected AS (
+    /* #8293: every quarter-hour the collector wrote, so the coverage columns count collector instants; a sample
+       under the reads floor, or the window's first, joins as NULL and is not a sample. */
+    SELECT DISTINCT sample_start AS collection_time
+    FROM sampled
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(ms_per_read) AS peak_ms_per_read,
        AVG(ms_per_read) AS avg_ms_per_read,
-       COUNT(*)         AS rated_samples,
+       COUNT(ms_per_read)         AS rated_samples,
        (array_agg(collection_time ORDER BY ms_per_read DESC NULLS LAST, collection_time DESC))[1] AS peak_sample,
-       (array_agg(reads ORDER BY ms_per_read DESC NULLS LAST, collection_time DESC))[1]           AS peak_sample_reads
-FROM rated
+       (array_agg(reads ORDER BY ms_per_read DESC NULLS LAST, collection_time DESC))[1]           AS peak_sample_reads,
+       " + WindowTiles.CoverageColumnsSql + @"
+FROM collected
+LEFT JOIN rated USING (collection_time)
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;
 
