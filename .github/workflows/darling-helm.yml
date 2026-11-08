@@ -95,4 +95,7 @@ jobs:
 
       - name: Run the render tests
         shell: bash
-        run: bash "${CHART_DIR}/tests/render-tests.sh"
+        run: |
+          set -euo pipefail
+          bash "${CHART_DIR}/tests/render-tests.sh"
+          sh "${CHART_DIR}/tests/render-config-tests.sh"

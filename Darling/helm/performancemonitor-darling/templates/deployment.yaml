@@ -18,10 +18,11 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.podAnnotations }}
       annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
@@ -44,6 +45,35 @@ spec:
       hostAliases:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      initContainers:
+        - name: render-config
+          image: {{ include "performancemonitor-darling.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "/scripts/render-config.sh", "/scripts/darling.json", "/config/darling.json"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          {{- with .Values.configSubstitutions }}
+          env:
+            {{- range $i, $s := . }}
+            - name: DARLING_SUBST_{{ $i }}_PLACEHOLDER
+              value: {{ $s.placeholder | quote }}
+            - name: DARLING_SUBST_{{ $i }}_VALUE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "performancemonitor-darling.secretName" $ }}
+                  key: {{ $s.secretKey | quote }}
+            {{- end }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: config-template
+              mountPath: /scripts
+              readOnly: true
       containers:
         - name: darling
           image: {{ include "performancemonitor-darling.image" . | quote }}
@@ -77,6 +107,9 @@ spec:
               mountPath: /usr/share/PerformanceMonitorDarling
             - name: tmp
               mountPath: /tmp
+            - name: secrets
+              mountPath: /run/secrets/darling
+              readOnly: true
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -105,6 +138,13 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 256Mi
+        - name: config-template
+          configMap:
+            name: {{ include "performancemonitor-darling.fullname" . }}
+        - name: secrets
+          secret:
+            secretName: {{ include "performancemonitor-darling.secretName" . }}
+            defaultMode: 288
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

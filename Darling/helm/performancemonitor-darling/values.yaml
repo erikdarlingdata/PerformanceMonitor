@@ -59,3 +59,23 @@ extraEnvFrom: []
 extraVolumes: []
 # Extra volume mounts of the Darling container (a list of VolumeMount objects).
 extraVolumeMounts: []
+
+# The operator's darling.json: servers, collection settings, alerts. The chart owns some keys of it (the store, the web and
+# MCP endpoints, health, passwordKey); setting one here fails the render and names the value to use instead.
+# Strings may contain a placeholder listed in configSubstitutions; its secret value is written in when the pod starts.
+config: {}
+
+# A list of { placeholder, secretKey }. At pod start an init container replaces every occurrence of `placeholder` in darling.json
+# with the value of `secretKey` from the Secret below, so a secret such as a webhook URL never lands in a ConfigMap.
+# A value may only contain A-Z a-z 0-9 and : / . _ ~ % ? = & + # - ; anything else stops the pod from starting.
+configSubstitutions: []
+
+secrets:
+  # Name of a Secret you manage (GitOps installs must use this). Empty makes the chart create one from `values` plus generated tokens.
+  existingSecret: ""
+  # Extra keys of the chart-created Secret (key: value). A key set here wins over generation.
+  values: {}
+  # Key of the web dashboard token in the Secret. The chart generates it when the key is not in `values`.
+  webTokenKey: web-token
+  # Key of the MCP token in the Secret. The chart generates it when the key is not in `values`.
+  mcpTokenKey: mcp-token
