@@ -62,7 +62,7 @@ internal sealed class DarlingHealthHostService : IHostedService, IAsyncDisposabl
         {
             config = _loadConfig();
         }
-        catch (Exception ex) when (ex is JsonException or IOException)
+        catch (Exception ex) when (ConfigLoadFailures(ex))
         {
             _logger.LogError(ex, "Health port not started: darling.json could not be read, so the health block is unknown ({ExceptionType}) (#8184)", ex.GetType().Name);
             return;
@@ -81,23 +81,27 @@ internal sealed class DarlingHealthHostService : IHostedService, IAsyncDisposabl
             return;
         }
 
-        var builder = WebApplication.CreateSlimBuilder();
-        builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(o => o.Listen(address, health.Port));
-        var app = builder.Build();
         var isFrontDoor = config.IsFrontDoor;
-        MapRoutes(app, probe => isFrontDoor
-            ? DarlingHealthEndpoints.AnswerFrontDoor(probe, _collector.Read(), _frontDoor.Stores)
-            : DarlingHealthEndpoints.Answer(probe, _collector.Read()));
-
+        WebApplication? app = null;
         try
         {
+            var builder = WebApplication.CreateSlimBuilder();
+            builder.Logging.ClearProviders();
+            builder.WebHost.ConfigureKestrel(o => o.Listen(address, health.Port));
+            app = builder.Build();
+            MapRoutes(app, probe => isFrontDoor
+                ? DarlingHealthEndpoints.AnswerFrontDoor(probe, _collector.Read(), _frontDoor.Stores)
+                : DarlingHealthEndpoints.Answer(probe, _collector.Read()));
             await app.StartAsync(cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is IOException or SocketException)
+        catch (Exception ex) when (BindFailures(ex))
         {
             _logger.LogError(ex, "Health port could not listen on {Address}:{Port} ({ExceptionType}); the service keeps running without it (#8184)", address, health.Port, ex.GetType().Name);
-            await app.DisposeAsync().ConfigureAwait(false);
+            if (app is not null)
+            {
+                await app.DisposeAsync().ConfigureAwait(false);
+            }
+
             return;
         }
 
@@ -105,6 +109,21 @@ internal sealed class DarlingHealthHostService : IHostedService, IAsyncDisposabl
         IsListening = true;
         _logger.LogInformation("Health port listening on {Address}:{Port} (/livez, /readyz; no token, no allowFrom) (#8184)", address, health.Port);
     }
+
+    /// <summary>#8184: every failure <c>DarlingConfig.Load</c> and <c>Parse</c> raise for a file the host cannot use: a missing or locked file
+    /// (<see cref="IOException"/>, <see cref="UnauthorizedAccessException"/>, <see cref="System.Security.SecurityException"/>), malformed JSON
+    /// (<see cref="JsonException"/>), an empty or <c>null</c> file (<see cref="InvalidDataException"/>), and a value or type the deserializer or
+    /// the secret resolution refuses (<see cref="NotSupportedException"/>, <see cref="ArgumentException"/>, <see cref="FormatException"/>,
+    /// <see cref="InvalidOperationException"/>). The worker treats these as terminal-but-survivable, so the health host must not stop the start.</summary>
+    private static bool ConfigLoadFailures(Exception ex) =>
+        ex is JsonException or IOException or UnauthorizedAccessException or InvalidDataException or System.Security.SecurityException
+            or NotSupportedException or ArgumentException or FormatException or InvalidOperationException;
+
+    /// <summary>#8184: every failure Kestrel's build and start raise for a taken or unusable address: address in use
+    /// (<see cref="IOException"/>), <see cref="SocketException"/>, no permission to bind (<see cref="UnauthorizedAccessException"/>), a port out
+    /// of range (<see cref="ArgumentException"/>) and Kestrel's own <see cref="InvalidOperationException"/>. A cancelled start is not a failure.</summary>
+    private static bool BindFailures(Exception ex) =>
+        ex is IOException or SocketException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or NotSupportedException;
 
     internal static void MapRoutes(IEndpointRouteBuilder app, Func<HealthProbe, HealthAnswer> answer)
     {

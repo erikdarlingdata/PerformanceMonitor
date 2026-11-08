@@ -216,6 +216,28 @@ public sealed class DarlingHealthHostTests
         await host.StopAsync(ct);
     }
 
+    private static async Task AssertConfigFailureDoesNotStart(Exception failure)
+    {
+        var logger = new CapturingLogger();
+        await using var host = new DarlingHealthHostService(
+            new CollectorRuntimeState(), new EmptyDirectory(), logger, () => throw failure);
+
+        await host.StartAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(host.IsListening);
+        var line = Assert.Single(logger.Lines, l => l.Level == LogLevel.Error);
+        Assert.Contains("health", line.Text);
+        Assert.Contains(failure.GetType().Name, line.Text);
+    }
+
+    [Fact]
+    public Task UnauthorizedConfig_DoesNotStart_AndLogsWhy() =>
+        AssertConfigFailureDoesNotStart(new UnauthorizedAccessException("darling.json is restricted"));
+
+    [Fact]
+    public Task EmptyConfig_DoesNotStart_AndLogsWhy() =>
+        AssertConfigFailureDoesNotStart(new System.IO.InvalidDataException("darling.json is empty"));
+
     [Fact]
     public async Task UnreadableConfig_DoesNotStart_AndLogsWhy()
     {
