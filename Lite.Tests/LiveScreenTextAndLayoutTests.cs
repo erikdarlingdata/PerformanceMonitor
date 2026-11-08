@@ -136,6 +136,7 @@ public sealed class LiveScreenTextAndLayoutTests
             await duckDb.InitializeAsync();
             using (var connection = duckDb.CreateConnection())
             {
+                await connection.OpenAsync();
                 using var command = connection.CreateCommand();
                 command.CommandText = "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version) VALUES (1, current_timestamp, 7, 'SQL01', 'Enterprise Edition (64-bit)', '16.0.1000.6')";
                 await command.ExecuteNonQueryAsync();
