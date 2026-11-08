@@ -158,7 +158,7 @@ public sealed class DarlingMcpObjectStatsTools
                     covers_30d = covers30d,
                     note = covers30d
                         ? null
-                        : $"The store holds {span.DaysOfData} day(s) of index snapshots for this server, so the "
+                        : $"The store holds {CountText.Plural(span.DaysOfData, "day")} of index snapshots for this server, so the "
                           + (covers7d ? "30-day baseline does not exist: growth_30d_mb and growth_pct_30d are null" : "7-day and 30-day baselines do not exist: growth_7d_mb, growth_30d_mb and growth_pct_30d are null")
                           + " rather than re-measured over a shorter span under the same name. Read growth_over_available_history_*: it spans exactly growth_window_days.",
                 },

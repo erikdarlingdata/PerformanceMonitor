@@ -409,7 +409,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             return McpHelpers.Status(
                 "unavailable",
                 $"{serverName} has no Query Store capture in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline window before this window, so there is no baseline to compare against and no regression can be detected however badly one regressed. This is NOT a clean bill of health. "
-                    + (kept ?? $"Either this server's whole collected history falls inside the last {hours_back} hour(s), or it has none older than the baseline lookback yet."),
+                    + (kept ?? $"Either this server's whole collected history falls inside the last {CountText.Plural(hours_back, "hour")}, or it has none older than the baseline lookback yet."),
                 notice.AsHints());
         }
 
@@ -417,7 +417,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
         {
             return McpHelpers.Status(
                 "empty",
-                $"{serverName} has Query Store history from before this window but nothing collected IN the last {hours_back} hour(s), so there is a recent side missing rather than nothing to report. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
+                $"{serverName} has Query Store history from before this window but nothing collected IN the last {CountText.Plural(hours_back, "hour")}, so there is a recent side missing rather than nothing to report. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
                 notice.AsHints());
         }
 
@@ -442,7 +442,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             {
                 return McpHelpers.Status(
                     "empty",
-                    $"No Query Store capture on {serverName} in the last {hours_back} hour(s) or in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline before it matched {scope}, so the filter matched nothing and this is NOT the all-clear: no query in {that} was compared. Check the database {(one ? "name" : "names")}, or drop the filter to read every database.",
+                    $"No Query Store capture on {serverName} in the last {CountText.Plural(hours_back, "hour")} or in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline before it matched {scope}, so the filter matched nothing and this is NOT the all-clear: no query in {that} was compared. Check the database {(one ? "name" : "names")}, or drop the filter to read every database.",
                     notice.AsHints());
             }
 
@@ -451,7 +451,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 var keptSome = await RetentionCause.ForDatabaseAsync(postgres, serverId, baselineStart, start, floor, tableSpans is not null, one, cancellationToken);
                 return McpHelpers.Status(
                     "unavailable",
-                    $"{serverName} has no Query Store capture of {scope} in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline window before this window, so there is no baseline for {that} to compare against and no regression of {(one ? "its" : "their")} queries can be detected however badly one regressed. This is NOT a clean bill of health: no query in {that} was compared. " + (keptSome ?? $"Either {thatPossessive} whole collected history falls inside the last {hours_back} hour(s), or {(one ? "it has" : "they have")} none older than the baseline lookback yet."),
+                    $"{serverName} has no Query Store capture of {scope} in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline window before this window, so there is no baseline for {that} to compare against and no regression of {(one ? "its" : "their")} queries can be detected however badly one regressed. This is NOT a clean bill of health: no query in {that} was compared. " + (keptSome ?? $"Either {thatPossessive} whole collected history falls inside the last {CountText.Plural(hours_back, "hour")}, or {(one ? "it has" : "they have")} none older than the baseline lookback yet."),
                     notice.AsHints());
             }
 
@@ -459,7 +459,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             {
                 return McpHelpers.Status(
                     "empty",
-                    $"{serverName} has Query Store history of {scope} from before this window but nothing of {(one ? "it" : "them")} collected IN the last {hours_back} hour(s), so {thatPossessive} recent side is missing rather than nothing to report, and this is NOT the all-clear: no query in {that} was compared. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
+                    $"{serverName} has Query Store history of {scope} from before this window but nothing of {(one ? "it" : "them")} collected IN the last {CountText.Plural(hours_back, "hour")}, so {thatPossessive} recent side is missing rather than nothing to report, and this is NOT the all-clear: no query in {that} was compared. Widen hours_back, or check get_collection_health: a collector that stopped looks exactly like this.",
                     notice.AsHints());
             }
         }
@@ -468,7 +468,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             "empty",
             McpHelpers.QuietUnlessCut(
                 notice.WindowTruncated, notice.EffectiveStart,
-                factual: $"No query on {serverName} regressed in the last {hours_back} hour(s). Both a baseline and this window were collected and no query's Regular average CPU is more than 25% worse than its baseline with at least 1 s of added CPU, and none of their timeouts or errors rose",
+                factual: $"No query on {serverName} regressed in the last {CountText.Plural(hours_back, "hour")}. Both a baseline and this window were collected and no query's Regular average CPU is more than 25% worse than its baseline with at least 1 s of added CPU, and none of their timeouts or errors rose",
                 coveredClaim: ": this is the all-clear for this read."),
             notice.AsHints());
     }

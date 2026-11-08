@@ -91,7 +91,7 @@ public sealed class DarlingMcpPgIndexUsageTools
         if (sampleCount < MinimumSamplesForADisuseClaim)
         {
             return "Not enough history to say anything about disuse: this read has "
-                 + sampleCount.ToString(CultureInfo.InvariantCulture) + " sample(s) of this index, and a "
+                 + CountText.Plural(sampleCount, "sample") + " of this index, and a "
                  + "windowed scan count is a DIFFERENCE that needs at least two. PostgreSQL records no "
                  + "index creation time anywhere, so how long we have been watching is the only evidence "
                  + "available that an index is old enough to judge.";
@@ -405,7 +405,7 @@ public sealed class DarlingMcpPgIndexUsageTools
                 note = "An index with no scans is a CANDIDATE, never a conclusion. Three things this data "
                      + "cannot see, in the order they bite: an index backing a constraint enforces it "
                      + "without ever registering a scan; a query that runs less often than "
-                     + $"{hours_back} hour(s) looks identical to a dead index; and a rare query may only be "
+                     + $"{CountText.Plural(hours_back, "hour")} looks identical to a dead index; and a rare query may only be "
                      + "acceptable because this index exists. Counts are cumulative since each database's "
                      + "statistics were last reset, which is reported per index. Indexes under 64 kB are "
                      + "deliberately not reported here, so this count is LOWER than get_pg_index_bloat's "
@@ -416,7 +416,7 @@ public sealed class DarlingMcpPgIndexUsageTools
                          + "and is a lower bound. A zero there is not counted among the unscanned indexes."
                          : string.Empty)
                      + (invalidCount > 0
-                         ? $" {invalidCount} INVALID index(es) are present and sorted to the top - those are "
+                         ? $" {CountText.Plural(invalidCount, "INVALID index", "INVALID indexes")} {(invalidCount == 1 ? "is" : "are")} present and sorted to the top - those are "
                          + "failed CREATE INDEX CONCURRENTLY leftovers, maintained by writes and used by "
                          + "nobody."
                          : string.Empty)
@@ -488,7 +488,7 @@ public sealed class DarlingMcpPgIndexUsageTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice is { IsUnavailable: false, WindowTruncated: true }, notice.EffectiveStart,
-                    factual: $"No indexes were recorded for {displayName} in the last {hoursBack} hour(s) even though "
+                    factual: $"No indexes were recorded for {displayName} in the last {CountText.Plural(hoursBack, "hour")} even though "
                         + "collection ran - at least two snapshots exist. Every index on every collected database is "
                         + "under the collector's 64 KB size floor, which is the state of a schema whose indexes are "
                         + "all trivially small",
@@ -500,7 +500,7 @@ public sealed class DarlingMcpPgIndexUsageTools
         {
             return await DarlingServerOfflineNote.UnavailableAsync(
                 postgres, serverId, displayName,
-                $"Only ONE index snapshot exists for {displayName} in the last {hoursBack} hour(s), so this "
+                $"Only ONE index snapshot exists for {displayName} in the last {CountText.Plural(hoursBack, "hour")}, so this "
                 + "is NOT a report about index usage. A windowed scan count is a DIFFERENCE and needs two "
                 + "snapshots before it produces anything. This collector runs DAILY, so on a newly added "
                 + "server it clears itself within a day or two; widen hours_back in the meantime.",
@@ -510,7 +510,7 @@ public sealed class DarlingMcpPgIndexUsageTools
         return await DarlingServerOfflineNote.UnavailableAsync(
             postgres, serverId, displayName,
             probe.RowsEver > 0
-                ? $"No index snapshots were collected for {displayName} in the last {hoursBack} hour(s), so "
+                ? $"No index snapshots were collected for {displayName} in the last {CountText.Plural(hoursBack, "hour")}, so "
                 + "the window says nothing either way. Collection HAS run for this server outside the "
                 + "window - this collector runs DAILY, so a window shorter than about 48 hours can "
                 + "legitimately contain fewer than two samples. Widen hours_back, or use "

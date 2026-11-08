@@ -472,7 +472,7 @@ public sealed class McpBlockingTools
                     r.event_time, r.database_name, r.blocked_spid, r.blocking_spid, r.wait_time_ms
                 }).ToList(),
                 size_note = leftOut > 0
-                    ? $"{leftOut} of the {allReports.Count} report(s) this page selected were left out so the answer stays within about 32 KB; a report is never cut mid-way, so each one returned is whole. left_out_reports lists the ones left out (first 20). Fetch one by calling again with as_of set to its event_time (hours_back wide enough to reach it) and limit 1, or narrow with database_name."
+                    ? $"{leftOut} of the {CountText.Plural(allReports.Count, "report")} this page selected {(leftOut == 1 ? "was" : "were")} left out so the answer stays within about 32 KB; a report is never cut mid-way, so each one returned is whole. left_out_reports lists the ones left out (first 20). Fetch one by calling again with as_of set to its event_time (hours_back wide enough to reach it) and limit 1, or narrow with database_name."
                     : null,
                 reports = allReports.Take(fitCount)
             }, McpHelpers.JsonOptions);
@@ -683,7 +683,7 @@ public sealed class McpBlockingTools
                 return await McpQueryTools.WithEmptyWindowNoticeAsync(await dataService.HasAnyWaitStatAsync(resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
-                        await McpQueryTools.QuietWindowMessageAsync(dataService, QueryWindowRelation.WaitStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "wait_stats", $"No lock waits recorded for {resolved.DisplayName} in the last {hours_back} hour(s)", ". This server has collected wait stats before, so this window was quiet: widen hours_back to find the most recent samples."))
+                        await McpQueryTools.QuietWindowMessageAsync(dataService, QueryWindowRelation.WaitStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "wait_stats", $"No lock waits recorded for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}", ". This server has collected wait stats before, so this window was quiet: widen hours_back to find the most recent samples."))
                     : McpHelpers.Status(
                         "unavailable",
                         $"No wait stats have EVER been recorded for {resolved.DisplayName}, so this is NOT a report of a server without lock contention: nothing has been stored for it at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled."),
@@ -763,7 +763,7 @@ public sealed class McpBlockingTools
         {
             return McpHelpers.Status(
                 "empty",
-                $"No {subject} was recorded for {serverName}{ForChosenDatabase(database)} in the last {hoursBack} hour(s). {captureCount} collector run(s) DID execute over this window, "
+                $"No {subject} was recorded for {serverName}{ForChosenDatabase(database)} in the last {CountText.Plural(hoursBack, "hour")}. {CountText.Plural(captureCount, "collector run")} DID execute over this window, "
                     + (loss is null ? "so this is a genuine all-clear rather than missing data" : "but " + RingBufferLossAnswer.LostEventsClaim)
                     + ": see hints.captures for which collectors ran and when.",
                 hints);
@@ -773,7 +773,7 @@ public sealed class McpBlockingTools
         return McpHelpers.Status(
             "unavailable",
             everCaptured
-                ? $"No {subject} collector runs are recorded for {serverName} in the last {hoursBack} hour(s), so this is NOT an all-clear: nothing was captured and the window says nothing either way. Collection HAS run for this server outside the window, so this is a gap rather than a dead collector: widen hours_back, or use get_collection_health to find where it stopped."
+                ? $"No {subject} collector runs are recorded for {serverName} in the last {CountText.Plural(hoursBack, "hour")}, so this is NOT an all-clear: nothing was captured and the window says nothing either way. Collection HAS run for this server outside the window, so this is a gap rather than a dead collector: widen hours_back, or use get_collection_health to find where it stopped."
                 : $"No {subject} collector runs have EVER been recorded for {serverName}, so this is NOT an all-clear: there is nothing to read. Check that collection is running for this server before concluding it was quiet.",
             hints);
     }

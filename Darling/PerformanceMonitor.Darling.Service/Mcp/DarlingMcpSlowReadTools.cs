@@ -121,7 +121,7 @@ public sealed class DarlingMcpSlowReadTools
             {
                 return McpHelpers.Status(
                     "empty",
-                    $"No slow read recorded in the last {hours} hour(s)" +
+                    $"No slow read recorded in the last {CountText.Plural(hours, "hour")}" +
                     (serverId is null && string.IsNullOrWhiteSpace(surface) && string.IsNullOrWhiteSpace(route) ? "" : " for that filter") +
                     ". The service records a read that took 5 seconds or more, or ended in a timeout, error or limit; " +
                     "a store before schema V162, or a quiet window, has none.");

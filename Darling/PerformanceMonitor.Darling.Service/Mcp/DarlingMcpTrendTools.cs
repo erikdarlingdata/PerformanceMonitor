@@ -156,7 +156,7 @@ public sealed class DarlingMcpTrendTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No memory samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
+                            factual: $"No memory samples recorded for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}",
                             coveredClaim: ". This server HAS collected memory stats before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent samples."),
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
@@ -384,7 +384,7 @@ public sealed class DarlingMcpTrendTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No file I/O samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
+                            factual: $"No file I/O samples recorded for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}",
                             coveredClaim: ". This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken: widen hours_back, or read it as no measurable read or write activity on any file in this window."),
                         echo, emptyNotice.AsHints())
                     : McpHelpers.StatusForDatabase(
@@ -419,7 +419,7 @@ public sealed class DarlingMcpTrendTools
     /// set, not about any one name. The single-name sentence is <see cref="TrendPayloads.FileIoScopeEmptyMessage"/>.
     /// </summary>
     internal static string FileIoChosenDatabasesEmptyMessage(string serverName, int hoursBack) =>
-        $"No read or write activity was recorded for {DatabaseFilter.ManyDatabasesDescription} on {serverName} in the last {hoursBack} hour(s). "
+        $"No read or write activity was recorded for {DatabaseFilter.ManyDatabasesDescription} on {serverName} in the last {CountText.Plural(hoursBack, "hour")}. "
         + "Each name must match a collected database exactly (get_file_io_stats lists them); omit database_name for every database.";
 
     [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time. Points are time buckets (bucket, bucket_minutes, aggregate_note) sized to the window unless bucket_minutes names a width: each point sums the collections it holds across the query's plans and handles, collection_count says how many, and avg_cpu_ms and avg_elapsed_ms are weighted by executions. min_dop and max_dop are each plan's cached extremes across the plans that ran in the bucket (a bucket where nothing ran leaves both blank), plan_count says how many plans, and query_plan_hash is null when that is more than one or no hash was captured. Past the raw tier's four days the hourly rollup answers, in buckets of whole hours (bucket_minutes a multiple of 60): executions, CPU and elapsed are summed across handles, and the other fields are null, collection_count included." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
@@ -1184,7 +1184,7 @@ public sealed class DarlingMcpTrendTools
         envelope["unrated_collections"] = unratedCollections;
         envelope["unrated_note"] = unratedCollections == 0
             ? null
-            : $"{unratedCollections} collection(s) had no knowable rate: a rate is a collection's work divided by the seconds it accrued over, and that denominator is unknowable two ways, the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the collection is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0: such a collection is left out of its point's rates rather than counted as zero, and a point that held nothing else carries null rates ({unrated} here).";
+            : $"{CountText.Plural(unratedCollections, "collection")} had no knowable rate: a rate is a collection's work divided by the seconds it accrued over, and that denominator is unknowable two ways, the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the collection is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0: such a collection is left out of its point's rates rather than counted as zero, and a point that held nothing else carries null rates ({unrated} here).";
         envelope["trend"] = points.Select(p => new
         {
             time = p.CollectionTime.ToString("o"),
@@ -1287,7 +1287,7 @@ public sealed class DarlingMcpTrendTools
 
     /// <summary>The two-state sentence pair the trio shares with Lite's twins, word for word (#2484, #2485).</summary>
     private static string QuietWindowMessage(string serverName, int hours_back, string what) =>
-        $"No {what} samples were recorded for {serverName} in the last {hours_back} hour(s). This server HAS been sampled before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent samples.";
+        $"No {what} samples were recorded for {serverName} in the last {CountText.Plural(hours_back, "hour")}. This server HAS been sampled before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent samples.";
 
     private static string NeverSampledMessage(string serverName, string what, string checkThis) =>
         $"No {what} samples have EVER been recorded for {serverName}. This is not an empty window: nothing at all has been stored for this server, so it is NOT a quiet server. {checkThis}";
@@ -1358,7 +1358,7 @@ public sealed class DarlingMcpTrendTools
 
             return EmptyStatus(
                 "empty",
-                $"No {what} samples in the hourly rollup ({route.HourlyView}) for {scoped} over the last {hours_back} hour(s), from {startUtc:o}. The window reaches past the raw tier's {TimescaleSupport.RawRetentionSpan.TotalDays:0}-day retention, so this read served the rollup, not raw. {reach} Widening hours_back cannot help here.",
+                $"No {what} samples in the hourly rollup ({route.HourlyView}) for {scoped} over the last {CountText.Plural(hours_back, "hour")}, from {startUtc:o}. The window reaches past the raw tier's {TimescaleSupport.RawRetentionSpan.TotalDays:0}-day retention, so this read served the rollup, not raw. {reach} Widening hours_back cannot help here.",
                 disclosure, databases);
         }
 
@@ -1398,7 +1398,7 @@ public sealed class DarlingMcpTrendTools
 
         return EmptyStatus(
             "empty",
-            $"No {what} samples were recorded for {scoped} in the part of the last {hours_back} hour(s) that the raw tier still holds. {oldest}, and the window as requested starts at {startUtc:o}: the part before raw's reach is UNSERVED rather than quiet, because the hourly rollup ({route.HourlyView}) that would serve deeper history has materialized less than raw holds. This server HAS been sampled before. Widening hours_back reaches further into what raw no longer holds and cannot help; run --backfill-rollups to materialize the rollup, which is what serves deeper history.",
+            $"No {what} samples were recorded for {scoped} in the part of the last {CountText.Plural(hours_back, "hour")} that the raw tier still holds. {oldest}, and the window as requested starts at {startUtc:o}: the part before raw's reach is UNSERVED rather than quiet, because the hourly rollup ({route.HourlyView}) that would serve deeper history has materialized less than raw holds. This server HAS been sampled before. Widening hours_back reaches further into what raw no longer holds and cannot help; run --backfill-rollups to materialize the rollup, which is what serves deeper history.",
             disclosure, databases);
     }
 

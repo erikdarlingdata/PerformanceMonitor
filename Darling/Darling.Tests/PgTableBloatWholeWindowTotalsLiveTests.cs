@@ -190,7 +190,7 @@ VALUES ($1,$2,$3,$4,'postgres','public','widget',$5, 0, 0,0,0,0, 1000000, 200000
                 Assert.StartsWith("never_analyzed_", table.GetProperty("table").GetString(), StringComparison.Ordinal);
             Assert.Equal(8, root.GetProperty("suppressed_estimate_count").GetInt64());
             Assert.True(root.GetProperty("pgstattuple_available_anywhere").GetBoolean());
-            Assert.Contains("3 table(s) have NO usable column statistics", root.GetProperty("note").GetString(), StringComparison.Ordinal);
+            Assert.Contains("3 tables have NO usable column statistics", root.GetProperty("note").GetString(), StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

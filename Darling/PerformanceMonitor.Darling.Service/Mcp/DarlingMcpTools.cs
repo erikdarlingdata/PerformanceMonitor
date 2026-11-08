@@ -397,7 +397,7 @@ public sealed class DarlingMcpTools
                 return McpHelpers.Status(
                     "unavailable",
                     $"The collector observed none of the requested window for {resolved.DisplayName}, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. " +
-                    $"{facts.Count} point-in-time fact(s) (configuration and current state) could still be read; audit_config reports those. " +
+                    $"{CountText.Plural(facts.Count, "point-in-time fact")} (configuration and current state) could still be read; audit_config reports those. " +
                     "Check get_collection_health to see when each collector last succeeded." +
                     (collectionCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {collectionCaveat}"),
                     DarlingMcpWindowNotice.AttachToHints(
@@ -1486,9 +1486,9 @@ public sealed class DarlingMcpTools
                     : "None needed: the mute was already in force and nothing was written.",
                 matched_now = matchedNow,
                 note = !registered
-                    ? $"This scope already mutes this story_path_hash; nothing was written and the existing mute stays in force ({matchedNow} stored finding(s) in this scope carry the hash). A reason passed on this call is not recorded."
+                    ? $"This scope already mutes this story_path_hash; nothing was written and the existing mute stays in force ({CountText.Plural(matchedNow, "stored finding")} in this scope {(matchedNow == 1 ? "carries" : "carry")} the hash). A reason passed on this call is not recorded."
                     : matchedNow > 0
-                        ? $"The mute is registered; {matchedNow} stored finding(s) in this scope carry the hash and the pattern will be dropped from future analysis runs."
+                        ? $"The mute is registered; {CountText.Plural(matchedNow, "stored finding")} in this scope {(matchedNow == 1 ? "carries" : "carry")} the hash and the pattern will be dropped from future analysis runs."
                         : "The mute is registered, but no stored finding in this scope carries this story_path_hash. If you copied it from analyze_server or get_analysis_findings it is still valid (the pattern will be dropped if it recurs); a hash from anywhere else may be mistyped and would mute nothing.",
             }, McpHelpers.JsonOptions);
         }
@@ -1562,7 +1562,7 @@ public sealed class DarlingMcpTools
                     status = "error",
                     message = removed == 0
                         ? "The unmute could not be written to the monitoring store (see the service log); the mute is still in force. If the log says permission denied, the mcp role lacks DELETE on config.analysis_muted: re-run " + DarlingManagedRoles.ProvisionRolesScriptPath + ", or restart a managed store so its roles are re-provisioned."
-                        : $"The unmute removed {removed} mute row(s) and then failed on {write.Failed} more (see the service log); the rest of the mute is still in force. Call again to retry.",
+                        : $"The unmute removed {CountText.Plural(removed, "mute row")} and then failed on {write.Failed} more (see the service log); the rest of the mute is still in force. Call again to retry.",
                     story_path_hash,
                     server = scope.Label,
                     kind,
@@ -1582,7 +1582,7 @@ public sealed class DarlingMcpTools
                 previous,
                 undo,
                 note = removed > 0
-                    ? $"Removed {removed} mute row(s) for this scope. The pattern is no longer skipped and is reported again when a later analysis pass finds it."
+                    ? $"Removed {CountText.Plural(removed, "mute row")} for this scope. The pattern is no longer skipped and is reported again when a later analysis pass finds it."
                     : "This scope holds no mute for this story_path_hash, so nothing changed. A mute registered for all servers is removed by omitting server_name; a per-server mute by naming that server.",
             }, McpHelpers.JsonOptions);
         }

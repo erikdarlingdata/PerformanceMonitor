@@ -79,7 +79,7 @@ public sealed class DarlingMcpStoreLogTools
                    later. */
                 return McpHelpers.Status(
                     "not_collected",
-                    $"No store-log captures in the last {hours_back} hour(s), so this window makes no claim "
+                    $"No store-log captures in the last {CountText.Plural(hours_back, "hour")}, so this window makes no claim "
                     + "about what the store's log holds. The service reads its own store's log on the hourly "
                     + "self-metrics tick; the first capture lands within an hour of starting on a store at "
                     + "schema V111 or later. Two conditions make this permanently empty on a store the "

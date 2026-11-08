@@ -588,7 +588,7 @@ public static class DarlingSchemaCapture
 
             foreach (var (reason, names) in _skipped)
             {
-                Add(string.Create(CultureInfo.InvariantCulture, $"{names.Count} database(s) not read ({reason.TrimEnd('.').ToLowerInvariant()}): {NoDatabaseAccessNote.NamedList(names)}"));
+                Add(string.Create(CultureInfo.InvariantCulture, $"{CountText.Plural(names.Count, "database")} not read ({reason.TrimEnd('.').ToLowerInvariant()}): {NoDatabaseAccessNote.NamedList(names)}"));
             }
 
             Add(NoDatabaseAccessNote.Sentence(_noAccess, _server.Target.IsAwsRds));
@@ -604,14 +604,14 @@ public static class DarlingSchemaCapture
 
             if (_failed.Count > 0)
             {
-                Add($"{_failed.Count} database(s) not finished, read in full next pass: {NoDatabaseAccessNote.NamedList(_failed)}");
+                Add($"{CountText.Plural(_failed.Count, "database")} not finished, read in full next pass: {NoDatabaseAccessNote.NamedList(_failed)}");
             }
 
             if (_budgetStopped)
             {
                 Add(string.Create(
                     CultureInfo.InvariantCulture,
-                    $"pass budget ({_passBudget.BudgetSeconds} s) spent after {_started} of {_planned} database(s); the rest were not read and are read in full on the next pass"));
+                    $"pass budget ({_passBudget.BudgetSeconds} s) spent after {_started} of {CountText.Plural(_planned, "database")}; the rest were not read and are read in full on the next pass"));
             }
 
             foreach (var text in _notes)

@@ -63,7 +63,7 @@ public sealed class OversizedPlanSweepRunRecordTests
 
         Assert.Equal("SUCCESS", status);
         Assert.Equal(
-            "Swept 0 server(s): 0 plan(s) claimed, 0 captured, 0 expired, 0 fetch failure(s)",
+            "Swept 0 servers: 0 plans claimed, 0 captured, 0 expired, 0 fetch failures",
             message);
     }
 
@@ -108,8 +108,8 @@ public sealed class OversizedPlanSweepRunRecordTests
 
         Assert.Equal("WARNING", status);
         Assert.Equal(
-            "Swept 4 server(s): 0 plan(s) claimed, 0 captured, 0 expired, 0 fetch failure(s), "
-            + "2 server(s) faulted (see prior warnings)",
+            "Swept 4 servers: 0 plans claimed, 0 captured, 0 expired, 0 fetch failures, "
+            + "2 servers faulted (see prior warnings)",
             message);
     }
 
@@ -133,7 +133,7 @@ public sealed class OversizedPlanSweepRunRecordTests
 
         Assert.Equal("SUCCESS", status);
         Assert.Equal(
-            "Swept 2 server(s): 3 plan(s) claimed, 0 captured, 3 expired, 0 fetch failure(s)",
+            "Swept 2 servers: 3 plans claimed, 0 captured, 3 expired, 0 fetch failures",
             message);
 
         /* And it is NOT the empty tick's record, which is the whole reason the claim and expiry counts are
@@ -159,8 +159,8 @@ public sealed class OversizedPlanSweepRunRecordTests
         };
 
         Assert.Equal(
-            "Swept 5 server(s): 0 plan(s) claimed, 0 captured, 0 expired, 0 fetch failure(s), "
-            + "1 server(s) faulted (see prior warnings); interrupted by service shutdown",
+            "Swept 5 servers: 0 plans claimed, 0 captured, 0 expired, 0 fetch failures, "
+            + "1 server faulted (see prior warnings); interrupted by service shutdown",
             OversizedPlanBacklogSweep.BuildRunRecordSummary(tally).Message);
     }
 
@@ -558,7 +558,7 @@ public sealed class OversizedPlanSweepRunRecordTests
 
         var quiet = DarlingMcpDataTools.FleetMaintenanceLogMiss(true, null, null, 6);
         Assert.Equal("empty", quiet.State);
-        Assert.Contains("last 6 hour(s)", quiet.Message, StringComparison.Ordinal);
+        Assert.Contains("last 6 hours", quiet.Message, StringComparison.Ordinal);
         Assert.Contains("means the pass did not RUN", quiet.Message, StringComparison.Ordinal);
         Assert.Contains("Do NOT check get_collection_health", quiet.Message, StringComparison.Ordinal);
 

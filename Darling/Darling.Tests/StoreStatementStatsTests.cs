@@ -384,7 +384,7 @@ public class StoreStatementStatsTests
         Assert.DoesNotContain("compose", owner, StringComparison.Ordinal);
 
         var hidden = DarlingMcpStoreQueryStatsTools.BuildNote(State(), utilityTracked: false, hiddenText: 7, evictionPasses: 0);
-        Assert.Contains("7 statement(s) read as <insufficient privilege>", hidden, StringComparison.Ordinal);
+        Assert.Contains("7 statements read as <insufficient privilege>", hidden, StringComparison.Ordinal);
         Assert.Contains("pg_read_all_stats", hidden, StringComparison.Ordinal);
 
         var old = DarlingMcpStoreQueryStatsTools.BuildNote(State(version: "1.8"), utilityTracked: false, hiddenText: 0, evictionPasses: null);

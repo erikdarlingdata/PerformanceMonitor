@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -74,7 +75,7 @@ public sealed class SkippedCycleSummary
                 : $"slowest step {LastSlowestStep}";
 
         return string.Create(CultureInfo.InvariantCulture,
-            $"Skipped cycles in 24 h: {Count:N0} late cycle(s), {SlotsSkipped:N0} slot(s) skipped. Last {CollectionHealthTime.Format(LastAtUtc.Value, clock)}: {step}.");
+            $"Skipped cycles in 24 h: {CountText.Plural(Count, "late cycle")}, {CountText.Plural(SlotsSkipped, "slot")} skipped. Last {CollectionHealthTime.Format(LastAtUtc.Value, clock)}: {step}.");
     }
 
     internal static string FormatSeconds(long ms) =>

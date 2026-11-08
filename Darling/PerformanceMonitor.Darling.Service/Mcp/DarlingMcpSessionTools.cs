@@ -242,7 +242,7 @@ public sealed class DarlingMcpSessionTools
                 {
                     return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status(
                         "empty",
-                        $"No active query snapshots on {resolved.DisplayName} in the last {hours_back} hour(s) matched "
+                        $"No active query snapshots on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} matched "
                         + DescribeActiveQueryFilters(databases, blocking_only, waitFilter)
                         + (tagFilter.Active ? $" (query tag '{tagFilter.Requested}')" : "")
                         + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist: drop them to see what the window holds."
@@ -385,7 +385,7 @@ public sealed class DarlingMcpSessionTools
             if (!databases.IsAll || blockingOnly || waitFilter != null)
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status(
                     "empty",
-                    $"No active query snapshots on {resolved.DisplayName} in the last {hoursBack} hour(s) matched "
+                    $"No active query snapshots on {resolved.DisplayName} in the last {CountText.Plural(hoursBack, "hour")} matched "
                     + DescribeActiveQueryFilters(databases, blockingOnly, waitFilter) + "." + MonitorLeftOutNote(includeMonitor)), cancellationToken, now.AddHours(-hoursBack));
             return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
                 ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No active query snapshots found in the requested time range." + MonitorLeftOutNote(includeMonitor)), cancellationToken, now.AddHours(-hoursBack));

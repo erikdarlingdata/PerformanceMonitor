@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -416,15 +417,16 @@ LIMIT $3";
         }
 
         note.Append(CultureInfo.InvariantCulture,
-            $"{report.RetainedEvents.Count:N0} distinct message(s) are retained with their text. ");
+            $"{CountText.Plural(report.RetainedEvents.Count, "distinct message")} {(report.RetainedEvents.Count == 1 ? "is" : "are")} retained with their text. ");
 
         if (summary.MessagesFolded > 0)
         {
             note.Append(string.Format(
                 CultureInfo.InvariantCulture,
-                "{0:N0} further distinct message(s) were folded into their class's count by the per-class budget "
-                + "of {1}; their occurrences are counted, their individual texts are not kept. ",
-                summary.MessagesFolded,
+                "{0} {1} folded into their class's count by the per-class budget "
+                + "of {2}; their occurrences are counted, their individual texts are not kept. ",
+                CountText.Plural(summary.MessagesFolded, "further distinct message"),
+                summary.MessagesFolded == 1 ? "was" : "were",
                 StoreLogClassifier.MaxRetainedGroupsPerClass));
         }
 
@@ -432,17 +434,18 @@ LIMIT $3";
         {
             note.Append(string.Format(
                 CultureInfo.InvariantCulture,
-                "{0:N0} capture(s) discarded a resume marker because the weekday log ring truncated the file "
+                "{0} discarded a resume marker because the weekday log ring truncated the file "
                 + "underneath it, so those captures cover an interval the previous ones did not. ",
-                summary.OffsetResets));
+                CountText.Plural(summary.OffsetResets, "capture")));
         }
 
         if (summary.BytesPending > 0)
         {
             note.Append(string.Format(
                 CultureInfo.InvariantCulture,
-                "{0:N0} byte(s) were still unread when the newest capture finished; the next capture reads them. ",
-                summary.BytesPending));
+                "{0} {1} still unread when the newest capture finished; the next capture reads them. ",
+                CountText.Plural(summary.BytesPending, "byte"),
+                summary.BytesPending == 1 ? "was" : "were"));
         }
 
         note.Append("No band is applied. Whether a class moved is its count read against the per-hour median "

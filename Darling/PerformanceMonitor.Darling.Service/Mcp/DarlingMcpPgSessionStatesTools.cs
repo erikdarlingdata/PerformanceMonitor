@@ -94,9 +94,9 @@ public sealed class DarlingMcpPgSessionStatesTools
                brief transaction every few minutes looks like. Said with the age and the floor so the row
                explains its own band, and so a reader can disagree with the floor rather than trust it. */
             var brief = "Was the oldest open transaction on the instance in "
-                      + $"{r.HorizonHolderSamples} of {r.SampleCount} sample(s), but its horizon age peaked at "
-                      + r.PeakHorizonAge.ToString("N0", CultureInfo.InvariantCulture)
-                      + " transaction(s), under the "
+                      + $"{r.HorizonHolderSamples} of {CountText.Plural(r.SampleCount, "sample")}, but its horizon age peaked at "
+                      + CountText.Plural(r.PeakHorizonAge, "transaction")
+                      + ", under the "
                       + DarlingPgSessionStatesReader.MinSustainedHolderHorizonAge.ToString("N0", CultureInfo.InvariantCulture)
                       + " that makes a hold: at most "
                       + r.PeakHorizonAge.ToString("N0", CultureInfo.InvariantCulture)
@@ -114,7 +114,7 @@ public sealed class DarlingMcpPgSessionStatesTools
                snapshot, so no row version waited behind it. On a quiet instance the oldest is simply
                whatever ran. Said plainly so a count like 5 of 5 does not read as a hold. */
             var zero = "Was the oldest open transaction on the instance in "
-                     + $"{r.HorizonHolderSamples} of {r.SampleCount} sample(s), but its horizon age never rose "
+                     + $"{r.HorizonHolderSamples} of {CountText.Plural(r.SampleCount, "sample")}, but its horizon age never rose "
                      + "above 0: it held the newest xid or snapshot, so no row version waited behind it and "
                      + "VACUUM lost nothing. On a quiet instance the oldest transaction is just whatever ran.";
 
@@ -129,7 +129,7 @@ public sealed class DarlingMcpPgSessionStatesTools
         if (r.HorizonHolderSamples > 0)
         {
             var passing = "Held the oldest xmin in "
-                        + $"{r.HorizonHolderSamples} of {r.SampleCount} sample(s) - a passing sighting "
+                        + $"{r.HorizonHolderSamples} of {CountText.Plural(r.SampleCount, "sample")} - a passing sighting "
                         + "rather than a sustained hold. Every write transaction is briefly the oldest "
                         + "holder, so the hold ON ITS OWN is normal traffic. It becomes a finding if the "
                         + "share climbs.";
@@ -187,6 +187,21 @@ public sealed class DarlingMcpPgSessionStatesTools
               + " idle inside a transaction it is holding a connection and any locks the transaction took"
               + tail
             : "";
+
+    /// <summary>The note's sentence about sessions that were idle in transaction yet pinned nothing, or nothing when there were none.</summary>
+    internal static string IdleWithoutHorizonSentence(int count) => count == 0
+        ? string.Empty
+        : $" {CountText.Plural(count, "session")} here {(count == 1 ? "was" : "were")} idle in transaction and pinned "
+          + $"NOTHING - {(count == 1 ? "it" : "they")} held no snapshot and no transaction id, so terminating {(count == 1 ? "it" : "them")} "
+          + "would not reclaim a single dead row.";
+
+    /// <summary>The note's sentence about rows PostgreSQL returned with every state column NULL, or nothing when there were none.</summary>
+    internal static string RedactedSentence(int count) => count == 0
+        ? string.Empty
+        : $" {CountText.Plural(count, "row")} {(count == 1 ? "is" : "are")} REDACTED: the monitoring login lacks pg_monitor on this "
+          + "target, so PostgreSQL returned the rows with every state column NULL rather "
+          + $"than refusing the read. {(count == 1 ? "That row says" : "Those rows say")} nothing about session state and {(count == 1 ? "its" : "their")} "
+          + "severity is reported as unknown.";
 
     /// <summary>
     /// Severity band, server-computed so the browser and the WPF row styles paint the same thing from the
@@ -404,21 +419,12 @@ public sealed class DarlingMcpPgSessionStatesTools
                 note = "This is a SAMPLE taken every collection cycle, not an event log. PostgreSQL records "
                      + "nothing about session state unless something asks it, so a transaction that opened "
                      + "and closed between two samples left no trace - "
-                     + $"{captures.CapturesWithSessions} of {captures.CapturesTotal} capture(s) in this "
+                     + $"{captures.CapturesWithSessions} of {CountText.Plural(captures.CapturesTotal, "capture")} in this "
                      + "window found any reportable session at all. Duration alone is NOT evidence that a "
                      + "session is starving VACUUM: read peak_horizon_age, where -1 means the session pinned "
                      + "nothing."
-                     + (idleWithoutHorizon > 0
-                         ? $" {idleWithoutHorizon} session(s) here were idle in transaction and pinned "
-                         + "NOTHING - they held no snapshot and no transaction id, so terminating them "
-                         + "would not reclaim a single dead row."
-                         : string.Empty)
-                     + (redacted > 0
-                         ? $" {redacted} row(s) are REDACTED: the monitoring login lacks pg_monitor on this "
-                         + "target, so PostgreSQL returned the rows with every state column NULL rather "
-                         + "than refusing the read. Those rows say nothing about session state and their "
-                         + "severity is reported as unknown."
-                         : string.Empty)
+                     + IdleWithoutHorizonSentence(idleWithoutHorizon)
+                     + RedactedSentence(redacted)
                      + (captureWasTruncated
                          ? " At least one capture hit the collector's per-capture row cap, so the stored "
                          + "rows for it are a worst-first sample of a larger set - compare "
@@ -477,7 +483,7 @@ public sealed class DarlingMcpPgSessionStatesTools
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
                     factual: $"No session held a transaction open past the collector's floor on {displayName} in the last "
-                        + $"{hoursBack} hour(s), across {captures.CapturesTotal} capture(s)",
+                        + $"{CountText.Plural(hoursBack, "hour")}, across {CountText.Plural(captures.CapturesTotal, "capture")}",
                     coveredClaim: ". This is the healthy "
                         + "state and a real all-clear rather than missing data - the collector stores nothing when "
                         + "every transaction is short.",
@@ -500,7 +506,7 @@ public sealed class DarlingMcpPgSessionStatesTools
 
         return await DarlingServerOfflineNote.UnavailableAsync(
             postgres, serverId, displayName,
-            $"No captures at all for {displayName} in the last {hoursBack} hour(s), so the window says "
+            $"No captures at all for {displayName} in the last {CountText.Plural(hoursBack, "hour")}, so the window says "
             + "nothing either way - this is NOT an all-clear. Check that collection is running and enabled "
             + "for this server with get_collection_health, or widen hours_back.",
             hints, cancellationToken);

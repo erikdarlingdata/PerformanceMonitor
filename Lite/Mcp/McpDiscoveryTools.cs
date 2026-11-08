@@ -43,7 +43,7 @@ public sealed class McpDiscoveryTools
                     "empty",
                     searched.Count == 0
                         ? $"No server has a database list in the last {days} days, so nothing was searched for '{requested}'. The database_states collector writes the list every minute by default (every 5 minutes under the Low-Impact preset) on a SQL Server target (not on Azure SQL Database), and only while Lite is open."
-                        : $"No monitored server's newest database list names '{requested}' (searched {searched.Count} server(s) that have a list in the last {days} days). A database that was dropped, renamed, or created since the last list looks the same; servers with no list in that time (Azure SQL Database targets, or a stopped collector) were not searched.");
+                        : NoMatchMessage(requested, searched.Count, days));
             }
 
             return JsonSerializer.Serialize(new
@@ -124,4 +124,8 @@ public sealed class McpDiscoveryTools
         /* #7527: JSON like every other read, and like Darling's list_servers (server_count + servers). */
         return JsonSerializer.Serialize(new { server_count = rows.Count, servers = rows }, McpHelpers.JsonOptions);
     }
+    /// <summary>The empty answer when the newest database lists were searched and none names the database asked for.</summary>
+    internal static string NoMatchMessage(string requested, int searched, int days) =>
+        $"No monitored server's newest database list names '{requested}' (searched {CountText.Plural(searched, "server")} that {(searched == 1 ? "has" : "have")} a list in the last {days} days). A database that was dropped, renamed, or created since the last list looks the same; servers with no list in that time (Azure SQL Database targets, or a stopped collector) were not searched.";
+
 }

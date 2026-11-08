@@ -653,7 +653,7 @@ public sealed class McpZeroIsAMeasurementLivePostgresTests
             var clear = JsonDocument.Parse(await DarlingMcpPgXminTools.GetPgXminHorizon(postgres, ServerName, hours_back: 4)).RootElement;
             Assert.Equal("empty", clear.GetProperty("status").GetString());
             Assert.Equal(6, clear.GetProperty("captures_in_window").GetInt32());
-            Assert.Contains("captured 6 time(s)", clear.GetProperty("finding").GetString()!, StringComparison.Ordinal);
+            Assert.Contains("captured 6 times", clear.GetProperty("finding").GetString()!, StringComparison.Ordinal);
 
             await SeedHolderAsync(connection, ct, MinutesAgo(20), "session", 80_000_000, "104", "state=idle in transaction", isWinner: true);
             await SeedHolderAsync(connection, ct, MinutesAgo(10), "session", 81_000_000, "104", "state=idle in transaction", isWinner: true);
@@ -801,7 +801,7 @@ public sealed class McpZeroIsAMeasurementLivePostgresTests
             Assert.Equal(3, history.GetProperty("history_days_available").GetInt32());
             Assert.False(history.GetProperty("covers_7d").GetBoolean());
             Assert.False(history.GetProperty("covers_30d").GetBoolean());
-            Assert.Contains("3 day(s) of index snapshots", history.GetProperty("note").GetString()!, StringComparison.Ordinal);
+            Assert.Contains("3 days of index snapshots", history.GetProperty("note").GetString()!, StringComparison.Ordinal);
             Assert.Equal(2, root.GetProperty("tables_returned").GetInt32());
             Assert.False(root.GetProperty("truncated").GetBoolean());
 

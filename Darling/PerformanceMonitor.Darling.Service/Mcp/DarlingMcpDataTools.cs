@@ -309,7 +309,7 @@ public sealed class DarlingMcpDataTools
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"No wait types recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
+                            factual: $"No wait types recorded for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}",
                             coveredClaim: ". This server has collected wait stats before, so this window was quiet: widen hours_back to find the most recent samples."),
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
@@ -971,7 +971,7 @@ public sealed class DarlingMcpDataTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No query-stats group on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
+                        $"No query-stats group on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
                 }
 
                 /* A filtered miss is not a collection miss: with the floor in the query, an empty page under
@@ -982,8 +982,8 @@ public sealed class DarlingMcpDataTools
                     return McpHelpers.Status(
                         "empty",
                         windowTruncated
-                            ? $"No query-stats group on {resolved.DisplayName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the part of the window raw query_stats still holds (from {McpHelpers.FormatEffectiveStart(effectiveStart)}; the older part was not read), so this is that part's answer rather than a page artefact: drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan."
-                            : $"No query-stats group on {resolved.DisplayName} in the last {hours_back} hour(s) has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact: drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
+                            ? $"No query-stats group on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the part of the window raw query_stats still holds (from {McpHelpers.FormatEffectiveStart(effectiveStart)}; the older part was not read), so this is that part's answer rather than a page artefact: drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan."
+                            : $"No query-stats group on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} has a cached plan with lifetime max_dop >= {minMaxDop}. The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact: drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
                         new
                         {
                             filter_applied = filterApplied,
@@ -1345,7 +1345,7 @@ public sealed class DarlingMcpDataTools
             if (rows.Count == 0 && tagFilter.Active)
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.WithDatabasesLeftOut(McpHelpers.Status(
                     "empty",
-                    $"No procedure on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!, cancellationToken, requestedStart);
+                    $"No procedure on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!, cancellationToken, requestedStart);
 
             if (rows.Count == 0)
             {
@@ -1697,7 +1697,7 @@ public sealed class DarlingMcpDataTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No Query Store query on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
+                        $"No Query Store query on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking.");
                 }
 
                 /* A filter that matched nothing is an answer, not a missing collection. Most queries never abort,
@@ -2667,13 +2667,13 @@ ORDER BY server_name";
                    describes what THIS response actually did instead of what the argument nominally requested. */
                 collector_detail_note = full_detail
                     ? "full_detail=true: every field is served for every collector below."
-                    : $"{compactCount} of {shownRows.Count} collector(s) below are HEALTHY with nothing to report (no errors, denials, session/extension-missing runs or abandoned cycles this window) and are compacted to collector/status/compact/total_runs/rows_stored/avg_duration_ms/last_success. {partialCount} need a look (failing, stale, stopped, erroring, denied, regressed, or an unexplained zero) and carry a leaner partial_detail shape instead of full detail: in a partial row a missing key means null, false or 0, and only collector, status, partial_detail, total_runs and errors are always present. Pass full_detail=true for every field on every collector.",
+                    : $"{compactCount} of {CountText.Plural(shownRows.Count, "collector")} below {(compactCount == 1 ? "is" : "are")} HEALTHY with nothing to report (no errors, denials, session/extension-missing runs or abandoned cycles this window) and are compacted to collector/status/compact/total_runs/rows_stored/avg_duration_ms/last_success. {partialCount} need a look (failing, stale, stopped, erroring, denied, regressed, or an unexplained zero) and carry a leaner partial_detail shape instead of full detail: in a partial row a missing key means null, false or 0, and only collector, status, partial_detail, total_runs and errors are always present. Pass full_detail=true for every field on every collector.",
                 /* #6180: the response-size cut, observed (see healthReply above). Null note and false flag when every collector fit. */
                 truncated = collectorCount < collectorRows.Count,
                 collectors_returned = collectorCount,
                 collectors_total = collectorRows.Count,
                 size_note = collectorCount < collectorRows.Count
-                    ? $"{collectorRows.Count - collectorCount} of {collectorRows.Count} collector row(s) were left off the end to keep this answer within about 32 KB. Call again without full_detail: healthy collectors are then compacted and every collector fits."
+                    ? $"{collectorRows.Count - collectorCount} of {CountText.Plural(collectorRows.Count, "collector row")} {(collectorRows.Count - collectorCount == 1 ? "was" : "were")} left off the end to keep this answer within about 32 KB. Call again without full_detail: healthy collectors are then compacted and every collector fits."
                     : null,
                 collectors = collectorRows.Take(collectorCount),
                 /* #3856: how old the collector half of this payload is, in whole seconds — the same field, the
@@ -3127,13 +3127,13 @@ ORDER BY server_name";
         if (!string.IsNullOrWhiteSpace(collectorName) || minDurationMs is not null || !string.IsNullOrWhiteSpace(status))
         {
             return ("empty",
-                $"No fleet-maintenance run-records in the last {hours} hour(s) matched "
+                $"No fleet-maintenance run-records in the last {CountText.Plural(hoursBack, "hour")} matched "
                 + $"{McpHelpers.DescribeCollectionLogFilters(collectorName, minDurationMs, status)}. "
                 + cadence);
         }
 
         return ("empty",
-            $"No fleet-maintenance run-records at all in the last {hours} hour(s). " + cadence);
+            $"No fleet-maintenance run-records at all in the last {CountText.Plural(hoursBack, "hour")}. " + cadence);
     }
 
     /// <summary>
@@ -3342,14 +3342,14 @@ ORDER BY server_name";
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No collector runs on {resolved.DisplayName} in the last {hours_back} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.", emptyNotice.AsHints());
+                        $"No collector runs on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")} matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.", emptyNotice.AsHints());
                 }
 
                 return McpHelpers.Status(
                     "empty",
                     McpHelpers.QuietUnlessCut(
                         emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                        factual: $"No collector runs recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
+                        factual: $"No collector runs recorded for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}",
                         coveredClaim: ". This server HAS collected before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent runs."),
                     emptyNotice.AsHints());
             }
@@ -3570,7 +3570,7 @@ ORDER BY server_name";
                 runs_returned = pageCount,
                 runs_total = rows.Count,
                 size_note = cut
-                    ? $"{rows.Count - pageCount} of the {rows.Count} run(s) this read selected were left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one collector_name / status to read the rest in full."
+                    ? $"{rows.Count - pageCount} of the {CountText.Plural(rows.Count, "run")} this read selected {(rows.Count - pageCount == 1 ? "was" : "were")} left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one collector_name / status to read the rest in full."
                     : null,
                 runs = runRows.Take(pageCount),
             };
@@ -3660,12 +3660,12 @@ ORDER BY server_name";
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No collector runs fleet-wide in the last {hours_back} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds.");
+                        $"No collector runs fleet-wide in the last {CountText.Plural(hours_back, "hour")} matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole: the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds.");
                 }
 
                 return McpHelpers.Status(
                     "empty",
-                    $"No collector runs recorded fleet-wide in the last {hours_back} hour(s). At least one enabled server has collected before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent runs.");
+                    $"No collector runs recorded fleet-wide in the last {CountText.Plural(hours_back, "hour")}. At least one enabled server has collected before, so this window is genuinely quiet rather than broken: widen hours_back to find the most recent runs.");
             }
 
             var result = rows.Select(fr => new
@@ -3746,7 +3746,7 @@ ORDER BY server_name";
                 runs_returned = pageCount,
                 runs_total = rows.Count,
                 size_note = cut
-                    ? $"{rows.Count - pageCount} of the {rows.Count} run(s) this read selected were left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one server_name / collector_name / status to read the rest in full."
+                    ? $"{rows.Count - pageCount} of the {CountText.Plural(rows.Count, "run")} this read selected {(rows.Count - pageCount == 1 ? "was" : "were")} left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one server_name / collector_name / status to read the rest in full."
                     : null,
                 runs = result.Take(pageCount),
             }, McpHelpers.JsonOptions), pageRows.Select(r => r.Entry.ReadSource));
@@ -3859,7 +3859,7 @@ ORDER BY server_name";
                         "empty",
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
-                            factual: $"Nothing was waiting on {resolved.DisplayName} in the last {hours_back} hour(s)",
+                            factual: $"Nothing was waiting on {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}",
                             coveredClaim: ". The collector has sampled this server, so this is a genuine all-clear for the window rather than missing data."),
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
@@ -3972,9 +3972,9 @@ ORDER BY server_name";
                             /* #5244: with a database filter only the blocking half was limited to it (deadlocks are not
                                split by database here), so the sentence says exactly that instead of "no blocking". */
                             factual: databases.IsAll
-                                ? $"No blocking or deadlocks recorded for {resolved.DisplayName} in the last {hours_back} hour(s)"
+                                ? $"No blocking or deadlocks recorded for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}"
                                 : $"No blocking{DarlingMcpBlockingTools.ForChosenDatabases(databases)} "
-                                  + $"(and no deadlocks, which are not limited by database) recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
+                                  + $"(and no deadlocks, which are not limited by database) recorded for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}",
                             /* #8146: a lossy window keeps the runs but not the all-clear; the lost events were never read. */
                             coveredClaim: emptyLoss is null
                                 ? ". The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window."

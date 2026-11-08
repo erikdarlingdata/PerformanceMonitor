@@ -94,7 +94,7 @@ public sealed class FinOpsSecondaryReplicaTests : IClassFixture<SharedDuckDbFixt
         Assert.DoesNotContain("OldReportsDB", detail, StringComparison.Ordinal);
         Assert.Contains("ArchiveDB", detail, StringComparison.Ordinal);
         var finding = Assert.Single(rows, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
-        Assert.StartsWith("1 idle database(s)", finding.Finding, StringComparison.Ordinal);
+        Assert.StartsWith("1 idle database", finding.Finding, StringComparison.Ordinal);
         Assert.Equal(AgReplicaScope.SkippedNote(1), note);
     }
 
@@ -167,7 +167,7 @@ public sealed class FinOpsSecondaryReplicaTests : IClassFixture<SharedDuckDbFixt
         Assert.DoesNotContain("OldReportsDB", detail, StringComparison.Ordinal);
         Assert.Contains("ArchiveDB", detail, StringComparison.Ordinal);
         var finding = Assert.Single(rows, r => r.Category == "Databases" && r.Finding.Contains("idle", StringComparison.OrdinalIgnoreCase));
-        Assert.StartsWith("1 idle database(s)", finding.Finding, StringComparison.Ordinal);
+        Assert.StartsWith("1 idle database", finding.Finding, StringComparison.Ordinal);
 
         /* A snapshot older than the horizon is unknown: nothing is filtered. */
         var (stale, _) = await RunAsync(s => s.SeedIdleDatabasesAsync(),

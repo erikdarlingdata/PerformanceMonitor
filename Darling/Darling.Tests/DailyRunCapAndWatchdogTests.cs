@@ -821,7 +821,7 @@ public sealed class DailyRunWatchdogTests
             Assert.Equal(0, queued.CycleSkips.Pending);
             Assert.Equal(0, going.CycleSkips.Pending);
             Assert.Contains(
-                "1 daily collector slot(s) lost their day (index object stats), daily permits: 1 waiting, oldest ",
+                "1 daily collector slot lost their day (index object stats), daily permits: 1 waiting, oldest ",
                 row.Message, StringComparison.Ordinal);
             Assert.DoesNotContain("Daily permits:", row.Message, StringComparison.Ordinal);
             Assert.Contains(

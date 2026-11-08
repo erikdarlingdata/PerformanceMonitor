@@ -84,7 +84,7 @@ public sealed class DarlingMcpCollectorCostTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No cost recorded for collector '{collector_name.Trim()}' in the last {days_back} day(s). " +
+                        $"No cost recorded for collector '{collector_name.Trim()}' in the last {CountText.Plural(days_back, "day")}. " +
                         "The service records an hourly aggregate; a collector that has not run in the window has no row.");
                 }
 

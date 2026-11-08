@@ -643,11 +643,11 @@ public static class PostgresAlertEvaluator
                 $"{accumulatedSeconds:N0}s of {subject} wait in {PoisonWaitWindowMinutes}m"),
             string.Create(CultureInfo.InvariantCulture,
                 $"{breachedAvg * PoisonWaitWindowMinutes * 60:N0}s accumulated over {PoisonWaitWindowMinutes}m "
-                + $"(an average of {breachedAvg:0.#} backend(s) continuously waiting)"),
+                + $"(an average of {breachedAvg:0.#} {(breachedAvg == 1 ? "backend" : "backends")} continuously waiting)"),
             string.Create(CultureInfo.InvariantCulture,
                 $"[{subject}] {accumulatedSeconds:N0}s of wait accumulated in the last "
                 + $"{PoisonWaitWindowMinutes} minutes across {wait.AccumulatedWaits:N0} waits — on average "
-                + $"{avgWaiters:N1} backend(s) continuously stuck. {PoisonWaitRemedyFor(wait.WaitEvent)}"),
+                + $"{avgWaiters:N1} {(avgWaiters == 1 ? "backend" : "backends")} continuously stuck. {PoisonWaitRemedyFor(wait.WaitEvent)}"),
             wait.AccumulatedWaitMs,
             breachedAvg * windowMs);
     }

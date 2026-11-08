@@ -529,7 +529,7 @@ public sealed class GatedCollectorRowsLiveTests
                 var compact = shown.Count(r => r.TryGetProperty("compact", out var c) && c.GetBoolean());
                 Assert.True(compact > 0, "the seeded collectors should be compact-eligible");
                 var note = doc.RootElement.GetProperty("collector_detail_note").GetString()!;
-                Assert.StartsWith($"{compact} of {shown.Length} collector(s) below", note);
+                Assert.StartsWith($"{compact} of {PerformanceMonitor.Common.CountText.Plural(shown.Length, "collector")} below", note);
             }
         });
     }

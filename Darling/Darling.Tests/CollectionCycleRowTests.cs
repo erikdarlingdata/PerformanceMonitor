@@ -44,11 +44,11 @@ public sealed class CycleSkipAccumulatorTests
             tally.TryTake(T0, DarlingCycleSkip.RowMinInterval)!,
             new CycleSkipCauses(0, null, 0, 0, DailyRunsWaiting: 3, OldestDailyWaitMs: 94_200_000), T0)!;
         Assert.Contains(
-            "1 daily collector slot(s) lost their day (index object stats), daily permits: 3 waiting, oldest 26 h 10 min",
+            "1 daily collector slot lost their day (index object stats), daily permits: 3 waiting, oldest 26 h 10 min",
             withBacklog.Message, StringComparison.Ordinal);
 
         var without = DarlingCycleSkip.Build(tally.TryTake(T0, DarlingCycleSkip.RowMinInterval)!, new CycleSkipCauses(0, null, 0, 0), T0)!;
-        Assert.Contains("1 daily collector slot(s) lost their day (index object stats)", without.Message, StringComparison.Ordinal);
+        Assert.Contains("1 daily collector slot lost their day (index object stats)", without.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("daily permits", without.Message, StringComparison.Ordinal);
     }
 
@@ -70,7 +70,7 @@ public sealed class CycleSkipAccumulatorTests
         Assert.Equal(185_000, report.DurationMs);
         Assert.Equal("query_store", report.SlowestItem);
         Assert.Equal(170_000, report.SlowestItemMs);
-        Assert.Contains("3 slot(s) skipped across 2 collector(s) (top: query_stats 2, wait_stats 1)", report.Message, StringComparison.Ordinal);
+        Assert.Contains("3 slots skipped across 2 collectors (top: query_stats 2, wait_stats 1)", report.Message, StringComparison.Ordinal);
         Assert.Contains("the previous collection pass took 185s and was still running when the next one was due (slowest: query store 170s)", report.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("relaunch", report.Message, StringComparison.Ordinal);
         Assert.Contains("The gap ran from 2026-10-12 11:57:00 UTC to 2026-10-12 12:00:00 UTC.", report.Message, StringComparison.Ordinal);
@@ -93,8 +93,8 @@ public sealed class CycleSkipAccumulatorTests
         Assert.Equal(DarlingCycleSkip.LaunchGuardHoldName, report.SlowestItem);
         Assert.Equal(360_000, report.SlowestItemMs);
         Assert.Contains("waited 45s for a fleet collection slot", report.Message, StringComparison.Ordinal);
-        Assert.Contains("memory launch guard held collection off for 5 slot(s)", report.Message, StringComparison.Ordinal);
-        Assert.Contains("1 daily collector slot(s) lost their day (index object stats)", report.Message, StringComparison.Ordinal);
+        Assert.Contains("memory launch guard held collection off for 5 slots", report.Message, StringComparison.Ordinal);
+        Assert.Contains("1 daily collector slot lost their day (index object stats)", report.Message, StringComparison.Ordinal);
 
         var gateOnly = new CycleSkipAccumulator();
         gateOnly.AddGrid("wait_stats", 1, T0.AddMinutes(-1));

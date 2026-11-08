@@ -488,7 +488,7 @@ public sealed partial class DarlingWorker : BackgroundService
                 if (pass.Failed > 0)
                 {
                     throw new InvalidOperationException(
-                        $"{pass.Failed} Query Store interval table(s) failed partition maintenance; each failure is logged above and the next pass retries.");
+                        $"{CountText.Plural(pass.Failed, "Query Store interval table")} failed partition maintenance; each failure is logged above and the next pass retries.");
                 }
 
                 return pass.Changed;
