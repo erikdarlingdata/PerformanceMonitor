@@ -461,14 +461,30 @@ WITH per_collection AS (
     FROM v_session_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     GROUP BY collection_time
+),
+collected AS (
+    /* #8293: the collector's runs. The session collector groups by program name and leaves its own sessions out, so a
+       collection with no other user session writes no session_stats row at all, and its SUCCESS run in collection_log
+       is the witness that the collector was there. Binned to the minute, because a run's log time and its rows'
+       collection_time are stamped apart; a run with no rows joins as NULL and is not a sample. */
+    SELECT DISTINCT date_trunc('minute', collection_time) AS minute
+    FROM collection_log
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   collector_name = 'session_stats'
+    AND   status = 'SUCCESS'
+),
+instants AS (
+    SELECT coalesce(p.collection_time, c.minute) AS collection_time, p.total_connections
+    FROM collected AS c
+    FULL OUTER JOIN per_collection AS p ON date_trunc('minute', p.collection_time) = c.minute
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_connections) AS peak_connections,
        AVG(total_connections) AS avg_connections,
-       COUNT(*) AS sample_count,
-       (array_agg(collection_time ORDER BY total_connections DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
+       COUNT(total_connections) AS sample_count,
+       (array_agg(collection_time ORDER BY total_connections DESC NULLS LAST, collection_time DESC) FILTER (WHERE total_connections IS NOT NULL))[1] AS peak_time,
        " + WindowTiles.CoverageColumnsSql + @"
-FROM per_collection
+FROM instants
 GROUP BY local_hour
 ORDER BY local_hour";
 

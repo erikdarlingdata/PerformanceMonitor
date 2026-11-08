@@ -308,6 +308,91 @@ public sealed class SqlServerStoreTileBehaviourBatchQueryMemoryTests
         }
     }
 
+    /// <summary>#8293: the session collector groups by program name and leaves its own sessions out, so a collection
+    /// with no other user session writes no session_stats row at all, only its SUCCESS run in collection_log. An hour the
+    /// collector ran every minute is still a covered hour, so a sustained rise in its first 25 minutes scores and fires.</summary>
+    [Fact]
+    public async Task Sessions_NoOtherSessionsForMostOfAFullyCollectedHour_TileIsStillScored_AndFires()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the live tile-behaviour test.");
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -4177_08;
+        const string serverName = "sqlstore-tile-sess-idle-e2e";
+        const int mu = 200;
+        const int sigma = 20;
+        const int shift = mu + 6 * sigma; // 320, clears SessionCountFloor (50)
+        const string insertSession = "INSERT INTO session_stats (collection_id, collection_time, server_id, server_name, program_name, connection_count, running_count, sleeping_count, dormant_count) VALUES ($1,$2,$3,$4,'App1',$5,0,0,0)";
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await InsertAsync(connection, "DELETE FROM session_stats WHERE server_id = $1", serverId);
+        await InsertAsync(connection, "DELETE FROM collection_log WHERE server_id = $1", serverId);
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var id = 960_000L;
+            for (var week = 1; week <= 21; week++)
+            {
+                for (var h = 0; h < 4; h++)
+                {
+                    var hourStart = T.AddDays(-7 * week).AddHours(h);
+                    for (var i = 0; i < 12; i++)
+                        await InsertAsync(connection, insertSession, id++, TruncateToSeconds(hourStart.AddMinutes(5 * i)), serverId, serverName, mu + (int)Math.Round(sigma * Math.Sin(week * 4 + h * 12 + i)));
+                }
+            }
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+            await SeedCanaryAsync(connection, serverId, serverName, T.AddHours(4), ct);
+
+            // The collector runs once a minute and logs every run; hours 0 to 2 hold sessions at the baseline, and in
+            // hour 3 only the first 25 minutes hold any, at the shift. The other 35 runs write no session_stats row.
+            for (var h = 0; h < 4; h++)
+            {
+                for (var i = 0; i < 60; i++)
+                {
+                    var at = TruncateToSeconds(T.AddHours(h).AddMinutes(i));
+                    await InsertAsync(connection,
+                        "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status) VALUES ($1,$2,$3,'session_stats',$4,5,'SUCCESS')",
+                        -9_910_000L - (h * 100 + i), serverId, serverName, at);
+                    if (h < 3)
+                        await InsertAsync(connection, insertSession, id++, at, serverId, serverName, mu + (int)Math.Round(sigma * Math.Sin(h * 12 + i)));
+                    else if (i < 25)
+                        await InsertAsync(connection, insertSession, id++, at, serverId, serverName, shift);
+                }
+            }
+
+            var provider = new PgBaselineProvider(postgres);
+            var detector = new PgAnomalyDetector(postgres, provider);
+            var context = new AnalysisContext
+            {
+                ServerId = serverId,
+                ServerName = serverName,
+                TimeRangeStart = T,
+                TimeRangeEnd = T.AddHours(4),
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            var facts = await detector.DetectAnomaliesAsync(context);
+            var fact = Assert.Single(facts, f => f.Key == "ANOMALY_SESSION_SPIKE");
+            Assert.Equal(13.0, fact.Metadata["tile_local_hour"]);
+            Assert.Equal(4.0, fact.Metadata["tiles_scored"]);
+            Assert.Equal(1.0, fact.Metadata["tiles_fired"]);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await InsertAsync(cleanup, "DELETE FROM session_stats WHERE server_id = $1", serverId);
+                await InsertAsync(cleanup, "DELETE FROM collection_log WHERE server_id = $1", serverId);
+                await CleanupCanaryAsync(cleanup, serverId, cleanupCt);
+                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
     private static double BatchBaselineStdDev()
     {
         var vals = Enumerable.Range(0, 12).Select(i => BatchMu + BatchSigmaAmp * Math.Sin(i)).ToArray();

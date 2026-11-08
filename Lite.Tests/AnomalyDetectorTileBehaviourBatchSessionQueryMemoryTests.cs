@@ -548,6 +548,54 @@ WHERE NOT (h = 3 AND i >= 25)";
         Assert.Equal(1, fact.Metadata["tiles_fired"]);
     }
 
+    /// <summary>#8293: the session collector groups by program name and leaves its own sessions out, so a collection
+    /// with no other user session writes no session_stats row at all, only its SUCCESS run in collection_log. An hour the
+    /// collector ran every minute is still a covered hour, so a sustained rise in its first 25 minutes scores and fires.</summary>
+    [Fact]
+    public async Task Sessions_NoOtherSessionsForMostOfAFullyCollectedHour_TileIsStillScored_AndFires()
+    {
+        const int serverId = -8007;
+        const double mu = 200.0;
+        const double sigma = 20.0;
+        const double shift = mu + 6 * sigma; // 320, clears SessionCountFloor (50)
+        const string historySql = @"
+INSERT INTO session_stats
+    (collection_id, collection_time, server_id, server_name, program_name,
+     connection_count, running_count, sleeping_count, dormant_count)
+SELECT -9400000 - (d * 10000 + h * 100 + i), $1 - to_days(d) + to_hours(h) + to_minutes(i * 5), $2, 'TileServer', 'App1',
+       GREATEST(0, ROUND($3 + $4 * sin(d * 4 + h * 12 + i))), 0, 0, 0
+FROM range(1, 22) AS d(d)
+CROSS JOIN range(0, 4) AS hh(h)
+CROSS JOIN range(0, 12) AS ii(i)";
+        await ExecuteSeedAsync(historySql, WindowStartT, serverId, mu, sigma);
+
+        // The collector runs once a minute and logs every run; hours 0 to 2 hold sessions at the baseline, and in hour 3
+        // only the first 25 minutes hold any, at the shift. The other 35 runs write no session_stats row.
+        const string runsSql = @"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status)
+SELECT -9910000 - (h * 100 + i), $2, 'TileServer', 'session_stats', $1 + to_hours(h) + to_minutes(i), 5, 'SUCCESS'
+FROM range(0, 4) AS hh(h)
+CROSS JOIN range(0, 60) AS ii(i)";
+        await ExecuteSeedAsync(runsSql, WindowStartT, serverId);
+        const string windowSql = @"
+INSERT INTO session_stats
+    (collection_id, collection_time, server_id, server_name, program_name,
+     connection_count, running_count, sleeping_count, dormant_count)
+SELECT -9810000 - (h * 100 + i), $1 + to_hours(h) + to_minutes(i), $2, 'TileServer', 'App1',
+       CASE WHEN h = 3 THEN $5 ELSE GREATEST(0, ROUND($3 + $4 * sin(h * 12 + i))) END, 0, 0, 0
+FROM range(0, 4) AS hh(h)
+CROSS JOIN range(0, 60) AS ii(i)
+WHERE NOT (h = 3 AND i >= 25)";
+        await ExecuteSeedAsync(windowSql, WindowStartT, serverId, mu, sigma, shift);
+        await SeedCanaryAsync(serverId, WindowStartT);
+
+        var facts = await _detector.DetectAnomaliesAsync(FourHourContext(serverId, WindowStartT));
+        var fact = Assert.Single(facts, f => f.Key == "ANOMALY_SESSION_SPIKE");
+        Assert.Equal(13, fact.Metadata["tile_local_hour"]);
+        Assert.Equal(4, fact.Metadata["tiles_scored"]);
+        Assert.Equal(1, fact.Metadata["tiles_fired"]);
+    }
+
     /* ───────────────────────── Memory: scenario 1 only ───────────────────────── */
 
     /// <summary>Scenario 1 for memory: <c>total_server_memory_mb / target_server_memory_mb * 100</c>, shifted
