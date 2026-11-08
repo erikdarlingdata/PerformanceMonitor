@@ -10,6 +10,7 @@ using System;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Darling.Remediation;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
@@ -39,9 +40,9 @@ VALUES ($1, $2, 7, 'srv-7', $3, $4, $5, 'Regular', $2, 'mod', md5($3 || $4::text
         await insert.ExecuteNonQueryAsync(c.Ct);
     }
 
-    /// <summary>The tool called with the test database's name and the ids as given, with nothing seeded on the caller's behalf.</summary>
-    private static Task<string> CallForceAsync(Ctx c, bool force, long queryId, long planId, bool dryRun) =>
-        DarlingMcpPlanForceTools.RunAsync(c.Source, c.Source, c.Log, force, "srv-7", c.Sql.Database, queryId, planId, c.Arg, dryRun, c.Ct);
+    /// <summary>The tool called with the ids as given and <paramref name="database"/> (the test database's name by default), with nothing seeded on the caller's behalf.</summary>
+    private static Task<string> CallForceAsync(Ctx c, bool force, long queryId, long planId, bool dryRun, string? database = null) =>
+        DarlingMcpPlanForceTools.RunAsync(c.Source, c.Source, c.Log, force, "srv-7", database ?? c.Sql.Database, queryId, planId, c.Arg, dryRun, c.Ct);
 
     private static Task<string?> RefusedRowsAsync(Ctx c, string reason) =>
         PgScalarAsync(c.Connection, $"SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = '{reason}'", c.Ct);
@@ -91,19 +92,83 @@ VALUES ($1, $2, 7, 'srv-7', $3, $4, $5, 'Regular', $2, 'mod', md5($3 || $4::text
     }
 
     /// <summary>
-    /// The store holds the pair for the named database, spelled in another case: the check passes, the call goes on to the server (here a closed port, so it
-    /// ends there), and nothing is journaled as not collected. Database names compare without regard to case, as the exclusion list does.
+    /// The store holds the pair for the named database, spelled in another case. The check passes, and the server is read and written in the database as the
+    /// store spells it, not as the caller spelled it: on a server whose collation is case-sensitive those are two databases, and the collected row came from the
+    /// store's. The before image, the statement and the journaled target all carry the store's spelling, so the undo goes back to the same database.
     /// </summary>
-    [Fact]
-    public async Task AForceOfAPairTheStoreHoldsForThatDatabase_PassesTheStoreCheck_WhateverTheCase()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AForceOfAPairTheStoreHoldsForThatDatabase_SpelledInAnotherCase_RunsInTheDatabaseAsTheStoreSpellsIt(bool dryRun)
     {
         await RunAsync(Without.Nothing, async c =>
         {
-            await SeedCollectedPlanAsync(c, c.Sql.Database.ToUpperInvariant(), 5, 7);
+            var (query, planA, _) = await c.Sql.TwoPlansAsync("pfc1", c.Ct);
+            await SeedCollectedPlanAsync(c, c.Sql.Database, query, planA);
+
+            var json = Parse(await CallForceAsync(c, force: true, query, planA, dryRun, c.Sql.Database.ToUpperInvariant()));
+            Assert.Equal(dryRun ? "dry_run" : "done", (string?)json["status"]);
+            Assert.Equal(c.Sql.Database, (string?)json["before"]!["database"]);
+            Assert.Equal(PlanForceStatement.For(c.Sql.Database, query, planA, force: true), (string?)json["statement"]);
+            Assert.Equal("0", await RefusedRowsAsync(c, PlanNotCollected));
+            if (dryRun)
+                return;
+            Assert.Equal(planA, await c.Sql.ForcedPlanAsync(query, c.Ct));
+            var called = Assert.Single(await RowsAsync(c, "action_called"));
+            Assert.Equal(c.Sql.Database, (string?)called["target"]!["database"]);
+        });
+    }
+
+    /// <summary>
+    /// The store holds the pair for two spellings of the database that differ by case alone: two databases on a server whose collation is case-sensitive. A third
+    /// spelling names neither and is refused, with both named, so the caller can copy one; the exact spelling passes the check and the call goes on to the server
+    /// (a closed port here, so it ends there).
+    /// </summary>
+    [Fact]
+    public async Task AForceOfAPairTheStoreHoldsForTwoSpellingsOfTheDatabase_IsRefusedUnlessTheSpellingIsExact()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var lower = c.Sql.Database;
+            var upper = lower.ToUpperInvariant();
+            var mixed = char.ToUpperInvariant(lower[0]) + lower[1..];
+            await SeedCollectedPlanAsync(c, lower, 5, 7);
+            await SeedCollectedPlanAsync(c, upper, 5, 7);
+
+            var json = Parse(await CallForceAsync(c, force: true, 5, 7, dryRun: true, mixed));
+            Assert.Equal("refused", (string?)json["status"]);
+            Assert.Equal(PlanNotCollected, (string?)json["reason"]);
+            var message = (string?)json["message"];
+            Assert.Contains(lower, message, StringComparison.Ordinal);
+            Assert.Contains(upper, message, StringComparison.Ordinal);
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+            Assert.Equal("1", await RefusedRowsAsync(c, PlanNotCollected));
+
+            var exact = Parse(await CallForceAsync(c, force: true, 5, 7, dryRun: true, upper));
+            Assert.NotEqual(PlanNotCollected, (string?)exact["reason"]);
+            Assert.Equal("1", await RefusedRowsAsync(c, PlanNotCollected));
+        }, storeOnly: true);
+    }
+
+    /// <summary>
+    /// The refusal names the databases the store holds the pair for, less those the server's entry excludes: a database excluded after its rows were collected is
+    /// one Darling does not act in, so it is not offered as the one the ids came from.
+    /// </summary>
+    [Fact]
+    public async Task TheRefusal_NamesNoDatabaseTheServerEntryExcludes()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            await PgExecAsync(c.Connection, "UPDATE config.config_monitored_servers SET excluded_databases = ARRAY['gone_db'] WHERE server_id = 7", c.Ct);
+            await SeedCollectedPlanAsync(c, "other_db", 5, 7);
+            await SeedCollectedPlanAsync(c, "gone_db", 5, 7);
 
             var json = Parse(await CallForceAsync(c, force: true, 5, 7, dryRun: true));
-            Assert.NotEqual(PlanNotCollected, (string?)json["reason"]);
-            Assert.Equal("0", await RefusedRowsAsync(c, PlanNotCollected));
+            Assert.Equal("refused", (string?)json["status"]);
+            Assert.Equal(PlanNotCollected, (string?)json["reason"]);
+            var message = (string?)json["message"];
+            Assert.Contains("other_db", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("gone_db", message, StringComparison.Ordinal);
         }, storeOnly: true);
     }
 
