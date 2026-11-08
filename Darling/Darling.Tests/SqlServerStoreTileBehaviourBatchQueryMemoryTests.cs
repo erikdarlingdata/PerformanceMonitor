@@ -222,9 +222,10 @@ public sealed class SqlServerStoreTileBehaviourBatchQueryMemoryTests
     /// pseudo-noise shape (mu + sigmaAmp * sin(i), i = 0..11, repeated 21 times) — computed once,
     /// closed-form, so every scenario's "6 sigma" shift is the same number the live baseline will
     /// actually report.</summary>
-    /// <summary>#8293: an hour the collector wrote every minute is a covered hour even when queries ran for only
-    /// 25 of those minutes. The other 35 collections are idle rows, with no executions and no time; coverage counts
-    /// the collector's instants, so the tile is scored, and its 25 active samples, all at the shift, fire.</summary>
+    /// <summary>#8293: an hour the collector ran every minute is a covered hour even when queries ran for only 25 of
+    /// those minutes. The collector keeps only statements run in the last ten minutes, so the other 35 collections
+    /// write no query_stats row at all, only their SUCCESS run in collection_log; coverage counts the collector's runs,
+    /// so the tile is scored, and its 25 active samples, all at the shift, fire.</summary>
     [Fact]
     public async Task QueryDuration_QueriesRunOnlyTwentyFiveMinutesOfAFullyCollectedHour_TileIsStillScored_AndFires()
     {
@@ -259,19 +260,21 @@ public sealed class SqlServerStoreTileBehaviourBatchQueryMemoryTests
             await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
             await SeedCanaryAsync(connection, serverId, serverName, T.AddHours(4), ct);
 
-            // The window: one collection a minute. Hours 0 to 2 are active at the baseline; in hour 3 only the first
-            // 25 minutes carry executions, at the shift, and the other 35 collections are idle rows.
+            // The window: the collector runs once a minute and logs every run. Hours 0 to 2 are active at the
+            // baseline; in hour 3 only the first 25 minutes carry executions, at the shift, and the other 35 runs
+            // write no query_stats row.
             for (var h = 0; h < 4; h++)
             {
                 for (var i = 0; i < 60; i++)
                 {
                     var at = TruncateToSeconds(T.AddHours(h).AddMinutes(i));
+                    await InsertAsync(connection,
+                        "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status) VALUES ($1,$2,$3,'query_stats',$4,5,'SUCCESS')",
+                        -9_900_000L - (h * 100 + i), serverId, serverName, at);
                     if (h < 3)
                         await InsertQueryStatsRowAsync(connection, id++, at, serverId, serverName, mu + (long)Math.Round(sigma * Math.Sin(h * 12 + i)), ct);
                     else if (i < 25)
                         await InsertQueryStatsRowAsync(connection, id++, at, serverId, serverName, shift, ct);
-                    else
-                        await InsertQueryStatsRowAsync(connection, id++, at, serverId, serverName, 0L, ct, executions: 0L);
                 }
             }
 
@@ -298,6 +301,7 @@ public sealed class SqlServerStoreTileBehaviourBatchQueryMemoryTests
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
             {
                 await CleanupQueryDurationAsync(cleanup, serverId, cleanupCt);
+                await InsertAsync(cleanup, "DELETE FROM collection_log WHERE server_id = $1", serverId);
                 await CleanupCanaryAsync(cleanup, serverId, cleanupCt);
                 await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
             });
@@ -371,7 +375,7 @@ CROSS JOIN LATERAL (SELECT $1::timestamp + i * INTERVAL '5 minutes') AS _(ts)", 
         return Convert.ToDouble(await cmd.ExecuteScalarAsync(ct));
     }
 
-    private static async Task InsertQueryStatsRowAsync(NpgsqlConnection connection, long id, DateTime at, int serverId, string serverName, long elapsedUs, System.Threading.CancellationToken ct, long executions = 1L)
+    private static async Task InsertQueryStatsRowAsync(NpgsqlConnection connection, long id, DateTime at, int serverId, string serverName, long elapsedUs, System.Threading.CancellationToken ct)
     {
         var queryHash = "0xTILEQD" + id.ToString(System.Globalization.CultureInfo.InvariantCulture);
         await InsertAsync(connection,
@@ -380,7 +384,7 @@ CROSS JOIN LATERAL (SELECT $1::timestamp + i * INTERVAL '5 minutes') AS _(ts)", 
                                        delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, min_dop, max_dop)
               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
             id, at, serverId, serverName, "tiledb", queryHash, "0xPLANHASH", "0xSQLH" + id, "0xPLANH" + id,
-            "SELECT 1", executions, elapsedUs, elapsedUs, 10L, 1, 1);
+            "SELECT 1", 1L, elapsedUs, elapsedUs, 10L, 1, 1);
     }
 
     private static async Task InsertMemoryRowAsync(NpgsqlConnection connection, long id, DateTime at, int serverId, string serverName, decimal targetMb, decimal totalMb, System.Threading.CancellationToken ct)

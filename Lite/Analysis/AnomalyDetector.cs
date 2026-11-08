@@ -1473,13 +1473,29 @@ WITH per_collection AS (
     FROM v_query_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     GROUP BY collection_time
+),
+collected AS (
+    /* #8293: the collector's runs. The query stats collector keeps only statements run in the last ten minutes, so an
+       idle collection writes no query_stats row at all, and its SUCCESS run in collection_log is the witness that the
+       collector was there. Binned to the minute, because a run's log time and its rows' collection_time are stamped
+       apart; a run with no rows joins as NULL and is not a sample. */
+    SELECT DISTINCT date_trunc('minute', collection_time) AS minute
+    FROM collection_log
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   collector_name = 'query_stats'
+    AND   status = 'SUCCESS'
+),
+instants AS (
+    SELECT coalesce(p.collection_time, c.minute) AS collection_time, p.total_elapsed
+    FROM collected AS c
+    FULL OUTER JOIN per_collection AS p ON date_trunc('minute', p.collection_time) = c.minute
 )
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_elapsed) AS peak_elapsed,
        AVG(total_elapsed) AS avg_elapsed,
        COUNT(total_elapsed) AS sample_count,
        " + WindowTiles.CoverageColumnsSql + @"
-FROM per_collection
+FROM instants
 GROUP BY local_hour
 ORDER BY local_hour";
 

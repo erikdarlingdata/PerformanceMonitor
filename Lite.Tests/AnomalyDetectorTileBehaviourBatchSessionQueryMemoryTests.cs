@@ -491,9 +491,10 @@ FROM s";
         Assert.Equal(referenceCutoff, fact.Metadata["fire_threshold"], precision: 6);
     }
 
-    /// <summary>#8293: an hour the collector wrote every minute is a covered hour even when queries ran for only
-    /// 25 of those minutes. The other 35 collections are idle rows, with no executions and no time; coverage counts
-    /// the collector's instants, so the tile is scored, and its 25 active samples, all at the shift, fire.</summary>
+    /// <summary>#8293: an hour the collector ran every minute is a covered hour even when queries ran for only 25 of
+    /// those minutes. The collector keeps only statements run in the last ten minutes, so the other 35 collections
+    /// write no query_stats row at all, only their SUCCESS run in collection_log; coverage counts the collector's runs,
+    /// so the tile is scored, and its 25 active samples, all at the shift, fire.</summary>
     [Fact]
     public async Task QueryDuration_QueriesRunOnlyTwentyFiveMinutesOfAFullyCollectedHour_TileIsStillScored_AndFires()
     {
@@ -516,8 +517,14 @@ CROSS JOIN range(0, 4) AS hh(h)
 CROSS JOIN range(0, 12) AS ii(i)";
         await ExecuteSeedAsync(historySql, WindowStartT, serverId, bigMu, bigSigma);
 
-        // The window: one collection a minute. Hours 0 to 2 are active at the baseline; in hour 3 only the first 25
-        // minutes carry executions, at the shift, and the other 35 collections are idle rows.
+        // The window: the collector runs once a minute and logs every run. Hours 0 to 2 are active at the baseline; in
+        // hour 3 only the first 25 minutes carry executions, at the shift, and the other 35 runs write no query_stats row.
+        const string runsSql = @"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status)
+SELECT -9900000 - (h * 100 + i), $2, 'TileServer', 'query_stats', $1 + to_hours(h) + to_minutes(i), 5, 'SUCCESS'
+FROM range(0, 4) AS hh(h)
+CROSS JOIN range(0, 60) AS ii(i)";
+        await ExecuteSeedAsync(runsSql, WindowStartT, serverId);
         const string windowSql = @"
 INSERT INTO query_stats
     (collection_id, collection_time, server_id, server_name,
@@ -527,11 +534,10 @@ INSERT INTO query_stats
      delta_logical_reads, delta_logical_writes, delta_physical_reads, delta_rows, delta_spills)
 SELECT -9800000 - (h * 100 + i), $1 + to_hours(h) + to_minutes(i), $2, 'TileServer',
        100, 0, 0, 0, 0, 0,
-       CASE WHEN h = 3 AND i >= 25 THEN 0 ELSE 100 END,
-       CASE WHEN h = 3 THEN (CASE WHEN i < 25 THEN $5 ELSE 0 END) ELSE GREATEST(0, ROUND($3 + $4 * sin(h * 12 + i))) END,
-       0, 0, 0, 0, 0, 0
+       100, CASE WHEN h = 3 THEN $5 ELSE GREATEST(0, ROUND($3 + $4 * sin(h * 12 + i))) END, 0, 0, 0, 0, 0, 0
 FROM range(0, 4) AS hh(h)
-CROSS JOIN range(0, 60) AS ii(i)";
+CROSS JOIN range(0, 60) AS ii(i)
+WHERE NOT (h = 3 AND i >= 25)";
         await ExecuteSeedAsync(windowSql, WindowStartT, serverId, bigMu, bigSigma, bigShift);
         await SeedCanaryAsync(serverId, WindowStartT);
 
