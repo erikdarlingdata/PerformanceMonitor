@@ -368,6 +368,20 @@ public static partial class PgTargetAdvice
         var current = knob is null ? "128 MB (assumed: no config snapshot)" : KnobMb(knob.Value);
         var atDefault = knob is null || knob.Value <= PgTargetScorer.SharedBuffersInitdbDefaultMb;
         var fired = pressure is not null && pressure.BaseSeverity > 0;
+        /* #8322: the collector's stamp for an Aurora target, where the service sizes the knob. */
+        var managedByService = (KnobMeta(knob, "not_applicable_on_aurora") ?? 0) > 0;
+
+        if (managedByService)
+        {
+            sb.Append("shared_buffers is ").Append(current)
+              .Append(", and on Aurora the service sets it from the instance's capacity: a parameter-group formula over the " +
+                      "instance class's memory, or the current capacity units on Serverless, which moves it as the capacity moves. " +
+                      "Nobody left it unsized, so raising the number is not the move. Read the capacity figures first " +
+                      "(get_pg_cpu_utilization's acu_utilization_percent and the instance class): a cache that is measurably short " +
+                      "on a capacity-sized instance is an instance too small for its working set, or a working set worth shrinking " +
+                      "(get_pg_buffer_usage: one large sequential scanner or a bloated table can churn a cache no size would satisfy).");
+            return sb.ToString();
+        }
 
         if (atDefault)
         {

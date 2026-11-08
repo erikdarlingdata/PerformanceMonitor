@@ -8,6 +8,7 @@
 
 using System;
 using System.ComponentModel;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -57,6 +58,24 @@ public sealed class DarlingMcpPgXminTools
             + "always a distributed transaction coordinator that failed mid-protocol.",
         _ => "Unrecognized holder source.",
     };
+
+    /// <summary>
+    /// The remedy for a source whose window peak is material, and the sentence for one that never was (#8322): a holder
+    /// whose xmin age peaked under <see cref="DarlingPgSessionStatesReader.MinSustainedHolderHorizonAge"/> transactions,
+    /// the floor get_pg_session_states grades a holder against (#8092), held back at most that many transactions' row
+    /// versions. An xmin one or two transactions behind is every live transaction on a busy server, so the source's remedy
+    /// would send an operator to fix a client that did nothing wrong.
+    /// </summary>
+    internal static string RemedyFor(string source, long peakXminAge) =>
+        peakXminAge >= DarlingPgSessionStatesReader.MinSustainedHolderHorizonAge
+            ? RemedyFor(source)
+            : "A holder was seen for this source, but its xmin age peaked at "
+              + CountText.Plural(peakXminAge, "transaction")
+              + " in this window, under the "
+              + DarlingPgSessionStatesReader.MinSustainedHolderHorizonAge.ToString("N0", CultureInfo.InvariantCulture)
+              + " that makes a hold: at most that many transactions' row versions waited behind it, which is the shape of "
+              + "ordinary in-flight work rather than a snapshot VACUUM was stuck behind. Nothing needs fixing unless the age "
+              + "climbs; get_pg_session_states grades the same holder against the same floor.";
 
     [McpServerTool(Name = "get_pg_xmin_horizon"), Description("What holds back PostgreSQL's xmin horizon, by cause: session, replication slot, logical slot (catalog_xmin), standby feedback, or prepared transaction - identical symptoms, different fixes, for bloat growing while autovacuum looks normal. Reports the oldest holder per source and the current winner. pct_of_window_winning = samples_as_winner / captures_in_window: EVERY capture in the window, not just captures with a holder. Blocks freezing; feeds get_pg_wraparound_risk. empty: captured, found nothing - all-clear. unavailable: no capture in the window. <<GUIDE>> Gets what is holding back the PostgreSQL xmin horizon, attributed by cause. Use this whenever dead tuples or table bloat are growing while autovacuum appears to be running normally - that symptom has four unrelated causes which look identical from the outside, and each needs a completely different fix: a long-running or idle-in-transaction session, an abandoned replication slot, a logical slot holding catalog_xmin, a standby feeding back its xmin, or an orphaned prepared transaction. Reports the oldest holder for each source, which one is currently winning, and how persistent each has been across the window, so a chronic holder can be told apart from a query that merely ran long: pct_of_window_winning is the share of EVERY capture in the window (captures_in_window, from the collector's own log - unheld captures included, the same denominator the vacuum-horizon alert uses), not the share of the captures that happened to record this source. Also relevant to wraparound risk: a pinned horizon blocks freezing, so an unattended holder here is an upstream cause of the risk get_pg_wraparound_risk measures. Works on any PostgreSQL target. Zero holders is reported as empty only when the collector captured in the window; no holders AND no captures is unavailable, not an all-clear.")]
     public static async Task<string> GetPgXminHorizon(
@@ -180,7 +199,9 @@ public sealed class DarlingMcpPgXminTools
                 pct_of_window_winning = capturesInWindow > 0
                     ? Math.Round((double)r.SamplesAsWinner / capturesInWindow * 100, 1)
                     : (double?)null,
-                remedy = RemedyFor(r.Source),
+                /* #8322: the remedy only once the source's window peak clears the age floor; under it, the sentence
+                   says the holder was seen and its age never became material. */
+                remedy = RemedyFor(r.Source, r.PeakXminAge),
             }).ToList();
 
             var winner = holders.FirstOrDefault(h => h.is_currently_winning) ?? holders[0];
