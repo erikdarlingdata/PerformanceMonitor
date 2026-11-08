@@ -353,6 +353,9 @@ public partial class ServerTab : UserControl
     /// </summary>
     private async System.Threading.Tasks.Task RefreshEngineEditionAsync()
     {
+        /* The version is the other engine fact the plan-correction grids word themselves by, read from the same stored row. */
+        await RefreshSqlMajorVersionAsync();
+
         if (_engineEdition != CollectorEngineCapability.UnknownEngineEdition)
         {
             return;

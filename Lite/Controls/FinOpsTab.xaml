@@ -581,6 +581,7 @@
 
                             <!-- Top 5 by Avg CPU per Execution -->
                             <ui:ChartPanel Grid.Column="1" x:Name="TopAvgCard" Title="Top Databases by Avg CPU / Execution" Subtitle="The databases that cost the most CPU per execution" Margin="4,0,0,0">
+                                <Grid>
                                 <DataGrid x:Name="TopAvgGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                                           AutoGenerateColumns="False" IsReadOnly="True"
                                           CanUserSortColumns="True" HeadersVisibility="Column"
@@ -606,6 +607,32 @@
                                         </DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
+                                    <!-- Both cards read the same trailing 24 hours; a database gets a Total row from CPU or file I/O alone and an Avg row only
+                                         when it recorded an execution, so an empty Avg card beside a filled Total card means no database recorded one. -->
+                                    <TextBlock x:Name="TopAvgNoDataMessage" Text="{x:Static ui:FinOpsEmptyText.TopAvgCpuPerExecution}" Margin="12,0">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="FontSize" Value="14"/>
+                                                <Setter Property="Foreground" Value="{DynamicResource ForegroundMutedBrush}"/>
+                                                <Setter Property="HorizontalAlignment" Value="Center"/>
+                                                <Setter Property="VerticalAlignment" Value="Center"/>
+                                                <Setter Property="TextWrapping" Value="Wrap"/>
+                                                <Setter Property="TextAlignment" Value="Center"/>
+                                                <Setter Property="IsHitTestVisible" Value="False"/>
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <MultiDataTrigger>
+                                                        <MultiDataTrigger.Conditions>
+                                                            <Condition Binding="{Binding HasItems, ElementName=TopAvgGrid}" Value="False"/>
+                                                            <Condition Binding="{Binding HasItems, ElementName=TopTotalGrid}" Value="True"/>
+                                                        </MultiDataTrigger.Conditions>
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </MultiDataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
                             </ui:ChartPanel>
                         </Grid>
 
