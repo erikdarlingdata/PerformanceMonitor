@@ -65,6 +65,12 @@ public sealed class ServerActionPermit
     public Guid RequestId { get; }
 
     public string AgentId { get; }
+
+    /// <summary>
+    /// This permit for <paramref name="database"/> in place of the one the gate was asked with: the spelling the store collected, when the caller's differs
+    /// from it by case alone. The action, the server, the object, the request and the agent are the same.
+    /// </summary>
+    internal ServerActionPermit WithDatabase(string database) => new(ServerAction, ServerId, ServerName, Id, database, RequestId, AgentId);
 }
 
 /// <summary>The gate's answer as a value: exactly one of <see cref="Permit"/> and <see cref="Refusal"/> is set. <see cref="Approval"/> is set
