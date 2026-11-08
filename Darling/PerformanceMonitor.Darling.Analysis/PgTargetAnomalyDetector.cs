@@ -139,7 +139,8 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(tps)                                                             AS peak_tps,
        AVG(tps)                                                             AS avg_tps,
        COUNT(*)                                                             AS tps_samples,
-       (array_agg(collection_time ORDER BY tps DESC NULLS LAST, collection_time DESC))[1]                    AS peak_time
+       (array_agg(collection_time ORDER BY tps DESC NULLS LAST, collection_time DESC))[1]                    AS peak_time,
+       " + WindowTiles.CoverageColumnsSql + @"
 FROM rated
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;
@@ -230,7 +231,8 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_sessions)                                  AS peak_sessions,
        AVG(total_sessions)                                  AS avg_sessions,
        COUNT(*)                                              AS sample_count,
-       (array_agg(collection_time ORDER BY total_sessions DESC NULLS LAST, collection_time DESC))[1] AS peak_time
+       (array_agg(collection_time ORDER BY total_sessions DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
+       " + WindowTiles.CoverageColumnsSql + @"
 FROM per_collection
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;
@@ -271,7 +273,8 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        AVG(acu_utilization_percent)                                          AS avg_capacity_pct,
        COUNT(acu_utilization_percent)                                        AS sample_count,
        (array_agg(collection_time ORDER BY acu_utilization_percent DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
-       MAX(cpu_percent)                                                      AS peak_cpu_percent
+       MAX(cpu_percent)                                                      AS peak_cpu_percent,
+       " + WindowTiles.CoverageColumnsSql + @"
 FROM pg_cpu_utilization
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 GROUP BY " + WindowTiles.LocalHourSql + @"
@@ -347,7 +350,8 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        SUM(coalesce(total_wait_ms, 0)) FILTER (WHERE ms_per_sec IS NOT NULL) AS total_wait_ms,
        COUNT(*) FILTER (WHERE ms_per_sec IS NOT NULL)                   AS sample_count,
        COUNT(*)                                                         AS collection_count,
-       (array_agg(collection_time ORDER BY ms_per_sec DESC NULLS LAST, collection_time DESC))[1] AS peak_time
+       (array_agg(collection_time ORDER BY ms_per_sec DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
+       " + WindowTiles.CoverageColumnsSql + @"
 FROM per_collection
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;

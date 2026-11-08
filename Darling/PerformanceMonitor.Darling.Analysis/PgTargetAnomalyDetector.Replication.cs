@@ -36,7 +36,8 @@ WITH per_collection AS (
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(replay_bytes) AS peak_replay_bytes,
        AVG(replay_bytes) AS avg_replay_bytes,
-       COUNT(*)          AS sample_count
+       COUNT(*)          AS sample_count,
+       " + WindowTiles.CoverageColumnsSql + @"
 FROM per_collection
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;

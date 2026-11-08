@@ -50,8 +50,11 @@ public class AnomalyGateTilesTests
         return new BaselineBucketMap(dict, LocalClockWindow.Utc(WindowEnd));
     }
 
+    /// <summary>A tile whose collection covers its whole hour (one instant a minute), so these cases exercise the
+    /// gate's math and not the #8293 coverage rule.</summary>
     private static WindowTile Tile(int localHour, int dow, double peak, double mean, long samples = 100)
-        => new(new DateTime(2026, 9, 24, localHour, 0, 0, DateTimeKind.Unspecified).AddDays(dow - (int)new DateTime(2026, 9, 24).DayOfWeek), peak, mean, samples);
+        => new(new DateTime(2026, 9, 24, localHour, 0, 0, DateTimeKind.Unspecified).AddDays(dow - (int)new DateTime(2026, 9, 24).DayOfWeek), peak, mean, samples,
+            Collections: 60, CollectionSpan: TimeSpan.FromMinutes(59));
 
     // ── the 4h == k identity, and the 24h ≈ 3.95 raise, on BOTH clauses ────────────────────────
 

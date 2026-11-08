@@ -72,9 +72,20 @@ public sealed record BaselineBucketMap(
 /// the tile is not scored (design §1's minimum-samples edge rule).</param>
 /// <param name="PeakTimeUtc">The UTC instant the peak was observed at, for families that track it
 /// (<c>peak_time</c> in the design). <c>null</c> for families with no per-tile peak time.</param>
+/// <param name="Collections">#8293: distinct collection instants observed in this tile — the
+/// <c>tile_collections</c> column <see cref="WindowTiles.CoverageColumnsSql"/> appends to every tiled statement.
+/// Instants, not rows: the I/O families carry several file rows per collection. With <see cref="CollectionSpan"/>
+/// and the window's cadence it says how much of its hour the tile's collection covers
+/// (<see cref="WindowTiles.CoveredTime(WindowTile, TimeSpan)"/>); a tile under
+/// <c>AnomalyThresholds.MinTileCoverage</c> is not scored. 0 when the row carries no coverage columns, which
+/// also leaves the tile unscored.</param>
+/// <param name="CollectionSpan">#8293: the tile's first collection instant to its last — the
+/// <c>tile_span_seconds</c> column. Zero for a single instant.</param>
 public readonly record struct WindowTile(
     DateTime LocalHour,
     double Peak,
     double Mean,
     long Samples,
-    DateTime? PeakTimeUtc = null);
+    DateTime? PeakTimeUtc = null,
+    long Collections = 0,
+    TimeSpan CollectionSpan = default);

@@ -82,7 +82,8 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        AVG(ms_per_read) AS avg_ms_per_read,
        COUNT(*)         AS rated_samples,
        (array_agg(collection_time ORDER BY ms_per_read DESC NULLS LAST, collection_time DESC))[1] AS peak_sample,
-       (array_agg(reads ORDER BY ms_per_read DESC NULLS LAST, collection_time DESC))[1]           AS peak_sample_reads
+       (array_agg(reads ORDER BY ms_per_read DESC NULLS LAST, collection_time DESC))[1]           AS peak_sample_reads,
+       " + WindowTiles.CoverageColumnsSql + @"
 FROM rated
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;
