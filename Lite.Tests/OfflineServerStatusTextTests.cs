@@ -84,18 +84,62 @@ public sealed class OfflineServerStatusTextTests
     }
 
     /// <summary>
-    /// The wiring: a server tab is selected, its cached connection status flips, and the status bar is re-worded the way the
-    /// 30-second check re-words it. The bar follows the check in both directions while the tab stays selected.
+    /// The wiring: a server tab is selected, its cached connection status flips, and the connection check the 30-second timer
+    /// runs re-words the status bar. The bar follows the check in both directions while the tab stays selected.
     /// </summary>
     [Fact]
     public void TheStatusBar_FollowsTheConnectionCheck_WhileATabStaysSelected()
+    {
+        var (selected, down, up) = WithHostedTab((w, server, status) =>
+        {
+            var afterSelect = status.Text;
+            var cached = w.ServerManager.GetConnectionStatus(server.Id);
+            cached.IsOnline = false;
+            RunConnectionCheck(w);
+            var afterDown = status.Text;
+
+            cached.IsOnline = true;
+            RunConnectionCheck(w);
+            return (afterSelect, afterDown, status.Text);
+        });
+
+        Assert.Equal("Connected to wiring-test", selected);
+        Assert.Equal(MainWindow.OfflineStatusText("wiring-test"), down);
+        Assert.Equal("Connected to wiring-test", up);
+    }
+
+    /// <summary>
+    /// A message another path put on the bar (a failed refresh, the server-removal report, the collecting line) stands through
+    /// the connection check while the server's cached status is unchanged, and gives way the moment the status flips.
+    /// </summary>
+    [Fact]
+    public void AnotherMessageOnTheBar_SurvivesTheCheck_UntilTheStatusChanges()
+    {
+        const string other = "Refresh failed: the store was busy";
+        var (kept, flipped) = WithHostedTab((w, server, status) =>
+        {
+            status.Text = other;
+            RunConnectionCheck(w);
+            var afterUnchanged = status.Text;
+
+            w.ServerManager.GetConnectionStatus(server.Id).IsOnline = false;
+            RunConnectionCheck(w);
+            return (afterUnchanged, status.Text);
+        });
+
+        Assert.Equal(other, kept);
+        Assert.Equal(MainWindow.OfflineStatusText("wiring-test"), flipped);
+    }
+
+    /// <summary>The window with one server tab hosted and selected; the server is not registered, so the check raises no notices.</summary>
+    private static T WithHostedTab<T>(Func<MainWindow, ServerConnection, TextBlock, T> body)
     {
         var dir = Path.Combine(Path.GetTempPath(), "OfflineStatusWiring_" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
         try
         {
             using var duckDb = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
-            var (selected, down, up) = Run(w =>
+            return Run(w =>
             {
                 var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "wiring-test", DisplayName = "wiring-test", IsEnabled = true };
                 var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
@@ -107,22 +151,8 @@ public sealed class OfflineServerStatusTextTests
                 tabs.Items.Add(item);
                 tabs.SelectedItem = item;
                 HostOf(w).UpdateLayout();
-                var status = (TextBlock)w.FindName("StatusText");
-                var afterSelect = status.Text;
-
-                var cached = ServerManagerOf(w).GetConnectionStatus(server.Id);
-                cached.IsOnline = false;
-                RefreshSelectedTabStatus(w);
-                var afterDown = status.Text;
-
-                cached.IsOnline = true;
-                RefreshSelectedTabStatus(w);
-                return (afterSelect, afterDown, status.Text);
+                return body(w, server, (TextBlock)w.FindName("StatusText"));
             });
-
-            Assert.Equal("Connected to wiring-test", selected);
-            Assert.Equal(MainWindow.OfflineStatusText("wiring-test"), down);
-            Assert.Equal("Connected to wiring-test", up);
         }
         finally
         {
@@ -130,10 +160,13 @@ public sealed class OfflineServerStatusTextTests
         }
     }
 
-    /// <summary>The window's connection-status cache, and the selected-tab status refresh the 30-second check calls.</summary>
-    private static ServerManager ServerManagerOf(MainWindow w) => w.ServerManager;
-
-    private static void RefreshSelectedTabStatus(MainWindow w) => w.WordSelectedServerTabStatus();
+    /// <summary>The connection check the status timer runs, by name while it is the window's own private step.</summary>
+    private static void RunConnectionCheck(MainWindow w)
+    {
+        var method = typeof(MainWindow).GetMethod("CheckConnectionsAndNotify", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public, Type.EmptyTypes);
+        Assert.True(method is not null, "the window has no connection check");
+        method!.Invoke(w, null);
+    }
 
     /* The window is built the way the chrome tests build it: the app's three paths point at a folder of the test's own, and the
        window's content moves into a plain host window whose size the test sets. */
