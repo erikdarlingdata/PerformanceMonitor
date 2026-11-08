@@ -285,4 +285,97 @@ public sealed class PageLayoutLooksWrongTests
 
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
+
+    /// <summary>
+    /// A lane whose read failed says only that: the empty sentence would claim the window holds no data, which a read that did not
+    /// return cannot establish. The CPU lane fails whole; the Blocking lane draws the series that read (here none) and is then marked.
+    /// </summary>
+    [Fact]
+    public void TheOverviewLanes_SayOnlyThatTheReadFailed_WhenItDid()
+    {
+        var problems = WithServerTab("DarkTheme", PaneWidth(900), 600, Credentials(), (tab, window, _) =>
+        {
+            var found = new List<string>();
+            var lanes = Find<CorrelatedTimelineLanesControl>(tab, "CorrelatedLanes");
+            Reveal(lanes);
+            Settle(window);
+            var none = new List<(double Time, double Value)>();
+            Invoke(lanes, "ShowFailed", lanes.CpuChart, "CPU %");
+            lanes.UpdateBlockingLane(none, none, windowSpanDays: 1);
+            var markFailed = typeof(CorrelatedTimelineLanesControl).GetMethod("MarkFailed", Instance | System.Reflection.BindingFlags.Static)
+                ?? throw new Xunit.Sdk.XunitException("the lanes control has no MarkFailed");
+            markFailed.Invoke(lanes, new object[] { lanes.BlockingChart });
+            lanes.SyncXAxes(24, null, null);
+            Settle(window);
+            foreach (var (chart, name) in new[] { (lanes.CpuChart, "CPU %"), (lanes.BlockingChart, "Blocking & Deadlocking") })
+            {
+                var said = chart.Plot.GetPlottables<ScottPlot.Plottables.Annotation>().Select(a => a.LabelText).ToList();
+                if (said.Count != 1 || said[0] != "read failed")
+                {
+                    found.Add($"{name}: the failed lane says {string.Join(" and ", said.Select(t => $"'{t}'"))}");
+                }
+            }
+
+            return found;
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>
+    /// The CPU Scheduler page's least height follows its content: the chart's floor over the rows the grid takes. The page scrolls
+    /// only when the two do not fit the viewport, and then by exactly what they need; the chart keeps its floor and the grid shows
+    /// all its rows either way.
+    /// </summary>
+    [Fact]
+    public void TheCpuSchedulerPage_ScrollsOnlyWhenTheChartFloorAndTheGridsRowsDoNotFit()
+    {
+        var problems = WithServerTab("DarkTheme", PaneWidth(900), 600, Credentials(), (tab, window, _) =>
+        {
+            var found = new List<string>();
+            var grid = Find<DataGrid>(tab, "CpuSchedulerGrid");
+            Reveal(grid);
+            Settle(window);
+            var page = PageOf(grid);
+            var layout = (Grid)page.Content;
+            foreach (var (rows, height) in new[] { (3, 600), (8, 600), (8, 450) })
+            {
+                grid.ItemsSource = Enumerable.Range(1, rows)
+                    .Select(i => new { Metric = $"Metric {i}", Value = $"{i * 10}", CollectionTimeLocal = "2026-11-07 10:00:00", IsWarning = i == 3, Hint = $"hint {i}" })
+                    .ToList();
+                Resize(window, PaneWidth(900), height);
+                Settle(window);
+                var needed = ChartLayout.MinPlotHeight + grid.ActualHeight + PageScroll.ChartOverGridGap;
+                var at = $"{rows} rows at {height} tall ({page.ViewportHeight:F0} px viewport, {grid.ActualHeight:F0} px grid)";
+                if (Math.Abs(page.ExtentHeight - Math.Max(page.ViewportHeight, needed)) > 1)
+                {
+                    found.Add($"{at}: the page's extent is {page.ExtentHeight:F0} px where the chart floor and the grid need {needed:F0}");
+                }
+
+                if (needed <= page.ViewportHeight && page.ScrollableHeight > 0.5)
+                {
+                    found.Add($"{at}: the page scrolls {page.ScrollableHeight:F0} px though its content fits");
+                }
+
+                if (layout.RowDefinitions[0].ActualHeight + 0.5 < ChartLayout.MinPlotHeight)
+                {
+                    found.Add($"{at}: the chart row is {layout.RowDefinitions[0].ActualHeight:F0} px");
+                }
+
+                if (InnerScroll(grid).ScrollableHeight > 0.5)
+                {
+                    found.Add($"{at}: the grid scrolls {InnerScroll(grid).ScrollableHeight:F0} px of its own rows");
+                }
+            }
+
+            if (page.ScrollableHeight < 0.5)
+            {
+                found.Add($"8 rows at 450 tall: the page does not scroll in a {page.ViewportHeight:F0} px viewport");
+            }
+
+            return found;
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
 }

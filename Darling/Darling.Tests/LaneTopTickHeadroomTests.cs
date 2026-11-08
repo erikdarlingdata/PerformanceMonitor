@@ -128,4 +128,24 @@ public sealed class LaneTopTickHeadroomTests
         Assert.True(shortLane.Axes.GetLimits().Top > tall.Axes.GetLimits().Top,
             $"the short lane's top is {shortLane.Axes.GetLimits().Top}, the tall lane's {tall.Axes.GetLimits().Top}");
     }
+
+    /// <summary>
+    /// ScottPlot lays the plot out in figure pixels divided by the scale factor and measures a label at its unscaled font size, so a
+    /// lane at 150% drawn one and a half times as tall is the same lane in layout units: the same ticks, the same gap, the same top.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 1)]
+    [InlineData(0, 105)]
+    public void AScaledLane_GetsTheSameTopAsTheUnscaledOne(double yMin, double yMax)
+    {
+        var unscaled = Lane(yMin, yMax);
+        LaneTopTickHeadroom.Apply(unscaled, 130);
+        var scaled = Lane(yMin, yMax);
+        scaled.ScaleFactor = 1.5;
+        LaneTopTickHeadroom.Apply(scaled, 130 * 1.5f);
+
+        var top = unscaled.Axes.GetLimits().Top;
+        Assert.True(top > yMax, "the unscaled lane's top was not raised");
+        Assert.InRange(scaled.Axes.GetLimits().Top, top - 0.01, top + 0.01);
+    }
 }
