@@ -77,7 +77,7 @@ public sealed partial class DarlingMcpPlanForceTools
     [McpServerTool(Name = "unforce_query_store_plan"), Description(
         "Agent arm, SQL Server only: removes the forced plan of one Query Store plan on the monitored server. Dry run by default: returns the exact statement and the before state, writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's force_plan switch and remediation login; ships off. " +
         "<<GUIDE>>" +
-        "Call get_plan_force_precheck first. This tool blocks only a call that cannot do anything: plan_not_collected (that database_name, query_id and plan_id are not together in any Query Store row Darling collected for that server: take all three from one get_query_store_top row), plan_query_changed (the query behind that query_id on the server is not the one Darling collected the pair for), plan_not_found or plan_not_forced.An agent may unforce any force, including one automatic plan correction or a person placed; the change is journaled in Agent changes (kind plan_unforce) with how that plan was forced, so it can be forced again, and a person can undo it from the Agent changes list. " +
+        "Call get_plan_force_precheck first. This tool blocks only a call that cannot do anything: plan_not_collected (that database_name, query_id and plan_id are not together in any Query Store row Darling collected for that server: take all three from one get_query_store_top row), plan_query_changed (the query behind that query_id on the server is not the one Darling collected the pair for), plan_not_found or plan_not_forced. An agent may unforce any force, including one automatic plan correction or a person placed; the change is journaled in Agent changes (kind plan_unforce) with how that plan was forced, so it can be forced again, and a person can undo it from the Agent changes list. " +
         "mcp.allowWrites never bypasses the gate, and a dry run needs it too. After a write, check with get_forced_plans. Nothing in Darling unforces on its own. Answers status dry_run, done, refused (reason) or failed, with before, after, statement and journal_id. A done answer also carries undo: force_query_store_plan with the same plan (a plan that automatic plan correction forced says that forcing it again makes it manual).")]
     public static Task<string> UnforceQueryStorePlan(
         NpgsqlDataSource postgres,
@@ -1030,6 +1030,18 @@ public sealed partial class DarlingMcpPlanForceTools
         }
 
         var stateNode = JsonSerializer.SerializeToNode(state);
+
+        /* The journaled before image names the query the agent's call acted on by its query_hash. A database restored or re-created since restarts its Query Store
+           ids, so the same query_id and plan_id can name another query's plan now, and the undo would force or unforce that one. An image or a server without a
+           hash has nothing to compare, and the server-state checks below decide on their own. */
+        if (!CollectedQueryMatches([facts.BeforeQueryHash], state.QueryHash))
+        {
+            await session.RecordRefusalAsync(PlanQueryChanged, ct);
+            return new PlanUndoAnswer(PlanUndoAnswer.RefusedStatus, PlanQueryChanged,
+                $"The query behind query_id {facts.QueryId} in {state.Database} on {facts.ServerName} is not the one this change acted on: the server's query_hash is {state.QueryHash}, and the change was journaled with {facts.BeforeQueryHash}. Query Store ids restart when a database is restored or re-created, so the same query_id and plan_id now name another query's plan. Nothing was written.",
+                null, stateNode);
+        }
+
         var plan = PlanUndoDecision.Decide(facts, state);
         if (plan.Refusal is { } refused)
         {
