@@ -408,7 +408,7 @@ public sealed partial class DarlingWorker : BackgroundService
         new("aggregate batching converge", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.Delta,
             (connection, logger, ct) => TimescaleSupport.ConvergeContinuousAggregateBatchingAsync(connection, logger, ct)),
 
-        /* #6070: a daily whose parent is another daily keeps a window one bucket wider than the 3-day one, so the
+        /* #6070: a daily whose parent is another daily keeps a window one bucket wider than the 4-day one, so the
            day its parent writes after it ran is still in its window the next run. config only (start_offset),
            no schedule, so the daily tier keeps finish-to-start. Before the ensure for the same 22023 reason as
            the window converge above. */

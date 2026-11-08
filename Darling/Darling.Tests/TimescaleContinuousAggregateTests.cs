@@ -1000,7 +1000,7 @@ public sealed class TimescaleContinuousAggregateTests
     /// which is what stops one being dragged onto the grid by a caller that only knows it has a view name.</para>
     /// </summary>
     [Fact]
-    public void DailyPolicy_UsesOneDayEndOffsetAndSchedule_KeepsThreeDayStart()
+    public void DailyPolicy_UsesOneDayEndOffsetAndSchedule_KeepsFourDayStart()
     {
         Assert.Equal("4 days", TimescaleSupport.DailyRefreshStartOffset);
         Assert.Equal(TimeSpan.FromDays(4), TimescaleSupport.DailyRefreshStartSpan);

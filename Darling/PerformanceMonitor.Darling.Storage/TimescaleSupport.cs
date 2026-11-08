@@ -9420,14 +9420,14 @@ AND   j.hypertable_name = '{relation}'";
     /// <c>start_offset</c> and then aligns its start DOWN to a bucket boundary, so the furthest it can reach is
     /// <c>start_offset</c> plus one bucket. A chunk becomes eligible only when its WHOLE range is older than
     /// <c>compress_after</c>. The two regions are therefore disjoint at any chunk width whenever
-    /// <c>compress_after ≥ start_offset + bucket</c>: 1 day 1 hour for the hourly tier, 4 days for the daily.
+    /// <c>compress_after ≥ start_offset + bucket</c>: 1 day 1 hour for the hourly tier, 5 days for the daily (6 for the daily-parented child).
     /// The daily tier's bucket IS a day, so the floor is a day there already; the hourly tier's is an hour, and
     /// an hour is the wrong unit for the gap. Every other boundary in this store moves in days — chunks close at
     /// UTC midnight (<see cref="ChunkIntervalDays"/>), raw eligibility flips at UTC midnight
     /// (<see cref="CompressAfterDays"/>) — and a sub-day margin would put the refresh's aligned start and the
     /// compression boundary within one scheduling jitter of each other on every run. Taking the margin as one
     /// raw chunk, on every tier, puts a whole day between the two on the hourly tier and lands the daily tier on
-    /// exactly its own floor. The result — 2 days hourly, 4 days daily — is the ruling #3581 was opened for,
+    /// exactly its own floor. The result — 2 days hourly, 5 days daily — is the ruling #3581 was opened for,
     /// reached as an expression rather than written down.</para>
     ///
     /// <para><b>What this does NOT protect, stated so it is not assumed.</b> Two refreshes reach past every
@@ -9453,7 +9453,7 @@ AND   j.hypertable_name = '{relation}'";
 
     /// <summary>
     /// <c>compress_after</c> for every aggregate whose refresh policy is DAILY —
-    /// <see cref="DailyRefreshStartSpan"/> plus <see cref="AggregateCompressMarginSpan"/>, 4 days. That is
+    /// <see cref="DailyRefreshStartSpan"/> plus <see cref="AggregateCompressMarginSpan"/>, 5 days (6 for the daily-parented child). That is
     /// the seven <see cref="DailyAggregates"/>. Their refresh keeps TimescaleDB's finish-to-start scheduling
     /// (<see cref="AddDailyRefreshPolicySql"/>), so the instant it runs drifts — which is one more reason the
     /// separation between refresh and compression is carried by the WINDOW arithmetic here rather than by

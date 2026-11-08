@@ -592,7 +592,7 @@ ORDER BY c.bucket";
     /// cref="DailyBucketsChained"/> (#4300, #4716) is the DAYS of a dependent daily that a closed repair
     /// range was ALSO refreshed over — added last so every existing construction site keeps compiling
     /// unchanged. It sums two things: the days the seam chase refreshes (#4300: the part of a closed seam
-    /// range older than the successor daily's own 3-day window, whether or not the daily held a row yet), and
+    /// range older than the successor daily's own 4-day window, whether or not the daily held a row yet), and
     /// the days a closed hourly range (seam OR ordinary loop, #4716) invalidated in a daily that already held
     /// a bucket for them, plus the dailies chained behind those (interval_daily to daygrain_daily). A day both
     /// would reach is refreshed and counted once: the seam chase leaves out the days the #4716 refresh already
@@ -942,7 +942,7 @@ ORDER BY c.bucket";
                     /* The daily is hierarchical from THIS hourly, so a day this chase would refresh must not
                        still hold an unmaterialized hourly bucket underneath it — a partial day reads Covered
                        (min/max, no contiguity check) exactly like a whole one, and once that happens nothing
-                       ever refreshes it again: the day is below the daily's own 3-day policy window, so the
+                       ever refreshes it again: the day is below the daily's own 4-day policy window, so the
                        ordinary daily walk never re-visits it, and the hourly hole scan only ever runs on the
                        hourly, not on what the daily rolled up from it. Scan the HOURLY over the same bounds
                        the chase is about to hand the daily, reusing the materialization this pass already
@@ -1270,7 +1270,7 @@ ORDER BY c.bucket";
     /// <summary>
     /// #4300: which part, if any, of a just-repaired successor-hourly range <c>[repairedStart,
     /// repairedEnd)</c> the dependent successor DAILY should also be chased over, so an outage-aged gap the
-    /// seam repair fills does not sit forever below the daily's own 3-day refresh window (<see
+    /// seam repair fills does not sit forever below the daily's own 4-day refresh window (<see
     /// cref="DailyRefreshStartSpan"/>) — the daily never materializes there on its own, and the successor
     /// hourly's 90-day retention is armed only through its successor daily's coverage (<see
     /// cref="RequireSuccessorDailyOf"/>), so an unchased gap holds that retention indefinitely even though no
@@ -1399,7 +1399,7 @@ ORDER BY c.bucket";
     /// #4716: the whole days a just-closed repaired range <c>[repairedStart, repairedEnd)</c> touched and that are
     /// COMPLETE at <paramref name="utcNow"/> — aligned out to whole days, oldest first, dropping any day whose end
     /// is after <c>AlignDown(utcNow, 1 day)</c> (the day still filling belongs to the daily's own policy). No
-    /// clip to the daily policy's 3-day window: a complete day the daily already holds is refreshed wherever it
+    /// clip to the daily policy's 4-day window: a complete day the daily already holds is refreshed wherever it
     /// sits. Pure, so the tests can walk it without a live store.
     /// </summary>
     public static IReadOnlyList<DateTime> CompleteDaysTouched(DateTime repairedStart, DateTime repairedEnd, DateTime utcNow)
