@@ -4914,9 +4914,17 @@ WHERE t.tgrelid = 'config.investigation_journal'::regclass
     {
         var u = userId.ToString(CultureInfo.InvariantCulture);
         return path == ComposeCredentialVolumeRoot || path.StartsWith(ComposeCredentialVolumeRoot + "/", StringComparison.Ordinal)
-            ? $"docker compose run --rm --no-deps --user 0 --entrypoint chown darling -R {u}:{u} {ComposeCredentialVolumeRoot} "
+            ? $"{ComposeVolumeOwnershipCommand(userId)} "
                 + "(on Kubernetes, run the one-off root Job under Container user in docs/darling/security.md instead)"
             : $"chown -R {u}:{u} '{path}'";
+    }
+
+    /// <summary>The one-off root compose container that gives the whole credential volume to <paramref name="userId"/>
+    /// (#8141), as docs/darling/security.md gives it.</summary>
+    internal static string ComposeVolumeOwnershipCommand(uint userId)
+    {
+        var u = userId.ToString(CultureInfo.InvariantCulture);
+        return $"docker compose run --rm --no-deps --user 0 --entrypoint chown darling -R {u}:{u} {ComposeCredentialVolumeRoot}";
     }
 
     /// <summary>The compose store's credential file for <paramref name="role"/>: the managed file's name without

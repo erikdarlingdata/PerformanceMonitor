@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using PerformanceMonitor.Darling.Storage;
 
@@ -144,8 +145,7 @@ public static class DarlingSecretSource
             }
             catch (Exception ex)
             {
-                throw new InvalidOperationException(
-                    $"{settingName}: secret file '{path}' could not be read: {ex.Message}", ex);
+                throw new InvalidOperationException(CouldNotRead(settingName, path, ex), ex);
             }
 
             WarnWhenReadableByOrdinaryUsers(path, settingName);
@@ -164,4 +164,37 @@ public static class DarlingSecretSource
 
         return value;
     }
+
+    /// <summary>
+    /// The refusal for a <c>file:</c> secret that could not be read (#1804). When the read was denied on Unix and the
+    /// service is not root (#8141: the image runs as 1654, and a 3.12 compose install wrote <c>secrets/*</c> as 0600 files
+    /// of the host user), it adds what to do: for a compose secret, the two upgrade lines from the Container user section
+    /// of docs/darling/security.md and the restart; elsewhere, the path and the user that needs to read it. This read
+    /// happens while the config loads, before the credentials-directory refusal can run, so it has to say both lines.
+    /// </summary>
+    internal static string CouldNotRead(string settingName, string path, Exception ex)
+    {
+        var refusal = $"{settingName}: secret file '{path}' could not be read: {ex.Message}";
+        if (ex is not UnauthorizedAccessException
+            || ComposeCredentialDirectoryGuard.Current.UnixModes is not { } modes
+            || modes.EffectiveUserId == 0)
+        {
+            return refusal;
+        }
+
+        var euid = modes.EffectiveUserId;
+        var lead = $"{refusal.TrimEnd('.')}. The service runs as user {euid.ToString(CultureInfo.InvariantCulture)}, which cannot read it; ";
+        return path.StartsWith(ComposeSecretsMount, StringComparison.Ordinal)
+            ? lead + "if this install ran as root before, run these once on the host, in the compose folder: "
+                + $"{ComposeSecretsModeFix}, then {DarlingManagedRoles.ComposeVolumeOwnershipCommand(euid)}; "
+                + "then restart the service (docker compose restart darling). See Container user in docs/darling/security.md."
+            : lead + $"give that user read access to '{path}', then restart the service.";
+    }
+
+    /// <summary>Where compose mounts a service's secrets.</summary>
+    internal const string ComposeSecretsMount = "/run/secrets/";
+
+    /// <summary>The host command that lets the container's user read the compose folder's files while
+    /// <c>secrets/</c> stays closed to other host users (#8141); docs/darling/security.md gives the same line.</summary>
+    internal const string ComposeSecretsModeFix = "chmod 700 secrets && chmod 644 darling.json secrets/*";
 }

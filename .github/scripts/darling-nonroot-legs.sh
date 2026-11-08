@@ -4,8 +4,10 @@
 #   fresh        a new volume: the service starts as 1654 and owns a 700 credentials directory with every key file.
 #   upgrade      a volume the previous (root) release wrote, handed over with the documented chown: same password key, and no
 #                role credential the volume already held, nor the log-hash key, is generated again.
-#   missed-step  the same volume WITHOUT the chown: the service stops, says what to run, and regenerates nothing; the web
-#                dashboard (turned on for this leg) stays down instead of connecting as the store owner.
+#   missed-step  the same volume WITHOUT either upgrade line: a 0600 store-connection secret another user owns stops the
+#                config load with both lines and the restart; after the chmod alone, the service stops, says what to run,
+#                and regenerates nothing; the web dashboard (turned on for this leg) stays down instead of connecting as
+#                the store owner.
 # Usage: darling-nonroot-legs.sh <image> <previous-image>
 set -euo pipefail
 
@@ -109,6 +111,11 @@ wait_log() {
       return 0
     fi
     if [ "$(docker inspect -f '{{.State.Running}}' "${c}")" != "true" ]; then
+      # It may have logged the line and exited between the two looks.
+      clog="$(docker logs "${c}" 2>&1)" || true
+      if grep -Eq -- "${re}" <<<"${clog}"; then
+        return 0
+      fi
       fail "${c} stopped before logging: ${re}"
     fi
     sleep 2
@@ -187,24 +194,44 @@ docker volume rm -f "${vol}" >/dev/null
 docker network rm "${net}" >/dev/null
 
 # ---- missed-step ----
+# Both upgrade lines skipped, met in the order an operator meets them. The store connection is a file: secret written 0600
+# and owned by another user (root here, on a named volume so its mode is real), as the previous release's setup.sh left
+# it: the config load stops on it first, so that refusal must give both lines. Once the secret is readable, the root-owned
+# credentials directory stops collection and the log gives the chown.
 leg="missed-step"
 new_store missed
 start_service "${prefix}-missed-old" "${previous}"
 wait_log "${prefix}-missed-old" 'Retention evaluation at startup'
 docker stop "${prefix}-missed-old" >/dev/null || fail "could not stop ${prefix}-missed-old"
-# The web dashboard on, with a token from a file in the leg's temp dir: its host must stay down, not connect as the owner.
-token_file="${work}/missed/web_token"
-head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "${token_file}"
-chmod 644 "${token_file}"
+secrets_vol="${prefix}-missed-secrets"
+docker volume create "${secrets_vol}" >/dev/null
+# The web dashboard on, with its token beside the store connection: its host must stay down, not connect as the owner.
+docker run --rm --user 0 --entrypoint sh -e DARLING_STORE_CONNECTION -v "${secrets_vol}:/s" "${image}" -c \
+  'printf "%s\n" "${DARLING_STORE_CONNECTION}" > /s/store_connection && chmod 600 /s/store_connection \
+   && head -c 24 /dev/urandom | od -An -tx1 | tr -d " \n" > /s/web_token && chmod 644 /s/web_token' \
+  || fail "could not write the secrets volume"
 cat > "${config_file}" <<'JSON'
 {
-  "postgres": { "managed": false, "connectionString": "env:DARLING_STORE_CONNECTION" },
+  "postgres": { "managed": false, "connectionString": "file:/run/secrets/store_connection" },
   "servers": [],
   "web": { "enabled": true, "network": { "token": "file:/run/secrets/web_token" } },
   "mcp": { "enabled": false }
 }
 JSON
-start_service "${prefix}-missed-new" "${image}" -v "$(host_path "${token_file}"):/run/secrets/web_token:ro"
+start_service "${prefix}-missed-chmod" "${image}" -v "${secrets_vol}:/run/secrets:ro"
+wait_log "${prefix}-missed-chmod" "secret file '/run/secrets/store_connection' could not be read"
+log="$(log_of "${prefix}-missed-chmod")"
+grep -qF "/run/secrets/store_connection' is denied. The service runs as user 1654, which cannot read it" <<<"${log}" \
+  || fail "the secret-read refusal does not name the service's user"
+grep -qF 'chmod 700 secrets && chmod 644 darling.json secrets/*' <<<"${log}" || fail "the secret-read refusal does not give the chmod"
+grep -qF 'chown darling -R 1654:1654 /var/lib/darling' <<<"${log}" || fail "the secret-read refusal does not give the chown"
+grep -qF 'docker compose restart darling' <<<"${log}" || fail "the secret-read refusal does not say to restart"
+if grep -qF "Generated the compose store's" <<<"${log}"; then fail "the service generated a credential before its config loaded"; fi
+docker rm -f "${prefix}-missed-chmod" >/dev/null
+# The chmod line run, the chown line still skipped.
+docker run --rm --user 0 --entrypoint chmod -v "${secrets_vol}:/s" "${image}" 644 /s/store_connection >/dev/null \
+  || fail "could not make the store connection secret readable"
+start_service "${prefix}-missed-new" "${image}" -v "${secrets_vol}:/run/secrets:ro"
 wait_log "${prefix}-missed-new" 'belongs to user 0, but the service runs as user 1654'
 log="$(log_of "${prefix}-missed-new")"
 grep -qF 'chown darling -R 1654:1654 /var/lib/darling' <<<"${log}" || fail "the log does not name the chown command"

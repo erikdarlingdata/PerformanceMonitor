@@ -409,8 +409,8 @@ internal static class DarlingPasswordKeyFileReader
 
         var users = $"{refusal.TrimEnd('.')}. It is owned by user {found.UserId.ToString(CultureInfo.InvariantCulture)}, "
             + $"not by user {euid.ToString(CultureInfo.InvariantCulture)}, which the service runs as; to give it to that user, ";
-        return path.StartsWith(ComposeSecretsMount, StringComparison.Ordinal)
-            ? users + ComposeSecretOwnershipFix(euid, path[ComposeSecretsMount.Length..])
+        return path.StartsWith(DarlingSecretSource.ComposeSecretsMount, StringComparison.Ordinal)
+            ? users + ComposeSecretOwnershipFix(euid, path[DarlingSecretSource.ComposeSecretsMount.Length..])
             : users + $"run: {DarlingManagedRoles.CredentialOwnershipFix(euid, path)}";
     }
 
@@ -424,9 +424,6 @@ internal static class DarlingPasswordKeyFileReader
         return $"run on the host, in the compose folder: sudo chown {u}:{u} secrets/{secret} (the file the {secret} secret "
             + "names in docker-compose.yml; keep its mode 0400 or 0600; see Darling/compose/secrets/README.md)";
     }
-
-    /// <summary>Where compose mounts a service's secrets.</summary>
-    private const string ComposeSecretsMount = "/run/secrets/";
 
     private static string NotRegular(string target) =>
         $"{target} is not a regular file (it is a directory, a device, a FIFO or a socket), so it is not read. Point " +
