@@ -8,13 +8,15 @@
     <ScrollViewer Margin="8" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
     <Grid x:Name="LanesGrid" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}">
         <Grid.RowDefinitions>
-            <!-- 5 lanes, equal height -->
-            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
-            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
-            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
-            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
-            <!-- #8162: the last lane also holds its X labels, so it takes a little more of the height and a floor 30 px taller. -->
-            <RowDefinition Height="1.15*" MinHeight="230"/>
+            <!-- 5 lanes, equal height. #8224: a lane has no legend, title or Y unit and only the last has X labels, so its floor is
+                 the shared plot-area floor (ui:ChartLayout.MinPlotAreaHeight, 120 px) plus its 4 px of margins and a few for the
+                 tick marks: 128 px. The five fit a 1280x800 window and scroll below that. -->
+            <RowDefinition Height="*" MinHeight="128"/>
+            <RowDefinition Height="*" MinHeight="128"/>
+            <RowDefinition Height="*" MinHeight="128"/>
+            <RowDefinition Height="*" MinHeight="128"/>
+            <!-- #8162: the last lane also holds its X labels, so it takes a little more of the height and a floor 25 px taller. -->
+            <RowDefinition Height="1.15*" MinHeight="153"/>
         </Grid.RowDefinitions>
 
         <!-- Lane 1: CPU -->
