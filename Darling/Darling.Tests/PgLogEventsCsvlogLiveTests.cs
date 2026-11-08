@@ -95,32 +95,45 @@ public sealed class PgLogEventsCsvlogLiveTests
             await using var clockCommand = new NpgsqlCommand("SELECT clock_timestamp()", targetConnection);
             var floor = (DateTime)(await clockCommand.ExecuteScalarAsync(ct))!;
 
-            await SendForgedLoginAsync(target!, ForgedCsvUserName, ct);
-            await SendForgedLoginAsync(target!, ForgedStderrUserName, ct);
-
-            await WaitForBothForgedEventsAsync(targetConnection, floor, ct);
-
             var usesCsvlog = await PgLogFormatCapability.IsCsvlogEnabledAsync(targetConnection, target!, ct);
             Assert.True(usesCsvlog, "the rig's log_destination must include csvlog for this route to be exercised.");
 
-            foreach (var binaryGranted in new[] { false, true })
-            {
-                var rows = await ReadRowsAsync(targetConnection, binaryGranted, ct);
+            /* #8205: the forged logins, the wait and the read go through the rotation-aware helper, so a log rotation between
+               the writes and the read (midnight, log_rotation_size) has both logins sent again into the file the collector tails.
+               The wait looks only at what the file gained after the writes, so earlier runs' identical entries on a reused
+               target do not stand in for this run's two; the markers are the quote-free parts of each planted name. */
+            await PgLogLiveWait.ReadOwnRecordAcrossRotationAsync(targetConnection, "csv",
+                write: async () =>
+                {
+                    await SendForgedLoginAsync(target!, ForgedCsvUserName, ct);
+                    await SendForgedLoginAsync(target!, ForgedStderrUserName, ct);
+                    return new[] { "00:00:00.0 UTC,", "UTC [1] LOG:  forged" };
+                },
+                read: async () =>
+                {
+                    foreach (var binaryGranted in new[] { false, true })
+                    {
+                        var rows = await ReadRowsAsync(targetConnection, binaryGranted, ct);
 
-                /* The forged text lands INSIDE the two real FATAL auth-failure events' own message text —
-                   the record each was planted into — never as a separate line of its own. */
-                var fatalCount = rows.Count(r => IsForgedFatal(r, floor));
-                Assert.True(fatalCount >= 2,
-                    $"expected at least the two forged FATAL events this run planted; got {fatalCount}.");
+                        /* The forged text lands INSIDE the two real FATAL auth-failure events' own message text —
+                           the record each was planted into — never as a separate line of its own. Fewer than this run's
+                           two means the read missed them: their records are not in the file the read tailed. */
+                        if (rows.Count(r => IsForgedFatal(r, floor)) < 2)
+                        {
+                            return false;
+                        }
 
-                /* No event was forged OUT of either planted newline: no pid 1, no severity LOG with message
-                   "forged" standing on its own, no user "fake" from the csvlog record's own field. */
-                Assert.DoesNotContain(rows, r => r.Pid == 1);
-                Assert.DoesNotContain(rows, r => r.Severity == "LOG" && r.Message == "forged");
-                Assert.DoesNotContain(rows, r => r.UserName == "fake" || r.UserName == "z");
+                        /* No event was forged OUT of either planted newline: no pid 1, no severity LOG with message
+                           "forged" standing on its own, no user "fake" from the csvlog record's own field. */
+                        Assert.DoesNotContain(rows, r => r.Pid == 1);
+                        Assert.DoesNotContain(rows, r => r.Severity == "LOG" && r.Message == "forged");
+                        Assert.DoesNotContain(rows, r => r.UserName == "fake" || r.UserName == "z");
 
-                Assert.NotEmpty(rows);
-            }
+                        Assert.NotEmpty(rows);
+                    }
+
+                    return true;
+                }, ct);
 
             bodySucceeded = true;
         }
@@ -209,27 +222,5 @@ public sealed class PgLogEventsCsvlogLiveTests
         await using var command = PostgresTargetProvider.Instance.CreateCommand(definition.BuildQuery(context), targetConnection, 30);
         await using var reader = await command.ExecuteReaderAsync(ct);
         return await definition.ReadAsync(reader, context, ct);
-    }
-
-    /// <summary>
-    /// Reads the log until both of THIS run's planted FATAL entries (at or after <paramref name="floor"/>) are readable,
-    /// up to 30 seconds — the syslogger flushes asynchronously, so the planted lines are not guaranteed to be on disk
-    /// the instant the TCP round trip returns. The wait used to look only for the csv file growing, which one of the
-    /// two entries satisfied, so the read could run with the second still unwritten ("expected at least two forged FATAL
-    /// events; got 0"). It returns when the deadline passes too, and the assertions then report what was readable.
-    /// </summary>
-    private static async Task WaitForBothForgedEventsAsync(NpgsqlConnection targetConnection, DateTime floor, CancellationToken ct)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(30);
-        while (DateTime.UtcNow < deadline)
-        {
-            var rows = await ReadRowsAsync(targetConnection, false, ct);
-            if (rows.Count(r => IsForgedFatal(r, floor)) >= 2)
-            {
-                return;
-            }
-
-            await Task.Delay(200, ct);
-        }
     }
 }

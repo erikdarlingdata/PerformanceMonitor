@@ -66,7 +66,7 @@ public class LiteLabelFitTests
     [Fact]
     public void TheCpuCardLabels_ShowInFull_At1366()
     {
-        var found = StaTestThread.Run(() =>
+        var found = StaTestThread.Run(() => WithTheme(() =>
         {
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = ScreenWidth, Height = ScreenHeight };
@@ -103,9 +103,33 @@ public class LiteLabelFitTests
             {
                 window.Close();
             }
-        });
+        }));
 
         Assert.True(found.Count == 0, string.Join(Environment.NewLine, found));
+    }
+
+    /// <summary>Runs <paramref name="body"/> with Lite's dark theme in the application scope, where the FinOps tab's StaticResource lookups (its TrimmedCell style is based on DataGridCellText) resolve while it loads, as they do in the app.</summary>
+    private static T WithTheme<T>(Func<T> body)
+    {
+        var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        ResourceDictionary? added = null;
+        if (!app.Resources.Contains("DataGridCellText"))
+        {
+            added = Theme();
+            app.Resources.MergedDictionaries.Add(added);
+        }
+
+        try
+        {
+            return body();
+        }
+        finally
+        {
+            if (added is not null)
+            {
+                app.Resources.MergedDictionaries.Remove(added);
+            }
+        }
     }
 
     [Fact]

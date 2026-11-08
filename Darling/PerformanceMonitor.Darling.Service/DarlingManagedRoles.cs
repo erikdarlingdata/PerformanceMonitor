@@ -2151,6 +2151,13 @@ GRANT SELECT ON {config}.investigation_request_threads TO {admin};
 --       threads are, SELECT to admin alone. provision-roles.sql step 3j6 does the same.
 REVOKE ALL ON {config}.investigation_slack_posts FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
 GRANT SELECT ON {config}.investigation_slack_posts TO {admin};
+-- 10e7. The chat requests (V254, #7659): who asked in a chat request, and each person's message. Owner-written as the threads are, SELECT to
+--       admin alone. mcp reads neither: a person's text reaches an agent only through the claim answer the service composes.
+--       provision-roles.sql step 3j7 does the same.
+REVOKE ALL ON {config}.investigation_request_askers FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.investigation_request_askers TO {admin};
+REVOKE ALL ON {config}.investigation_person_messages FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.investigation_person_messages TO {admin};
 
 -- 10f. Phase C tables (V193, #5997): the evidence of a request, the daily deadlock signature counts and the signature
 --     merges. Only the store owner (the service) writes them. The default privileges would give admin INSERT/UPDATE/DELETE
@@ -4374,6 +4381,7 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
             .Append(InvestigationRequestStore.SlackThreadPosted)
             .Append(InvestigationRequestStore.SlackPressed)
             .Append(InvestigationRequestStore.AskerJournalEvent)
+            .Append(InvestigationRequestStore.AgentMessage)
             .Select(k => "'" + k + "'"));
 
     /// <summary>

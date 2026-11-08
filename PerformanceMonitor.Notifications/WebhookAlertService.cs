@@ -385,16 +385,29 @@ public partial class WebhookAlertService
             /* #5366: the routing decision and every channel's URL, headers, body template and proxy below
                read from the delivery snapshot taken above, so a saved setting that changes while the posts are
                in flight cannot send a later channel somewhere the decision did not name. */
+            /* #8244: a Per-event delivery is one post per incident to the same place, so each post takes the destination's
+               next slot (WebhookAlertService.Pacing.cs). A Summary card is one post and takes no spacing. */
+            var spacing = deliveryMode == AlertNotificationMode.PerEvent ? PerEventPostSpacing : TimeSpan.Zero;
+
+            /* #8244: the channels post together, and their answers are recorded afterwards in the fixed order Teams, Slack,
+               generic, PagerDuty. A post can wait on its destination's pacing or on the hold an HTTP 429 left, and one
+               channel's wait must not delay another's page for the same firing. The per-channel health tallies are
+               concurrent-safe, the pacing tables take one lock, and Record runs on this thread only once every post is in. */
+            Task<string?>? teamsSend = null;
+            Task<string?>? slackSend = null;
+            Task<string?>? genericSend = null;
+            Task<string?>? pagerDutySend = null;
+
             if (route.Teams.Destination is { } teamsUrl)
             {
                 attempted = true;
-                Record(NotificationRouter.TeamsChannel, await TrySendTeamsAlertAsync(delivery, teamsUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
+                teamsSend = TrySendTeamsAlertAsync(delivery, teamsUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, postSpacing: spacing, cancellationToken: cancellationToken);
             }
 
             if (route.Slack.Destination is { } slackUrl)
             {
                 attempted = true;
-                Record(NotificationRouter.SlackChannel, await TrySendSlackAlertAsync(delivery, slackUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, cancellationToken));
+                slackSend = TrySendSlackAlertAsync(delivery, slackUrl, metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName, postSpacing: spacing, cancellationToken: cancellationToken);
             }
 
             if (route.Generic.Destination is { } genericUrl)
@@ -407,7 +420,7 @@ public partial class WebhookAlertService
                    this value. The deliverer records the same value, so a resolution closes the key the receiver opened even
                    when the filter dropped the alert's first incident (the key anchors on the first incident it keeps). */
                 genericDedupKey = DeriveGenericDedupKey(serverId, serverName, metricName, renderContext);
-                Record(NotificationRouter.GenericChannel, await TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, investigationJson, GenericSigningFor(delivery, route.Generic.RouteId, genericUrl), dedupKeyOverride: genericDedupKey, cancellationToken: cancellationToken));
+                genericSend = TrySendGenericAlertAsync(delivery, genericUrl, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, investigationJson, GenericSigningFor(delivery, route.Generic.RouteId, genericUrl), dedupKeyOverride: genericDedupKey, cancellationToken: cancellationToken, postSpacing: spacing);
             }
 
             if (route.PagerDuty.Destination is { } pagerDutyKey)
@@ -418,7 +431,38 @@ public partial class WebhookAlertService
                    value. The deliverer records it, so the resolve closes the incident this trigger opened even when the
                    filter dropped the alert's first incident. */
                 pagerDutyDedupKey = DerivePagerDutyDedupKey(serverId, metricName, renderContext, autoResolveFlag);
-                var pagerDutyError = await TrySendPagerDutyAlertAsync(delivery, autoResolveFlag, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, dedupKeyOverride: pagerDutyDedupKey, cancellationToken: cancellationToken);
+                pagerDutySend = TrySendPagerDutyAlertAsync(delivery, autoResolveFlag, pagerDutyKey, metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName, dedupKeyOverride: pagerDutyDedupKey, cancellationToken: cancellationToken, postSpacing: spacing);
+            }
+
+            var sends = new List<Task>(4);
+            foreach (var send in new[] { teamsSend, slackSend, genericSend, pagerDutySend })
+            {
+                if (send is not null)
+                {
+                    sends.Add(send);
+                }
+            }
+
+            await Task.WhenAll(sends);
+
+            if (teamsSend is not null)
+            {
+                Record(NotificationRouter.TeamsChannel, await teamsSend);
+            }
+
+            if (slackSend is not null)
+            {
+                Record(NotificationRouter.SlackChannel, await slackSend);
+            }
+
+            if (genericSend is not null)
+            {
+                Record(NotificationRouter.GenericChannel, await genericSend);
+            }
+
+            if (pagerDutySend is not null)
+            {
+                var pagerDutyError = await pagerDutySend;
                 Record(NotificationRouter.PagerDutyChannel, pagerDutyError);
 
                 /* With auto-resolve on, a DELIVERED close re-opens the lifecycle: the cooldown entry the
@@ -629,9 +673,12 @@ public partial class WebhookAlertService
     /// so nothing built from this can leak it. A destination that never failed, or that delivered since its last
     /// failure, reads 0. Names are the <see cref="NotificationRouter"/> channel names.
     ///
-    /// <para><b>One entry per destination.</b> The four channels' settings-row destinations are always listed
+    /// <para><b>One entry per destination.</b> The four webhook channels' settings-row destinations are always listed
     /// (<see cref="WebhookChannelFailureCount.RouteId"/> null), and a route's destination is listed once a send has
-    /// gone to it. Two routes can point one channel at two destinations, and a delivery to one says nothing about the
+    /// gone to it. #8245: the Email channel is listed with them, as one entry with no route, because every route's
+    /// email goes through the one relay the settings row names and <see cref="EmailSendCore"/> counts its sends
+    /// here (<see cref="RecordEmailFailure"/>, <see cref="RecordEmailDelivered"/>); it is Configured while
+    /// <see cref="EmailSendCore.SmtpConfigured"/> holds, so a host's one read covers every channel an alert can leave by. Two routes can point one channel at two destinations, and a delivery to one says nothing about the
     /// other, so each is counted and judged on its own, and a host keys its memory of what it announced by
     /// <see cref="WebhookChannelFailureCount.Key"/>.</para>
     ///
@@ -655,6 +702,7 @@ public partial class WebhookAlertService
             DestinationFailureCount(NotificationRouter.SlackChannel, null, SlackConfigured),
             DestinationFailureCount(NotificationRouter.GenericChannel, null, GenericConfigured),
             DestinationFailureCount(NotificationRouter.PagerDutyChannel, null, PagerDutyConfigured),
+            DestinationFailureCount(NotificationRouter.EmailChannel, null, EmailSendCore.SmtpConfigured(_settings)),
         };
 
         var routes = _settings.NotificationRoutes;

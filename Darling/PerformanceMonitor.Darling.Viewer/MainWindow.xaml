@@ -1458,13 +1458,13 @@
                                     Click="RecommendationsGenerateNow_Click"
                                     ToolTip="Ask the Darling service to run analysis for this server now, then refresh"/>
                             <TextBlock x:Name="RecommendationsStatusText" Margin="12,0,0,0" VerticalAlignment="Center"
-                                       FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
                         </StackPanel>
 
                         <!-- #5558: the node holds a secondary copy of some availability group databases, so their
                              per-database findings are left to the primary. Shown only with a list or the all-clear. -->
                         <TextBlock x:Name="RecommendationsReplicaNoteText" Grid.Row="1" Visibility="Collapsed"
-                                   TextWrapping="Wrap" Margin="2,6,2,0" FontStyle="Italic"
+                                   TextWrapping="Wrap" Margin="2,6,2,0"
                                    Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
                         <!-- Content: exactly one region is visible per state. -->

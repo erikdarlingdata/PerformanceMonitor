@@ -27,7 +27,7 @@ public sealed class SlackRequestThreadProbeTests
     /// the arity tracks the signature and the arm is found by its parameter name rather than by its ordinal.
     /// </summary>
     [Fact]
-    public void TheProbe_MapsTheThreadTableTo252_AndItsAbsenceTo251()
+    public void TheProbe_MapsTheChatTablesTo254_TheCardTableTo253_TheThreadTableTo252_AndItsAbsenceTo251()
     {
         var map = typeof(ViewerDataService).GetMethod(
             nameof(ViewerDataService.MapProbedSchemaVersion),
@@ -35,16 +35,30 @@ public sealed class SlackRequestThreadProbeTests
         var parameters = map.GetParameters();
         var threads = Array.FindIndex(parameters, p => p.Name == "hasSlackBotThreads");
         var cards = Array.FindIndex(parameters, p => p.Name == "hasSlackCards");
+        var chat = Array.FindIndex(parameters, p => p.Name == "hasChatRequests");
         Assert.True(threads >= 0, "the probe has a hasSlackBotThreads sentinel");
         Assert.True(cards >= 0, "the probe has a hasSlackCards sentinel (#7658)");
-        Assert.Equal(parameters.Length - 1, cards);
-        Assert.Equal(parameters.Length - 2, threads);
+        Assert.True(chat >= 0, "the probe has a hasChatRequests sentinel (#7659)");
+        Assert.Equal(parameters.Length - 2, chat);
+        Assert.Equal(parameters.Length - 3, cards);
+        Assert.Equal(parameters.Length - 4, threads);
 
+        /* Every sentinel present maps to the build's version; the sentinels above V254 off, the chat requests' message table is the newest one present. */
         var allTrue = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(253, (int)map.Invoke(null, allTrue)!);
         Assert.Equal(StorageVersion.SchemaVersion, (int)map.Invoke(null, allTrue)!);
 
-        var withoutCards = (object[])allTrue.Clone();
+        var upToChat = (object[])allTrue.Clone();
+        for (var i = chat + 1; i < upToChat.Length; i++)
+        {
+            upToChat[i] = false;
+        }
+
+        Assert.Equal(254, (int)map.Invoke(null, upToChat)!);
+
+        var withoutChat = (object[])upToChat.Clone();
+        withoutChat[chat] = false;
+        Assert.Equal(253, (int)map.Invoke(null, withoutChat)!);
+        var withoutCards = (object[])withoutChat.Clone();
         withoutCards[cards] = false;
         Assert.Equal(252, (int)map.Invoke(null, withoutCards)!);
         var withoutThreads = (object[])withoutCards.Clone();

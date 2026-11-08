@@ -468,7 +468,8 @@ public sealed class SlackSocketModeListener
                 {
                     if (inboundEvent is not null)
                     {
-                        await _handlers.HandleEventAsync(inboundEvent, cancellationToken);
+                        /* The bot's own user id rides with the event (#7659), so the mention handler can tell this bot's token from any other. */
+                        await _handlers.HandleEventAsync(inboundEvent with { BotUserId = BotUserId }, cancellationToken);
                     }
                     else if (interaction is not null)
                     {

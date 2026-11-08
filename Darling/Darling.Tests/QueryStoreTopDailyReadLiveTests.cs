@@ -44,6 +44,8 @@ public sealed class QueryStoreTopDailyReadLiveTests
     private static readonly DateTime BuildNow = new(2026, 1, 15, 12, 0, 0, DateTimeKind.Unspecified);
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+    /* Npgsql leaves the password out of the ConnectionString read back from a data source or an opened connection, so what the body opens by connection string comes from the scratch store's own string. */
+    private string _storeConnectionString = "";
 
     [Fact]
     public void TheDailyStatement_SharesTheTableReadsTail_AndItsPredicates()
@@ -151,11 +153,12 @@ VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minu
         Assert.Equal(10, result.Built);
     }
 
-    private static async Task RunLiveAsync(Func<NpgsqlConnection, NpgsqlDataSource, CancellationToken, Task> body)
+    private async Task RunLiveAsync(Func<NpgsqlConnection, NpgsqlDataSource, CancellationToken, Task> body)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        _storeConnectionString = scratch.ConnectionString;
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -322,7 +325,7 @@ VALUES (@ct, 1, 'dbskew', @q, @q, 'Regular', @ct - interval '10 minutes', @ct, '
             }
 
             /* The Viewer's grid (its own copy of the statement, built from the same expressions) agrees. */
-            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(connection.ConnectionString);
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(_storeConnectionString);
             var grid = await viewer.GetQueryStoreTopQueriesAsync(ServerId, start, End, Top, new[] { "dbskew" }, cancellationToken: ct);
             Assert.Equal(new long[] { 901, 900 }, grid.Select(r => r.QueryId).ToArray());
             Assert.Equal((10_000_000.0 + 10_000.0 * 1_000.0) / 10_001.0 / 1000.0, grid.Single(r => r.QueryId == 900).AvgDurationMs, 6);

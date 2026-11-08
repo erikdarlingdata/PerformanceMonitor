@@ -135,9 +135,9 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
     /// That is a property of what a report IS rather than an accident of how it fires: an incident-carrying
     /// context would enter these documents into per-event splitting and the incident delivery filter, which
     /// are paging mechanisms a once-a-day report stays outside of (#3834 states this at each builder). The
-    /// belt-and-suspenders catch below also answers <c>null</c>: both <c>TrySendAsync</c> and
-    /// <c>RecordAlertAsync</c> are failure-isolated themselves, so a throw here is something outside the
-    /// channels and says nothing about whether they delivered.</para>
+    /// belt-and-suspenders catch below answers <see cref="AlertDelivery.DelivererFailed"/> (#8246): both
+    /// <c>TrySendAsync</c> and <c>RecordAlertAsync</c> are failure-isolated themselves, so a throw here is something
+    /// outside the channels, and nothing is known to have reached anyone, so the engine tries the alert again.</para>
     /// </summary>
     public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
     {
@@ -158,21 +158,22 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
                incident-carrying alert into one send+row per distinct incident (capped, "+N more"). */
             var mode = AlertDeliveryModeResolver.Resolve(_resolveServerOverride(outcome.ServerKey), _settings.DeliveryMode);
             /* #7086: a held fire is one digest row, whatever the mode: the Per-event split is a paging mechanism. */
-            if (mode == AlertNotificationMode.PerEvent && outcome.Context?.Incidents is { Count: > 0 }
-                && !(outcome.Hold is not null && !outcome.Muted))
+            if (PerEventNotification.Splits(mode, outcome.Context) && !(outcome.Hold is not null && !outcome.Muted))
             {
                 var deliveries = new List<AlertDelivery?>();
                 foreach (var message in PerEventNotification.Split(outcome.Context, _settings.PerEventMax))
                 {
-                    /* Per-incident card: msg.CurrentValue is the incident's occurrence count, and
-                       msg.NumericValue carries it as a number for the history row (#1830 — the
-                       overflow message's "+N more" text is unparseable, so the store's text fallback
-                       silently recorded 0). Threshold is the outcome's, unchanged. Matches Lite's
-                       per-event sends; detail text rebuilt from the split context. */
+                    /* Per-incident card: message.CurrentValue is the incident's occurrence count. The row's numeric is the
+                       alert's measurement (#8246): the engine reads the newest open row's value back as the level it last
+                       announced (Volume Free Space's free percent, PVS's percent), and the history shows the value the
+                       threshold was judged against. message.NumericValue, the incident's count, is the row's numeric only
+                       for an alert with no measurement of its own (#1830: the overflow message's "+N more" text is
+                       unparseable, so the store's text fallback silently recorded 0). Threshold is the outcome's,
+                       unchanged. Matches Lite's per-event sends; detail text rebuilt from the split context. */
                     deliveries.Add(await SendAndRecordAsync(
                         outcome, message.CurrentValue, message.Context,
                         AlertContextBuilders.ContextToDetailText(message.Context),
-                        numericCurrentValue: message.NumericValue, numericThresholdValue: outcome.NumericThresholdValue,
+                        numericCurrentValue: outcome.NumericCurrentValue ?? message.NumericValue, numericThresholdValue: outcome.NumericThresholdValue,
                         deliveryMode: mode, cancellationToken: cancellationToken));
                 }
 
@@ -194,7 +195,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         {
             _logger.LogError(ex, "Alert delivery failed for {Metric} on {Server}: {Message}",
                 outcome.MetricName, outcome.ServerName, ex.Message);
-            return null;
+            return AlertDelivery.DelivererFailed(ex.Message);
         }
     }
 

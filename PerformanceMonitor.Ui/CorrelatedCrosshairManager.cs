@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -333,20 +334,15 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
                 var series = lane.Series[0];
                 double? value = FindNearestValue(series, xValue);
 
+                // Tooltip: value, plus an arrow when the value is outside the lane's baseline band
+                _tooltipText.Inlines.Add(new Run("\n" + LaneLine(lane.Label, value, lane.Unit)) { Foreground = DefaultBrush });
                 if (value.HasValue)
                 {
                     var indicator = ToIndicator(SingleSeriesArrow(lane, series, value.Value, xValue));
-
-                    // Tooltip: value, plus an arrow when the value is outside the lane's baseline band
-                    _tooltipText.Inlines.Add(new Run($"\n{lane.Label}: {value.Value:N1} {lane.Unit}") { Foreground = DefaultBrush });
                     if (indicator != null)
                     {
                         _tooltipText.Inlines.Add(new Run($" {indicator.Value.Symbol}") { Foreground = indicator.Value.Brush });
                     }
-                }
-                else
-                {
-                    _tooltipText.Inlines.Add(new Run($"\n{lane.Label}: —") { Foreground = DefaultBrush });
                 }
             }
             else if (lane.Series.Count > 1)
@@ -355,16 +351,13 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
                 {
                     var series = lane.Series[seriesIndex];
                     double? value = FindNearestValue(series, xValue);
-                    string unit = series.Unit ?? lane.Unit;
+                    _tooltipText.Inlines.Add(new Run("\n" + LaneLine(series.Name, value, series.Unit ?? lane.Unit)) { Foreground = DefaultBrush });
                     if (value.HasValue)
                     {
-                        _tooltipText.Inlines.Add(new Run($"\n{series.Name}: {value.Value:N0} {unit}") { Foreground = DefaultBrush });
                         var indicator = GetBaselineIndicator(lane, value.Value, seriesIndex, xValue);
                         if (indicator != null)
                             _tooltipText.Inlines.Add(new Run($" {indicator.Value.Symbol}") { Foreground = indicator.Value.Brush });
                     }
-                    else
-                        _tooltipText.Inlines.Add(new Run($"\n{series.Name}: —") { Foreground = DefaultBrush });
                 }
             }
             else
@@ -400,6 +393,46 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         => BelowReadFloor(series, xValue)
             ? null
             : BandArrow(lane, xValue, 0, value);
+
+    /// <summary>
+    /// #8187: one tooltip line, "name: value unit", or "name: —" when the series has no value at the cursor. Every lane's every series
+    /// prints through here, so a lane's value reads the same whether the lane holds one series or several.
+    /// </summary>
+    private static string LaneLine(string name, double? value, string unit)
+        => value.HasValue ? $"{name}: {FormatLaneValue(value.Value)} {unit}" : $"{name}: —";
+
+    /// <summary>
+    /// #8187: a lane's value at the precision its magnitude needs, the same for every series count: a whole number plain, ten and over
+    /// to one decimal, one and over to two, and under one to its two leading significant digits. (The chart hover prints by the same
+    /// rule in its own helper; each surface keeps its own so neither changes with the other.)
+    /// </summary>
+    internal static string FormatLaneValue(double value)
+    {
+        if (double.IsNaN(value) || double.IsInfinity(value))
+            return value.ToString(CultureInfo.CurrentCulture);
+
+        var magnitude = Math.Abs(value);
+        if (magnitude == Math.Floor(magnitude))
+            return value.ToString("N0", CultureInfo.CurrentCulture);
+        if (magnitude >= 10)
+            return value.ToString("N1", CultureInfo.CurrentCulture);
+        if (magnitude >= 1)
+            return value.ToString("N2", CultureInfo.CurrentCulture);
+
+        /* 0.5 -> 0.5, 0.046 -> 0.046, 0.0456 -> 0.046: the decimals that reach the second significant digit, trailing zeros dropped. */
+        var decimals = Math.Min(15, (int)Math.Ceiling(-Math.Log10(magnitude)) + 1);
+        return value.ToString("0." + new string('#', decimals), CultureInfo.CurrentCulture);
+    }
+
+    /// <summary>The tooltip's lines for the lane on <paramref name="chart"/> at <paramref name="xValue"/>, one per series, as the hover prints them, without the ▲/▼.</summary>
+    internal IReadOnlyList<string> HoverLinesAt(ScottPlot.WPF.WpfPlot chart, double xValue)
+    {
+        var lane = _lanes.Find(l => l.Chart == chart);
+        if (lane == null) return Array.Empty<string>();
+        if (lane.Series.Count == 1)
+            return new[] { LaneLine(lane.Label, FindNearestValue(lane.Series[0], xValue), lane.Unit) };
+        return lane.Series.Select(series => LaneLine(series.Name, FindNearestValue(series, xValue), series.Unit ?? lane.Unit)).ToList();
+    }
 
     /// <summary>The ▲/▼ the tooltip shows for a single-series lane at <paramref name="xValue"/>, or null (the same decision the hover makes).</summary>
     internal string? HoverArrowAt(ScottPlot.WPF.WpfPlot chart, double xValue)

@@ -8654,6 +8654,11 @@ WHERE c.is_enabled";
             var count = channel.ConsecutiveFailures;
             var wasFailing = _activeNotificationChannelFailing.TryGetValue(key, out var active) && active;
 
+            /* #8245: the Email entry is the SMTP relay, read from the same ledger. Its text names email and the email core's
+               log lines, and never the relay or an address; the webhook entries keep their wording. */
+            var isEmail = name == NotificationRouter.EmailChannel;
+            var channelPhrase = isEmail ? "Email channel" : $"{label} webhook channel";
+
             switch (WebhookChannelFailurePolicy.Decide(wasFailing, count, channel.Configured))
             {
                 case WebhookChannelNotice.Failing:
@@ -8661,13 +8666,15 @@ WHERE c.is_enabled";
                     await FireAsync(
                         StoreKey(NotificationChannelKeyPrefix + key), _storeLabel, NotificationChannelFailingMetric,
                         $"{count} failures in a row", $"{WebhookAlertService.FailingChannelThreshold} failures in a row",
-                        detail: $"The {label} webhook channel has failed {count} times in a row, so alerts sent to " +
-                            $"{label} are not arriving there. The other channels are not affected. The service log's " +
-                            $"'{name.ToUpperInvariant()} WEBHOOK FAILED' lines name the error for each failure. This " +
+                        detail: $"The {channelPhrase} has failed {count} times in a row, so " +
+                            (isEmail ? "alert emails are not arriving" : $"alerts sent to {label} are not arriving there") +
+                            ". The other channels are not affected. The service log's " +
+                            (isEmail ? "'ALERT EMAIL FAILED'" : $"'{name.ToUpperInvariant()} WEBHOOK FAILED'") +
+                            " lines name the error for each failure. This " +
                             "is stated once; a 'Notification Channel Recovered' entry follows when the channel " +
                             "delivers again.",
                         severity: AlertSeverityLevel.Warning,
-                        shortMessage: $"{label} webhook failed {count} times in a row",
+                        shortMessage: isEmail ? $"Alert email failed {count} times in a row" : $"{label} webhook failed {count} times in a row",
                         numericCurrentValue: count,
                         numericThresholdValue: WebhookAlertService.FailingChannelThreshold,
                         cancellationToken);
@@ -8678,7 +8685,7 @@ WHERE c.is_enabled";
                     await RecordResolutionAsync(new AlertResolution(
                         StoreKey(NotificationChannelKeyPrefix + key), _storeLabel, NotificationChannelFailingMetric,
                         NotificationChannelRecoveredMetric,
-                        $"{_storeLabel}: the {label} webhook channel is delivering again (failures in a row back to 0)"),
+                        $"{_storeLabel}: the {channelPhrase} is delivering again (failures in a row back to 0)"),
                         cancellationToken);
                     break;
 
@@ -8687,7 +8694,8 @@ WHERE c.is_enabled";
                     await RecordResolutionAsync(new AlertResolution(
                         StoreKey(NotificationChannelKeyPrefix + key), _storeLabel, NotificationChannelFailingMetric,
                         NotificationChannelRecoveredMetric,
-                        $"{_storeLabel}: the {label} webhook channel was turned off (no destination is configured for it)"),
+                        $"{_storeLabel}: the {channelPhrase} was turned off (" +
+                        (isEmail ? "SMTP is disabled or has no recipients" : "no destination is configured for it") + ")"),
                         cancellationToken);
                     break;
             }

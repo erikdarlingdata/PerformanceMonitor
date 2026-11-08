@@ -166,7 +166,17 @@ public sealed class MeasurementContractCensusTests
     private static readonly (string File, string Source)[] IntervalAliasPassthroughsDefendedByTheAggregatePredicate =
     {
         ("Darling/PerformanceMonitor.Darling.Analysis/PgBaselineProvider.cs", TimescaleSupport.PerfmonIntervalBaselineView),
+        /* #8106: the WaitMsPerSec arm reads wait_stats_cadence_baseline; its legacy text, #3653's arm over wait_stats_interval_baseline, stays
+           for the window the successor does not yet reach, so both sources carry the passthrough. */
         ("Darling/PerformanceMonitor.Darling.Analysis/PgBaselineProvider.cs", TimescaleSupport.WaitStatsIntervalBaselineView),
+        ("Darling/PerformanceMonitor.Darling.Analysis/PgBaselineProvider.cs", TimescaleSupport.WaitStatsCadenceBaselineView),
+    };
+
+    /// <summary>#8106: the CREATE text of a superseded supply that is itself a #3653 successor. Not registered, so the census reads its
+    /// predicate here rather than off <see cref="TimescaleSupport.BaselineAggregates"/>.</summary>
+    private static readonly Dictionary<string, string> SupersededCarryingCreates = new(StringComparer.Ordinal)
+    {
+        [TimescaleSupport.WaitStatsIntervalBaselineView] = TimescaleSupport.CreateWaitStatsIntervalBaselineSql,
     };
 
     /// <summary>
@@ -259,7 +269,8 @@ public sealed class MeasurementContractCensusTests
         foreach (var (_, source) in IntervalAliasPassthroughsDefendedByTheAggregatePredicate)
         {
             Assert.Contains(source, TimescaleSupport.SupersededBaselineRelations.Select(s => s.Successor));
-            Assert.True(registered.TryGetValue(source, out var createSql), $"{source} is not a registered baseline aggregate");
+            Assert.True(registered.TryGetValue(source, out var createSql) || SupersededCarryingCreates.TryGetValue(source, out createSql),
+                $"{source} is neither a registered baseline aggregate nor a superseded one whose CREATE is named here");
             Assert.Contains("sample_interval_seconds IS DISTINCT FROM 0", createSql, StringComparison.Ordinal);
         }
     }
@@ -961,10 +972,14 @@ public sealed class MeasurementContractCensusTests
                 TimescaleSupport.QueryStatsIntervalHourlyView,
                 TimescaleSupport.QueryStatsIoHourlyView,
                 TimescaleSupport.WaitStatsIntervalBaselineView,
+                TimescaleSupport.WaitStatsCadenceBaselineView,
             }.OrderBy(v => v, StringComparer.Ordinal),
             carrying);
+        /* #8106: a carrying aggregate is registered, or is a superseded legacy (wait_stats_interval_baseline carries the predicate and
+           retires through SupersededBaselineRelations once its cadence successor covers the tier). */
         var registeredHourlyOrBaseline = TimescaleSupport.HourlyAggregates.Concat(TimescaleSupport.BaselineAggregates).Select(a => a.View).ToHashSet(StringComparer.Ordinal);
-        Assert.All(carrying, view => Assert.Contains(view, registeredHourlyOrBaseline));
+        var supersededLegacies = TimescaleSupport.SupersededBaselineRelations.Select(s => s.Legacy).ToHashSet(StringComparer.Ordinal);
+        Assert.All(carrying, view => Assert.True(registeredHourlyOrBaseline.Contains(view) || supersededLegacies.Contains(view), $"{view} carries the predicate but is neither registered nor superseded"));
 
         /* THE INVARIANT SINCE Q12: every aggregate that still admits the row is SUPERSEDED — named in one of the
            two supersession lists with a successor that is registered and carries the predicate. The roster
@@ -977,7 +992,9 @@ public sealed class MeasurementContractCensusTests
             .ToDictionary(s => s.Legacy, s => s.Successor, StringComparer.Ordinal);
         Assert.All(admitting, legacy => Assert.True(supersessions.ContainsKey(legacy), $"{legacy} admits the unknowable row and has no registered successor — rule 5 is open again"));
         Assert.All(admitting, legacy => Assert.Contains(supersessions[legacy], carrying));
-        Assert.Equal(admitting.Count, supersessions.Count);
+        /* Every superseded legacy is a governed aggregate: one that admits the row, or (#8106) a carrying one superseded in its turn. */
+        Assert.All(supersessions.Keys, legacy => Assert.Contains(legacy, admitting.Concat(carrying)));
+        Assert.Equal(admitting.Count + supersessions.Keys.Count(carrying.Contains), supersessions.Count);
 
         /* Every equivalent predicate is really in the WHERE it claims to be in. */
         foreach (var (view, predicate) in EquivalentPredicates)
@@ -994,7 +1011,7 @@ public sealed class MeasurementContractCensusTests
         var registeredViews = TimescaleSupport.HourlyAggregates.Concat(TimescaleSupport.BaselineAggregates).Concat(TimescaleSupport.DailyAggregates).Select(a => a.View).ToHashSet(StringComparer.Ordinal);
         foreach (var (legacy, _) in TimescaleSupport.SupersededBaselineRelations)
         {
-            Assert.Contains(legacy, admitting);
+            Assert.Contains(legacy, admitting.Concat(carrying));
             Assert.DoesNotContain(legacy, registeredViews);
         }
 

@@ -73,7 +73,7 @@ export const MCP_ACTION_TOOL_NAMES = [
   "record_investigation_feedback", "reject_investigation_note", "reload_config", "remove_server", "remove_webhook_signing_key", "reset_collector_schedules", "restore_alert_history", "resume_collection", "run_collectors_now", "run_custom_view_panel",
   "save_environment_profile", "send_daily_health_report_now", "set_agent_actions_enabled", "set_alert_threshold_override", "set_collector_databases", "set_collector_frequency", "set_collector_retention", "set_collector_run_at", "set_database_state_expected", "set_mute_rule_enabled",
   "set_notification_route_enabled", "set_notification_route_fallback", "set_quiet_window", "set_server_action", "set_server_excluded_databases", "set_server_xe_session_databases",
-  "submit_investigation_report", "test_connection", "test_custom_alert_rule", "test_query_tag_rule", "start_practice_request", "unassign_query_tag",
+  "submit_investigation_report", "post_investigation_message", "test_connection", "test_custom_alert_rule", "test_query_tag_rule", "start_practice_request", "unassign_query_tag",
   "unassign_server_tag", "undo_agent_change", "undo_plan_change", "unforce_query_store_plan", "unmute_analysis_finding", "update_alert_settings", "update_custom_alert_rule",
   "update_custom_view", "update_known_pattern", "update_mute_rule", "update_notification_channels", "update_notification_route", "update_query_tag", "update_query_tag_rule",
   "update_server_tag", "update_service_flags", "validate_custom_alert_rule", "validate_custom_view", "wait_for_investigation_requests", "write_investigation_note",
@@ -251,6 +251,16 @@ function measurementCountsText(text) {
  * `text` with the named internal tokens and the measurement counts put into words, nothing else (#6649). For a collection
  * log's message cell: a successful run leaves its counts there, and a failed run leaves a real error message.
  */
+/** The plural the "(s)" rewrite below gives a word: "hours", "alerts", "queries". */
+function wordsOf(word) {
+  return /[^aeiou]y$/.test(word) ? word.slice(0, -1) + "ies" : word + "s";
+}
+
+/** A count and its word agreeing ("1 alert", "3 alerts", "2 queries"), for text a page builds from a number it knows. */
+export function countWord(n, word) {
+  return n + " " + (String(n) === "1" ? word : wordsOf(word));
+}
+
 export function plainTextCounts(text) {
   if (typeof text !== "string" || text === "") return text;
   return measurementCountsText(namedTokenText(text));
@@ -423,7 +433,7 @@ export function plainText(text) {
   /* #6831: the empty cut-window sentence's pointer at hints.effective_start, when the page has no instant to put there (util.js names it when it has one). */
   t = t.replace(/\bstarts at effective_start \(see hints\)/g, "starts partway into the window");
   /* "24 hour(s)", "288 collector run(s)": the count is known, so the word agrees with it ("1 hour", "24 hours", "2 queries"). */
-  t = t.replace(/(?<![\w.])(\d[\d,]*) ((?:[a-z]+ )?[a-z]+)\(s\)/g, (m, n, word) => n + " " + (n === "1" ? word : /[^aeiou]y$/.test(word) ? word.slice(0, -1) + "ies" : word + "s"));
+  t = t.replace(/(?<![\w.])(\d[\d,]*) ((?:[a-z]+ )?[a-z]+)\(s\)/g, (m, n, word) => n + " " + (n === "1" ? word : wordsOf(word)));
 
   /* "raise limit": the pages have no row-limit control. "...filter - raise limit to see more." and "...returned; raise limit
      (now 50) for more." lose the clause; ", or raise limit," and ", and raise limit if none ... shows one" lose theirs. */
