@@ -53,7 +53,7 @@ public sealed class ViewerSweepPressurePanelTests
                     new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
                     new DarlingServer(1, "sweep-panel-test", "sweep-panel-test", true, null));
                 var window = new Window { Content = tab, Width = 1800, Height = 1000 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     /* Showing the window starts the tab's own database read on a thread-pool continuation; the drill-down skips it the same way. */

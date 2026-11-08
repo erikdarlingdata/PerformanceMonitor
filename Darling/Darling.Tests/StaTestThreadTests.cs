@@ -41,6 +41,41 @@ public sealed class StaTestThreadTests
         Assert.True(first.Background, "the shared thread must be a background thread, or a stuck body keeps the test process alive");
     }
 
+    /// <summary>
+    /// #8289: a test window is shown where no monitor shows it, without taking keyboard focus and with no taskbar button, at the size the test
+    /// asked for. Judged on the real window handle: Windows itself must find no monitor under it.
+    /// </summary>
+    [Fact]
+    public void ShowOffScreen_PutsTheWindowOnNoMonitor_UnactivatedAndOffTheTaskbar_AtItsOwnSize()
+    {
+        StaTestThread.Run(() =>
+        {
+            var window = new Window { Width = 400, Height = 300 };
+            try
+            {
+                StaTestThread.ShowOffScreen(window);
+                StaTestThread.WaitForIdle(window.Dispatcher, StaTestThread.IdleLimit);
+
+                var handle = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+                Assert.True(window.IsVisible, "the window must still be shown, so WPF lays it out and renders it");
+                Assert.Equal(IntPtr.Zero, MonitorFromWindow(handle, MonitorDefaultToNull));
+                Assert.False(window.IsActive, "a test window must not take keyboard focus from the developer");
+                Assert.False(window.ShowInTaskbar);
+                Assert.Equal(400, window.ActualWidth);
+                Assert.Equal(300, window.ActualHeight);
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+    }
+
+    private const uint MonitorDefaultToNull = 0;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+
     [Fact]
     public void ABodysException_ComesBackToTheCaller_WithItsOwnStack()
     {
@@ -260,7 +295,7 @@ public sealed class StaTestThreadTests
             {
                 /* Showing a window starts WPF's render engine and its render thread when nothing in the process has yet. */
                 var window = new Window { Width = 50, Height = 50, ShowInTaskbar = false };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 host.Step("waiting with a window shown");
                 release.Wait();
                 window.Close();
@@ -504,7 +539,7 @@ public sealed class StaTestThreadTests
         {
             Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => queuedRan = true));
             left = new Window { Width = 50, Height = 50, ShowInTaskbar = false };
-            left.Show();
+            StaTestThread.ShowOffScreen(left);
         });
 
         Assert.True(queuedRan, "work the body queued must run before the next test, not during it");

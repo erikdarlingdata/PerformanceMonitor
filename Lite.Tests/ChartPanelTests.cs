@@ -47,7 +47,7 @@ public sealed class ChartPanelTests
             {
                 var panel = make();
                 var window = new Window { Content = panel, Width = 600, Height = 340, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     ClippedTextProbe.Settle(window);

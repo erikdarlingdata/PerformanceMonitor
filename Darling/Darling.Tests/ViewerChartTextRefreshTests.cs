@@ -57,7 +57,7 @@ public sealed class ViewerChartTextRefreshTests
             chart.Plot.Add.TimeSeries(xs, xs.Select((_, i) => 10.0 + i).ToArray());
             chart.Plot.YLabel("MB/s");
             var window = new Window { Content = chart, Width = 480, Height = 320, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ChartLayoutProbe.Settle(window, [chart]);
@@ -81,7 +81,7 @@ public sealed class ViewerChartTextRefreshTests
         {
             var slicer = new TimeRangeSlicerControl();
             var window = new Window { Content = slicer, Width = 700, Height = 220, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var end = new DateTime(2026, 3, 10, 18, 0, 0, DateTimeKind.Utc);
@@ -124,7 +124,7 @@ public sealed class ViewerChartTextRefreshTests
                 new DarlingServer(1, "heatmap-text", "heatmap-text", true, null));
             typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
             var window = new Window { Content = ChartLayoutProbe.HostLikeMainWindow(tab), Width = 1280, Height = 800, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var chart = (WpfPlot)tab.FindName("QueryHeatmapChart");
@@ -177,7 +177,7 @@ public sealed class ViewerChartTextRefreshTests
                 new DarlingServer(1, "heatmap-ticks", "heatmap-ticks", true, null));
             typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
             var window = new Window { Content = ChartLayoutProbe.HostLikeMainWindow(tab), Width = width, Height = height, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var chart = (WpfPlot)tab.FindName("QueryHeatmapChart");
@@ -208,7 +208,7 @@ public sealed class ViewerChartTextRefreshTests
             {
                 var slicer = new TimeRangeSlicerControl();
                 var window = new Window { Content = slicer, Width = width, Height = 220, Left = 0, Top = 0 };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     var end = new DateTime(2026, 3, 10, 18, 0, 0, DateTimeKind.Utc);
@@ -258,7 +258,7 @@ public sealed class ViewerChartTextRefreshTests
             var control = new CorrelatedTimelineLanesControl();
             control.Initialize(null!, 1);
             var window = new Window { Content = control, Width = 1280, Height = 800, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var to = DateTime.UtcNow;
@@ -287,7 +287,7 @@ public sealed class ViewerChartTextRefreshTests
             var control = new CorrelatedTimelineLanesControl();
             control.Initialize(null!, 1);
             var window = new Window { Content = control, Width = width, Height = height, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var to = DateTime.UtcNow;

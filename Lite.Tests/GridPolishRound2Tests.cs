@@ -380,7 +380,7 @@ public sealed class GridPolishRound2Tests
                 parent.Children.Remove(list);
                 var window = new Window { Content = list, Width = 280, Height = 400, Left = 0, Top = 0 };
                 list.ItemsSource = new[] { new SelectableItem { DisplayName = LongName, IsSelected = false } };
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 try
                 {
                     ClippedTextProbe.Settle(window);
@@ -427,7 +427,7 @@ public sealed class GridPolishRound2Tests
         {
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = 1280, Height = 900 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 var row = (UtilizationEfficiencyRow)GridPolishProbe.Rows(typeof(UtilizationEfficiencyRow), 1, new Dictionary<string, object?>

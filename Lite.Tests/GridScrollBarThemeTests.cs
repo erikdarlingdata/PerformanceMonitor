@@ -84,7 +84,7 @@ public class GridScrollBarThemeTests
             var window = new Window { Content = new Canvas { Children = { grid } }, Width = 600, Height = 400 };
             window.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = ThemeUri(theme) });
             grid.Style = (Style)window.FindResource(typeof(DataGrid));
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ClippedTextProbe.Settle(window);

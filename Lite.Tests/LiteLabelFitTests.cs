@@ -71,7 +71,7 @@ public class LiteLabelFitTests
             var tab = new FinOpsTab();
             var window = new Window { Content = tab, Width = ScreenWidth, Height = ScreenHeight };
             window.Resources.MergedDictionaries.Add(Theme());
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ((FrameworkElement)tab.FindName("UtilizationContent")).Visibility = Visibility.Visible;
@@ -144,7 +144,7 @@ public class LiteLabelFitTests
             };
             var window = new Window { Content = picker, Width = ScreenWidth, Height = ScreenHeight };
             window.Resources.MergedDictionaries.Add(Theme());
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             var found = new List<string>();
             try
             {

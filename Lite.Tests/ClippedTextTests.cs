@@ -50,7 +50,7 @@ public class ClippedTextTests
                 var rememberedTab = App.SettingsWindowTab;
                 var window = new SettingsWindow(new ScheduleManager(dir), new ServerManager(dir)) { PersistSelectedTab = _ => { } };
                 window.Resources.MergedDictionaries.Add(Theme());
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 var tabs = (TabControl)window.FindName("SettingsTabs");
                 var found = new List<string>();
                 for (var i = 0; i < tabs.Items.Count; i++)
@@ -87,7 +87,7 @@ public class ClippedTextTests
             {
                 var window = new Window { Content = tab, Width = 1100, Height = 925 };
                 window.Resources.MergedDictionaries.Add(Theme());
-                window.Show();
+                StaTestThread.ShowOffScreen(window);
                 foreach (var (indicator, text) in new[]
                 {
                     ("AgentStatusIndicator", "Agents: 5/7 running, 2 stopped"),

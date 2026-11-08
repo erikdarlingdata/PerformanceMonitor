@@ -36,7 +36,7 @@ public sealed class OverviewLanesReachTests
         {
             var control = new CorrelatedTimelineLanesControl { Height = controlHeight };
             var window = new Window { Content = new Grid { Children = { control } }, Width = 1900, Height = 1300, Left = 0, Top = 0 };
-            window.Show();
+            StaTestThread.ShowOffScreen(window);
             try
             {
                 ChartLayoutProbe.Layout(window);
