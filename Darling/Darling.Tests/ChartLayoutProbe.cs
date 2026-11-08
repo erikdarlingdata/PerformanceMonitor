@@ -76,7 +76,8 @@ internal static class ChartLayoutProbe
     public static string TabLabel(IEnumerable<TabItem> path) =>
         string.Join(" > ", path.Select(t => t.Header as string ?? t.Name)).Trim();
 
-    public static void Reveal(IEnumerable<TabItem> path)
+    /// <summary>Selects each tab of <paramref name="path"/> under the dispatcher's synchronization context, so the handlers the selections fire resume on the tab's thread (#8273).</summary>
+    public static void Reveal(IEnumerable<TabItem> path) => StaTestThread.WithDispatcherContext(() =>
     {
         foreach (var tab in path)
         {
@@ -85,7 +86,7 @@ internal static class ChartLayoutProbe
                 owner.SelectedItem = tab;
             }
         }
-    }
+    });
 
     public static void Layout(Window window)
     {
