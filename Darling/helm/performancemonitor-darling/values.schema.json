@@ -35,6 +35,7 @@
         "existingClaim": { "type": "string" }
       }
     },
+    "deploymentAnnotations": { "type": "object" },
     "podAnnotations": { "type": "object" },
     "podLabels": { "type": "object" },
     "nodeSelector": { "type": "object" },

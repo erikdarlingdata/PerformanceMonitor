@@ -4,6 +4,10 @@ metadata:
   name: {{ include "performancemonitor-darling.fullname" . }}
   labels:
     {{- include "performancemonitor-darling.labels" . | nindent 4 }}
+  {{- with .Values.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   # One service per credentials volume, and never two at once: the start's check of the credentials directory is not
   # locked across processes, so a second pod starting beside the first could read planted files between the first one's

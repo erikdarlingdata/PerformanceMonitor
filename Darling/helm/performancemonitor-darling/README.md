@@ -2,7 +2,7 @@
 
 A Helm chart for Darling, the collector service of PerformanceMonitor. It runs the service as one pod with a state volume, a Service for the web dashboard (and, when you turn it on, the MCP endpoint), optional Ingresses, and either a single bundled TimescaleDB pod or a connection to a PostgreSQL server you run.
 
-Requires Kubernetes 1.27 or later and Helm 3. The chart is not published to a registry yet, so you install it from a checkout of this repository.
+Requires Kubernetes 1.27 or later, Helm 3, and a Darling image newer than 3.12.0: the first release after 3.12.0, or an image built from this checkout. The probes use the health port, which 3.12.0 lacks, and until that release `latest` still points at 3.12.0, so pin a newer tag or build the image (the chart refuses a plain release tag of 3.12.0 or older). The chart is not published to a registry yet, so you install it from a checkout of this repository.
 
 Every value is documented in [`values.yaml`](values.yaml) and checked by [`values.schema.json`](values.schema.json). This page covers what the values do together.
 
@@ -89,6 +89,7 @@ The bundled store runs custom alerts. An external store does not, by design, and
 | `nameOverride`, `fullnameOverride` | empty | Resource naming. |
 | `resources` | requests 250m CPU and 512Mi, limit 4Gi memory | The Darling container. |
 | `persistence.size`, `.storageClass`, `.existingClaim` | `1Gi`, cluster default, none | The state volume at `/var/lib/darling`. An existing claim must be writable by user 1654. |
+| `deploymentAnnotations` | empty | Annotations on the Deployment itself, for controllers that watch them. |
 | `podAnnotations`, `podLabels`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName`, `hostAliases` | empty | Pod placement and metadata. |
 | `extraEnv`, `extraEnvFrom`, `extraVolumes`, `extraVolumeMounts` | empty | Extras for the Darling container. |
 | `config` | `{}` | Your `darling.json`: servers, collection, alerts. The chart owns some keys (below). |
@@ -183,7 +184,7 @@ Unless you name your own, the chart generates the web token, the MCP token (in `
 
 A tool that renders the chart without reading the cluster (`helm template`, which is what a GitOps controller runs) cannot see them, so it generates new tokens and a new store password on every sync. A new store password locks Darling out of a store that already has data. **For a GitOps install, create the Secrets yourself and set `secrets.existingSecret` and `store.bundled.auth.existingSecret` to their names.** Any secret manager can create them (External Secrets or Sealed Secrets, for example). `secrets.existingSecret` needs the token keys (`web-token`, `mcp-token`, or the names you set), the keys your `config` and `configSubstitutions` refer to, and for a `file:` reference the path `/run/secrets/darling/<key>`. The install notes print a warning whenever a generated value is in use.
 
-A change to a Secret does not restart the pod; only a ConfigMap change does. After rotating a Secret, restart: `kubectl rollout restart deployment/<fullname>`.
+A change to a Secret does not restart the pod; only a ConfigMap change does. After rotating a Secret, restart: `kubectl rollout restart deployment/<fullname>`. A controller that watches Deployment annotations can do it for you: set its annotation through `deploymentAnnotations` (Reloader is one example).
 
 **Rotating the bundled store's password.** The store sets its password once, when it creates its data directory; changing the Secret afterwards only locks Darling out. Change it inside the store first, then the Secret, then restart Darling:
 

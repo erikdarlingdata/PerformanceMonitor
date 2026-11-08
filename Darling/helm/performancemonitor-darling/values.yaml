@@ -39,6 +39,9 @@ persistence:
   # Use an existing PersistentVolumeClaim instead of creating one. The volume must be writable by UID/GID 1654.
   existingClaim: ""
 
+# Extra annotations on the Deployment itself (not the pod), for controllers that watch Deployment annotations, for
+# example one that restarts the pod when a referenced Secret changes.
+deploymentAnnotations: {}
 # Extra annotations on the pod.
 podAnnotations: {}
 # Extra labels on the pod.

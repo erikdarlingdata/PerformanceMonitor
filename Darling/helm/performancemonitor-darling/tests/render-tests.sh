@@ -177,11 +177,28 @@ for args in "" "--set secrets.existingSecret=s --set store.bundled.auth.existing
   grep -qF 'darling.json is only a seed' <<<"${n}" || { echo "NOTES do not say darling.json is a seed (${args:-defaults})" >&2; exit 1; }
 done
 
+t image_tag_minimum
+for tag in 3.12.0 v3.12.0 3.11.2; do
+  assert_fails "needs a Darling image newer than 3.12.0" --set-string "image.tag=${tag}"
+done
+for tag in 3.13.0 v3.13.0 latest pr dev abc1234; do
+  render --set-string "image.tag=${tag}"
+done
+
+t deployment_annotations
+render
+assert_eq "$(dq '.metadata.annotations')" "null" "no deployment annotations by default"
+render --set-json 'deploymentAnnotations={"reloader.example/auto":"true"}'
+assert_eq "$(dq '.metadata.annotations["reloader.example/auto"]')" '"true"' "deploymentAnnotations"
+assert_eq "$(dq '.spec.template.metadata.annotations["reloader.example/auto"]')" "null" "not on the pod"
+
 t notes_warn_latest_tag
 n="$(notes)"
 grep -qF 'moves' <<<"${n}" || { echo "NOTES lack the moving-tag warning for the latest tag" >&2; exit 1; }
 n="$(notes --set image.tag=3.13.0)"
 if grep -qF 'moves' <<<"${n}"; then echo "NOTES warn about a pinned tag" >&2; exit 1; fi
+n="$(notes)"
+grep -qF 'newer than 3.12.0' <<<"${n}" || { echo "NOTES lack the minimum-image caveat for the latest tag" >&2; exit 1; }
 
 t fail_owned_key_in_config_any_case
 assert_fails "config.postgres.connectionString is owned by the chart" --set config.Postgres.connectionString=x

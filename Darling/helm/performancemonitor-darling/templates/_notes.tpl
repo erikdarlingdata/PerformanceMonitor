@@ -25,6 +25,6 @@ Read the web token (it is never printed here; the key is {{ .Values.secrets.webT
 {{- end }}
 {{- if eq (toString (default .Chart.AppVersion .Values.image.tag)) "latest" }}
 
-WARNING: the image tag is "latest", a tag that moves with every release. Set image.tag to a release version (or image.digest) so an upgrade or a pod restart cannot change the collector by itself.
+WARNING: the image tag is "latest", a tag that moves with every release. Set image.tag to a release version (or image.digest) so an upgrade or a pod restart cannot change the collector by itself. The chart also needs a Darling image newer than 3.12.0 (the health port the probes use): until the first release after 3.12.0, "latest" still points at 3.12.0, so pin a newer tag or build the image from this checkout.
 {{- end }}
 {{- end -}}

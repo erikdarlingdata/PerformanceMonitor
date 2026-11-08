@@ -1,4 +1,4 @@
 # The bundled store with every other value at its default, except what the defaults deliberately leave to the operator:
 # a pinned image tag. CI renders and validates this file next to the plain defaults.
 image:
-  tag: "3.12.0"
+  tag: "3.13.0"
