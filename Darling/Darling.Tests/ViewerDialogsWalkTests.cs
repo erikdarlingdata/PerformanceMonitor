@@ -25,7 +25,7 @@ namespace Darling.Tests;
 /// <summary>
 /// The Viewer's dialogs, rendered with its Dark theme: the column filter popup names a column by its header; the Edit Server
 /// dialog heads itself Edit; Credential Profiles with no profiles says so inside its grid; Database State Overrides calls its state
-/// column the last state seen; the Analysis card's heading is sized and placed like the Delivery card's and its note points at
+/// column the last known state; the Analysis card's heading is sized and placed like the Delivery card's and its note points at
 /// the Delivery tab; Manage Servers shows every column at its default size; and, from the theme, a disabled PasswordBox keeps
 /// a disabled TextBox's fill while a chosen radio button marks itself with the accent.
 /// </summary>
@@ -89,7 +89,7 @@ public sealed class ViewerDialogsWalkTests
     }
 
     [Fact]
-    public void DatabaseStateOverrides_CallsTheStateColumnTheLastStateSeen()
+    public void DatabaseStateOverrides_CallsTheStateColumnTheLastKnownState()
     {
         var headers = StaTestThread.Run(() => WithTheme(() =>
         {
@@ -97,7 +97,7 @@ public sealed class ViewerDialogsWalkTests
             return ((DataGrid)window.FindName("StatesGrid")).Columns.Select(c => c.Header as string).ToList();
         }));
 
-        Assert.Contains("Last Seen State", headers);
+        Assert.Contains("Last Known State", headers);
         Assert.DoesNotContain("Current State", headers);
     }
 
