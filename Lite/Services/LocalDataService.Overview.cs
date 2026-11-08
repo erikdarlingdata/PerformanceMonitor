@@ -283,8 +283,8 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
     /// <summary>
     /// #7167: when this server's newest SUCCESSFUL collector run landed (<c>collection_log.status = 'SUCCESS'</c>, the status Collection
     /// Health counts as a run that reached the server), or null when the store holds none. A server Lite cannot reach logs ERROR,
-    /// PERMISSIONS or SKIPPED rows every cycle, which keep the plain newest-row read of <see cref="GetServerSummaryAsync"/> fresh while
-    /// nothing is being read, so this read leaves them out. The loop's skipped-slots row is not a collector run (#5643).
+    /// PERMISSIONS, SKIPPED or CANCELLED rows every cycle while nothing is being read, so this read leaves them out, as the card's
+    /// Last Collect read in <see cref="GetServerSummaryAsync"/> does (#8304). The loop's skipped-slots row is not a collector run (#5643).
     /// </summary>
     public async Task<DateTime?> GetLastSuccessfulCollectionAsync(int serverId)
     {
@@ -390,7 +390,7 @@ public enum ServerCardStatus
     /// Nothing to do with the metric rows, which is the whole reason it needs explaining.</summary>
     CollectorErrors,
 
-    /// <summary>The last connection check failed — the card's red offline overlay.</summary>
+    /// <summary>The last connection check failed — the card's red border and Offline word, with "--" on its Blocking and Deadlocks rows.</summary>
     Offline,
 
     /// <summary>The server has not been connection-checked yet (<c>IsOnline</c> is null): a card built before
@@ -400,7 +400,7 @@ public enum ServerCardStatus
 
 /// <summary>
 /// The ladder itself, in ONE function, plus the two renderings every surface shares. #2451 collapsed the
-/// Overview card's word, colour, border, overlay and tooltip onto <see cref="ServerCardStatus"/>; #2458 found
+/// Overview card's word, colour, border, greyed rows and tooltip onto <see cref="ServerCardStatus"/>; #2458 found
 /// the sidebar row's dot (<c>ServerConnection.DotStatus</c>) deriving the same four words from its own copy of
 /// the same flag pair, on a different type, on a different surface — so the sidebar and the card could say
 /// different things about one server and nothing would notice. They now read this.
@@ -893,8 +893,8 @@ public class ServerSummaryItem
     /// The Overview card's status tooltip (#2437, answering #2422 on Lite's surface): what the status word
     /// means, what the metric rows say, and what to do next.
     ///
-    /// <para>The metric line is omitted on an Offline card. The card draws a dimming overlay across those rows
-    /// precisely because the numbers under it are the last ones collected before the server went dark, so
+    /// <para>The metric line is omitted on an Offline card. Its Blocking and Deadlocks rows read "--" (#8304)
+    /// precisely because the numbers behind them are the last ones collected before the server went dark, so
     /// demanding attention for them would contradict the card while the reader is looking at it.</para>
     /// </summary>
     public string StatusTooltip

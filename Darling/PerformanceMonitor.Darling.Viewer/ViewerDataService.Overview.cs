@@ -43,7 +43,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// the card's status from COLLECTION FRESHNESS instead — how old the newest <c>v_collection_log</c> row
 /// is (see <see cref="ServerSummaryItem.ClassifyFreshness"/>): fresh → Online (green), stale (older than
 /// twice the fastest collector's cadence) → Warning (amber), and no collection / long-dead → Offline
-/// (the red overlay). (2) The Dashboard's health card live-queries currently-blocked sessions / current
+/// (the red border and status word). (2) The Dashboard's health card live-queries currently-blocked sessions / current
 /// scheduler state; the viewer reads the newest COLLECTED snapshot instead (the freshness band already
 /// answers "is this server reporting"). The severity BANDS themselves are reproduced verbatim from
 /// <c>ServerHealthStatus</c> so a viewer card colours a metric exactly as the Dashboard would.</para>
@@ -836,7 +836,7 @@ public sealed class ServerSummaryItem
     /// <summary>
     /// True when no collection has EVER landed for this server (<see cref="ServerFreshness.NeverCollected"/>):
     /// the service hasn't reached it yet — a registered-but-queued server during bootstrap, not a dead one.
-    /// Drives the amber "Awaiting first collection" status instead of the red Offline overlay.
+    /// Drives the amber "Awaiting first collection" status instead of the red Offline status.
     /// </summary>
     public bool AwaitingFirstCollection { get; set; }
 
@@ -1281,7 +1281,7 @@ public sealed class ServerSummaryItem
     /// stale collector counts, and they are not "OK" — they are unmeasured. The verdict keys only on the
     /// FAILING count (a stale collector is neither healthy nor failing, so it stays 0 and reads a green "OK"
     /// while the server is dark). Rather than invent a stale-count threshold, reuse the reachability signal the
-    /// card already carries (<see cref="IsOffline"/>, the same one that drives the offline overlay): an offline
+    /// card already carries (<see cref="IsOffline"/>, the same one that greys the metric rows): an offline
     /// server's collectors read a neutral "Stale", never a green "OK".
     ///
     /// <para>#3539 A6: a REACHABLE server with no collector banded at all reads "--" — the card's word for a
@@ -1518,7 +1518,7 @@ public sealed class ServerSummaryItem
     /// Critical when the FAILING share of <see cref="CollectorCount"/> passes the collector-health
     /// classifier's 20% bar, and Unknown again when <see cref="CollectorCount"/> is zero with nothing
     /// failing — a reachable server nothing has banded yet (#3539 A6), which the offline arm here does not
-    /// cover. Offline is already painted by the card border / overlay, so this governs only
+    /// cover. Offline is already painted by the card border and status word, so this governs only
     /// the per-metric dot: it must not show a green "healthy" dot on a dark server. The overall metric band
     /// reads the counts straight from ToHealthMetrics(), not this property, so the neutral offline reading
     /// never leaks into the card's worst-band or fleet score.
@@ -1526,7 +1526,7 @@ public sealed class ServerSummaryItem
     public HealthSeverity CollectorSeverity =>
         IsOffline ? HealthSeverity.Unknown : ServerHealthClassifier.CollectorSeverity(FailedCollectorCount, CollectorCount);
 
-    /// <summary>The card's worst metric band (offline handled separately by the border / overlay).</summary>
+    /// <summary>The card's worst metric band (offline handled separately by the border and status word).</summary>
     public HealthSeverity OverallMetricSeverity => ServerHealthClassifier.OverallMetricSeverity(ToHealthMetrics());
 
     /// <summary>
@@ -1667,7 +1667,7 @@ public sealed class ServerSummaryItem
 
     /// <summary>
     /// Maps the freshness band onto the card's three status flags, taking the live-ping's place: Fresh →
-    /// Online, Stale → the amber Warning state, Offline → the red Offline overlay, NeverCollected → the amber
+    /// Online, Stale → the amber Warning state, Offline → the red Offline status, NeverCollected → the amber
     /// "Awaiting first collection" state (IsOnline stays null: the truth is "unknown, not reached yet", not
     /// "was up and died").
     ///

@@ -68,6 +68,32 @@ public partial class MainWindow : Window
     /// this text about 120 px beside its four counters, and a longer sentence lost its ending there.
     /// </summary>
     internal static string OfflineStatusText(string displayName) => $"Offline: {displayName}";
+
+    /// <summary>
+    /// The status bar text for a server tab, from the server's cached connection status (#8304): <see cref="OfflineStatusText"/> when
+    /// the last check failed, else <see cref="ConnectedStatusText"/> with the tab's collection suffix. Pure, so the three places that
+    /// word the bar (a tab switch, the end of the tab's first collection, and the 30-second connection check) cannot disagree.
+    /// </summary>
+    internal static string ServerTabStatusText(bool? isOnline, string displayName, string? suffix) =>
+        isOnline == false ? OfflineStatusText(displayName) : ConnectedStatusText(displayName, suffix);
+
+    /// <summary>The server list and connection-status cache this window reads; the status bar is worded from it.</summary>
+    internal ServerManager ServerManager => _serverManager;
+
+    /// <summary>
+    /// Words the status bar for the selected server tab from its server's cached connection status and its collection suffix (#8304).
+    /// Called on a tab switch, when the tab's first collection ends, and on the 30-second connection check, so a server that goes
+    /// down while its tab is open reads Offline on the next check, and one that comes back reads Connected again. Another selected
+    /// tab (Overview, Alerts) leaves the bar as it is.
+    /// </summary>
+    internal void WordSelectedServerTabStatus()
+    {
+        if (ServerTabControl.SelectedItem is TabItem { Content: ServerTab serverTab })
+        {
+            _serverStatusSuffix.TryGetValue(serverTab.Server.Id, out var suffix);
+            StatusText.Text = ServerTabStatusText(_serverManager.GetConnectionStatus(serverTab.Server.Id).IsOnline, serverTab.Server.DisplayNameWithIntent, suffix);
+        }
+    }
     private readonly Dictionary<string, (Action<int, int, DateTime?> AlertCounts, Action<PerformanceMonitor.Ui.TimeRangeSpec> ApplyTimeRange, Func<Task> ManualRefresh)> _tabEventHandlers = new();
     /* Server tab badge state for the non-blocking/deadlock conditions (#754/#749), keyed by the
        ServerConnection GUID (the same key as _openServerTabs). The alert sweep sets these; both the
@@ -240,6 +266,8 @@ public partial class MainWindow : Window
             UpdateStatusBar();
             await RefreshOverviewAsync();
             CheckConnectionsAndNotify();
+            /* #8304: the selected server tab's status bar follows the check: Offline when its server went down, Connected when it came back. */
+            WordSelectedServerTabStatus();
             CheckWebhookChannelsAndNotify();
 
             /* Auto-refresh alert history if the tab is active */
@@ -776,11 +804,7 @@ public partial class MainWindow : Window
         if (ServerTabControl.SelectedItem is TabItem { Content: ServerTab serverTab })
         {
             ServerTimeHelper.ActiveServerClock = serverTab.ServerClock;
-            _serverStatusSuffix.TryGetValue(serverTab.Server.Id, out var statusSuffix);
-            /* #8304: the same connection check the Overview card's Offline word comes from. */
-            StatusText.Text = _serverManager.GetConnectionStatus(serverTab.Server.Id).IsOnline == false
-                ? OfflineStatusText(serverTab.Server.DisplayNameWithIntent)
-                : ConnectedStatusText(serverTab.Server.DisplayNameWithIntent, statusSuffix);
+            WordSelectedServerTabStatus();
         }
 
         /* Refresh alerts tab when selected */
@@ -1562,11 +1586,9 @@ public partial class MainWindow : Window
             {
                 await Task.Run(() => _collectorService.RunAllCollectorsForServerAsync(server));
                 _serverStatusSuffix[server.Id] = "Data loaded";
-                /* #8304: a server the last connection check could not reach is called offline, not connected: its collectors
-                   just ran and reached nothing, and the tab shows stored data. The same check words the Overview card. */
-                StatusText.Text = _serverManager.GetConnectionStatus(server.Id).IsOnline == false
-                    ? OfflineStatusText(server.DisplayNameWithIntent)
-                    : ConnectedStatusText(server.DisplayNameWithIntent, "Data loaded");
+                /* #8304: worded from the connection check, so a server the check could not reach is called offline, not connected:
+                   its collectors just ran and reached nothing, and the tab shows stored data. */
+                WordSelectedServerTabStatus();
                 serverTab.RefreshData();
                 UpdateCollectorHealth();
                 _ = RefreshOverviewAsync();

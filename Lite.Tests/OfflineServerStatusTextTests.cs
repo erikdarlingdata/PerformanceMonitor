@@ -130,20 +130,10 @@ public sealed class OfflineServerStatusTextTests
         }
     }
 
-    /// <summary>The window's connection-status cache and its selected-tab status refresh, by name so this file builds before the window has them.</summary>
-    private static ServerManager ServerManagerOf(MainWindow w)
-    {
-        var property = typeof(MainWindow).GetProperty("ServerManager", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-        Assert.True(property is not null, "the window does not expose its connection-status cache yet");
-        return (ServerManager)property!.GetValue(w)!;
-    }
+    /// <summary>The window's connection-status cache, and the selected-tab status refresh the 30-second check calls.</summary>
+    private static ServerManager ServerManagerOf(MainWindow w) => w.ServerManager;
 
-    private static void RefreshSelectedTabStatus(MainWindow w)
-    {
-        var method = typeof(MainWindow).GetMethod("WordSelectedServerTabStatus", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public, Type.EmptyTypes);
-        Assert.True(method is not null, "the window has no selected-tab status refresh yet");
-        method!.Invoke(w, null);
-    }
+    private static void RefreshSelectedTabStatus(MainWindow w) => w.WordSelectedServerTabStatus();
 
     /* The window is built the way the chrome tests build it: the app's three paths point at a folder of the test's own, and the
        window's content moves into a plain host window whose size the test sets. */
