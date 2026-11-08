@@ -103,28 +103,54 @@ public sealed partial class DarlingMcpPlanForceTools
     internal const string PlanNotCollected = "plan_not_collected";
 
     /// <summary>
-    /// The databases of one server whose collected Query Store rows hold the (query_id, plan_id) pair: the raw <c>query_store_stats</c> rows and the
-    /// <c>query_store_interval_wide</c> table, which keeps <see cref="QueryStoreIntervalPartitions.WideHorizonDays"/> days. A pair whose rows have aged out of both is not collected.
+    /// The query behind the query_id on the server is not the one whose rows Darling collected: its <c>query_hash</c> matches none the store holds for the triple. A database
+    /// restored or re-created inside the store's window restarts its Query Store ids, so the same pair then names another query's plan. Nothing is run.
+    /// </summary>
+    internal const string PlanQueryChanged = "plan_query_changed";
+
+    /// <summary>One collected (database, query_hash) of the pair. <see cref="QueryHash"/> is the <c>0x</c> text the collector stores; null on a row that carries none.</summary>
+    internal sealed record CollectedPlan(string Database, string? QueryHash);
+
+    /// <summary>
+    /// The databases of one server whose collected Query Store rows hold the (query_id, plan_id) pair, with each distinct <c>query_hash</c> those rows carry: the raw
+    /// <c>query_store_stats</c> rows and the <c>query_store_interval_wide</c> table, which keeps <see cref="QueryStoreIntervalPartitions.WideHorizonDays"/> days. A pair
+    /// whose rows have aged out of both is not collected.
     /// </summary>
     internal const string CollectedPlanDatabasesSql = @"
-SELECT database_name FROM collect.query_store_stats WHERE server_id = $1 AND query_id = $2 AND plan_id = $3
+SELECT database_name, query_hash FROM collect.query_store_stats WHERE server_id = $1 AND query_id = $2 AND plan_id = $3
 UNION
-SELECT database_name FROM collect.query_store_interval_wide WHERE server_id = $1 AND query_id = $2 AND plan_id = $3
-ORDER BY database_name";
+SELECT database_name, query_hash FROM collect.query_store_interval_wide WHERE server_id = $1 AND query_id = $2 AND plan_id = $3
+ORDER BY database_name, query_hash";
 
-    internal static async Task<IReadOnlyList<string>> ReadCollectedPlanDatabasesAsync(NpgsqlDataSource postgres, int serverId, long queryId, long planId, CancellationToken ct)
+    internal static async Task<IReadOnlyList<CollectedPlan>> ReadCollectedPlansAsync(NpgsqlDataSource postgres, int serverId, long queryId, long planId, CancellationToken ct)
     {
         await using var connection = await postgres.OpenConnectionAsync(ct);
         await using var command = new NpgsqlCommand(CollectedPlanDatabasesSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint });
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = planId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint });
-        var names = new List<string>();
+        var rows = new List<CollectedPlan>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
-            names.Add(reader.GetString(0));
-        return names;
+            rows.Add(new CollectedPlan(reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1)));
+        return rows;
     }
+
+    /// <summary>
+    /// Whether the query the server has behind the ids is one the store collected the pair for: true when <paramref name="serverHash"/> equals one of
+    /// <paramref name="collectedHashes"/> (the <c>0x</c> text on both sides, case ignored), and when either side has no hash to compare (no collected row
+    /// carries one, or the server has no row for the query, which the server-state check refuses on its own).
+    /// </summary>
+    internal static bool CollectedQueryMatches(IEnumerable<string?> collectedHashes, string? serverHash)
+    {
+        if (serverHash is null)
+            return true;
+        var known = collectedHashes.Where(hash => hash is not null).ToList();
+        return known.Count == 0 || known.Contains(serverHash, StringComparer.OrdinalIgnoreCase);
+    }
+
+    internal static string PlanQueryChangedMessage(string serverDisplayName, string database, long queryId, long planId, IEnumerable<string?> collectedHashes, string serverHash) =>
+        $"The query behind query_id {queryId} in {database} on {serverDisplayName} is not the one Darling collected plan {planId} for: the server's query_hash is {serverHash}, and the collected rows carry {string.Join(", ", collectedHashes.Where(hash => hash is not null).Distinct(StringComparer.OrdinalIgnoreCase))}. Query Store ids restart when a database is restored or re-created, so the same query_id and plan_id now name another query's plan. Read the query again with get_query_store_top and pass the ids from a current row. Nothing was run.";
 
     /// <summary>
     /// The collected spelling of <paramref name="database"/> among <paramref name="collected"/>: the name that matches exactly, else the one name that matches
@@ -159,7 +185,8 @@ ORDER BY database_name";
     /// <summary>
     /// <paramref name="postgres"/> is the store's read data source: its collected Query Store rows decide whether <paramref name="database"/>, <paramref name="queryId"/> and
     /// <paramref name="planId"/> name one plan Darling collected on this server, before the server is read. The server is then read, and written, in the database
-    /// as the store spells it: the returned <see cref="PlanPrepared{T}.Permit"/> carries that spelling when the caller's differs from it by case alone.
+    /// as the store spells it: the returned <see cref="PlanPrepared{T}.Permit"/> carries that spelling when the caller's differs from it by case alone. The server's
+    /// <c>query_hash</c> must be one the collected rows carry (<see cref="PlanQueryChanged"/> otherwise), so ids a restore renumbered reach no other query's plan.
     /// </summary>
     internal static async Task<PlanPrepared<ForcePlanFacts>> PrepareForcePlanAsync(NpgsqlDataSource postgres, NpgsqlDataSource owner, ILogger logger, ServerActionPermit permit, int serverId,
         string serverDisplayName, bool force, string database, long queryId, long planId, bool dryRun, PlanRefusalSink onRefusal, CancellationToken ct)
@@ -171,7 +198,8 @@ ORDER BY database_name";
         /* The store's own rows decide whether the three values name one collected plan. Query Store ids are per-database sequences from 1, so the pair alone exists in
            nearly every database on the server, and the server's check (the pair exists in the named database) cannot tell a wrong database from the right one.
            A database the server's entry excludes is one Darling does not act in, so it is not among the names the refusal offers. */
-        var collected = (await ReadCollectedPlanDatabasesAsync(postgres, serverId, queryId, planId, ct)).Where(name => !IsExcludedDatabase(excluded, name)).ToList();
+        var collectedRows = (await ReadCollectedPlansAsync(postgres, serverId, queryId, planId, ct)).Where(row => !IsExcludedDatabase(excluded, row.Database)).ToList();
+        var collected = collectedRows.Select(row => row.Database).Distinct(StringComparer.Ordinal).ToList();
         if (CollectedSpelling(collected, database) is not { } spelling)
         {
             await onRefusal(PlanNotCollected, ct);
@@ -191,6 +219,16 @@ ORDER BY database_name";
             if (before.Outcome == RemediationOutcome.Refused && before.Reason is not null)
                 await onRefusal(before.Reason, ct);
             return PlanPrepared<ForcePlanFacts>.End(Answer(before.Outcome == RemediationOutcome.Refused ? "refused" : "failed", before.Reason, before.Message));
+        }
+
+        /* The store's rows prove the pair was collected; the server's query_hash proves the query behind the query_id is still the one those rows came from. A database
+           restored or re-created inside the store's window restarts its Query Store ids, and a force or unforce of the old ids would pin or release another query's plan. */
+        var collectedHashes = collectedRows.Where(row => string.Equals(row.Database, spelling, StringComparison.Ordinal)).Select(row => row.QueryHash).ToList();
+        if (!CollectedQueryMatches(collectedHashes, beforeState.QueryHash))
+        {
+            await onRefusal(PlanQueryChanged, ct);
+            return PlanPrepared<ForcePlanFacts>.End(Answer("refused", PlanQueryChanged,
+                PlanQueryChangedMessage(serverDisplayName, beforeState.Database, queryId, planId, collectedHashes, beforeState.QueryHash!), new { dry_run = dryRun, before = beforeState }));
         }
 
         if (BlockReason(beforeState, force) is { } block)

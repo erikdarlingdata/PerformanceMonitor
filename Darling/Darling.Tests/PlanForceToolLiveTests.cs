@@ -136,6 +136,14 @@ public sealed partial class PlanForceToolLiveTests
             return value is null or DBNull ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture);
         }
 
+        /// <summary>The server's <c>query_hash</c> of the query, in the <c>0x</c> text the store keeps it in; null when Query Store has no such query.</summary>
+        public async Task<string?> QueryHashAsync(long queryId, CancellationToken ct)
+        {
+            await using var admin = await OpenAsync(Admin(Database), ct);
+            var value = await ScalarAsync(admin, $"SELECT CONVERT(varchar(18), query_hash, 1) FROM sys.query_store_query WHERE query_id = {queryId};", ct);
+            return value is null or DBNull ? null : Convert.ToString(value, CultureInfo.InvariantCulture);
+        }
+
         public async Task<bool> HasForcingTypeColumnAsync(CancellationToken ct)
         {
             await using var admin = await OpenAsync(Admin(Database), ct);
@@ -183,7 +191,8 @@ public sealed partial class PlanForceToolLiveTests
     /// <summary>Which of the four conditions to leave out of the setup.</summary>
     private enum Without { Nothing, Switch, Level, ActionsEnabled, CredentialSlot, EvictSwitch, KillSwitch }
 
-    private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Connection, SqlScratch Sql, string Arg, Lines Log, CancellationToken Ct)
+    /// <param name="StoreOnly">No SQL Server database was made for this test: a seeded row's <c>query_hash</c> cannot be read from the server.</param>
+    private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Connection, SqlScratch Sql, string Arg, Lines Log, CancellationToken Ct, bool StoreOnly = false)
     {
         /// <summary>The tool, called as an agent that copied the database, query and plan from one get_query_store_top row: the store holds the three together for this server.</summary>
         public async Task<string> Tool(bool force, long queryId, long planId, bool dryRun, string server = "srv-7")
@@ -240,7 +249,7 @@ public sealed partial class PlanForceToolLiveTests
             var opened = await store.OpenOrJoinAsync(alert, ct);
             var claim = await store.ClaimAsync(opened.RequestId!.Value, "agent-a", ct);
             var arg = AgentActionArgumentTests.Arg(opened.RequestId.Value.ToString(), claim.ClaimId!.Value.ToString(), reason: "plan 2 regressed; peer agreed");
-            await body(new Ctx(source, connection, sql, arg, new Lines(), ct));
+            await body(new Ctx(source, connection, sql, arg, new Lines(), ct, storeOnly));
             bodySucceeded = true;
         }
         finally
