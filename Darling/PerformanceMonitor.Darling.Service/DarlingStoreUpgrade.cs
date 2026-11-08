@@ -254,6 +254,14 @@ internal sealed class DarlingStoreUpgrade
     /// </summary>
     internal Func<string, CancellationToken, Task<string?>> ReadRuntimeVersionLine { get; set; } = ReadRuntimeVersionLineAsync;
 
+    /// <summary>
+    /// Runs inside <see cref="CarryAutoConfAsync"/>'s trial, after its marker is written and just before its
+    /// cluster start, with the trial's own token. Null in production. A test holds the trial here, cancels,
+    /// and then lets it go, so the cancellation meets the start every time instead of racing a start that may
+    /// already be over.
+    /// </summary>
+    internal Func<CancellationToken, Task>? BeforeTrialStartForTests { get; set; }
+
     /* ============================ outcome ============================ */
 
     internal enum StoreUpgradeStatus
@@ -3957,6 +3965,11 @@ internal sealed class DarlingStoreUpgrade
                 try
                 {
                     File.WriteAllText(marker, trialPort.ToString(CultureInfo.InvariantCulture));
+                    if (BeforeTrialStartForTests is { } beforeTrialStart)
+                    {
+                        await beforeTrialStart(cancellationToken);
+                    }
+
                     /* QuiescedStartWaitSeconds (900s), not the default 120s (item 3, round-2 review Medium 2):
                        this can be the retry below, on a cluster whose first start already used up part of any
                        generous wait, and a short timeout here would misreport an unrelated slow start as a
