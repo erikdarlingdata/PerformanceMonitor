@@ -1221,17 +1221,29 @@ public static class DarlingRetention
             var schemaCutoff = utcNow.AddDays(-EffectivePurgeRetentionDays(
                 "schema_objects",
                 retentionDaysFor?.Invoke("schema_objects") ?? CollectorScheduleDefaults.All["schema_objects"].RetentionDays));
+            /* Each PurgeOneAsync is counted on its own, as every sibling's is: the wall budget's gate counts each call it keeps from
+               starting (TablesNotReached), and that count is taken back out of tablesPurged below (#5592). */
             var schemaVersionsDeleted = await PurgeOneAsync(
                 postgres, "collect.schema_objects",
                 TimeSlicedDeleteSql("collect.schema_objects", "valid_to", "valid_to IS NOT NULL"),
                 schemaCutoff, logger, cancellationToken, pacer: walPacer);
+            if (schemaVersionsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += schemaVersionsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             var staleSchemaHistoriesDeleted = await PurgeOneAsync(
                 postgres, "collect.schema_objects", StaleSchemaHistoryDeleteSql, schemaCutoff, logger, cancellationToken,
                 batchSize: SingleShotStatement, pacer: walPacer);
-            if (schemaVersionsDeleted is not null && staleSchemaHistoriesDeleted is not null)
+            if (staleSchemaHistoriesDeleted is not null)
             {
                 tablesPurged++;
-                totalRowsDeleted += schemaVersionsDeleted.Value + staleSchemaHistoriesDeleted.Value;
+                totalRowsDeleted += staleSchemaHistoriesDeleted.Value;
             }
             else
             {
