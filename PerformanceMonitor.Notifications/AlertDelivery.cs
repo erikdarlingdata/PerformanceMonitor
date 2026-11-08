@@ -168,6 +168,15 @@ public sealed record AlertDelivery
     public static AlertDelivery RoutedToDigest() => new(false, ChannelDigest, null);
 
     /// <summary>
+    /// #8246: the deliverer threw outside its channels (a render step, a store write) and cannot say what went out. Nothing
+    /// is known to have reached anyone, so the alert reads as every channel failed: <see cref="Sent"/> false on
+    /// <see cref="ChannelFailed"/> with the exception's message. The engine then tries the alert again sooner than its
+    /// cooldown and puts its second markers back, and the external alert drain tries the row again, where a null answer
+    /// read as delivered.
+    /// </summary>
+    public static AlertDelivery DelivererFailed(string error) => new(false, ChannelFailed, error);
+
+    /// <summary>
     /// A disposition rebuilt from three already-computed column values. <b>The deprecated Dashboard SKU's
     /// only.</b>
     ///

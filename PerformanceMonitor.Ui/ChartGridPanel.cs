@@ -80,7 +80,7 @@ public sealed class ChartGridPanel : Panel
 
     /// <summary>
     /// What the charts' own chrome (caption, tick labels, a legend that wrapped) asks for, so the plot keeps its minimum height
-    /// whatever the legend did (<see cref="ChartLayout.RowMinHeightFor"/>). Set from <see cref="ChartGroupAligner"/>'s check.
+    /// whatever the legend did (<see cref="ChartLayout.RowMinHeightFor(double, double)"/>). Set from <see cref="ChartGroupAligner"/>'s check.
     /// </summary>
     internal double ContentMinHeight { get => (double)GetValue(ContentMinHeightProperty); set => SetValue(ContentMinHeightProperty, value); }
 
