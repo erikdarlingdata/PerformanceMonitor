@@ -31,9 +31,9 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
-{{/* Image reference: repository:tag, or repository:tag@digest when image.digest is set. */}}
+{{/* Image reference: repository:tag, or repository:tag@digest when image.digest is set. The tag goes through toString: --set image.tag=8017 gives a number. */}}
 {{- define "performancemonitor-darling.image" -}}
-{{- $tag := default .Chart.AppVersion .Values.image.tag -}}
+{{- $tag := toString (default .Chart.AppVersion .Values.image.tag) -}}
 {{- if .Values.image.digest -}}
 {{- printf "%s:%s@%s" .Values.image.repository $tag .Values.image.digest -}}
 {{- else -}}

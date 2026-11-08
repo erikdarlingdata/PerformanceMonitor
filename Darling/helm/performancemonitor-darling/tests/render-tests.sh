@@ -58,6 +58,12 @@ assert_eq "$(dq '.spec.template.spec.containers[0].image')" '"ghcr.io/erikdarlin
 render --set image.tag=3.13.0,image.digest=sha256:abc
 assert_eq "$(dq '.spec.template.spec.containers[0].image')" '"ghcr.io/erikdarlingdata/performancemonitor-darling:3.13.0@sha256:abc"' "tag and digest"
 
+t image_tag_numeric
+# --set parses an all-digit tag as a number; it must still render as the tag, never as %!s(int64=...).
+render --set image.tag=8017
+assert_eq "$(dq '.spec.template.spec.containers[0].image')" '"ghcr.io/erikdarlingdata/performancemonitor-darling:8017"' "numeric tag"
+assert_eq "$(dq '.spec.template.spec.initContainers[0].image')" '"ghcr.io/erikdarlingdata/performancemonitor-darling:8017"' "numeric tag, init container"
+
 t resources_default
 render
 assert_eq "$(dq '.spec.template.spec.containers[0].resources')" \
