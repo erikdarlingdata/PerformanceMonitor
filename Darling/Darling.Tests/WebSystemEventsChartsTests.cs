@@ -225,7 +225,9 @@ public sealed class WebSystemEventsChartsBehaviourTests
         };
 
         /* A has 40 backoffs and B 5; C, D, E and F have 1 each (C's snapshot carries no count), so the quietest four tie and the name decides. */
-        Assert.Equal(new[] { "A", "B", "C", "D", "E" }, DarlingMcpHealthParserTools.SickSpinlockTypes(rows));
+        var (top, total) = DarlingMcpHealthParserTools.SickSpinlockTypes(rows);
+        Assert.Equal(new[] { "A", "B", "C", "D", "E" }, top);
+        Assert.Equal(6, total);
         var first = DarlingMcpHealthParserTools.BucketCpu(rows, 10)[0];
         Assert.Equal(30, first.SickSpinlocks["A"]);
         Assert.Equal(1, first.SickSpinlocks["C"]);
