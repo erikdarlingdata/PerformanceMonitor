@@ -7,7 +7,8 @@ name: Darling Helm chart
 # from this checkout and runs tests/kind-tests.sh.
 #
 # Triggers: a manual dispatch, a reusable-workflow call, and a pull request that touches the chart or the files the chart
-# mirrors (the compose file's store flags, the Dockerfile's user and paths, the store image pin in the Linux store workflow, the image name build.yml pushes).
+# mirrors (the compose file's store flags, the Dockerfile's user and paths, the store image pin in the Linux store workflow).
+# build.yml is not a trigger: the nightly run and the parity test catch a change of the image name it pushes.
 # Never add `pull_request_target`: the job runs the checked-out chart and scripts and must not get a write token or secrets.
 on:
   workflow_call:
@@ -21,7 +22,6 @@ on:
       - 'Darling/Dockerfile'
       - '.github/workflows/darling-linux-store.yml'
       - 'Darling/PerformanceMonitor.Darling.Service/Hosting/DarlingHealth*.cs'
-      - '.github/workflows/build.yml'
 
 permissions:
   contents: read

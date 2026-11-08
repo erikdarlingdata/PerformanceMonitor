@@ -20,7 +20,10 @@ nameOverride: ""
 # Override the full resource name prefix.
 fullnameOverride: ""
 
-# Resources of the Darling container.
+# Resources of the Darling container. The memory limit is what the collector plans against: it stops launching new
+# collections once its resident memory reaches 80% of the container's limit, and resumes when it falls back under. A limit
+# too small for the fleet holds collection off rather than failing (2Gi held a real fleet's collection off for hours),
+# so size it to the fleet and watch the log for the memory launch guard.
 resources:
   requests:
     cpu: 250m
@@ -60,8 +63,12 @@ extraVolumes: []
 # Extra volume mounts of the Darling container (a list of VolumeMount objects).
 extraVolumeMounts: []
 
-# The operator's darling.json: servers, collection settings, alerts. The chart owns some keys of it (the store, the web and
-# MCP endpoints, health, passwordKey); setting one here fails the render and names the value to use instead.
+# The operator's darling.json: servers, collection settings, alerts. The chart owns these keys of it: postgres.managed,
+# postgres.connectionString, web.enabled, web.port, web.publicBaseUrl, web.network.listen, web.network.allowFrom,
+# web.network.trustedProxies, web.network.token, mcp.enabled, mcp.port, mcp.network.listen, mcp.network.allowFrom,
+# mcp.network.token, health and passwordKey. Setting one here fails the render and names the value to use instead; every
+# other key (postgres.webConnectionString, web.network.oidc, web.network.tls, ...) passes through.
+# Some keys are only a first-run seed: the store keeps them after the first start (see the README).
 # Strings may contain a placeholder listed in configSubstitutions; its secret value is written in when the pod starts.
 config: {}
 
@@ -86,7 +93,8 @@ secrets:
   existingSecret: ""
   # Extra keys of the chart-created Secret (key: value). A key set here wins over generation.
   values: {}
-  # Key of the web dashboard token in the Secret. The chart generates it when the key is not in `values`.
+  # Key of the web dashboard token in the Secret. The chart generates it (40 random characters) when the key is not in
+  # `values`. A token you supply needs at least 16 characters and 6 different ones, or the surface stays loopback-only.
   webTokenKey: web-token
   # Key of the MCP token in the Secret. The chart generates it when the key is not in `values`.
   mcpTokenKey: mcp-token
@@ -109,7 +117,7 @@ store:
       # (POSTGRES_PASSWORD_FILE) and the Darling pod (PGPASSWORD) both read that key. Empty makes the chart generate
       # the password into the Secret <release>-store; GitOps installs must set this.
       existingSecret: ""
-    # Resources of the store container.
+    # Resources of the store container. As the compose file says: give a store with real data 4 GB or more.
     resources:
       requests:
         memory: 2Gi
@@ -181,7 +189,8 @@ web:
     enabled: false
     # IngressClass name. Empty uses the cluster default.
     className: ""
-    # Host names of the Ingress (a list of strings). Every path of every host goes to the dashboard Service.
+    # Host names of the Ingress (a list of strings). Every path of every host goes to the dashboard Service, but Darling's
+    # Host guard admits only the host of web.publicBaseUrl (by default the first host here): the others get 400.
     hosts: []
     # TLS entries of the Ingress, as in the Kubernetes Ingress spec: a list of { hosts, secretName }.
     tls: []

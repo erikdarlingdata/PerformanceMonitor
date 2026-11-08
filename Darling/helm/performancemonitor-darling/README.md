@@ -109,7 +109,27 @@ Fixed, not values: one replica, the `Recreate` strategy, and the pod security co
 
 ### Keys the chart owns in `config`
 
-The chart sets `postgres`, `health`, `passwordKey`, `web.enabled`, `web.port`, `web.network`, `web.publicBaseUrl`, `mcp.enabled`, `mcp.port` and `mcp.network` (except `mcp.network.hostName`, see below). Setting one inside `config` fails the render and names the value to use instead; the chart never overrides one silently.
+The chart owns exactly these keys of `darling.json`:
+
+- `postgres.managed` and `postgres.connectionString` (from `store.*`);
+- `web.enabled`, `web.port`, `web.publicBaseUrl`, `web.network.listen`, `web.network.allowFrom`, `web.network.trustedProxies` and `web.network.token`;
+- `mcp.enabled`, `mcp.port`, `mcp.network.listen`, `mcp.network.allowFrom` and `mcp.network.token`;
+- `health` and `passwordKey`.
+
+Setting one inside `config` fails the render and names the value to use instead (or says the chart sets it and nothing overrides it); the chart never overrides one silently. Keys are matched ignoring case, as Darling reads them. Every other key under `postgres`, `web.network` and `mcp.network` is yours and is passed through, for example `postgres.webConnectionString`, `web.network.oidc`, `web.network.tls` and `mcp.network.tls`. The chart sets `mcp.network.hostName` only when `config` does not (see below).
+
+### Through `config`
+
+Some settings have no chart value; they go in `config`, next to the keys the chart owns.
+
+- **OIDC sign-in for the dashboard:** `config.web.network.oidc` (`authority`, `clientId`, `clientSecret`). Give the client secret as a `file:` reference into the chart Secret, for example `clientSecret: file:/run/secrets/darling/oidc-client-secret` with the key `oidc-client-secret` in `secrets.values` or in your `existingSecret`. Behind an Ingress the dashboard needs `trustedProxies` for the `https` redirect.
+- **TLS on the pod itself** (instead of, or behind, a TLS-terminating Ingress): mount the certificate with `extraVolumes` and `extraVolumeMounts`, and set `config.web.network.tls` or `config.mcp.network.tls` (`certPath` and `keyPath`, or `pfxPath` and `pfxPassword`) to the mounted paths. The Ingress then has to speak HTTPS to the pod (an annotation of your controller).
+- **Least-privilege store logins:** `postgres.webConnectionString` and `postgres.mcpConnectionString` are not owned. On an external store, run `tools/provision-roles.sql` (see [Security](../../../docs/darling/security.md#security--least-privilege-roles)), put the two connection strings in the chart Secret, and point the keys at them with `file:/run/secrets/darling/<key>`.
+
+Two warnings in the log are expected with this chart:
+
+- On an external store without those two strings, the dashboard and the MCP endpoint each log that they connect to the store "as the owner login (postgres.connectionString) because postgres.webConnectionString is not set" (or `mcpConnectionString`). That is the documented fallback, not a fault: they work, with the owner's rights. The strings above remove it.
+- Without `tls` in `config`, the dashboard and the MCP endpoint each log at every start that they serve plain HTTP and that `allowFrom` bounds only who can route to the port. Behind a TLS-terminating Ingress that is the expected shape: the plain hop is the one between the controller and the pod.
 
 ### Reaching it from outside the cluster
 
@@ -120,7 +140,11 @@ Darling listens on `0.0.0.0` inside the pod, and `allowFrom` decides who it serv
 - What the controller writes into `X-Forwarded-For` depends on how traffic reaches it: behind a LoadBalancer Service with `externalTrafficPolicy: Cluster` it is often a node address, not the operator's. Check the controller's own log before you write the web list.
 - Rendering fails with a message naming the missing value otherwise.
 - `web.publicBaseUrl` defaults to `https://<first web ingress host>` when a TLS entry covers it, and `http://` when none does.
+- For the dashboard, Darling's Host guard admits one DNS name: the host of `web.publicBaseUrl`. With several web Ingress hosts, only that one works; the others get `400`.
 - For MCP, Darling's Host guard admits one DNS name. The chart sets `mcp.network.hostName` to the first MCP Ingress host (set it in `config` to use another), so only that host works.
+- A token you supply (in `secrets.values` or your `existingSecret`) must be at least 16 characters with at least 6 different characters. A shorter or more repetitive one keeps that surface loopback-only, with a Critical line in the log. The chart's generated tokens are 40 random characters.
+- `trustedProxies` set to the controller pods' CIDR trusts every pod in that CIDR: any of them can claim any client address in `X-Forwarded-For`. The health port, 5154, answers anyone who can route to the pod. A NetworkPolicy that admits only the ingress controller to the web and MCP ports, and nothing else to the pod, closes both (the kubelet's probes come from the node, which most network plugins always admit).
+- IPv4 is assumed: the chart sets `listen` to `0.0.0.0`. IPv6-only clusters are not supported in this version.
 
 ## Which values the store overrides after the first start
 
@@ -161,6 +185,16 @@ A tool that renders the chart without reading the cluster (`helm template`, whic
 
 A change to a Secret does not restart the pod; only a ConfigMap change does. After rotating a Secret, restart: `kubectl rollout restart deployment/<fullname>`.
 
+**Rotating the bundled store's password.** The store sets its password once, when it creates its data directory; changing the Secret afterwards only locks Darling out. Change it inside the store first, then the Secret, then restart Darling:
+
+```
+kubectl exec <fullname>-store-0 -- psql -U darling -d darling -c "ALTER ROLE darling PASSWORD '<new password>'"
+kubectl patch secret <fullname>-store -p '{"stringData":{"password":"<new password>"}}'
+kubectl rollout restart deployment/<fullname>
+```
+
+(With `store.bundled.auth.existingSecret`, update that Secret instead.)
+
 ## The password key
 
 Darling seals the passwords of the servers it monitors under a key. By default it makes one in its state volume. `passwordKey` keeps it in a Secret you manage instead, so a volume restored without the Secret cannot read the stored passwords:
@@ -173,7 +207,16 @@ passwordKey:
 
 The chart mounts it read-only at `/run/secrets/darling-password-key/<secretKey>` with mode 0440 and group 1654 (through `fsGroup`), outside `credentials/`, and sets `passwordKey` to that `file:` path. `source: env` injects it as `DARLING_PASSWORD_KEY` instead; `file:` is the safer one (an environment variable shows in `kubectl exec … env` and `/proc`).
 
-**Making a key:** run the service's `--new-password-key <path>` verb as user 1654, or `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out password-key.pem`, then put the file in your secret store and delete it. The key must be RSA-3072. See [`--new-password-key`](../../../docs/darling/cli.md#the-table).
+**Making a key:** run the image once as user 1654 with the service's `--new-password-key` verb, and keep the key from its standard output (no volume to mount, so it works the same under Docker Desktop):
+
+```
+docker run --rm --user 1654 --entrypoint sh ghcr.io/erikdarlingdata/performancemonitor-darling:<release> -c \
+  'dotnet PerformanceMonitor.Darling.Service.dll --new-password-key /tmp/password-key >&2 && cat /tmp/password-key' > password-key
+kubectl create secret generic darling-password-key --from-file=password-key=password-key
+rm password-key
+```
+
+The verb prints the key's fingerprint on standard error; the service logs the same fingerprint when it loads the key. `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out password-key.pem` makes an equivalent key. The key must be RSA-3072. Put it in your secret store (or the Secret, as above) and delete the file. See [`--new-password-key`](../../../docs/darling/cli.md#the-table).
 
 **Moving an existing key off the volume:** copy the `password-key` file from the credentials directory into the Secret, set `passwordKey`, upgrade, and check the log shows the same fingerprint loaded from `passwordKey` before you delete the old file. The steps, the checks the service makes on the file, and `--reset-password-key` are in [Keeping the key outside the service](../../../docs/darling/security.md#security--least-privilege-roles).
 
@@ -188,7 +231,7 @@ The chart sets a `health` block in `darling.json` and probes the health port, 51
 
 There is no liveness probe on the dashboard or MCP port, and no probe reads the stopped marker.
 
-**Not Ready** means the collector is `starting` (no verdict yet), `degraded` (a startup step failed and the service is retrying it) or `stopped` (a startup step failed for good, or the configuration has problems). The pod is never restarted for it: restarting does not fix a refused configuration or an unreachable store. `kubectl describe pod` shows the failed probe, and `kubectl logs` says why. While it is not Ready the dashboard is still up, and `kubectl port-forward` reaches it and shows the same state. A Service sends no traffic to a pod that is not Ready, so an Ingress reaches nothing meanwhile; target the Deployment (or the pod) in the port-forward, as in the install section.
+**Not Ready** means the collector is `starting` (no verdict yet), `degraded` (a startup step failed and the service is retrying it) or `stopped` (a startup step failed for good, or the configuration has problems). The pod is never restarted for it: restarting does not fix a refused configuration or an unreachable store. `kubectl describe pod` shows the failed probe, and `kubectl logs` says why. Do not count on the dashboard meanwhile: on a store the chart's Darling does not manage, the dashboard waits for the store-login verdict before it starts, so while the collector is `starting` or `degraded` at start it may not answer, and the ownership stop of a root-owned volume (Upgrades, step 4) keeps it down on purpose. `kubectl logs` is the place to look. A Service sends no traffic to a pod that is not Ready, so an Ingress reaches nothing meanwhile; when the dashboard is up, a port-forward to the Deployment (or the pod), as in the install section, still reaches it.
 
 What readiness does not cover: it follows a startup verdict. The service publishes that it is collecting once, when startup finishes, and does not change it back, so a store that becomes unreachable after collection started is not shown as not Ready. Watch collection itself (the dashboard's state, or the service log) for that. See [the health port](../../../docs/darling/network-endpoints.md#the-health-port) for what the port answers.
 

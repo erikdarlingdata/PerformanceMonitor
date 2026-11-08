@@ -5,6 +5,9 @@ metadata:
   labels:
     {{- include "performancemonitor-darling.labels" . | nindent 4 }}
 spec:
+  # One service per credentials volume, and never two at once: the start's check of the credentials directory is not
+  # locked across processes, so a second pod starting beside the first could read planted files between the first one's
+  # chmod and its removal (docs/darling/security.md, and the compose file's comment on the darling-credentials volume).
   replicas: 1
   strategy:
     type: Recreate
@@ -31,6 +34,8 @@ spec:
         runAsUser: 1654
         runAsGroup: 1654
         fsGroup: 1654
+        # OnRootMismatch: the kubelet changes ownership only when the volume root does not match. A recursive change on
+        # every mount would open credentials/ to the group, and the service then rotates its keys at each start.
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault

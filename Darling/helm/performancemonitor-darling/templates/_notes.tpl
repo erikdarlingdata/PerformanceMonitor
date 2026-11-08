@@ -1,6 +1,10 @@
 {{/* The text of NOTES.txt. It lives in a helper so the render tests can render it without a cluster. */}}
 {{- define "performancemonitor-darling.notes" -}}
 Darling is installed as {{ include "performancemonitor-darling.fullname" . }}.
+
+darling.json is only a seed for servers, alerts, webhooks and the other first-run settings: after the first start the
+store keeps them, and a change to `config` no longer reaches them. Change them in the Viewer, the dashboard or the MCP
+tools (the chart README lists which keys are seeds).
 {{- if or (not .Values.secrets.existingSecret) (include "performancemonitor-darling.storePasswordGenerated" .) }}
 
 WARNING: generated values are in use:

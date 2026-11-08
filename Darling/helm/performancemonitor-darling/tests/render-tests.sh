@@ -170,6 +170,13 @@ grep -qF GitOps <<<"${n}" || { echo "NOTES lack GitOps" >&2; exit 1; }
 n="$(notes --set secrets.existingSecret=s --set store.bundled.auth.existingSecret=x)"
 if grep -qF existingSecret <<<"${n}" || grep -qF GitOps <<<"${n}"; then echo "NOTES warn with an existing Secret" >&2; exit 1; fi
 
+t notes_say_darling_json_is_a_seed
+for args in "" "--set secrets.existingSecret=s --set store.bundled.auth.existingSecret=x --set image.tag=1"; do
+  # shellcheck disable=SC2086
+  n="$(notes ${args})"
+  grep -qF 'darling.json is only a seed' <<<"${n}" || { echo "NOTES do not say darling.json is a seed (${args:-defaults})" >&2; exit 1; }
+done
+
 t notes_warn_latest_tag
 n="$(notes)"
 grep -qF 'moves' <<<"${n}" || { echo "NOTES lack the moving-tag warning for the latest tag" >&2; exit 1; }
@@ -268,7 +275,7 @@ assert_eq "$(dq '[.spec.template.spec.containers[0].env[] | select(.name == "PGP
 
 t external_notes_no_store_warning
 n="$(notes --set secrets.existingSecret=s "${EXT[@]}" --set image.tag=1)"
-if grep -qF 'store' <<<"${n}"; then echo "NOTES mention a store password in external mode" >&2; exit 1; fi
+if grep -qE "store's password|bundled store" <<<"${n}"; then echo "NOTES mention a store password in external mode" >&2; exit 1; fi
 
 t schema_rejects
 assert_fails "store.mode" --set store.mode=bogus
