@@ -89,7 +89,7 @@ public sealed class SlackCardStoreLiveTests
     {
         await WithStoreAsync(async (connection, _, _, ct) =>
         {
-            Assert.Equal("255", await ScalarAsync(connection, "SELECT max(version) FROM darling_schema_version", ct));
+            Assert.Equal(StorageVersion.SchemaVersion.ToString(System.Globalization.CultureInfo.InvariantCulture), await ScalarAsync(connection, "SELECT max(version) FROM darling_schema_version", ct));
             Assert.Equal("True", await ScalarAsync(connection, "SELECT to_regclass('config.investigation_slack_posts') IS NOT NULL", ct));
             Assert.Equal("SELECT", await ScalarAsync(connection,
                 "SELECT string_agg(privilege_type, ',') FROM information_schema.role_table_grants WHERE table_schema = 'config' AND table_name = 'investigation_slack_posts' AND grantee = 'admin'", ct) ?? "SELECT");

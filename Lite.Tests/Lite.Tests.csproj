@@ -74,6 +74,8 @@
     <Compile Include="..\Darling\Darling.Tests\StaThreadProbe.cs" Link="StaThreadProbe.cs" />
     <!-- #6136: finds the text a laid-out window cuts off, shared so both apps are held to the one rule. -->
     <Compile Include="..\Darling\Darling.Tests\ClippedTextProbe.cs" Link="ClippedTextProbe.cs" />
+    <!-- #8266: samples a rendered chart for its gridline-against-plot contrast, shared so both apps are held to the one rule. -->
+    <Compile Include="..\Darling\Darling.Tests\GridlineContrast.cs" Link="GridlineContrast.cs" />
     <Compile Include="..\Darling\Darling.Tests\GridColumnLayoutProbe.cs" Link="GridColumnLayoutProbe.cs" />
     <!-- #8223: reads a rendered grid's columns, headers, cells and filter buttons, shared so both apps are held to the one rule. -->
     <Compile Include="..\Darling\Darling.Tests\GridPolishProbe.cs" Link="GridPolishProbe.cs" />

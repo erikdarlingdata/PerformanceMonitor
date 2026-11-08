@@ -39,9 +39,9 @@ public sealed class SlackRequestThreadProbeTests
         Assert.True(threads >= 0, "the probe has a hasSlackBotThreads sentinel");
         Assert.True(cards >= 0, "the probe has a hasSlackCards sentinel (#7658)");
         Assert.True(chat >= 0, "the probe has a hasChatRequests sentinel (#7659)");
-        Assert.Equal(parameters.Length - 2, chat);
-        Assert.Equal(parameters.Length - 3, cards);
-        Assert.Equal(parameters.Length - 4, threads);
+        Assert.Equal(parameters.Length - 3, chat);
+        Assert.Equal(parameters.Length - 4, cards);
+        Assert.Equal(parameters.Length - 5, threads);
 
         /* Every sentinel present maps to the build's version; the sentinels above V254 off, the chat requests' message table is the newest one present. */
         var allTrue = Enumerable.Repeat((object)true, parameters.Length).ToArray();
