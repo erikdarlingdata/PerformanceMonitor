@@ -59,7 +59,7 @@ public static partial class PgTargetAdvice
         Investigation:
             "auto_explain captured a statement (identified by query_id) under two different plan hashes within the window, " +
             "and pg_stat_statements' per-call mean execution time stepped up across the moment the second plan first " +
-            "appeared — mean after the flip against mean before it, over the stored deltas on each side. Either reading " +
+            "appeared: mean after the flip against mean before it, over the stored deltas on each side. Either reading " +
             "alone is not a regression: a plan can change without cost, and a mean can rise with a busier hour; the two " +
             "together at the same moment are. Every bar the step was graded on (the ratio, the absolute per-call delta, the " +
             "call floor on each side) is chosen, not measured (threshold_lineage = 0). A plan that was never captured is " +
@@ -70,7 +70,7 @@ public static partial class PgTargetAdvice
         Remediation:
             "get_pg_plans for the queryid shows both captured plans and when each first appeared; get_pg_top_queries " +
             "shows the statement's text and its neighbours. PostgreSQL has no plan cache to force the old plan back into, " +
-            "so the levers are the inputs the planner chose from: fresh statistics (ANALYZE the tables the plan reads — " +
+            "so the levers are the inputs the planner chose from: fresh statistics (ANALYZE the tables the plan reads, " +
             "one sample read of each), a larger statistics target on the column whose estimate flipped the plan (more " +
             "ANALYZE time and statistics space on that column), plan_cache_mode = force_custom_plan for a prepared " +
             "statement whose generic plan is the bad one (planning cost on every execution), or a rewrite that takes the " +
@@ -83,7 +83,7 @@ public static partial class PgTargetAdvice
             "predicate column of that statement whose pg_stats top_value_frequency says one value covers a large fraction " +
             "of the table. That is the PostgreSQL reading of parameter sensitivity: a parameter equal to the common value " +
             "and one equal to anything else are two different selectivities, and the planner is right to choose two " +
-            "plans — the cost is that one of them is wrong for the other's parameters. This is a convention-class card " +
+            "plans, the cost is that one of them is wrong for the other's parameters. This is a convention-class card " +
             "(it names a mechanism, not a fire) and sits under the story threshold unless PG_PLAN_REGRESSION fired on the " +
             "same statement in the window. Both bars (the hash count, the skew frequency) are chosen, not measured " +
             "(threshold_lineage = 0). queryid is re-keyed by a major upgrade, so occurrence history restarts there.",
@@ -92,8 +92,8 @@ public static partial class PgTargetAdvice
             "often the predicate was evaluated and where the planner's estimate was worst; get_pg_plans lists every plan " +
             "hash captured for the statement. The levers: a larger statistics target on the skewed column (a longer " +
             "most-common-values list, at ANALYZE time and statistics-space cost), plan_cache_mode = force_custom_plan for " +
-            "a prepared statement (re-planned per call — planning time on every execution), or two statements — one for " +
-            "the common value, one for the rest — so each gets the plan its selectivity deserves (an application change). " +
+            "a prepared statement (re-planned per call, planning time on every execution), or two statements, one for " +
+            "the common value, one for the rest, so each gets the plan its selectivity deserves (an application change). " +
             "No index is proposed here: the evidence is about estimates, not access paths.");
 
     /// <summary>
@@ -123,9 +123,9 @@ public static partial class PgTargetAdvice
             "auto_explain captured plans in which a Seq Scan node over a named relation carries a Filter, and for the same " +
             "statement (query_id) pg_qualstats recorded a predicate on that relation that filtered nine rows in ten or more " +
             "of the rows it evaluated; pg_table_bloat_stats puts the relation's heap at a quarter gigabyte or more; and the " +
-            "plan was captured at least three times per observed hour. Any one of those alone is not a finding — a " +
+            "plan was captured at least three times per observed hour. Any one of those alone is not a finding, a " +
             "sequential scan is the right plan for a small relation, an unselective predicate, or a statement that runs " +
-            "once a day — so the card fires only on all three, and even then as an advisory: it does not know the " +
+            "once a day, so the card fires only on all three, and even then as an advisory: it does not know the " +
             "relation's write rate or the storage budget, which decide whether an access path would pay for itself. " +
             "The captures-per-hour figure is a LOWER BOUND: auto_explain logs only executions slower than " +
             "auto_explain.log_min_duration, so every scan that finished under the threshold is invisible here. Every bar " +
@@ -158,7 +158,7 @@ public static partial class PgTargetAdvice
                 Remediation =
                     "Loading auto_explain needs shared_preload_libraries to name it (a restart) and auto_explain.log_min_duration " +
                     "set to the threshold above which plans are logged; the counter-objective is log volume and the per-statement " +
-                    "cost of emitting a plan, which is why the threshold exists — and on a managed platform without a readable " +
+                    "cost of emitting a plan, which is why the threshold exists, and on a managed platform without a readable " +
                     "server log (Aurora, RDS) the capture is not available at all, so this card stays as it is there. " +
                     "get_pg_plan_capture_readiness lists every facet with its remedy.",
             };
@@ -178,7 +178,7 @@ public static partial class PgTargetAdvice
 
         var inv = new StringBuilder();
         inv.Append(CultureInfo.InvariantCulture,
-            $"Statement queryid {queryId}: mean execution time per call stepped from {before:0.#} ms to {after:0.#} ms ({ratio:0.#}×, +{after - before:0.#} ms per call) at the moment its captured plan changed");
+            $"Statement queryid {queryId}: mean execution time per call stepped from {before:0.#} ms to {after:0.#} ms ({FactAdvice.RatioText(ratio)}×, +{after - before:0.#} ms per call) at the moment its captured plan changed");
         /* FormatAge is the sessions family's (PgTargetAdvice.Sessions.cs) — one rendering of "how long ago" per class. */
         if (hasFlipAge)
             inv.Append(CultureInfo.InvariantCulture, $" ({FormatAge(flipAgeS)} before the window's end)");
@@ -203,11 +203,11 @@ public static partial class PgTargetAdvice
             var keyedAnomaly = anomaly.Metadata.GetValueOrDefault(PgTargetScorer.PlanAnomalySeriesKey) >= 1.0;
             var peak = anomaly.Metadata.GetValueOrDefault("peak_mean_ms");
             if (!keyedAnomaly)
-                inv.Append(CultureInfo.InvariantCulture, $" ANOMALY_PG_PLAN_REGRESSION co-fired: the server-wide per-call mean reached {peak:0.#} ms against this hour's baseline — a blunt corroboration, used because no flipped statement has its own history yet.");
+                inv.Append(CultureInfo.InvariantCulture, $" ANOMALY_PG_PLAN_REGRESSION co-fired: the server-wide per-call mean reached {peak:0.#} ms against this hour's baseline, a blunt corroboration, used because no flipped statement has its own history yet.");
             else if (PgTargetScorer.PlanRegressionAnomalyCorroborates(factsByKey))
-                inv.Append(CultureInfo.InvariantCulture, $" ANOMALY_PG_PLAN_REGRESSION co-fired for this statement: its own per-call mean reached {peak:0.#} ms against its hour-of-week routine — the statistical reading of the same step.");
+                inv.Append(CultureInfo.InvariantCulture, $" ANOMALY_PG_PLAN_REGRESSION co-fired for this statement: its own per-call mean reached {peak:0.#} ms against its hour-of-week routine, the statistical reading of the same step.");
             else
-                inv.Append(CultureInfo.InvariantCulture, $" ANOMALY_PG_PLAN_REGRESSION fired for a DIFFERENT flipped statement (queryid {anomaly.ObjectName}) at {peak:0.#} ms per call against its own routine — more than one plan changed in this window; that deviation is not evidence about this statement.");
+                inv.Append(CultureInfo.InvariantCulture, $" ANOMALY_PG_PLAN_REGRESSION fired for a DIFFERENT flipped statement (queryid {anomaly.ObjectName}) at {peak:0.#} ms per call against its own routine: more than one plan changed in this window; that deviation is not evidence about this statement.");
         }
         if (PgTargetScorer.SameStatementFired(factsByKey, PgTargetFactKeys.PlanRegression, PgTargetFactKeys.ParameterSensitivity)
             && factsByKey.TryGetValue(PgTargetFactKeys.ParameterSensitivity, out var sensitivity))
@@ -216,13 +216,13 @@ public static partial class PgTargetAdvice
 
         var rem = new StringBuilder();
         rem.Append(CultureInfo.InvariantCulture, $"get_pg_plans for queryid {queryId} shows both plans and when each first appeared; get_pg_top_queries has the statement's text. ");
-        rem.Append(CultureInfo.InvariantCulture, $"The step is {after - before:0.#} ms on every call, {callsAfter:N0} calls since the flip — ");
+        rem.Append(CultureInfo.InvariantCulture, $"The step is {after - before:0.#} ms on every call, {callsAfter:N0} calls since the flip: ");
         rem.Append("PostgreSQL has no plan cache to force the earlier plan back into, so the levers are the planner's inputs: ANALYZE the tables the plan reads (one sample read each) if statistics went stale; a larger statistics target on the column whose estimate hinged the plan (more ANALYZE time and statistics space on it); plan_cache_mode = force_custom_plan when the statement is prepared and its generic plan is the bad one (planning time on every execution); or a rewrite that takes the flipping predicate out of the hinge (an application change).");
 
         return s_planRegressionStatic with
         {
             Headline = string.Format(CultureInfo.InvariantCulture,
-                "Statement queryid {0} got {1:0.#}× slower per call when its plan changed ({2:0.#} ms → {3:0.#} ms)", queryId, ratio, before, after),
+                "Statement queryid {0} got {1}× slower per call when its plan changed ({2:0.#} ms → {3:0.#} ms)", queryId, FactAdvice.RatioText(ratio), before, after),
             Investigation = inv.ToString(),
             Remediation = rem.ToString(),
         };
@@ -242,10 +242,10 @@ public static partial class PgTargetAdvice
                 Headline = string.Format(CultureInfo.InvariantCulture,
                     "Statement queryid {0} was captured under {1:0} plans, but its predicate columns cannot be read", queryId, hashes),
                 Investigation = string.Format(CultureInfo.InvariantCulture,
-                    "Statement queryid {0} was captured under {1:0} distinct plan hashes in the window — the plan-variance half of parameter sensitivity. ", queryId, hashes)
+                    "Statement queryid {0} was captured under {1:0} distinct plan hashes in the window: the plan-variance half of parameter sensitivity. ", queryId, hashes)
                     + (qualstatsAbsent
                         ? "The predicate half cannot be read: pg_extension_availability reports pg_qualstats is not installed in any database, so which columns the statement filters on, and whether any is skewed, is unknown. "
-                        : "The predicate half cannot be read: pg_qualstats is installed but recorded no predicate for this statement — its default sample_rate is 1 / max_connections, so a statement can run for hours and never be sampled. ")
+                        : "The predicate half cannot be read: pg_qualstats is installed but recorded no predicate for this statement, its default sample_rate is 1 / max_connections, so a statement can run for hours and never be sampled. ")
                     + "Nothing is graded off this fact; the variance alone is a mechanism without its evidence.",
                 Remediation = qualstatsAbsent
                     ? "Installing pg_qualstats (it must be in shared_preload_libraries, then created in the database the statement runs in) records which predicates are evaluated and how selectively; its counter-objective is a sampled per-query overhead governed by pg_qualstats.sample_rate. get_pg_extensions shows the state per database; get_pg_plans lists the plan hashes."
@@ -271,18 +271,18 @@ public static partial class PgTargetAdvice
                 : string.Format(CultureInfo.InvariantCulture, ", with {0:N0} distinct values", nDistinct));
         inv.Append('.');
         if (hasError)
-            inv.Append(CultureInfo.InvariantCulture, $" The planner's worst row estimate on that predicate was off by {errorRatio:0.#}× (pg_qualstats' worst_estimate_error_ratio).");
+            inv.Append(CultureInfo.InvariantCulture, $" The planner's worst row estimate on that predicate was off by {FactAdvice.RatioText(errorRatio)}× (pg_qualstats' worst_estimate_error_ratio).");
         inv.Append(" A parameter equal to the common value and one equal to anything else are two different selectivities, so the planner is right to pick two plans; the cost is that each is wrong for the other's parameters.");
         if (PgTargetScorer.SameStatementFired(factsByKey, PgTargetFactKeys.ParameterSensitivity, PgTargetFactKeys.PlanRegression)
             && factsByKey.TryGetValue(PgTargetFactKeys.PlanRegression, out var regression))
             inv.Append(CultureInfo.InvariantCulture, $" PG_PLAN_REGRESSION fired on this statement in the same window ({regression.Metadata.GetValueOrDefault(PgTargetScorer.PlanMeanMsBeforeKey):0.#} ms → {regression.Metadata.GetValueOrDefault(PgTargetScorer.PlanMeanMsAfterKey):0.#} ms per call): the variance cost something, which is what lifts this card over the story threshold.");
         else
-            inv.Append(" No regression fired on this statement in the window, so this is a mechanism named, not a cost measured — it sits under the story threshold.");
+            inv.Append(" No regression fired on this statement in the window, so this is a mechanism named, not a cost measured: it sits under the story threshold.");
         inv.Append(" The hash count and the skew frequency it was graded on are chosen, not measured (threshold_lineage = 0). queryid is re-keyed by a major upgrade, so occurrence history restarts there.");
 
         var rem = new StringBuilder();
         rem.Append("get_pg_column_stats shows the column's top_value_frequency and n_distinct; get_pg_predicate_stats shows the predicate's evaluations and estimate error; get_pg_plans lists every plan hash captured for the statement; get_pg_top_queries has its text. ");
-        rem.Append(CultureInfo.InvariantCulture, $"With one value at {frequency * 100:0}% of the table, the levers are: a larger statistics target on that column so the planner's most-common-values list holds the skew (more ANALYZE time and statistics space on the column); plan_cache_mode = force_custom_plan for a prepared statement (re-planned per call — planning time on every execution); or two statements, one for the common value and one for the rest, so each gets the plan its selectivity deserves (an application change). No index is proposed here: the evidence is about estimates, not access paths.");
+        rem.Append(CultureInfo.InvariantCulture, $"With one value at {frequency * 100:0}% of the table, the levers are: a larger statistics target on that column so the planner's most-common-values list holds the skew (more ANALYZE time and statistics space on the column); plan_cache_mode = force_custom_plan for a prepared statement (re-planned per call, planning time on every execution); or two statements, one for the common value and one for the rest, so each gets the plan its selectivity deserves (an application change). No index is proposed here: the evidence is about estimates, not access paths.");
 
         return s_parameterSensitivityStatic with
         {
@@ -335,7 +335,7 @@ public static partial class PgTargetAdvice
             else
                 inv.Append("; this is the one beyond it.");
             if (blind > 0)
-                inv.Append(CultureInfo.InvariantCulture, $" {blind:0} had no trustworthy own history yet and were not graded — never judged against the server's mean as a stand-in.");
+                inv.Append(CultureInfo.InvariantCulture, $" {blind:0} had no trustworthy own history yet and were not graded, never judged against the server's mean as a stand-in.");
             inv.Append(" The set is what auto_explain logged: a statement whose plan changed without a captured plan is not in it.");
         }
 
@@ -361,7 +361,7 @@ public static partial class PgTargetAdvice
                     "slow minute does not fire it, and a statement with no trustworthy history of its own is recorded and " +
                     "never graded. The fleet read behind this shape: across fifty PostgreSQL clusters the SERVER-WIDE " +
                     "per-call mean never reached three times its hour-of-week normal in a week, while a single statement's " +
-                    "own series reaches ninety times — a per-statement step dilutes to nothing in a server's mean, so the " +
+                    "own series reaches ninety times, a per-statement step dilutes to nothing in a server's mean, so the " +
                     "deviation is asked of the statement. PG_PLAN_REGRESSION grades what the flip cost per call; this is " +
                     "the statistical reading of the same step, and the two share one story when they name one statement." +
                     s_anomalyHedge,
@@ -379,8 +379,8 @@ public static partial class PgTargetAdvice
                 "judged against this server's hour-of-week baseline of the same quantity over the last 30 days. Both the peak " +
                 "and the window's mean had to clear the bar, so one slow minute does not fire it. This is the FALLBACK " +
                 "reading, used because no statement whose plan changed in this window has enough of its own history to be " +
-                "judged against: it says the server's statements got slower per call than this hour usually sees — not " +
-                "which one — and a fleet read of fifty clusters found this series blunt (a single statement's step barely " +
+                "judged against: it says the server's statements got slower per call than this hour usually sees, not " +
+                "which one, and a fleet read of fifty clusters found this series blunt (a single statement's step barely " +
                 "moves it), so treat it as a pointer, not a verdict. PG_PLAN_REGRESSION names the statement whose plan " +
                 "flipped, and this anomaly folds into that story when both fire; alone it is as likely a heavier parameter " +
                 "mix or a colder cache as a plan change." + s_anomalyHedge,
@@ -417,7 +417,7 @@ public static partial class PgTargetAdvice
                     "Loading auto_explain needs shared_preload_libraries to name it (a restart), auto_explain.log_min_duration set " +
                     "to the threshold above which plans are logged, and auto_explain.log_format = json for the capture to parse; " +
                     "auto_explain.log_analyze adds Actual Rows and Rows Removed by Filter to each node at the cost of timing every " +
-                    "logged execution. The counter-objective is log volume and the per-statement cost of emitting a plan — and on a " +
+                    "logged execution. The counter-objective is log volume and the per-statement cost of emitting a plan, and on a " +
                     "managed platform without a readable server log the capture is not available at all. " +
                     "get_pg_plan_capture_readiness lists every facet with its remedy.",
             };
@@ -443,7 +443,7 @@ public static partial class PgTargetAdvice
            side, then the qualstats witness), how big the relation is, then the gates and the co-fires. */
         var inv = new StringBuilder();
         inv.Append(CultureInfo.InvariantCulture,
-            $"Statement queryid {queryId} was captured {captures ?? 0:0} times in {observedHours:0.#} observed hours ({perHour ?? 0:0.#} per hour — a lower bound: only executions slower than auto_explain.log_min_duration are logged) with a Seq Scan over {relation} carrying a Filter");
+            $"Statement queryid {queryId} was captured {captures ?? 0:0} times in {observedHours:0.#} observed hours ({perHour ?? 0:0.#} per hour, a lower bound: only executions slower than auto_explain.log_min_duration are logged) with a Seq Scan over {relation} carrying a Filter");
         inv.Append(removedShare is { } share
             ? string.Format(CultureInfo.InvariantCulture, "; across those captures the filter removed {0:0.#}% of the rows the scan read (Rows Removed by Filter against Actual Rows).", share * 100)
             : "; the captured plans carry no Actual Rows (auto_explain.log_analyze is off), so how many rows the filter removed is not known from the plan.");
@@ -456,14 +456,14 @@ public static partial class PgTargetAdvice
                 inv.Append(CultureInfo.InvariantCulture, $" (columns: {columns})");
             inv.Append(CultureInfo.InvariantCulture, $" filtered {sel * 100:0.#}% of the rows it evaluated ({rowsFiltered ?? 0:N0} of {rowsEvaluated ?? 0:N0}");
             if (sampleRate is { } rate && rate < 1)
-                inv.Append(CultureInfo.InvariantCulture, $", sampled at {rate:0.####} — counts are of the sample, not scaled");
+                inv.Append(CultureInfo.InvariantCulture, $", sampled at {rate:0.####}: counts are of the sample, not scaled");
             inv.Append(')');
             if (estimateError is { } err)
-                inv.Append(CultureInfo.InvariantCulture, $"; the planner's worst row estimate on it was off by {err:0.#}×");
+                inv.Append(CultureInfo.InvariantCulture, $"; the planner's worst row estimate on it was off by {FactAdvice.RatioText(err)}×");
             inv.Append('.');
         }
         else
-            inv.Append(" pg_qualstats recorded no predicate for this statement on the relation — its default sample_rate is 1 / max_connections, so a statement can run for hours and never be sampled — and the selectivity gate cannot pass on an unknown.");
+            inv.Append(" pg_qualstats recorded no predicate for this statement on the relation: its default sample_rate is 1 / max_connections, so a statement can run for hours and never be sampled, and the selectivity gate cannot pass on an unknown.");
         inv.Append(heapBytes is { } heap
             ? string.Format(CultureInfo.InvariantCulture, " The relation's heap is {0} (pg_table_bloat_stats, newest sample{1}).", KnobBytes(heap),
                 relationsNamed is > 1 ? string.Format(CultureInfo.InvariantCulture, "; {0:0} relations share the name across databases or schemas and the largest is stated", relationsNamed) : string.Empty)
@@ -472,7 +472,7 @@ public static partial class PgTargetAdvice
         if (!qualstatsAbsent)
         {
             inv.Append(cleared
-                ? string.Format(CultureInfo.InvariantCulture, " All three gates hold — selective (≥ {0:0}% filtered), large (≥ {1}), recurring (≥ {2:0.#} captures per observed hour) — so this is a recurring selective scan of a large relation, not one slow execution.",
+                ? string.Format(CultureInfo.InvariantCulture, " All three gates hold: selective (≥ {0:0}% filtered), large (≥ {1}), recurring (≥ {2:0.#} captures per observed hour), so this is a recurring selective scan of a large relation, not one slow execution.",
                     PgTargetScorer.SeqScanSelectiveFraction * 100, KnobBytes(PgTargetScorer.SeqScanLargeRelationBytes), PgTargetScorer.SeqScanMinCapturesPerHour)
                 : string.Format(CultureInfo.InvariantCulture, " The shape is under this card's bars (selective ≥ {0:0}% filtered, large ≥ {1}, recurring ≥ {2:0.#} captures per observed hour){3}; it is shown, not graded.",
                     PgTargetScorer.SeqScanSelectiveFraction * 100, KnobBytes(PgTargetScorer.SeqScanLargeRelationBytes), PgTargetScorer.SeqScanMinCapturesPerHour,
@@ -506,7 +506,7 @@ public static partial class PgTargetAdvice
         rem.Append(CultureInfo.InvariantCulture, $"get_pg_plans for queryid {queryId} shows the captured plan with the Seq Scan node and its Filter (literals redacted); get_pg_predicate_stats shows the predicate columns, their evaluations and estimate error; get_pg_top_queries has the statement's text, calls and mean time; get_pg_table_bloat has {relation}'s size and dead-tuple share. ");
         rem.Append(CultureInfo.InvariantCulture, $"The questions before any access path: is the predicate stable (does the statement always filter {relation} on {(columns ?? "these columns")}, or on several)? is {relation} written often (every insert, update and delete would maintain an index on it)? would the storage and that write cost be paid for by the reads saved at {perHour ?? 0:0.#}+ scans per hour? ");
         if (qualstatsAbsent)
-            rem.Append("Installing pg_qualstats (it must be in shared_preload_libraries, then created in the database the statement runs in) records which predicates are evaluated and how selectively — the witness this card needs before it names a column; its counter-objective is a sampled per-query overhead governed by pg_qualstats.sample_rate. get_pg_extensions shows the state per database.");
+            rem.Append("Installing pg_qualstats (it must be in shared_preload_libraries, then created in the database the statement runs in) records which predicates are evaluated and how selectively: the witness this card needs before it names a column; its counter-objective is a sampled per-query overhead governed by pg_qualstats.sample_rate. get_pg_extensions shows the state per database.");
         else if (cleared && columns is not null)
         {
             /* The suggestion LAST, as corroboration of what the measured-slow plan and the sampled predicate already said
@@ -515,18 +515,18 @@ public static partial class PgTargetAdvice
                pg_qualstats' own, never read off the plan's redacted Filter. The maintainer's 2026-09-20 discipline:
                impact is an ESTIMATE from the plan's numbers, never a promised improvement; counts are labelled sampled
                and captures bounded by the log threshold; "a new index can cause regressions elsewhere — test it". */
-            rem.Append(CultureInfo.InvariantCulture, $"If the answers favour it, the candidate the evidence supports is CREATE INDEX CONCURRENTLY ON {relation} ({columns}); — columns in pg_qualstats' order of selectivity, which is the order to verify against the statement's text before running it. ");
-            rem.Append(CultureInfo.InvariantCulture, $"A new index can cause regressions elsewhere — plan changes on other statements that read {relation}, write amplification on every insert, update and delete to it, and storage — so test it against the workload before it reaches production. ");
-            rem.Append(CultureInfo.InvariantCulture, $"Its cost: every insert, update and delete on {relation} maintains it from then on; storage in proportion to the relation's row count and the key width (measure with pg_relation_size once built — {(heapBytes is { } hb ? KnobBytes(hb) + " of heap is the upper bound a single-column btree stays well under" : "the heap size is not known here")}); CONCURRENTLY takes no write lock but runs longer, cannot run inside a transaction, and leaves an INVALID index behind if it fails. ");
+            rem.Append(CultureInfo.InvariantCulture, $"If the answers favour it, the candidate the evidence supports is CREATE INDEX CONCURRENTLY ON {relation} ({columns}); the columns are in pg_qualstats' order of selectivity, which is the order to verify against the statement's text before running it. ");
+            rem.Append(CultureInfo.InvariantCulture, $"A new index can cause regressions elsewhere: plan changes on other statements that read {relation}, write amplification on every insert, update and delete to it, and storage, so test it against the workload before it reaches production. ");
+            rem.Append(CultureInfo.InvariantCulture, $"Its cost: every insert, update and delete on {relation} maintains it from then on; storage in proportion to the relation's row count and the key width (measure with pg_relation_size once built, {(heapBytes is { } hb ? KnobBytes(hb) + " of heap is the upper bound a single-column btree stays well under" : "the heap size is not known here")}); CONCURRENTLY takes no write lock but runs longer, cannot run inside a transaction, and leaves an INVALID index behind if it fails. ");
             rem.Append(CultureInfo.InvariantCulture, $"What it might save is an ESTIMATE from the plan's own numbers, not a promise: the captured scans read the whole heap to keep {(1 - (selectivity ?? 0)) * 100:0.#}% of the rows evaluated, and the predicate figures are pg_qualstats' SAMPLE (sample_rate {sampleRate ?? 1:0.####}), not the full count. ");
             if (estimateError is { } e && e > 1)
-                rem.Append(CultureInfo.InvariantCulture, $"The planner's estimate on the predicate was off by {e:0.#}×, so ANALYZE {relation} first (one sample read) — an index built on a misjudged column may not be chosen. ");
+                rem.Append(CultureInfo.InvariantCulture, $"The planner's estimate on the predicate was off by {FactAdvice.RatioText(e)}×, so ANALYZE {relation} first (one sample read): an index built on a misjudged column may not be chosen. ");
             rem.Append("Only executions slower than auto_explain.log_min_duration were captured, so the scan rate above is the floor of what the scan costs, not its size.");
         }
         else if (cleared)
             rem.Append("No index is named: the predicate columns are not known here (pg_qualstats recorded no predicate for this statement on the relation), and a column read off the plan's redacted Filter would be a guess. get_pg_predicate_stats after raising pg_qualstats.sample_rate, or the statement's text from get_pg_top_queries, names them.");
         else
-            rem.Append("No index is named: the shape is under this card's bars, so the evidence does not yet support one — the scan may be the right plan for this relation and predicate. Watch the rate and the selectivity; if the relation grows or the statement's calls rise, the card grades it.");
+            rem.Append("No index is named: the shape is under this card's bars, so the evidence does not yet support one, the scan may be the right plan for this relation and predicate. Watch the rate and the selectivity; if the relation grows or the statement's calls rise, the card grades it.");
 
         var headline = qualstatsAbsent
             ? string.Format(CultureInfo.InvariantCulture, "Statement queryid {0} scans {1} sequentially in captured plans, but the predicate's selectivity cannot be read: pg_qualstats is not installed", queryId, relation)

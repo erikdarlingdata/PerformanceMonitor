@@ -33,33 +33,33 @@ public static partial class PgTargetAdvice
         Headline: "The configured memory worst case exceeds this host's memory",
         Investigation:
             "PostgreSQL's per-backend allocation model, summed from the latest pg_server_config snapshot: shared_buffers " +
-            "once, plus max_connections × work_mem × (1 + max_parallel_workers_per_gather) — every backend may run one sort " +
-            "or hash at work_mem and each parallel worker another — plus autovacuum_max_workers × maintenance_work_mem " +
+            "once, plus max_connections × work_mem × (1 + max_parallel_workers_per_gather), where every backend may run one sort " +
+            "or hash at work_mem and each parallel worker another, plus autovacuum_max_workers × maintenance_work_mem " +
             "(autovacuum_work_mem when set), plus wal_buffers; measured against the host's memory_total_bytes from " +
-            "pg_cpu_utilization (AWS Performance Insights, Aurora only — a stock target has no host-memory source and " +
+            "pg_cpu_utilization (AWS Performance Insights, Aurora only, a stock target has no host-memory source and " +
             "this check reads unavailable there). The backend term that is graded uses the window's peak " +
             "pg_database_stats.numbackends (clamped to max_connections) whenever an instant sampled it, and the all-slots " +
             "figure is stated beside it; with no sampled backend count the configured permission is what is graded, and " +
             "the card says so. work_mem is a per-operation budget, not a per-connection allocation, so " +
             "the sum is a CEILING the workload may never approach: at or past 1.0× the configuration CAN exceed physical " +
             "memory if every backend spills once. That is arithmetic (engine-defined), which is why the card is advisory " +
-            "alone and reaches the incident line only when a workload co-fire says it is being felt — the host's " +
+            "alone and reaches the incident line only when a workload co-fire says it is being felt: the host's " +
             "reclaimable memory measurably short (PG_HOST_MEMORY_PRESSURE) or sorts already spilling (PG_TEMP_SPILL). " +
             "get_analysis_facts source=pg_memory carries every term in bytes.",
         Remediation:
             "Decide which term to shrink, and name what it costs. Raising work_mem globally is the classic overcommit path: " +
             "it multiplies by max_connections and by parallel workers, so set it per role or per session for the sorts " +
-            "that need it and keep the global value modest — the counter-objective is that a smaller global work_mem spills " +
+            "that need it and keep the global value modest, the counter-objective is that a smaller global work_mem spills " +
             "more sorts and hashes to temp files (pg_temp). Fewer max_connections behind a pooler shrinks the same term " +
-            "directly — the counter-objective is that arrivals above the pool queue in the application. A smaller " +
-            "shared_buffers shrinks the fixed term — the counter-objective is cache hits handed to the OS page cache. On a " +
+            "directly: the counter-objective is that arrivals above the pool queue in the application. A smaller " +
+            "shared_buffers shrinks the fixed term: the counter-objective is cache hits handed to the OS page cache. On a " +
             "Serverless instance size the sum to the MINIMUM capacity it scales down to, because that is the box the " +
             "configuration must fit when the instance is smallest.");
 
     private static readonly AdviceBlock s_hostMemoryPressureStatic = new(
         Headline: "The host's reclaimable memory is measurably short (Aurora)",
         Investigation:
-            "The OS's reclaimable share — (memory_free_bytes + memory_cached_bytes) / memory_total_bytes from " +
+            "The OS's reclaimable share, (memory_free_bytes + memory_cached_bytes) / memory_total_bytes from " +
             "pg_cpu_utilization's row (AWS Performance Insights os.memory.*, collected for Aurora targets only), read " +
             "minute by minute over the window and graded at its worst SUSTAINED point: the lowest share the host held for " +
             "three consecutive one-minute samples, so a single dip while a maintenance job ran never pages. The 10 % / 3 % " +
@@ -68,7 +68,7 @@ public static partial class PgTargetAdvice
         Remediation:
             "Read CONFIG_PG_MEMORY_OVERCOMMIT beside this: if the configured worst case exceeds the host, the shortage was " +
             "predicted and the terms to shrink are named there. If it does not, the memory is going to something the " +
-            "configuration did not budget — a long-running statement holding a large hash (get_pg_top_queries), or " +
+            "configuration did not budget: a long-running statement holding a large hash (get_pg_top_queries), or " +
             "maintenance running with many autovacuum workers at once. A larger instance class or a higher minimum " +
             "Serverless capacity buys memory at cost and leaves the allocation that needs it in place.");
 
@@ -117,16 +117,16 @@ public static partial class PgTargetAdvice
             ? $"The worst-case memory at the window's peak of {Num(peak)} backends is {KnobBytes(graded)}"
             : $"The configured memory worst case is {KnobBytes(worst)}";
         var headline = exceeds
-            ? $"{subject} — {Ratio(ratio)} {headlineHost}" + (critical ? " — more than double" : string.Empty)
-            : $"{subject} — {Ratio(ratio)} {headlineHost}, within the box";
+            ? $"{subject}: {Ratio(ratio)} {headlineHost}" + (critical ? ": more than double" : string.Empty)
+            : $"{subject}: {Ratio(ratio)} {headlineHost}, within the box";
 
         var coFire = exceeds
             ? (pressureFired, spillFired) switch
             {
-                (true, true) => " Both workload co-fires are present — the host's reclaimable memory is measurably short AND sorts are spilling past work_mem — so the arithmetic is being felt and the card is past the incident line (D5).",
-                (true, false) => " PG_HOST_MEMORY_PRESSURE co-fires — the host's reclaimable memory is measurably short — so the arithmetic is being felt and the card is past the incident line (D5).",
-                (false, true) => " PG_TEMP_SPILL co-fires — sorts and hashes are already spilling past work_mem, so the per-backend term is real — and the card is past the incident line (D5).",
-                _ => " No workload co-fire in the window: the host's reclaimable memory was not measurably short and sorts were not spilling, so this stands as an advisory (0.4) — the sum is a ceiling the workload has not approached (D5).",
+                (true, true) => " Both workload co-fires are present (the host's reclaimable memory is measurably short AND sorts are spilling past work_mem), so the arithmetic is being felt and the card is past the incident line (D5).",
+                (true, false) => " PG_HOST_MEMORY_PRESSURE co-fires (the host's reclaimable memory is measurably short), so the arithmetic is being felt and the card is past the incident line (D5).",
+                (false, true) => " PG_TEMP_SPILL co-fires (sorts and hashes are already spilling past work_mem, so the per-backend term is real), and the card is past the incident line (D5).",
+                _ => " No workload co-fire in the window: the host's reclaimable memory was not measurably short and sorts were not spilling, so this stands as an advisory (0.4), the sum is a ceiling the workload has not approached (D5).",
             }
             : string.Empty;
 
@@ -137,7 +137,7 @@ public static partial class PgTargetAdvice
                 $"{TermsSentence(sum)} " + (observed ? ObservedSentence(sum, ratio, graded, hostClause) : ConfiguredOnlySentence(worst, ratio, hostClause)) +
                 (exceeds
                     ? (observed ? " At or past 1.0× the backends this window actually ran CAN exceed physical memory if each spills once" : " At or past 1.0× the configuration CAN exceed physical memory if every backend spills once")
-                      + " — PostgreSQL's own per-backend allocation model, arithmetic rather than a judgment (engine-defined)."
+                      + ": PostgreSQL's own per-backend allocation model, arithmetic rather than a judgment (engine-defined)."
                     : " Under 1.0× the model fits the box and this fact is context.")
                 + (critical ? " The 2× band is measured against the dogfood fleet (50 Aurora clusters, 7 days, 2026-09-29): no cluster came near the line, so the bar sits in the measured empty interval (threshold_lineage = 1)." : string.Empty)
                 + " work_mem is a per-sort / per-hash budget, not a per-connection allocation, so the product is a CEILING the workload may never approach."
@@ -164,8 +164,8 @@ public static partial class PgTargetAdvice
             : mc > 0 && peak / mc >= 0.5
                 ? $"a ceiling the window's concurrency approached: peak {Num(peak)} of {Num(mc)}"
                 : $"a ceiling the window's concurrency never approached: peak {Num(peak)} of {Num(mc)}";
-        return $"At the window's peak of {Num(peak)} backends (pg_database_stats.numbackends summed across databases at one instant, over {Num(instants)} sampled instants — the same peak PG_SESSION_SATURATION divides by) the backend term is {KnobBytes(observedBackend)} and the sum is {KnobBytes(graded)}, {Ratio(ratio)} of {hostClause}; that is the ratio graded." +
-               $" The settings permit {Ratio(configuredRatio)} if all max_connections sorted at once — {reach}; stated, not graded.";
+        return $"At the window's peak of {Num(peak)} backends (pg_database_stats.numbackends summed across databases at one instant, over {Num(instants)} sampled instants, the same peak PG_SESSION_SATURATION divides by) the backend term is {KnobBytes(observedBackend)} and the sum is {KnobBytes(graded)}, {Ratio(ratio)} of {hostClause}; that is the ratio graded." +
+               $" The settings permit {Ratio(configuredRatio)} if all max_connections sorted at once: {reach}; stated, not graded.";
     }
 
     /// <summary>Basis 0: no backend level was sampled in the window, so the configured permission is what was graded,
@@ -173,7 +173,7 @@ public static partial class PgTargetAdvice
     private static string ConfiguredOnlySentence(double worst, double ratio, string hostClause)
     {
         return $"The sum, {KnobBytes(worst)}, is {Ratio(ratio)} of {hostClause}." +
-               " No backend count was sampled in the window (pg_database_stats.numbackends carried no value), so this is the configured permission — every max_connections slot sorting at once — and that is what was graded, not the concurrency this server actually reached.";
+               " No backend count was sampled in the window (pg_database_stats.numbackends carried no value), so this is the configured permission (every max_connections slot sorting at once), and that is what was graded, not the concurrency this server actually reached.";
     }
 
     private static string TermsSentence(Fact sum)
@@ -205,8 +205,8 @@ public static partial class PgTargetAdvice
     {
         if (!sum.Metadata.TryGetValue(PgTargetScorer.MemoryEffectiveCacheSizeBytesKey, out var ecs)) return string.Empty;
         return sum.Metadata.GetValueOrDefault(PgTargetScorer.MemoryEffectiveCacheExceedsTotalKey) > 0
-            ? $" effective_cache_size is {KnobBytes(ecs)} on a host reporting {KnobBytes(totalMin)} — a planner assumption larger than the machine is a lie to the planner (engine-defined; stated here, not graded)."
-            : $" effective_cache_size is {KnobBytes(ecs)}, within the host's {KnobBytes(totalMin)} — plausible.";
+            ? $" effective_cache_size is {KnobBytes(ecs)} on a host reporting {KnobBytes(totalMin)}: a planner assumption larger than the machine is a lie to the planner (engine-defined; stated here, not graded)."
+            : $" effective_cache_size is {KnobBytes(ecs)}, within the host's {KnobBytes(totalMin)}: plausible.";
     }
 
     private static string SamplesSentence(Fact sum)
@@ -230,13 +230,13 @@ public static partial class PgTargetAdvice
             ? " The host is measurably short now, so the order is: shrink the term that is actually allocating (work_mem per session, or connections behind a pooler) before anything that costs cache hits."
             : string.Empty;
         var serverlessClause = serverless
-            ? " On this Serverless instance size the sum to the MINIMUM capacity it scales down to — the box the configuration must fit when the instance is smallest — or raise the minimum capacity, at cost for every hour it is provisioned."
+            ? " On this Serverless instance size the sum to the MINIMUM capacity it scales down to (the box the configuration must fit when the instance is smallest), or raise the minimum capacity, at cost for every hour it is provisioned."
             : string.Empty;
 
         return $"Raising work_mem globally is the classic overcommit path: at {KnobBytes(wm)} it multiplies by max_connections {Num(mc)} and by parallel workers. " +
-               "Set it per role or per session for the sorts that need it and keep the global value modest — the counter-objective is that a smaller global work_mem spills more sorts and hashes to temp files (pg_temp). " +
-               $"Fewer max_connections behind a pooler shrinks the same term directly — the counter-objective is that arrivals above the pool queue in the application. " +
-               $"A smaller shared_buffers ({KnobBytes(sb)} now) shrinks the fixed term — the counter-objective is cache hits handed to the OS page cache." +
+               "Set it per role or per session for the sorts that need it and keep the global value modest: the counter-objective is that a smaller global work_mem spills more sorts and hashes to temp files (pg_temp). " +
+               $"Fewer max_connections behind a pooler shrinks the same term directly: the counter-objective is that arrivals above the pool queue in the application. " +
+               $"A smaller shared_buffers ({KnobBytes(sb)} now) shrinks the fixed term: the counter-objective is cache hits handed to the OS page cache." +
                spillCaveat + pressureCaveat + serverlessClause;
     }
 
@@ -254,14 +254,14 @@ public static partial class PgTargetAdvice
             return s_hostMemoryPressureStatic with
             {
                 Headline = noSource
-                    ? "Host memory is not collected for this target — no pressure reading, no composition check"
-                    : "Host memory columns are sparse in this window — no pressure reading, no composition check",
+                    ? "Host memory is not collected for this target: no pressure reading, no composition check"
+                    : "Host memory columns are sparse in this window: no pressure reading, no composition check",
                 Investigation = noSource
                     ? "pg_cpu_utilization has no row for this server in the window. The host's memory reaches the store only through AWS " +
-                      "Performance Insights (Aurora), and core PostgreSQL exposes no OS memory counter in any version — so on a stock target " +
+                      "Performance Insights (Aurora), and core PostgreSQL exposes no OS memory counter in any version, so on a stock target " +
                       "this family is structurally unavailable, stated as such rather than read as \"no pressure\" or measured against a " +
                       "guessed total (the V136 rule)." + sumClause
-                    : $"pg_cpu_utilization has {Num(samples)} rows for this server in the window but only {Num(withMemory)} carry memory_total_bytes — " +
+                    : $"pg_cpu_utilization has {Num(samples)} rows for this server in the window but only {Num(withMemory)} carry memory_total_bytes: " +
                       "fewer than half. Rows written before V136 have the memory columns NULL, and a Performance Insights endpoint that does not " +
                       "publish os.memory.* leaves them NULL truthfully; either way the window is not a memory measurement, and the family is " +
                       "unavailable for it rather than graded on a minority of samples." + sumClause,
@@ -285,26 +285,26 @@ public static partial class PgTargetAdvice
         var overcommitFired = factsByKey.TryGetValue(PgTargetFactKeys.ConfigMemoryOvercommit, out var sum) && sum.BaseSeverity > 0;
 
         var sustainedClause = sustained is { } sus
-            ? $" The worst share held for {Num(sustain)} consecutive samples was {Share(sus)} — the graded figure."
+            ? $" The worst share held for {Num(sustain)} consecutive samples was {Share(sus)}: the graded figure."
             : $" No run of {Num(sustain)} consecutive memory-carrying samples exists in the window, so nothing is graded: a single sample is not pressure.";
         var activeClause = active is { } act ? $" memory_active_bytes peaked at {Share(act)} of total." : string.Empty;
         var rangeClause = totalMax > totalMin ? $" (the instance scaled between {KnobBytes(totalMin)} and {KnobBytes(totalMax)})" : $" ({KnobBytes(totalMin)} total)";
         var overcommitClause = overcommitFired
-            ? " CONFIG_PG_MEMORY_OVERCOMMIT fired in the same window: the configured worst case exceeds this host, and the arithmetic predicted the shortage — the terms to shrink are named on that card."
+            ? " CONFIG_PG_MEMORY_OVERCOMMIT fired in the same window: the configured worst case exceeds this host, and the arithmetic predicted the shortage, the terms to shrink are named on that card."
             : " CONFIG_PG_MEMORY_OVERCOMMIT did not fire: the configured worst case fits this host, so the memory is going to something the configuration did not budget.";
 
         return s_hostMemoryPressureStatic with
         {
             Headline = fired
                 ? $"The host's reclaimable memory fell to {Share(min)} of total and stayed under {Share(PgTargetScorer.HostMemoryReclaimableWarningShare)} for {Num(sustain)} consecutive samples"
-                : $"The host's reclaimable memory reached a low of {Share(min)} of total — not sustained under the {Share(PgTargetScorer.HostMemoryReclaimableWarningShare)} line",
+                : $"The host's reclaimable memory reached a low of {Share(min)} of total, not sustained under the {Share(PgTargetScorer.HostMemoryReclaimableWarningShare)} line",
             Investigation =
                 $"(memory_free_bytes + memory_cached_bytes) / memory_total_bytes from pg_cpu_utilization{rangeClause}: minimum {Share(min)}, mean {Share(mean)} across {Num(withMemory)} of {Num(samples)} samples." +
                 sustainedClause + activeClause +
                 (fired
                     ? $" The {Share(PgTargetScorer.HostMemoryReclaimableWarningShare)} / {Share(PgTargetScorer.HostMemoryReclaimableCriticalShare)} bars and the {Num(sustain)}-sample sustain are measured against the dogfood fleet (50 Aurora clusters, 7 days, 2026-09-29): no cluster came near the line, so the bars sit in the measured empty interval (threshold_lineage = 1)."
                     : " Under the warning line this fact is context: stated so the composition card can read it, and it roots nothing.")
-                + " On Aurora the storage tier makes the OS page cache matter less than on stock, but this is the INSTANCE's memory — what shared_buffers and every work_mem allocation come out of."
+                + " On Aurora the storage tier makes the OS page cache matter less than on stock, but this is the INSTANCE's memory, what shared_buffers and every work_mem allocation come out of."
                 + overcommitClause,
         };
     }

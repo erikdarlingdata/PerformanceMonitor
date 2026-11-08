@@ -867,26 +867,26 @@ public static class FactRemediation
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ApcOwnsIt,
-                $"query_store_stats: plan {target.PlanId} is_forced_plan = true, plan_forcing_type = {state.PlanForcingType} at {Stamp(state.PlanObservedAtUtc)} — automatic plan correction placed this force; a manual force would replace it and remove the engine's revert path"));
+                $"query_store_stats: plan {target.PlanId} is_forced_plan = true, plan_forcing_type = {state.PlanForcingType} at {Stamp(state.PlanObservedAtUtc)}, automatic plan correction placed this force; a manual force would replace it and remove the engine's revert path"));
         }
         else if (apcOnTarget && (Is(apcState, "Verifying") || Is(apcState, "Success")))
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ApcOwnsIt,
                 $"plan_correction: recommendation state {apcState}{Reason(apcReason)} with last_good_plan_id = {target.PlanId}" +
-                $"{ForcedClause(state.ApcLastGoodPlanIsForced, state.ApcLastGoodPlanForcingType)} at {Stamp(state.ApcObservedAtUtc)} — the engine is already forcing exactly this plan"));
+                $"{ForcedClause(state.ApcLastGoodPlanIsForced, state.ApcLastGoodPlanForcingType)} at {Stamp(state.ApcObservedAtUtc)}, the engine is already forcing exactly this plan"));
         }
         else if (state.OtherForcedPlanId is long otherAuto && IsAutoForcing(state.OtherForcedPlanForcingType))
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ApcOwnsIt,
-                $"query_store_stats: plan {otherAuto} of this query is forced with plan_forcing_type = {state.OtherForcedPlanForcingType} at {Stamp(state.OtherForcedPlanObservedAtUtc)} — automatic plan correction is handling this query through a different plan; forcing {target.PlanId} would take it over"));
+                $"query_store_stats: plan {otherAuto} of this query is forced with plan_forcing_type = {state.OtherForcedPlanForcingType} at {Stamp(state.OtherForcedPlanObservedAtUtc)}, automatic plan correction is handling this query through a different plan; forcing {target.PlanId} would take it over"));
         }
         else if (apcOnOther && Is(apcState, "Verifying"))
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ApcOwnsIt,
-                $"plan_correction: recommendation state Verifying{Reason(apcReason)} with last_good_plan_id = {state.ApcLastGoodPlanId} (not {target.PlanId}) at {Stamp(state.ApcObservedAtUtc)} — the engine is mid-verification on a different plan for this query"));
+                $"plan_correction: recommendation state Verifying{Reason(apcReason)} with last_good_plan_id = {state.ApcLastGoodPlanId} (not {target.PlanId}) at {Stamp(state.ApcObservedAtUtc)}, the engine is mid-verification on a different plan for this query"));
         }
 
         /* already_forced — by hand, here or on a sibling plan. */
@@ -894,13 +894,13 @@ public static class FactRemediation
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.AlreadyForced,
-                $"query_store_stats: plan {target.PlanId} is_forced_plan = true, plan_forcing_type = {state.PlanForcingType ?? "(unknown)"} at {Stamp(state.PlanObservedAtUtc)} — this plan is already forced; there is nothing to force"));
+                $"query_store_stats: plan {target.PlanId} is_forced_plan = true, plan_forcing_type = {state.PlanForcingType ?? "(unknown)"} at {Stamp(state.PlanObservedAtUtc)}, this plan is already forced; there is nothing to force"));
         }
         else if (state.OtherForcedPlanId is long otherManual && !IsAutoForcing(state.OtherForcedPlanForcingType))
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.AlreadyForced,
-                $"query_store_stats: plan {otherManual} of this query is forced (plan_forcing_type = {state.OtherForcedPlanForcingType ?? "(unknown)"}) at {Stamp(state.OtherForcedPlanObservedAtUtc)} — SQL Server keeps one forced plan per query, so forcing {target.PlanId} silently replaces it; decide that on purpose"));
+                $"query_store_stats: plan {otherManual} of this query is forced (plan_forcing_type = {state.OtherForcedPlanForcingType ?? "(unknown)"}) at {Stamp(state.OtherForcedPlanObservedAtUtc)}, SQL Server keeps one forced plan per query, so forcing {target.PlanId} silently replaces it; decide that on purpose"));
         }
 
         /* forcing_failed_on_this_plan — the counter the alert family pages on, and the engine's own verdict. */
@@ -908,7 +908,7 @@ public static class FactRemediation
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ForcingFailedOnThisPlan,
-                $"query_store_stats: plan {target.PlanId} force_failure_count = {state.ForceFailureCount}, last_force_failure_reason = {state.LastForceFailureReason ?? "(none recorded)"} at {Stamp(state.PlanObservedAtUtc)} — forcing this plan is already failing on this server"));
+                $"query_store_stats: plan {target.PlanId} force_failure_count = {state.ForceFailureCount}, last_force_failure_reason = {state.LastForceFailureReason ?? "(none recorded)"} at {Stamp(state.PlanObservedAtUtc)}, forcing this plan is already failing on this server"));
         }
         else if (apcOnTarget && (Is(apcState, "Reverted") || Is(apcReason, "ForcingFailed") || !string.IsNullOrEmpty(state.ApcLastGoodPlanForceFailureReason)))
         {
@@ -916,7 +916,7 @@ public static class FactRemediation
                 ForcePlanBlockerNames.ForcingFailedOnThisPlan,
                 $"plan_correction: recommendation state {apcState}{Reason(apcReason)} on last_good_plan_id = {target.PlanId}" +
                 (string.IsNullOrEmpty(state.ApcLastGoodPlanForceFailureReason) ? string.Empty : $", last_good_plan_force_failure_reason = {state.ApcLastGoodPlanForceFailureReason}") +
-                $" at {Stamp(state.ApcObservedAtUtc)} — the engine already tried this plan and " +
+                $" at {Stamp(state.ApcObservedAtUtc)}, the engine already tried this plan and " +
                 (Is(apcState, "Reverted") && !Is(apcReason, "ForcingFailed") ? "reverted it for no significant gain" : "could not force it")));
         }
         /* apc_withdrew_it — after the failure arm, so Expired/ForcingFailed is named a failure. */
@@ -924,7 +924,7 @@ public static class FactRemediation
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ApcWithdrewIt,
-                $"plan_correction: recommendation state Expired{Reason(apcReason)} on last_good_plan_id = {target.PlanId} at {Stamp(state.ApcObservedAtUtc)} — the engine recommended this plan and withdrew the recommendation for the reason quoted"));
+                $"plan_correction: recommendation state Expired{Reason(apcReason)} on last_good_plan_id = {target.PlanId} at {Stamp(state.ApcObservedAtUtc)}, the engine recommended this plan and withdrew the recommendation for the reason quoted"));
         }
 
         /* apc_resolved_differently — Success through another plan. */
@@ -933,7 +933,7 @@ public static class FactRemediation
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ApcResolvedDifferently,
                 $"plan_correction: recommendation state Success{Reason(apcReason)} with last_good_plan_id = {state.ApcLastGoodPlanId} (not {target.PlanId})" +
-                $"{ForcedClause(state.ApcLastGoodPlanIsForced, state.ApcLastGoodPlanForcingType)} at {Stamp(state.ApcObservedAtUtc)} — the engine already resolved this query's regression through plan {state.ApcLastGoodPlanId}"));
+                $"{ForcedClause(state.ApcLastGoodPlanIsForced, state.ApcLastGoodPlanForcingType)} at {Stamp(state.ApcObservedAtUtc)}, the engine already resolved this query's regression through plan {state.ApcLastGoodPlanId}"));
         }
 
         return blockers;
@@ -1086,7 +1086,7 @@ public static class FactRemediation
         }
 
         var guidance = anyApcOn
-            ? "Automatic plan correction (FORCE_LAST_GOOD_PLAN) is ON for at least one of these databases: the engine forces and verifies its own last-good plan there and reverts it if it does not help. Read each target's guidance and blockers before forcing by hand — a manual force replaces AUTO forcing and removes the engine's revert path. Intervene only where a recommendation has reverted or expired, or where the engine has none."
+            ? "Automatic plan correction (FORCE_LAST_GOOD_PLAN) is ON for at least one of these databases: the engine forces and verifies its own last-good plan there and reverts it if it does not help. Read each target's guidance and blockers before forcing by hand: a manual force replaces AUTO forcing and removes the engine's revert path. Intervene only where a recommendation has reverted or expired, or where the engine has none."
             : null;
 
         return new StructuredRemediation(action.FactKey, action.Action, structured, guidance);
@@ -1141,13 +1141,13 @@ public static class FactRemediation
         if (namedAsRegressed)
         {
             var better = state.ApcLastGoodPlanId is long good ? $" and plan {good} as the better one" : string.Empty;
-            return $"The engine's own open recommendation{reason} for query {t.QueryId} names plan {t.PlanId} (the plan proposed here) as the regressed, worse plan{better}, as of {Stamp(state.ApcObservedAtUtc)} — the engine disagrees with this page's choice; compare both plans before forcing either.";
+            return $"The engine's own open recommendation{reason} for query {t.QueryId} names plan {t.PlanId} (the plan proposed here) as the regressed, worse plan{better}, as of {Stamp(state.ApcObservedAtUtc)}: the engine disagrees with this page's choice; compare both plans before forcing either.";
         }
 
         if (string.Equals(apcState, "Active", StringComparison.OrdinalIgnoreCase) &&
             state.ApcLastGoodPlanId is long activePlan && activePlan != t.PlanId)
         {
-            return $"The engine's own open recommendation{reason} for query {t.QueryId} names plan {activePlan}, not {t.PlanId}, as of {Stamp(state.ApcObservedAtUtc)} — two candidate plans; compare both before forcing either.";
+            return $"The engine's own open recommendation{reason} for query {t.QueryId} names plan {activePlan}, not {t.PlanId}, as of {Stamp(state.ApcObservedAtUtc)}: two candidate plans; compare both before forcing either.";
         }
 
         return null;

@@ -15,7 +15,7 @@ namespace PerformanceMonitorLite.Analysis;
 internal static class BlockingChainViewerProjection
 {
     public const string EmptyStateDetail =
-        "No blocking was captured for this session in the selected time range — from either the " +
+        "No blocking was captured for this session in the selected time range, from either the " +
         "blocked-process-report Extended Event or the always-on DMV blocking snapshot. Its wait may not " +
         "have overlapped a collection in this window.";
 

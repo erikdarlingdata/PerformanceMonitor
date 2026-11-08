@@ -456,7 +456,7 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
 
         Assert.Equal("empty", filtered.GetProperty("status").GetString());
         Assert.Equal("No long-running query completions found in the specified time range for the database DbA"
-            + ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data. The monitor's own statements are left out. Pass include_monitor=true to include them.",
+            + ". The long_query_completions collector is opt-in (default OFF): enable it in the collector schedule to capture data. The monitor's own statements are left out. Pass include_monitor=true to include them.",
             filtered.GetProperty("message").GetString());
         Assert.Equal("DbA", filtered.GetProperty("database_name").GetString());
         Assert.False(filtered.GetProperty("hints").TryGetProperty("effective_start", out var start) && start.ValueKind != JsonValueKind.Null,

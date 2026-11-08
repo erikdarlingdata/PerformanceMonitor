@@ -159,7 +159,7 @@ public sealed class DarlingMcpHealthTools
             if (row.DataState == DailySummaryDataState.Purged)
                 return McpHelpers.Status(
                     "unavailable",
-                    $"{row.SummaryDate:yyyy-MM-dd} is before {resolved.DisplayName}'s retention_horizon ({row.RetentionHorizon:yyyy-MM-dd}): the per-signal tables the health band reads (deadlocks, blocking, CPU, memory, waits) have been purged for that day, so no health verdict is possible and the counts would be zeros by construction, not by measurement. Longer-lived sources may still record the day — collection_runs and alert_count below are real where non-zero.",
+                    $"{row.SummaryDate:yyyy-MM-dd} is before {resolved.DisplayName}'s retention_horizon ({row.RetentionHorizon:yyyy-MM-dd}): the per-signal tables the health band reads (deadlocks, blocking, CPU, memory, waits) have been purged for that day, so no health verdict is possible and the counts would be zeros by construction, not by measurement. Longer-lived sources may still record the day: collection_runs and alert_count below are real where non-zero.",
                     new
                     {
                         summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
@@ -311,11 +311,11 @@ public sealed class DarlingMcpHealthTools
                 return everCollected
                     ? McpHelpers.Status(
                         "empty",
-                        $"No collected days for {resolved.DisplayName} between {fromDate:yyyy-MM-dd} and {lastDay:yyyy-MM-dd}. A day with ANY collection appears here even when every signal was quiet, so this range is outside what the store holds for this server rather than a stretch of quiet days — widen days_back, or move as_of.",
+                        $"No collected days for {resolved.DisplayName} between {fromDate:yyyy-MM-dd} and {lastDay:yyyy-MM-dd}. A day with ANY collection appears here even when every signal was quiet, so this range is outside what the store holds for this server rather than a stretch of quiet days: widen days_back, or move as_of.",
                         new { from_date = fromDate.ToString("yyyy-MM-dd"), to_date = lastDay.ToString("yyyy-MM-dd") })
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No collector runs have EVER been recorded for {resolved.DisplayName}, so the calendar is empty because nothing has been collected — not because those days were quiet. Check that the service is running and that the server is enabled for collection.",
+                        $"No collector runs have EVER been recorded for {resolved.DisplayName}, so the calendar is empty because nothing has been collected, not because those days were quiet. Check that the service is running and that the server is enabled for collection.",
                         new { from_date = fromDate.ToString("yyyy-MM-dd"), to_date = lastDay.ToString("yyyy-MM-dd") });
             }
 

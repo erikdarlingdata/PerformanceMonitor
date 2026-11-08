@@ -378,7 +378,7 @@ public sealed class StoryConfidenceTests
         new FactScorer().ScoreAll(several);
         var card = FactAdvice.Compose("RUNNING_JOBS", several.ToFactLookup());
         Assert.NotNull(card);
-        Assert.Equal("Agent job `Nightly Index Maintenance` and 2 others running well past normal — likely stuck, not busy", card!.Headline);
+        Assert.Equal("Agent job `Nightly Index Maintenance` and 2 others running well past normal, likely stuck, not busy", card!.Headline);
         Assert.StartsWith("3 Agent jobs ran well past normal duration this window, `Nightly Index Maintenance` the furthest past its own history (the Running Jobs view lists the 2 others)", card.Investigation, StringComparison.Ordinal);
         Assert.Contains(", the worst at 400% of its historical average", card.Investigation, StringComparison.Ordinal);
         Assert.StartsWith("Check `Nightly Index Maintenance` in Agent history first, then the others:", card.Remediation, StringComparison.Ordinal);
@@ -388,7 +388,7 @@ public sealed class StoryConfidenceTests
         var one = RebuildFacts(runningLong: 1, worstJob: "Weekly CHECKDB");
         new FactScorer().ScoreAll(one);
         var single = FactAdvice.Compose("RUNNING_JOBS", one.ToFactLookup());
-        Assert.Equal("Agent job `Weekly CHECKDB` running well past normal — likely stuck, not busy", single!.Headline);
+        Assert.Equal("Agent job `Weekly CHECKDB` running well past normal, likely stuck, not busy", single!.Headline);
         Assert.StartsWith("Agent job `Weekly CHECKDB` ran well past normal duration this window, the worst at", single.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("other", single.Investigation, StringComparison.Ordinal);
         Assert.StartsWith("Check `Weekly CHECKDB` in Agent history first: a job at several times", single.Remediation, StringComparison.Ordinal);
@@ -408,7 +408,7 @@ public sealed class StoryConfidenceTests
         var unnamed = RebuildFacts(runningLong: 3);
         new FactScorer().ScoreAll(unnamed);
         var card = FactAdvice.Compose("RUNNING_JOBS", unnamed.ToFactLookup());
-        Assert.Equal("3 Agent jobs running well past normal — likely stuck, not busy", card!.Headline);
+        Assert.Equal("3 Agent jobs running well past normal, likely stuck, not busy", card!.Headline);
         Assert.StartsWith("3 Agent jobs ran well past normal duration this window, the worst at 400% of its historical average", card.Investigation, StringComparison.Ordinal);
         Assert.StartsWith("Check the long-running jobs in Agent history:", card.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("`", card.Headline, StringComparison.Ordinal);
@@ -420,7 +420,7 @@ public sealed class StoryConfidenceTests
         Assert.DoesNotContain("Should Not Appear", refused!.Headline, StringComparison.Ordinal);
         Assert.DoesNotContain("Should Not Appear", refused.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("Should Not Appear", refused.Remediation, StringComparison.Ordinal);
-        Assert.Equal("0 Agent jobs running well past normal — likely stuck, not busy", refused.Headline);
+        Assert.Equal("0 Agent jobs running well past normal, likely stuck, not busy", refused.Headline);
     }
 
     /* ── Helpers ── */

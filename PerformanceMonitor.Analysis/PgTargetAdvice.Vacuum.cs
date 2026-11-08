@@ -88,10 +88,10 @@ public static partial class PgTargetAdvice
             "large one that is merely busy. The slope of dead tuples across the run and the differenced " +
             "autovacuum_count say whether autovacuum is running and losing or never reaching the table.",
         Remediation:
-            "Do not turn autovacuum off to quiet it — an unvacuumed table becomes bloat and, unfrozen, a wraparound " +
+            "Do not turn autovacuum off to quiet it: an unvacuumed table becomes bloat and, unfrozen, a wraparound " +
             "shutdown. If autovacuum ran and lost, give it more work per second on that table (ALTER TABLE … SET " +
             "(autovacuum_vacuum_cost_limit = …, autovacuum_vacuum_cost_delay = …)) at the cost of more I/O while it " +
-            "runs; if it never reached the table, the workers are busy elsewhere — raise autovacuum_max_workers " +
+            "runs; if it never reached the table, the workers are busy elsewhere: raise autovacuum_max_workers " +
             "(restart) or lower the biggest tables' scale factor so the small hot ones get a turn. Check PG_XMIN_HOLD: " +
             "a held horizon makes dead tuples unremovable and no tuning helps until it is released.");
 
@@ -122,20 +122,20 @@ public static partial class PgTargetAdvice
         var autovacuumOff = facts.TryGetValue(PgTargetFactKeys.ConfigAutovacuumOff, out var off) && off.BaseSeverity > 0;
 
         var headline = insertArm
-            ? $"{table}{db} has taken {Fmt(inserts)} inserts since its last vacuum, {ratio:0.#}× its insert-vacuum threshold, for {trailing:0} consecutive samples"
-            : $"{table}{db} carries {Fmt(dead)} dead tuples, {ratio:0.#}× its own autovacuum trigger line, for {trailing:0} consecutive samples";
+            ? $"{table}{db} has taken {Fmt(inserts)} inserts since its last vacuum, {FactAdvice.RatioText(ratio)}× its insert-vacuum threshold, for {trailing:0} consecutive samples"
+            : $"{table}{db} carries {Fmt(dead)} dead tuples, {FactAdvice.RatioText(ratio)}× its own autovacuum trigger line, for {trailing:0} consecutive samples";
 
         var inv = new StringBuilder();
         if (insertArm)
         {
             inv.Append($"The append-only arm: {Fmt(inserts)} rows inserted since the last vacuum against a per-table insert threshold of {Fmt(insertThreshold)} (autovacuum_vacuum_insert_threshold + autovacuum_vacuum_insert_scale_factor × {Fmt(live)} live tuples). ");
-            inv.Append("An append-only table has no dead tuples for the dead-tuple rule to see, and a table that is never vacuumed is never frozen — this is the classic wraparound route, which is why the insert arm exists. ");
+            inv.Append("An append-only table has no dead tuples for the dead-tuple rule to see, and a table that is never vacuumed is never frozen: this is the classic wraparound route, which is why the insert arm exists. ");
         }
         else
         {
             inv.Append($"{Fmt(dead)} dead tuples against this table's own trigger line of {Fmt(threshold)} (autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × {Fmt(live)} live tuples, reloptions honoured)");
             if (live > 0 && threshold > 0)
-                inv.Append($" — the line sits at {threshold / live:P1} of the table");
+                inv.Append($": the line sits at {threshold / live:P1} of the table");
             inv.Append(". ");
         }
 
@@ -152,7 +152,7 @@ public static partial class PgTargetAdvice
             var oSlope = o.Figures is not null && o.Figures.TryGetValue(PgTargetScorer.BacklogSlopePerHourKey, out var s)
                 ? $", {Fmt(Math.Abs(s))}/h {(s > 0 ? "and rising" : s < 0 ? "and falling" : "and flat")}"
                 : string.Empty;
-            return $"{oRatio:0.#}× for {FmtHours(oHours)}{oSlope}";
+            return $"{FactAdvice.RatioText(oRatio)}× for {FmtHours(oHours)}{oSlope}";
         });
 
         inv.Append($"The table has been past its line for {trailing:0} consecutive samples spanning {hours:0.#} h{rest}. ");
@@ -160,25 +160,25 @@ public static partial class PgTargetAdvice
         if (slopeComputable)
         {
             var verb = slope > 0 ? "rose" : slope < 0 ? "fell" : "held flat";
-            inv.Append($"Across that run the {(insertArm ? "insert" : "dead-tuple")} count {verb} at {Fmt(Math.Abs(slope))} per hour (the stored hourly gauge, differenced between samples — a level, not a counter). ");
+            inv.Append($"Across that run the {(insertArm ? "insert" : "dead-tuple")} count {verb} at {Fmt(Math.Abs(slope))} per hour (the stored hourly gauge, differenced between samples, a level, not a counter). ");
         }
         else
         {
-            inv.Append("The slope across the run is not computable — the run's samples do not span enough time to divide. ");
+            inv.Append("The slope across the run is not computable: the run's samples do not span enough time to divide. ");
         }
 
         if (runsComputable)
         {
             if (runs > 0)
             {
-                inv.Append($"autovacuum ran on the table {runs:0} time{(runs == 1 ? string.Empty : "s")} during the run (the cumulative autovacuum_count, differenced — never summed)");
+                inv.Append($"autovacuum ran on the table {runs:0} time{(runs == 1 ? string.Empty : "s")} during the run (the cumulative autovacuum_count, differenced, never summed)");
                 inv.Append(slope > 0
                     ? ", and the backlog still grew: it is running and LOSING, not merely late. "
                     : ", and did not bring the count under the line. ");
             }
             else
             {
-                inv.Append("autovacuum did not run on the table at all during the run (autovacuum_count unchanged) — the launcher never reached it. ");
+                inv.Append("autovacuum did not run on the table at all during the run (autovacuum_count unchanged): the launcher never reached it. ");
             }
         }
         else
@@ -189,24 +189,24 @@ public static partial class PgTargetAdvice
         if (m.TryGetValue(PgTargetScorer.BacklogHoursSinceLastAutovacuumKey, out var sinceLast))
             inv.Append($"last_autovacuum was {sinceLast:0.#} h before the window end. ");
         else
-            inv.Append("The table has no last_autovacuum stamp — it has never been autovacuumed since its statistics were last reset. ");
+            inv.Append("The table has no last_autovacuum stamp: it has never been autovacuumed since its statistics were last reset. ");
 
         if (disabled)
             inv.Append("autovacuum_enabled is OFF on this table (a reloption), so the engine will never clear it. ");
         if (xminHeld)
-            inv.Append("PG_XMIN_HOLD co-fired: the xmin horizon is held back, so dead tuples newer than it are not removable by any vacuum — this backlog cannot clear until the holder is released. ");
+            inv.Append("PG_XMIN_HOLD co-fired: the xmin horizon is held back, so dead tuples newer than it are not removable by any vacuum, this backlog cannot clear until the holder is released. ");
         if (autovacuumOff)
             inv.Append("CONFIG_PG_AUTOVACUUM_OFF co-fired: autovacuum is off server-wide, so this backlog is by configuration. ");
         /* The POPULATION, a different number from the named list above: every table that met the gate, which can
            exceed the three rows the read returns. So the count stays and so does the pointer to the tool. */
         if (others > 0)
-            inv.Append($"{others:0} other table{(others == 1 ? " is" : "s are")} persistently past their line too — get_pg_autovacuum_health lists them all by ratio. ");
+            inv.Append($"{others:0} other table{(others == 1 ? " is" : "s are")} persistently past their line too: get_pg_autovacuum_health lists them all by ratio. ");
 
         var rem = new StringBuilder();
         rem.Append("Never switch autovacuum off to make this quiet: the backlog becomes bloat, and an unfrozen table becomes a wraparound shutdown. ");
         if (xminHeld)
         {
-            rem.Append("Resolve PG_XMIN_HOLD first — while the horizon is pinned, no VACUUM (manual or automatic) can remove these tuples, and any tuning below only burns I/O. ");
+            rem.Append("Resolve PG_XMIN_HOLD first, while the horizon is pinned, no VACUUM (manual or automatic) can remove these tuples, and any tuning below only burns I/O. ");
         }
 
         if (autovacuumOff)
@@ -215,13 +215,13 @@ public static partial class PgTargetAdvice
         }
         else if (disabled)
         {
-            rem.Append($"Re-enable it for this table — ALTER TABLE {table} SET (autovacuum_enabled = true); — or, if it was disabled for a bulk load still in progress, schedule a manual VACUUM when the load ends. Counter-objective: autovacuum I/O returns to this table. ");
+            rem.Append($"Re-enable it for this table: ALTER TABLE {table} SET (autovacuum_enabled = true);, or, if it was disabled for a bulk load still in progress, schedule a manual VACUUM when the load ends. Counter-objective: autovacuum I/O returns to this table. ");
         }
         else if (runsComputable && runs > 0)
         {
-            rem.Append($"autovacuum is reaching this table and losing, so let it work unthrottled HERE rather than server-wide: ALTER TABLE {table} SET (autovacuum_vacuum_cost_delay = 0); — 0 is the engine's own 'no throttling' value (the server default is a 2 ms delay per 200 cost units); a per-table reloption applies at the next run without a restart. Counter-objective: more read and write I/O from autovacuum while it runs on this table. ");
+            rem.Append($"autovacuum is reaching this table and losing, so let it work unthrottled HERE rather than server-wide: ALTER TABLE {table} SET (autovacuum_vacuum_cost_delay = 0);, 0 is the engine's own 'no throttling' value (the server default is a 2 ms delay per 200 cost units); a per-table reloption applies at the next run without a restart. Counter-objective: more read and write I/O from autovacuum while it runs on this table. ");
             if (!insertArm && live > 0 && threshold > 0)
-                rem.Append($"If the line itself is the problem — {Fmt(threshold)} dead rows before a run starts — lower this table's own scale factor so runs start earlier and each does less: ALTER TABLE {table} SET (autovacuum_vacuum_scale_factor = {SuggestedScaleFactor(threshold, live):0.###}); — that halves the trigger line from its current {threshold / live:P1} of the table. Counter-objective: more frequent, smaller vacuums. ");
+                rem.Append($"If the line itself is the problem, {Fmt(threshold)} dead rows before a run starts, lower this table's own scale factor so runs start earlier and each does less: ALTER TABLE {table} SET (autovacuum_vacuum_scale_factor = {SuggestedScaleFactor(threshold, live):0.###});, that halves the trigger line from its current {threshold / live:P1} of the table. Counter-objective: more frequent, smaller vacuums. ");
         }
         else
         {
@@ -246,18 +246,18 @@ public static partial class PgTargetAdvice
         Investigation:
             "PostgreSQL's 32-bit transaction counter wraps; when a database's oldest unfrozen XID (datfrozenxid) or " +
             "MultiXact ages past autovacuum_freeze_max_age, autovacuum force-starts a wraparound-prevention vacuum " +
-            "whether or not the table is otherwise due — reaching that age is ROUTINE (the healthy sawtooth), staying " +
+            "whether or not the table is otherwise due: reaching that age is ROUTINE (the healthy sawtooth), staying " +
             "at or above it is the finding. Each counter is graded against its OWN setting (the MultiXact default is " +
             "twice the XID one), and the same bars the wraparound alert pages on decide the severity here. The window's " +
             "slope of the age gives a time-to-wall estimate when the age is climbing; when it fell or held, none is stated.",
         Remediation:
-            "ROUTINE (at the setting, not recovering): confirm the forced vacuum is running and winning — " +
+            "ROUTINE (at the setting, not recovering): confirm the forced vacuum is running and winning, " +
             "pg_stat_progress_vacuum, and the age falling between collections; find the oldest tables with " +
             "age(relfrozenxid) and check nothing holds the xmin horizon (PG_XMIN_HOLD). EMERGENCY (past twice the " +
             "setting, or past vacuum_failsafe_age at 74.5% of the 2^31 space): run VACUUM (FREEZE) on the oldest " +
             "tables now from a session with vacuum_cost_delay = 0, and keep the database's connections; at the wall " +
             "the server stops accepting writes and the remedy is hours of single-user-mode vacuuming. Never disable " +
-            "autovacuum to stop the forced vacuum — it is the only thing standing between the counter and the wall.");
+            "autovacuum to stop the forced vacuum: it is the only thing standing between the counter and the wall.");
 
     private static AdviceBlock ComposeWraparoundTrend(IReadOnlyDictionary<string, Fact> facts)
     {
@@ -290,14 +290,14 @@ public static partial class PgTargetAdvice
         var sinceLastSeen = FmtHours(m.GetValueOrDefault(PgTargetScorer.WraparoundMinutesSinceLastSeenKey) / 60.0);
 
         var headline = gone
-            ? $"{counter} age in {db} was {Fmt(age)} when last seen {sinceLastSeen} before the window ended — no longer reported (dropped?); not graded"
+            ? $"{counter} age in {db} was {Fmt(age)} when last seen {sinceLastSeen} before the window ended: no longer reported (dropped?); not graded"
             : arm switch
         {
-            4 => $"{counter} age {Fmt(age)} in {db} is {pctOfCeiling:P1} of the wraparound space — past vacuum_failsafe_age; EMERGENCY",
-            3 => $"{counter} age {Fmt(age)} in {db} is past twice {settingName} ({Fmt(setting)}) — autovacuum's own defence is losing; EMERGENCY",
-            2 => $"{counter} age {Fmt(age)} in {db} is {pctOfCeiling:P1} of the wraparound space — far past this cluster's routine freeze point",
+            4 => $"{counter} age {Fmt(age)} in {db} is {pctOfCeiling:P1} of the wraparound space: past vacuum_failsafe_age; EMERGENCY",
+            3 => $"{counter} age {Fmt(age)} in {db} is past twice {settingName} ({Fmt(setting)}): autovacuum's own defence is losing; EMERGENCY",
+            2 => $"{counter} age {Fmt(age)} in {db} is {pctOfCeiling:P1} of the wraparound space: far past this cluster's routine freeze point",
             1 => $"{counter} age {Fmt(age)} in {db} has reached {settingName} ({Fmt(setting)}) and has not come back down",
-            _ => $"{counter} age {Fmt(age)} in {db} is {fractionOfSetting:P0} of {settingName} — under the engine's freeze line",
+            _ => $"{counter} age {Fmt(age)} in {db} is {fractionOfSetting:P0} of {settingName}, under the engine's freeze line",
         };
 
         var inv = new StringBuilder();
@@ -308,12 +308,12 @@ public static partial class PgTargetAdvice
             : $"{db}: {counter} age {Fmt(age)}, {fractionOfSetting:P0} of its own {settingName} ({Fmt(setting)}) and {pctOfCeiling:P1} of the 2^31 space; {Fmt(remaining)} {(multi ? "MultiXacts" : "transactions")} remain before the wall. ");
         if (keepingUp)
             inv.Append(gone
-                ? $"The counter had come DOWN from its window peak of {Fmt(peak)} — autovacuum's freeze cycle was winning (the routine sawtooth). "
-                : $"The counter has come DOWN from its window peak of {Fmt(peak)} — autovacuum's freeze cycle is winning (the routine sawtooth). ");
+                ? $"The counter had come DOWN from its window peak of {Fmt(peak)}: autovacuum's freeze cycle was winning (the routine sawtooth). "
+                : $"The counter has come DOWN from its window peak of {Fmt(peak)}: autovacuum's freeze cycle is winning (the routine sawtooth). ");
         else
             inv.Append(gone
-                ? $"The last reading WAS the window peak ({Fmt(peak)}) — the counter had never been lower inside the window, so the forced anti-wraparound vacuum was not (yet) winning. "
-                : $"The latest reading IS the window peak ({Fmt(peak)}) — the counter has never been lower inside the window, so the forced anti-wraparound vacuum is not (yet) winning. ");
+                ? $"The last reading WAS the window peak ({Fmt(peak)}): the counter had never been lower inside the window, so the forced anti-wraparound vacuum was not (yet) winning. "
+                : $"The latest reading IS the window peak ({Fmt(peak)}): the counter has never been lower inside the window, so the forced anti-wraparound vacuum is not (yet) winning. ");
         inv.Append(wallComputable
             ? gone
                 ? $"At the window's slope of {Fmt(slope)} per hour the wall was roughly {FmtHours(hoursToWall)} away at the last reading; that straight-line estimate is moot if the database was dropped. "
@@ -325,7 +325,7 @@ public static partial class PgTargetAdvice
             ? "The other counter's last reading rides in the fact's metadata beside this one; the two are never collapsed. "
             : "The other counter is graded against its own setting separately and rides in the fact's metadata; the two are never collapsed. ");
         if (xminHeld)
-            inv.Append("PG_XMIN_HOLD co-fired: a held horizon stops freezing outright — VACUUM can freeze only tuples older than the horizon, so relfrozenxid cannot advance past the holder. ");
+            inv.Append("PG_XMIN_HOLD co-fired: a held horizon stops freezing outright, VACUUM can freeze only tuples older than the horizon, so relfrozenxid cannot advance past the holder. ");
         if (backlog)
             inv.Append("PG_AUTOVACUUM_BACKLOG co-fired: the forced freeze vacuum is queuing behind tables autovacuum is already failing to clear. ");
 
@@ -344,21 +344,21 @@ public static partial class PgTargetAdvice
         }
         else if (emergency)
         {
-            rem.Append($"EMERGENCY, not routine. Find the oldest tables in {db} (SELECT relname, age(relfrozenxid) FROM pg_class WHERE relkind IN ('r','m','t') ORDER BY 2 DESC) and run VACUUM (FREEZE, VERBOSE) on them now from a session with vacuum_cost_delay = 0 — do not wait for autovacuum, whose per-run cost limits are why it fell behind. ");
+            rem.Append($"EMERGENCY, not routine. Find the oldest tables in {db} (SELECT relname, age(relfrozenxid) FROM pg_class WHERE relkind IN ('r','m','t') ORDER BY 2 DESC) and run VACUUM (FREEZE, VERBOSE) on them now from a session with vacuum_cost_delay = 0: do not wait for autovacuum, whose per-run cost limits are why it fell behind. ");
             if (arm == 4)
                 rem.Append("The engine is already past vacuum_failsafe_age and vacuuming without cost limits or index cleanup; that is the last automatic defence. ");
-            rem.Append("If a manual VACUUM cannot advance the age, something holds the horizon — an idle transaction, a replication slot, a prepared transaction (PG_XMIN_HOLD names it) — and that must be released first. Counter-objective: a freeze vacuum reads every page of the table and is I/O-heavy while it runs; at the wall the alternative is a write-refusing server and hours in single-user mode. ");
+            rem.Append("If a manual VACUUM cannot advance the age, something holds the horizon: an idle transaction, a replication slot, a prepared transaction (PG_XMIN_HOLD names it), and that must be released first. Counter-objective: a freeze vacuum reads every page of the table and is I/O-heavy while it runs; at the wall the alternative is a write-refusing server and hours in single-user mode. ");
         }
         else if (arm is 1 or 2)
         {
-            rem.Append($"ROUTINE crossing that has not resolved. autovacuum force-started a wraparound-prevention vacuum when the age reached {settingName}; confirm it is running (pg_stat_progress_vacuum) and that the age falls at the next collections. If it is running and the age still climbs, the oldest tables are large enough that the forced vacuum cannot outrun the workload — raise autovacuum_vacuum_cost_limit (reload) or run VACUUM (FREEZE) on them by hand off-peak. Counter-objective: more autovacuum I/O. Do NOT raise {settingName} to make the crossing go away: it only moves the line closer to the wall. ");
+            rem.Append($"ROUTINE crossing that has not resolved. autovacuum force-started a wraparound-prevention vacuum when the age reached {settingName}; confirm it is running (pg_stat_progress_vacuum) and that the age falls at the next collections. If it is running and the age still climbs, the oldest tables are large enough that the forced vacuum cannot outrun the workload: raise autovacuum_vacuum_cost_limit (reload) or run VACUUM (FREEZE) on them by hand off-peak. Counter-objective: more autovacuum I/O. Do NOT raise {settingName} to make the crossing go away: it only moves the line closer to the wall. ");
         }
         else
         {
             rem.Append($"Nothing to do: the age is under {settingName} and the freeze cycle is behaving. This fact is context for the vacuum chain. ");
         }
 
-        rem.Append("Never disable autovacuum to stop the forced vacuum — it is the only thing between the counter and the wall.");
+        rem.Append("Never disable autovacuum to stop the forced vacuum: it is the only thing between the counter and the wall.");
         return new AdviceBlock(headline, inv.ToString().TrimEnd(), rem.ToString().TrimEnd());
     }
 
@@ -368,12 +368,12 @@ public static partial class PgTargetAdvice
         Headline: "The xmin horizon stayed pinned across a majority of the window's consecutive captures",
         Investigation:
             "VACUUM can remove only tuples older than the cluster's oldest active snapshot (the xmin horizon). " +
-            "Four unrelated causes hold it back and look identical by symptom — dead tuples accumulate, autovacuum " +
-            "reports success, nothing shrinks — so the collector attributes each capture to its source: a session " +
+            "Four unrelated causes hold it back and look identical by symptom (dead tuples accumulate, autovacuum " +
+            "reports success, nothing shrinks), so the collector attributes each capture to its source: a session " +
             "(idle in transaction or a long query), a replication slot's xmin or catalog_xmin, a standby's " +
-            "hot_standby_feedback, or a prepared transaction. Persistence is measured on the HORIZON — the winning " +
+            "hot_standby_feedback, or a prepared transaction. Persistence is measured on the HORIZON: the winning " +
             "age, whoever won, staying at or above the same bar the xmin alert pages on for a run of consecutive " +
-            "captures — because equally old transactions taking turns as the winner pin the horizon exactly as hard " +
+            "captures, because equally old transactions taking turns as the winner pin the horizon exactly as hard " +
             "as one transaction does. Who held it is reported beside that as shares per kind and a distinct-holder " +
             "count, and named only when one holder won most of the run. A horizon that reached the bar once (a query " +
             "that ran long and finished) is context, not a finding.",
@@ -381,8 +381,8 @@ public static partial class PgTargetAdvice
             "The fix differs completely by holder kind: end an idle-in-transaction session (pg_terminate_backend) and " +
             "find why the application left it open; drop an inactive replication slot whose consumer is gone " +
             "(pg_drop_replication_slot) or fix the consumer; disable hot_standby_feedback or end the long replica query; " +
-            "COMMIT PREPARED or ROLLBACK PREPARED an orphaned prepared transaction. Each has a counter-objective — a " +
-            "killed transaction, a re-synced replica, a CDC pipeline that must resnapshot — which is why the holder is named.");
+            "COMMIT PREPARED or ROLLBACK PREPARED an orphaned prepared transaction. Each has a counter-objective: a " +
+            "killed transaction, a re-synced replica, a CDC pipeline that must resnapshot, which is why the holder is named.");
 
     private static AdviceBlock ComposeXminHold(IReadOnlyDictionary<string, Fact> facts)
     {
@@ -421,56 +421,56 @@ public static partial class PgTargetAdvice
         var headline = persistenceArm
             ? attributed
                 ? $"The xmin horizon sat at least {Fmt(floor)} transactions back for {heldCaptures:0} of {total:0} consecutive captures, held by {holder} ({kind})"
-                : $"The xmin horizon sat at least {Fmt(floor)} transactions back for {heldCaptures:0} of {total:0} consecutive captures — {distinctHolders:0} holders took turns holding it"
-            : $"The xmin horizon reached {Fmt(age)} transactions back but did not stay there ({heldCaptures:0} of {total:0} captures) — a transient hold, not a pinned horizon";
+                : $"The xmin horizon sat at least {Fmt(floor)} transactions back for {heldCaptures:0} of {total:0} consecutive captures: {distinctHolders:0} holders took turns holding it"
+            : $"The xmin horizon reached {Fmt(age)} transactions back but did not stay there ({heldCaptures:0} of {total:0} captures): a transient hold, not a pinned horizon";
 
         var inv = new StringBuilder();
         inv.Append($"Persistence is measured on the HORIZON: the winning age, whoever won, stayed at or above the shared warning bar ({Fmt(PostgresOutagePredictorThresholds.XminAgeWarningThreshold)}) for {heldCaptures:0} consecutive captures of the {total:0} in the window that recorded any holder ({(total > 0 ? heldCaptures / total : 0):P0}; the alert's majority standard is {PostgresOutagePredictorThresholds.XminPersistenceFraction:P0} over at least {PostgresOutagePredictorThresholds.XminMinimumObservations} observations). ");
         if (heldCaptures > 0)
             inv.Append($"Across that run the horizon never came nearer than {Fmt(floor)} transactions and reached {Fmt(runPeak)}; the severity is graded on the floor, because that is the age it held for every capture of the run. ");
         inv.Append(persistenceArm
-            ? "That is the pinned-horizon shape the xmin alert pages on, graded on the same bars — and it is graded on the AGE rather than on one holder's identity, because equally old transactions taking turns as the winner hold the horizon exactly as hard as one transaction does (the shape that read 0 before #3691). "
-            : "That does not meet the pinned-horizon standard — a query that ran long and finished looks like this — so it is context, not a finding, exactly as the alert would decline to page it. ");
+            ? "That is the pinned-horizon shape the xmin alert pages on, graded on the same bars, and it is graded on the AGE rather than on one holder's identity, because equally old transactions taking turns as the winner hold the horizon exactly as hard as one transaction does (the shape that read 0 before #3691). "
+            : "That does not meet the pinned-horizon standard (a query that ran long and finished looks like this), so it is context, not a finding, exactly as the alert would decline to page it. ");
         if (heldCaptures > 0)
         {
-            inv.Append($"Attribution, separately: {distinctHolders:0} distinct holder(s) won captures of the run — client backends {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerBackendShareKey))}, replication slots {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerSlotShareKey))}, standby feedback {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerStandbyShareKey))}, prepared transactions {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerPreparedShareKey))}. ");
+            inv.Append($"Attribution, separately: {distinctHolders:0} distinct holder(s) won captures of the run, client backends {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerBackendShareKey))}, replication slots {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerSlotShareKey))}, standby feedback {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerStandbyShareKey))}, prepared transactions {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerPreparedShareKey))}. ");
             inv.Append(attributed
-                ? $"{holder} won {modalShare:P0} of the run, at or past the {PgTargetScorer.XminHolderDominanceShare:P0} share this finding needs before it names a holder (a chosen line, not a measured one — threshold_lineage = 0 — and it gates only the NAME, never the grade), so the remedy below is its kind's. "
-                : $"No holder reached the {PgTargetScorer.XminHolderDominanceShare:P0} share this finding needs before naming one (a chosen line, not a measured one — threshold_lineage = 0 — gating only the name, never the grade); the largest won {modalShare:P0}, so the fact names none. ");
+                ? $"{holder} won {modalShare:P0} of the run, at or past the {PgTargetScorer.XminHolderDominanceShare:P0} share this finding needs before it names a holder (a chosen line, not a measured one (threshold_lineage = 0), and it gates only the NAME, never the grade), so the remedy below is its kind's. "
+                : $"No holder reached the {PgTargetScorer.XminHolderDominanceShare:P0} share this finding needs before naming one (a chosen line, not a measured one (threshold_lineage = 0) gating only the name, never the grade); the largest won {modalShare:P0}, so the fact names none. ");
         }
         inv.Append($"The latest capture's winner was {(latestSource == "unknown" ? "not attributable to a kind" : KindPhrase(latestSource))}, {Fmt(age)} transactions back, {sinceLast:0} min before the window end. ");
         if (freezeMaxAge > 0)
             inv.Append($"Held past this server's autovacuum_freeze_max_age ({Fmt(freezeMaxAge)}) the hold would also stop the anti-wraparound vacuum advancing relfrozenxid; the severity ramps toward critical as the held age approaches it. ");
         if (backlog)
-            inv.Append("PG_AUTOVACUUM_BACKLOG co-fired: tables are past their trigger line and staying there — the damage this hold is doing, since dead tuples newer than the horizon cannot be removed. ");
+            inv.Append("PG_AUTOVACUUM_BACKLOG co-fired: tables are past their trigger line and staying there, the damage this hold is doing, since dead tuples newer than the horizon cannot be removed. ");
         if (wraparound)
             inv.Append("PG_WRAPAROUND_TREND co-fired: the freeze age is already climbing past the engine's line. ");
 
         var rem = sourcesAlternated
-            ? "Holders of SEVERAL KINDS took turns pinning the horizon, so there is no one remedy: read the shares above, then take the set in order of share — pg_stat_activity (backend_xmin, backend_xid) for backends, pg_replication_slots (xmin, catalog_xmin) for slots, pg_stat_replication for standby feedback, pg_prepared_xacts for prepared transactions. Counter-objective: each release has a different cost (a rolled-back transaction, a consumer that must re-initialise, an irreversible two-phase resolution), which is why the kinds are not treated as one."
+            ? "Holders of SEVERAL KINDS took turns pinning the horizon, so there is no one remedy: read the shares above, then take the set in order of share, pg_stat_activity (backend_xmin, backend_xid) for backends, pg_replication_slots (xmin, catalog_xmin) for slots, pg_stat_replication for standby feedback, pg_prepared_xacts for prepared transactions. Counter-objective: each release has a different cost (a rolled-back transaction, a consumer that must re-initialise, an irreversible two-phase resolution), which is why the kinds are not treated as one."
             : source switch
         {
             "session" =>
-                $"A backend is holding a snapshot — idle in transaction, or a query running for hours. Identify it (pg_stat_activity WHERE backend_xmin IS NOT NULL ORDER BY age(backend_xmin) DESC; the holder text names the pid) and end it with pg_terminate_backend(pid) if it is idle in transaction; then find why the application left the transaction open (a missing COMMIT on an error path, a pooler in transaction mode holding a dead client). Set idle_in_transaction_session_timeout so the next one cannot pin the cluster for hours. Counter-objective: the terminated transaction's work is rolled back.",
+                $"A backend is holding a snapshot: idle in transaction, or a query running for hours. Identify it (pg_stat_activity WHERE backend_xmin IS NOT NULL ORDER BY age(backend_xmin) DESC; the holder text names the pid) and end it with pg_terminate_backend(pid) if it is idle in transaction; then find why the application left the transaction open (a missing COMMIT on an error path, a pooler in transaction mode holding a dead client). Set idle_in_transaction_session_timeout so the next one cannot pin the cluster for hours. Counter-objective: the terminated transaction's work is rolled back.",
             "replication_slot" =>
-                $"A replication slot's xmin is pinning the horizon — its consumer has stopped confirming. If the consumer is gone for good, drop the slot (SELECT pg_drop_replication_slot('…'); the holder text names it); if it is merely behind, restart or fix the consumer so it advances. Counter-objective: a dropped slot's consumer must re-initialise from a fresh base copy.",
+                $"A replication slot's xmin is pinning the horizon: its consumer has stopped confirming. If the consumer is gone for good, drop the slot (SELECT pg_drop_replication_slot('…'); the holder text names it); if it is merely behind, restart or fix the consumer so it advances. Counter-objective: a dropped slot's consumer must re-initialise from a fresh base copy.",
             "replication_slot_catalog" =>
-                $"A logical slot's catalog_xmin is pinning the horizon — the logical decoding consumer (CDC, logical replication subscriber) is not confirming. Check its pipeline; if it is abandoned, drop the slot. Counter-objective: an abandoned CDC pipeline that is later revived must resnapshot.",
+                $"A logical slot's catalog_xmin is pinning the horizon: the logical decoding consumer (CDC, logical replication subscriber) is not confirming. Check its pipeline; if it is abandoned, drop the slot. Counter-objective: an abandoned CDC pipeline that is later revived must resnapshot.",
             "standby_feedback" =>
                 $"A standby with hot_standby_feedback = on is exporting its longest-running query's snapshot to the primary. End the replica query, or set hot_standby_feedback = off on that standby and accept query cancellations there instead (max_standby_streaming_delay). Counter-objective: replica queries may be cancelled by conflicting cleanup.",
             "prepared_transaction" =>
-                $"An orphaned prepared transaction (pg_prepared_xacts) is pinning the horizon; its XA coordinator never finished it. COMMIT PREPARED or ROLLBACK PREPARED it by gid — the right choice depends on what the coordinator believes happened. Counter-objective: whichever way it resolves is irreversible.",
+                $"An orphaned prepared transaction (pg_prepared_xacts) is pinning the horizon; its XA coordinator never finished it. COMMIT PREPARED or ROLLBACK PREPARED it by gid: the right choice depends on what the coordinator believes happened. Counter-objective: whichever way it resolves is irreversible.",
             _ =>
-                "The holder kind is not one the collector recognises: read pg_stat_activity (backend_xmin), pg_replication_slots (xmin, catalog_xmin) and pg_prepared_xacts directly to find what is pinning the horizon. Counter-objective: none until the holder is identified — every release has a cost only its kind can name.",
+                "The holder kind is not one the collector recognises: read pg_stat_activity (backend_xmin), pg_replication_slots (xmin, catalog_xmin) and pg_prepared_xacts directly to find what is pinning the horizon. Counter-objective: none until the holder is identified, every release has a cost only its kind can name.",
         };
 
         /* Same-kind alternation (five client backends taking turns) keeps the kind's remedy — it is the right
            remedy — but not the promise that one release fixes it: the horizon moves to the next holder. */
         if (heldCaptures > 0 && !attributed && !sourcesAlternated)
-            rem = $"{distinctHolders:0} equally old holders took turns holding the horizon — resolving one moves the horizon to the next, not back; look at the SET, not the latest winner. " + rem;
+            rem = $"{distinctHolders:0} equally old holders took turns holding the horizon: resolving one moves the horizon to the next, not back; look at the SET, not the latest winner. " + rem;
 
         if (!persistenceArm)
-            rem = "No action on this evidence alone — a transient hold is normal; if it recurs: " + rem;
+            rem = "No action on this evidence alone, a transient hold is normal; if it recurs: " + rem;
 
         return new AdviceBlock(headline, inv.ToString().TrimEnd(), rem);
     }
@@ -500,7 +500,7 @@ public static partial class PgTargetAdvice
     private static readonly AdviceBlock s_autovacuumOffStatic = new(
         Headline: "autovacuum is OFF server-wide",
         Investigation:
-            "autovacuum = off in pg_settings disables the launcher entirely — no table is vacuumed or analysed " +
+            "autovacuum = off in pg_settings disables the launcher entirely: no table is vacuumed or analysed " +
             "unless someone runs VACUUM by hand, and only the wraparound-prevention vacuum still fires (the engine " +
             "refuses to let that one be disabled). A convention check on its own; when PG_AUTOVACUUM_BACKLOG " +
             "co-fires the consequence is measured.",
@@ -531,7 +531,7 @@ public static partial class PgTargetAdvice
             var ratio = bl.Metadata.GetValueOrDefault(PgTargetScorer.BacklogRatioKey, bl.Value);
             return s_autovacuumOffStatic with
             {
-                Headline = $"autovacuum is OFF server-wide, and {table} is {ratio:0.#}× past its own trigger line because of it",
+                Headline = $"autovacuum is OFF server-wide, and {table} is {FactAdvice.RatioText(ratio)}× past its own trigger line because of it",
                 Investigation = s_autovacuumOffStatic.Investigation +
                     $" Here it has: {table} has sat past the line autovacuum would have fired at for {bl.Metadata.GetValueOrDefault(PgTargetScorer.BacklogTrailingSamplesKey):0} consecutive samples (PG_AUTOVACUUM_BACKLOG).",
             };
@@ -545,7 +545,7 @@ public static partial class PgTargetAdvice
         Investigation:
             "Each autovacuum worker collects dead-tuple identifiers into memory bounded by autovacuum_work_mem " +
             "(which defaults to maintenance_work_mem); when the space fills mid-table the run stops to scan every " +
-            "index, then resumes — on PostgreSQL 16 and earlier that is six bytes per dead tuple, capped at 1 GB, so a " +
+            "index, then resumes, on PostgreSQL 16 and earlier that is six bytes per dead tuple, capped at 1 GB, so a " +
             "table with tens of millions of dead tuples costs several index passes per vacuum. PostgreSQL 17 replaced " +
             "the array with a radix-tree TID store and the limit stops binding in practice. This is evidence-gated: it " +
             "means something only beside PG_AUTOVACUUM_BACKLOG.",
@@ -586,13 +586,13 @@ public static partial class PgTargetAdvice
             "computes that table's trigger line (autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × " +
             "n_live_tup, or the insert line on 13+) and the collector stores it hourly, so this finding is a table " +
             "the engine WOULD have vacuumed, in at least three consecutive samples, if it had been allowed to. A " +
-            "disabled table with no backlog is not reported — someone may be vacuuming it by hand on a schedule — so " +
+            "disabled table with no backlog is not reported (someone may be vacuuming it by hand on a schedule), so " +
             "the fact exists only when the reloption has a measured consequence. The one exception the engine " +
             "keeps: the wraparound-prevention vacuum ignores the reloption and will still run at " +
             "autovacuum_freeze_max_age.",
         Remediation:
-            "Re-enable it — ALTER TABLE … SET (autovacuum_enabled = true); takes effect at the launcher's next look, " +
-            "no restart — at the cost of the vacuum I/O whoever disabled it was avoiding; if a run hurt the workload, " +
+            "Re-enable it: ALTER TABLE … SET (autovacuum_enabled = true); takes effect at the launcher's next look, " +
+            "no restart, at the cost of the vacuum I/O whoever disabled it was avoiding; if a run hurt the workload, " +
             "a per-table cost delay or a lower scale factor is the lever, not the switch. Or keep it off and " +
             "schedule VACUUM (ANALYZE) on the table yourself, accepting that a manual vacuum reads every page and " +
             "holds SHARE UPDATE EXCLUSIVE while it runs (reads and writes continue; DDL and other vacuums wait). " +
@@ -621,7 +621,7 @@ public static partial class PgTargetAdvice
             || (facts.TryGetValue(PgTargetFactKeys.ConfigAutovacuumOff, out var off) && off.BaseSeverity > 0);
         var hasLastAutovacuum = m.TryGetValue(PgTargetScorer.BacklogHoursSinceLastAutovacuumKey, out var sinceLast);
 
-        var headline = $"{table}{db} has autovacuum_enabled = off and sits at {ratio:0.#}× its own {(insertArm ? "insert-vacuum" : "autovacuum trigger")} line for {FmtHours(hours)}";
+        var headline = $"{table}{db} has autovacuum_enabled = off and sits at {FactAdvice.RatioText(ratio)}× its own {(insertArm ? "insert-vacuum" : "autovacuum trigger")} line for {FmtHours(hours)}";
 
         /* #3691 lane 43: the ranked tables BY NAME, appended to the sentence that states the subject's own ratio
            and hours — because Ranked[0] IS the subject, so "and two more" means "besides the table just
@@ -630,12 +630,12 @@ public static partial class PgTargetAdvice
            their shape and not which table. Empty string when the read found only the subject, which is the
            byte-identity arm for every single-disabled-table server. */
         var rest = FactAdvice.NameTheRest(f, o =>
-            $"{o.Figures?.GetValueOrDefault(PgTargetScorer.BacklogRatioKey) ?? o.Value:0.#}× for {FmtHours(o.Figures?.GetValueOrDefault(PgTargetScorer.BacklogHoursKey) ?? 0)}");
+            $"{FactAdvice.RatioText(o.Figures?.GetValueOrDefault(PgTargetScorer.BacklogRatioKey) ?? o.Value)}× for {FmtHours(o.Figures?.GetValueOrDefault(PgTargetScorer.BacklogHoursKey) ?? 0)}");
 
         var inv = new StringBuilder();
         inv.Append(insertArm
-            ? $"The reloption is off on {table}, and the table has taken {Fmt(inserts)} inserts since its last vacuum against its own insert line of {Fmt(insertThreshold)} (autovacuum_vacuum_insert_threshold + autovacuum_vacuum_insert_scale_factor × {Fmt(live)} live tuples) — {ratio:0.#}× the line, for {trailing:0} consecutive samples spanning {FmtHours(hours)}{rest}. "
-            : $"The reloption is off on {table}, and the table carries {Fmt(dead)} dead tuples against its own trigger line of {Fmt(threshold)} (autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × {Fmt(live)} live tuples, reloptions honoured) — {ratio:0.#}× the line, for {trailing:0} consecutive samples spanning {FmtHours(hours)}{rest}. ");
+            ? $"The reloption is off on {table}, and the table has taken {Fmt(inserts)} inserts since its last vacuum against its own insert line of {Fmt(insertThreshold)} (autovacuum_vacuum_insert_threshold + autovacuum_vacuum_insert_scale_factor × {Fmt(live)} live tuples): {ratio:0.#}× the line, for {trailing:0} consecutive samples spanning {FmtHours(hours)}{rest}. "
+            : $"The reloption is off on {table}, and the table carries {Fmt(dead)} dead tuples against its own trigger line of {Fmt(threshold)} (autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × {Fmt(live)} live tuples, reloptions honoured): {ratio:0.#}× the line, for {trailing:0} consecutive samples spanning {FmtHours(hours)}{rest}. ");
         inv.Append("The engine computed that line and would have fired; the reloption is the only reason it did not. ");
         if (hasLastAutovacuum)
             inv.Append($"autovacuum last ran on this table {FmtHours(sinceLast)} before the window end. ");
@@ -644,20 +644,20 @@ public static partial class PgTargetAdvice
         if (totalBytes > 0)
             inv.Append($"The table is {FmtBytes(totalBytes)} on disk. ");
         if (serverOff)
-            inv.Append("CONFIG_PG_AUTOVACUUM_OFF also fired: the launcher is off server-wide, so the per-table reloption is moot until autovacuum = on — the server setting subsumes this card. ");
+            inv.Append("CONFIG_PG_AUTOVACUUM_OFF also fired: the launcher is off server-wide, so the per-table reloption is moot until autovacuum = on, the server setting subsumes this card. ");
         /* The POPULATION, which is a different number from the ranked list: every disabled table that met the
            gate, however many the read returned (the read stops at FactRanked.MaxObjects). So this sentence keeps
            its count and sends the reader to the tool for the tail the card cannot name. */
         if (others > 0)
-            inv.Append($"{others:0} more disabled table{(others == 1 ? " has" : "s have")} met the same gate — get_pg_autovacuum_health names them all, disabled tables first. ");
+            inv.Append($"{others:0} more disabled table{(others == 1 ? " has" : "s have")} met the same gate: get_pg_autovacuum_health names them all, disabled tables first. ");
         if (facts.TryGetValue(PgTargetFactKeys.AutovacuumBacklog, out var bl) && bl.Severity > 0)
             inv.Append("PG_AUTOVACUUM_BACKLOG carries the grade (ratio, slope, tables in backlog); this card names the cause. ");
 
         var rem = new StringBuilder();
         if (serverOff)
             rem.Append("Turn autovacuum back on server-wide first (autovacuum = on in postgresql.conf, then pg_reload_conf(); on a managed service, set it in your provider's parameter group or server parameters, which applies it); the per-table reloption below only matters once the launcher runs. ");
-        rem.Append($"Two levers, each with its cost. (1) Re-enable autovacuum on this table — ALTER TABLE {table} SET (autovacuum_enabled = true); — no restart; the launcher picks it up at its next autovacuum_naptime pass and will vacuum it at once because it is already past its line. Counter-objective: the autovacuum I/O whoever disabled it was avoiding returns to this table; if a run was hurting the workload, pair it with ALTER TABLE {table} SET (autovacuum_vacuum_cost_delay = 2); (the server default; the reloption exists so ONE table can be throttled without touching the rest) rather than leaving it off. ");
-        rem.Append($"(2) Keep it off and schedule the vacuum yourself — VACUUM (ANALYZE) {table}; off-peak, then on a cadence that beats the {(insertArm ? "insert" : "dead-tuple")} rate. Counter-objective: a manual VACUUM reads every page of the table{(totalBytes > 0 ? $" ({FmtBytes(totalBytes)})" : string.Empty)} and holds SHARE UPDATE EXCLUSIVE while it runs — reads and writes continue, DDL and other vacuums wait — and a schedule that slips becomes this finding again. ");
+        rem.Append($"Two levers, each with its cost. (1) Re-enable autovacuum on this table: ALTER TABLE {table} SET (autovacuum_enabled = true);, no restart; the launcher picks it up at its next autovacuum_naptime pass and will vacuum it at once because it is already past its line. Counter-objective: the autovacuum I/O whoever disabled it was avoiding returns to this table; if a run was hurting the workload, pair it with ALTER TABLE {table} SET (autovacuum_vacuum_cost_delay = 2); (the server default; the reloption exists so ONE table can be throttled without touching the rest) rather than leaving it off. ");
+        rem.Append($"(2) Keep it off and schedule the vacuum yourself: VACUUM (ANALYZE) {table}; off-peak, then on a cadence that beats the {(insertArm ? "insert" : "dead-tuple")} rate. Counter-objective: a manual VACUUM reads every page of the table{(totalBytes > 0 ? $" ({FmtBytes(totalBytes)})" : string.Empty)} and holds SHARE UPDATE EXCLUSIVE while it runs (reads and writes continue, DDL and other vacuums wait), and a schedule that slips becomes this finding again. ");
         rem.Append("Never VACUUM FULL as the first lever: it takes ACCESS EXCLUSIVE, rewrites the whole table and blocks every reader and writer for the duration; it is for reclaiming space AFTER the backlog is under control, if ever. ");
         if (!insertArm && live > 0 && threshold > 0)
             rem.Append($"If the table was disabled because its runs were too big, re-enable it with a lower line so each run is smaller: ALTER TABLE {table} SET (autovacuum_vacuum_scale_factor = {SuggestedScaleFactor(threshold, live):0.###}); halves the trigger from its current {threshold / live:P1} of the table. Counter-objective: more frequent, smaller vacuums. ");

@@ -396,7 +396,7 @@ public sealed class PgTargetIoTests
 
         var write = WriteFact(4.0, ops: 3_000);
         var writeBlock = FactAdvice.Compose(PgTargetFactKeys.IoWriteLatencyMs, Lookup(write))!;
-        Assert.Contains("4.0 ms per operation over the 4 observed hours — stated, not graded", writeBlock.Headline, StringComparison.Ordinal);
+        Assert.Contains("4.0 ms per operation over the 4 observed hours: stated, not graded", writeBlock.Headline, StringComparison.Ordinal);
         Assert.Contains("No bar grades it yet", writeBlock.Investigation, StringComparison.Ordinal);
     }
 
@@ -407,7 +407,7 @@ public sealed class PgTargetIoTests
         anomaly.Metadata["peak_ms_per_read"] = 25.0;
         anomaly.Metadata["baseline_samples"] = 120;
         var block = FactAdvice.Compose(PgTargetFactKeys.AnomalyIoLatency, Lookup(anomaly))!;
-        Assert.Equal("Data-file read latency spiked to 25.0 ms per read — 12 times its usual variation above its normal level for this time of week", block.Headline);
+        Assert.Equal("Data-file read latency spiked to 25.0 ms per read: 12 times its usual variation above its normal level for this time of week", block.Headline);
         Assert.Contains("12 times its usual variation above its 1.3 ms per read normal level for this hour-of-week (over 120 baseline samples)", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("pg_stat_io", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("get_pg_io_trend", block.Remediation, StringComparison.Ordinal);

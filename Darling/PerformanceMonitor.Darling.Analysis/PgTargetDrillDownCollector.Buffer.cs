@@ -334,7 +334,7 @@ AND   e.extension_name = 'pg_buffercache'";
             },
             cold_buffers = summary.ColdBuffers,
             cold_share = Round(summary.ColdShare),
-            cold_note = "Buffers in relations whose average usage count is at or below 1 — the clock sweep's next victims; a per-relation average, not a per-buffer count.",
+            cold_note = "Buffers in relations whose average usage count is at or below 1: the clock sweep's next victims; a per-relation average, not a per-buffer count.",
             top_relations = top.Select(r => new
             {
                 rank = r.Rank,

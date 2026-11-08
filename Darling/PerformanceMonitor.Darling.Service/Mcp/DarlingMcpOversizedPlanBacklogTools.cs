@@ -86,8 +86,8 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
         {
             return McpHelpers.Status(
                 "precondition",
-                "include_rows needs server_name. The row listing carries the claim key — the plan and SQL "
-                + "handles with their statement offsets — which identifies a plan in ONE server's cache and "
+                "include_rows needs server_name. The row listing carries the claim key: the plan and SQL "
+                + "handles with their statement offsets, which identifies a plan in ONE server's cache and "
                 + "means nothing outside it, so a fleet-wide listing would be mostly identifiers for servers "
                 + "you did not ask about. Call this once without include_rows to see which servers have a "
                 + "backlog, then again with server_name set to the one you want.");
@@ -125,19 +125,19 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
                 {
                     scope,
                     capture_cap_bytes = QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes,
-                    note = "A worklist, not a series — these rows are updated in place, so there is no window "
+                    note = "A worklist, not a series: these rows are updated in place, so there is no window "
                         + "and no trend. last_captured_at and last_expired_at are stamped by the out-of-band "
                         + "sweep and by nothing else, so they are how you tell a sweep that is working from one "
                         + "that has never fetched anything: pending rows with a null last_captured_at is the "
                         + "second. pending, captured and expired are a strict partition of total_rows. "
-                        + "rows_with_content is not the same claim as captured_rows — the plan fallbacks key on "
+                        + "rows_with_content is not the same claim as captured_rows: the plan fallbacks key on "
                         + "the content column, so a captured row with no content is a plan get_plan_xml still "
                         + "cannot serve. observed_bytes is the monitored server's own measurement in UTF-16 "
                         + "bytes, directly comparable to capture_cap_bytes; the median is a discrete "
                         + "percentile, so it is a size some plan really had. Nothing here reports the size of "
                         + "the STORED content: a character count would read as half the byte figure, and "
                         + "measuring it would detoast every captured plan. server_name is null for a backlog "
-                        + "row whose server has left the registry — those rows are still counted, because "
+                        + "row whose server has left the registry: those rows are still counted, because "
                         + "retention prunes this table on last_seen_at and not on the registry.",
                     by_collector = census.Select(c => new
                     {
@@ -197,7 +197,7 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
                     }),
                     rows_note = include_rows
                         ? "Take query_hash from a query_stats row into get_plan_xml with this server_name and "
-                          + "database_name and it resolves through the over-cap fallback — that is the only "
+                          + "database_name and it resolves through the over-cap fallback, that is the only "
                           + "route to a plan the cap declined. A row with has_plan_xml false has no content to "
                           + "serve yet, whatever its verdict says. Ordered largest plan first, which is NOT the "
                           + "sweep's claim order, so this is not a prediction of the next fetch."

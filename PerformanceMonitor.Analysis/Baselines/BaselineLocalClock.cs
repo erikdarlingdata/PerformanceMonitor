@@ -195,7 +195,7 @@ public sealed class BaselineLocalClock
             NoteOnce(
                 "steps:" + timeZoneId,
                 string.Create(CultureInfo.InvariantCulture,
-                    $"[BaselineLocalClock] zone '{timeZoneId}' changed offset {transitions.Count} times inside one {BaselineMath.BaselineWindowDays}-day baseline window; keying on the newest change ({transitions[^1].AtUtc:yyyy-MM-dd HH:mm:ss}Z, {FormatOffset(transitions[^1].Before)} → {FormatOffset(transitions[^1].After)}) — rows before the earlier change are off by that earlier shift."));
+                    $"[BaselineLocalClock] zone '{timeZoneId}' changed offset {transitions.Count} times inside one {BaselineMath.BaselineWindowDays}-day baseline window; keying on the newest change ({transitions[^1].AtUtc:yyyy-MM-dd HH:mm:ss}Z, {FormatOffset(transitions[^1].Before)} → {FormatOffset(transitions[^1].After)}): rows before the earlier change are off by that earlier shift."));
         }
 
         var step = transitions[^1];

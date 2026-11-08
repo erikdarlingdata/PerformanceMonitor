@@ -315,7 +315,7 @@ public class StorySideLeafTests
         Assert.DoesNotContain("see its card", story.StoryText, StringComparison.Ordinal);
         Assert.DoesNotContain("see their cards", story.StoryText, StringComparison.Ordinal);
         Assert.Contains(StorySideLeaves.SentenceMarker, advice.Investigation, StringComparison.Ordinal);
-        Assert.Contains($"`{PgTargetFactKeys.ConfigMaintWorkMem}` — {lever.Headline}", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains($"`{PgTargetFactKeys.ConfigMaintWorkMem}`: {lever.Headline}", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains($"For `{PgTargetFactKeys.ConfigMaintWorkMem}`: {lever.Remediation}", advice.Remediation, StringComparison.Ordinal);
     }
 
@@ -350,10 +350,10 @@ public class StorySideLeafTests
         Assert.DoesNotContain("see its card", story.StoryText, StringComparison.Ordinal);
         Assert.DoesNotContain("see their cards", story.StoryText, StringComparison.Ordinal);
         Assert.Contains(
-            $"{StorySideLeaves.SentenceMarker} `{PgTargetFactKeys.ConfigEffectiveCacheSize}` — {cache.Headline}",
+            $"{StorySideLeaves.SentenceMarker} `{PgTargetFactKeys.ConfigEffectiveCacheSize}`: {cache.Headline}",
             advice.Investigation, StringComparison.Ordinal);
         Assert.Contains(
-            $"{StorySideLeaves.SentenceMarker} `{PgTargetFactKeys.ConfigRandomPageCost}` — {cost.Headline}",
+            $"{StorySideLeaves.SentenceMarker} `{PgTargetFactKeys.ConfigRandomPageCost}`: {cost.Headline}",
             advice.Investigation, StringComparison.Ordinal);
         var cacheClause = $" For `{PgTargetFactKeys.ConfigEffectiveCacheSize}`: {cache.Remediation}";
         var costClause = $" For `{PgTargetFactKeys.ConfigRandomPageCost}`: {cost.Remediation}";
@@ -480,7 +480,7 @@ public class StorySideLeafTests
         Assert.Null(StorySideLeaves.Sentence([], byKey));
 
         const string maintSentence =
-            "`CONFIG_PG_MAINT_WORK_MEM` — maintenance_work_mem is being tested by public.hot's 5,250 dead tuples.";
+            "`CONFIG_PG_MAINT_WORK_MEM`: maintenance_work_mem is being tested by public.hot's 5,250 dead tuples.";
         Assert.Equal(
             $" {StorySideLeaves.SentenceMarker} {maintSentence}",
             StorySideLeaves.Sentence([PgTargetFactKeys.ConfigMaintWorkMem], byKey));

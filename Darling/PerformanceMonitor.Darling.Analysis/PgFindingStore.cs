@@ -552,13 +552,13 @@ ORDER BY local_bucket, story_path_hash";
             if (everyRowAccepted)
             {
                 _logger?.LogError(
-                    "[PgFindingStore] InsertFindingsAsync had all {Count} row(s) accepted and then failed to COMMIT them, so the batch was rolled back — this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {Message}",
+                    "[PgFindingStore] InsertFindingsAsync had all {Count} row(s) accepted and then failed to COMMIT them, so the batch was rolled back, this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {Message}",
                     findings.Count, ex.Message);
             }
             else
             {
                 _logger?.LogError(
-                    "[PgFindingStore] InsertFindingsAsync failed at row {Row} of {Count} and the batch was rolled back — this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {Message}",
+                    "[PgFindingStore] InsertFindingsAsync failed at row {Row} of {Count} and the batch was rolled back, this analysis persisted NO findings, deliberately: a partial set would have read as a complete analysis that found fewer problems. {Message}",
                     row, findings.Count, ex.Message);
             }
 
@@ -655,7 +655,7 @@ ORDER BY local_bucket, story_path_hash";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            _logger?.LogError("[PgFindingStore] GetPriorOccurrencesAsync failed — this pass's findings are persisted unlabelled and the next pass reads the same history: {Message}", ex.Message);
+            _logger?.LogError("[PgFindingStore] GetPriorOccurrencesAsync failed, this pass's findings are persisted unlabelled and the next pass reads the same history: {Message}", ex.Message);
             return PriorOccurrenceRead.Empty;
         }
     }
