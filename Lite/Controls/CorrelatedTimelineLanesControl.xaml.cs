@@ -808,10 +808,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
     /* Render an empty lane as a live, gridded chart instead of a dead black box. This is most often
        the Blocking/Deadlocking lane on a healthy server (no events = good news), so make it match the
-       populated lanes: keep the grid and show a 0-1 Y axis. We no longer blank the axes or add the old
-       "No Data" text (which SyncXAxes pushed off-screen anyway). X limits and the vertical gridlines are
+       populated lanes: keep the grid and show a 0-1 Y axis. X limits and the vertical gridlines are
        set afterward by SyncXAxes so the time axis aligns with the other lanes; the left axis keeps its
-       default numeric ticks, so 0/1 labels and horizontal gridlines render. The title arg is retained
+       default numeric ticks, so 0/1 labels and horizontal gridlines render. #8307: the lane also says it
+       is empty, in the one muted sentence the other charts use, anchored to the plot's center in pixels so
+       the X limits SyncXAxes sets afterwards do not carry it off the screen. The title arg is retained
        for call-site readability. */
     private void ShowEmpty(ScottPlot.WPF.WpfPlot chart, string title)
     {
@@ -829,8 +830,30 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         if (chart == BlockingChart) ChartStyle.UseCountAxis(chart); // #8224: an empty count lane still labels whole numbers
         chart.Plot.Axes.SetLimitsY(0, 1);
 
+        var note = chart.Plot.Add.Annotation($"No {LaneName(chart)} data in this window", ScottPlot.Alignment.MiddleCenter);
+        note.LabelFontSize = 14;
+        note.LabelFontColor = EmptyTextColor();
+        note.LabelBackgroundColor = ScottPlot.Colors.Transparent;
+        note.LabelBorderColor = ScottPlot.Colors.Transparent;
+        note.LabelBorderWidth = 0;
+        note.LabelShadowColor = ScottPlot.Colors.Transparent;
+
         chart.Refresh();
     }
+
+    /// <summary>The lane's name in its empty sentence, the one Initialize uses before the first read.</summary>
+    private string LaneName(ScottPlot.WPF.WpfPlot chart) =>
+        chart == CpuChart ? "SQL CPU"
+        : chart == WaitStatsChart ? "Wait Stats"
+        : chart == BlockingChart ? "Blocking"
+        : chart == MemoryChart ? "Buffer Pool"
+        : "I/O Latency";
+
+    /// <summary>The theme's muted text color (the one the XAML empty hints use), or the palette's placeholder grey when no theme is loaded.</summary>
+    private static ScottPlot.Color EmptyTextColor() =>
+        System.Windows.Application.Current?.TryFindResource("ForegroundMutedBrush") is System.Windows.Media.SolidColorBrush brush
+            ? new ScottPlot.Color(brush.Color.R, brush.Color.G, brush.Color.B, brush.Color.A)
+            : ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
 
     /// <summary>
     /// Reapplies theme to all lane charts (call on theme change).

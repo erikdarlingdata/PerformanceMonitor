@@ -38,8 +38,16 @@ public static class RunningJobsCurrency
     public static DateTime? NotCurrentSince(DateTime? lastGoodCollectionUtc, DateTime cutoffUtc)
         => lastGoodCollectionUtc is DateTime last && last < cutoffUtc ? last : null;
 
-    /// <summary>The note shown where the jobs would be when collection is not current.</summary>
-    public static string NotCurrentNote(DateTime lastGoodCollectionUtc)
-        => string.Create(CultureInfo.InvariantCulture,
-            $"Collection is not current. The last good collection was at {lastGoodCollectionUtc:yyyy-MM-dd HH:mm} UTC, so no running jobs are shown.");
+    /// <summary>
+    /// The note shown where the jobs would be when collection is not current. <paramref name="formatTime"/> words the last good
+    /// collection's instant the way the page words its other times (#8307: the tab's selected time mode); without it the note names
+    /// the UTC instant, as the MCP tools do.
+    /// </summary>
+    public static string NotCurrentNote(DateTime lastGoodCollectionUtc, Func<DateTime, string>? formatTime = null)
+    {
+        var when = formatTime is null
+            ? string.Create(CultureInfo.InvariantCulture, $"{lastGoodCollectionUtc:yyyy-MM-dd HH:mm} UTC")
+            : formatTime(lastGoodCollectionUtc);
+        return $"Collection is not current. The last good collection was at {when}, so no running jobs are shown.";
+    }
 }

@@ -19,6 +19,12 @@ using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitorLite.Controls;
 
+public partial class ServerTab
+{
+    /// <summary>#8307: the CPU Scheduler page scrolls as one: a wheel over its grid that is at its end moves the page (<see cref="PageScroll.ForwardWheel"/>).</summary>
+    private void PageScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e) => PageScroll.ForwardWheel(sender, e);
+}
+
 /// <summary>
 /// The CPU Scheduler tab — the Lite port of the Darling viewer's CPU Scheduler surface (itself the
 /// Dashboard-parity port of the cpu_scheduler_stats reporting). A point-in-time snapshot collector, so

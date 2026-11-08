@@ -1322,7 +1322,7 @@ public partial class ServerTab : UserControl
             if (read.Jobs.Count == 0 && !bannerShows && read.LastGoodCollection is DateTime lastGood
                 && RunningJobsNoDataMessage.Tag is string ownText && RunningJobsNoDataMessage.Text == ownText)
             {
-                RunningJobsNoDataMessage.Text = RunningJobsCurrency.NotCurrentNote(lastGood);
+                RunningJobsNoDataMessage.Text = RunningJobsCurrency.NotCurrentNote(lastGood, utc => CollectionHealthTime.Format(utc, _serverClock));
                 RunningJobsNoDataMessage.Visibility = System.Windows.Visibility.Visible;
             }
         }

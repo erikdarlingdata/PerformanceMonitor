@@ -74,6 +74,12 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
     internal LegendPanel Panel => _panel;
 
     /// <summary>
+    /// #8307: a legend under the plot keeps to one row of whole entries and "+N more" even when more rows would fit the chart: for a
+    /// chart whose entries are one per file (File I/O), where every row would otherwise be legend.
+    /// </summary>
+    internal bool OneRow { get; init; }
+
+    /// <summary>
     /// Extra room added to a RIGHT legend's panel, on the side away from the plot, so charts in a group whose legends differ in
     /// width share one plot rectangle and the spare space falls to the right of the legend (<see cref="ChartGroupAligner"/>).
     /// </summary>
@@ -135,7 +141,7 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
             }
         }
 
-        if (underFits) return (Edge.Bottom, false, 0);
+        if (underFits && !OneRow) return (Edge.Bottom, false, 0);
 
         /* One row. The data rectangle's width does not depend on the legend's height, so any layout gives the width the row wraps at.
            A legend that already fits one row has nothing to leave out. */
