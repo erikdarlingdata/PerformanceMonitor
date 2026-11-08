@@ -290,6 +290,8 @@ public partial class ViewerServerTab : IDisposable
         ReapplyAxisColors(TempDbSizeChart);
         TempDbSizeChart.Plot.YLabel("MB");
         TempDbSizeChart.Plot.Axes.AutoScaleY();
+        /* A near-flat allocation (the file sizes rarely move) would otherwise fit an axis a hundredth of a megabyte tall. */
+        ChartYSpan.ApplyMinimum(TempDbSizeChart.Plot, totals);
         TempDbSizeChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbSizeChart.Plot, rangeStart, rangeEnd), rangeEnd);
         TempDbSizeChart.Refresh();
     }

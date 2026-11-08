@@ -923,7 +923,7 @@
                                            Padding="8,4" FontWeight="Bold"
                                            Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                            Background="#2244AAFF"/>
-                                <Expander Header="CPU by database" IsExpanded="False" Margin="4,2,4,0">
+                                <Expander Header="Show CPU by database" IsExpanded="False" Margin="4,2,4,8">
                                     <ScrollViewer MaxHeight="220" VerticalScrollBarVisibility="Auto">
                                         <ui:MetricBarCards x:Name="QueryStatsByDbCards" Margin="4,4,4,8"/>
                                     </ScrollViewer>
@@ -3500,6 +3500,7 @@
                         </DataGrid>
                     </TabItem>
                     <TabItem Header="Automatic Tuning">
+                        <Grid>
                         <DataGrid x:Name="AutomaticTuningGrid" Style="{StaticResource DarkGrid}">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Binding="{Binding DatabaseName}" Width="200">
@@ -3525,6 +3526,7 @@
                                 </DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>
+                        </Grid>
                     </TabItem>
                     <TabItem Header="Trace Flags">
                         <Grid>
