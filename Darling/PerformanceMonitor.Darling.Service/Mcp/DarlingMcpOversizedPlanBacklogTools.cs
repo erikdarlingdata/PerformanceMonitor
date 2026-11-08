@@ -140,8 +140,11 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
                     servers_in_scope = ordered.Count,
                     servers_returned = shown,
                     truncated = shown < ordered.Count,
+                    /* Composed here rather than McpResponseBudget.PageCutNote: this read has no window, no database and no row
+                       limit over servers, so the one lever that shows a cut server is server_name. */
                     cut_note = shown < ordered.Count
-                        ? McpResponseBudget.PageCutNote(ordered.Count, shown, "pending_rows desc, total_rows desc", "servers")
+                        ? string.Create(CultureInfo.InvariantCulture,
+                            $"TRUNCATED: {ordered.Count:#,0} servers were read; only {shown:#,0} fit the {McpResponseBudget.DefaultBytes:#,0}-byte response budget (pending_rows desc, total_rows desc). Pass server_name to read one of the servers not shown.")
                         : null,
                     note = "A worklist, not a series: these rows are updated in place, so there is no window "
                         + "and no trend. last_captured_at and last_expired_at are stamped by the out-of-band "
