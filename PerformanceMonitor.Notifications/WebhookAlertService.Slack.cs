@@ -40,6 +40,7 @@ public partial class WebhookAlertService
         string? detailText,
         DateTime nowUtc,
         string? displayName = null,
+        TimeSpan postSpacing = default,
         CancellationToken cancellationToken = default)
     {
         var entries = EntriesNaming(settings, NotificationRouter.SlackChannel, webhookUrl);
@@ -47,7 +48,8 @@ public partial class WebhookAlertService
         {
             var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
                 detailText: detailText, displayName: displayName, nowUtc: nowUtc);
-            var error = await PostWebhookAsync(webhookUrl, payload, settings.SlackProxyAddress, cancellationToken: cancellationToken, bodyLog: _logger);
+            var error = await PostPacedAsync(
+                NotificationRouter.SlackChannel, webhookUrl, webhookUrl, payload, settings.SlackProxyAddress, headers: null, signing: null, postSpacing, cancellationToken);
 
             if (error != null)
             {

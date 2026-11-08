@@ -184,8 +184,9 @@ public sealed class StoreLockHolderTests
             /* #7256: a budgeted writer's two acquisitions, the poll and the park tail, each registering as it takes the lock. */
             "if (s_dbLock.TryEnterWriteLock(0))",
             "if (!s_dbLock.TryEnterWriteLock(remaining))",
-            "if (!s_dbLock.TryEnterReadLock(0))",
-            "if (!s_dbLock.TryEnterWriteLock(0))",
+            /* The trim cycle's two tries: TrimLockWaitForTests is zero outside tests, so these never wait in production. */
+            "if (!s_dbLock.TryEnterReadLock(TrimLockWaitForTests))",
+            "if (!s_dbLock.TryEnterWriteLock(TrimLockWaitForTests))",
         };
         Assert.True(expected.SequenceEqual(matched),
             "The matched acquisitions changed. Expected: " + string.Join(" | ", expected)

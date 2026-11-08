@@ -51,7 +51,7 @@ public interface ISlackRequestThreadStore
 public sealed record SlackThreadJournalRow(
     long JournalId, string Event, DateTime EventTimeUtc, string Actor, string? Reason, string? DetailJson, string PostKey,
     Guid RequestId, int RouteId, int ServerId, string ServerName, string Metric, string Severity, string Trigger, Guid? FollowUpOf,
-    string? CalledDetailJson, int ClaimNo, string? Verdict, string? RootCause, DateTime OpenedAtUtc);
+    string? CalledDetailJson, int ClaimNo, string? Verdict, string? RootCause, DateTime OpenedAtUtc, Guid? ChatThreadOf = null);
 
 /// <summary>#7656: where the thread pass reads the rows to post. The store implements it; a test stands its own in.</summary>
 public interface ISlackThreadRowSource
@@ -188,7 +188,7 @@ SELECT p.journal_id, p.event, p.event_time, p.actor, p.reason, p.detail::text, p
             THEN (SELECT count(*) FROM config.investigation_journal AS k
                   WHERE k.request_id = p.request_id AND k.event = 'claimed' AND k.journal_id <= p.journal_id)
             ELSE 0 END,
-       rp.verdict, rp.root_cause, r.opened_at
+       rp.verdict, rp.root_cause, r.opened_at, r.chat_thread_of
 FROM posts AS p
 JOIN config.investigation_requests AS r ON r.request_id = p.request_id
 JOIN config.config_notification_routes AS rt ON rt.route_id = r.route_id
@@ -225,7 +225,7 @@ LIMIT $3";
                 reader.GetString(12), reader.GetString(13), reader.IsDBNull(14) ? null : reader.GetGuid(14),
                 reader.IsDBNull(15) ? null : reader.GetString(15), (int)reader.GetInt64(16),
                 reader.IsDBNull(17) ? null : reader.GetString(17), reader.IsDBNull(18) ? null : reader.GetString(18),
-                reader.GetFieldValue<DateTime>(19)));
+                reader.GetFieldValue<DateTime>(19), reader.IsDBNull(20) ? null : reader.GetGuid(20)));
         }
 
         return rows;

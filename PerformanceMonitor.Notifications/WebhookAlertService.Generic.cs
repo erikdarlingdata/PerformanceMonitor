@@ -45,6 +45,7 @@ public partial class WebhookAlertService
         WebhookSigningKeys? signing = null,
         string status = GenericStatusFiring,
         string? dedupKeyOverride = null,
+        TimeSpan postSpacing = default,
         CancellationToken cancellationToken = default)
     {
         var entries = EntriesNaming(settings, NotificationRouter.GenericChannel, webhookUrl);
@@ -92,8 +93,8 @@ public partial class WebhookAlertService
 
             /* #3598: the routed endpoint; headers, body template and proxy stay the parent's — a route
                redirects the POST, it does not re-author it. */
-            var error = await PostWebhookAsync(
-                webhookUrl, payload, settings.GenericWebhookProxyAddress, headers, WebhookPostTimeout, signed, cancellationToken, _logger);
+            var error = await PostPacedAsync(
+                NotificationRouter.GenericChannel, webhookUrl, webhookUrl, payload, settings.GenericWebhookProxyAddress, headers, signed, postSpacing, cancellationToken);
 
             if (error != null)
             {

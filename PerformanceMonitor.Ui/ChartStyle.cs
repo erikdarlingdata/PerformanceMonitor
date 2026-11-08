@@ -121,6 +121,7 @@ namespace PerformanceMonitor.Ui
             chart.Plot.Axes.Left.Label.ForeColor = c.Text;
             chart.Plot.Axes.Bottom.TickLabelStyle.FontSize = 13;
             chart.Plot.Axes.Left.TickLabelStyle.FontSize = 13;
+            ApplyAxisTitleStyle(chart);
 
             ApplyShortPlotFixes(chart);
 
@@ -196,6 +197,22 @@ namespace PerformanceMonitor.Ui
             chart.Plot.Axes.Left.Label.ForeColor = text;
             chart.Plot.Axes.Bottom.TickLabelStyle.FontSize = 13;
             chart.Plot.Axes.Left.TickLabelStyle.FontSize = 13;
+            ApplyAxisTitleStyle(chart);
+        }
+
+        /// <summary>
+        /// #8224: an axis title (the Y unit: "ms", "MB/s", "events/hour") is one style on every chart: regular weight at
+        /// <see cref="ChartAxisTitle.BaseFontSize"/>. ScottPlot's stock axis title is bold at 16 points, so a chart that never set
+        /// the style drew its unit heavier and larger than its neighbours. <see cref="ChartAxisTitle"/> shrinks the size on a
+        /// plot too short for the title, and nothing else changes it.
+        /// </summary>
+        public static void ApplyAxisTitleStyle(WpfPlot chart)
+        {
+            foreach (var axis in new ScottPlot.IAxis[] { chart.Plot.Axes.Left, chart.Plot.Axes.Bottom })
+            {
+                axis.Label.Bold = false;
+                axis.Label.FontSize = (float)ChartAxisTitle.BaseFontSize;
+            }
         }
 
         /// <summary>
