@@ -18,9 +18,10 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #8074: the Viewer's Wait Trend shares the reader the web's <c>get_pg_wait_trend</c> runs, so on an Aurora target it follows
-/// the same event over the same points from the engine's cumulative counters. Its own class because the Viewer is a WPF
-/// project; the tool-level facts are in <see cref="PgWaitTrendEngineCumulativeLiveTests"/>.
+/// #8074: the Viewer's Wait Trend on an Aurora target reads the engine's cumulative counters: it follows the event with the most
+/// wait time, serves that event's per-collection deltas as its points, and names the engine_cumulative instrument, the same
+/// arm <c>get_pg_wait_trend</c> buckets for the web. Its own class because the Viewer is a WPF project; the tool-level facts are
+/// in <see cref="PgWaitTrendEngineCumulativeLiveTests"/>.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class PgWaitTrendEngineCumulativeViewerLiveTests

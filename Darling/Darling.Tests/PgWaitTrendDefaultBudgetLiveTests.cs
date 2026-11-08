@@ -74,8 +74,8 @@ public sealed class PgWaitTrendDefaultBudgetLiveTests
             Assert.True(points > 0, "the default call returned no points");
             Assert.True(bytes <= McpResponseBudget.DefaultBytes,
                 $"get_pg_wait_trend's default call is {bytes:N0} bytes, over the {McpResponseBudget.DefaultBytes:N0}-byte budget ({points} points)");
-            Assert.True(points <= TrendBuckets.McpPointBudget,
-                $"get_pg_wait_trend's default call served {points} points, over the {TrendBuckets.McpPointBudget}-point auto target");
+            Assert.True(points <= TrendBuckets.PgWaitTrendMcpAutoPoints,
+                $"get_pg_wait_trend's default call served {points} points, over the {TrendBuckets.PgWaitTrendMcpAutoPoints}-point auto target");
             Assert.True(root.TryGetProperty("bucket_minutes", out var width) && width.GetInt32() >= 1,
                 "the answer does not say which bucket width it chose");
             Assert.True(root.TryGetProperty("aggregate_note", out _), "the answer carries no aggregate_note");
