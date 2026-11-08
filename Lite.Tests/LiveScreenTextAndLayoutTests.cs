@@ -138,7 +138,9 @@ public sealed class LiveScreenTextAndLayoutTests
             {
                 await connection.OpenAsync();
                 using var command = connection.CreateCommand();
-                command.CommandText = "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version) VALUES (1, current_timestamp, 7, 'SQL01', 'Enterprise Edition (64-bit)', '16.0.1000.6')";
+                /* One row with every payload column the collector writes, since the table declares them NOT NULL. */
+                command.CommandText = "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, product_update_level, engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb, socket_count, cores_per_socket, is_hadr_enabled, is_clustered, enterprise_features, service_objective, vcore_count, lock_pages_in_memory, instant_file_initialization_enabled, memory_dump_count) "
+                    + "VALUES (1, current_timestamp, 7, 'SQL01', 'Enterprise Edition (64-bit)', '16.0.1000.6', 'RTM', 'CU5', 3, 8, 1, 65536, 1, 8, false, false, '', '', 0, false, false, 0)";
                 await command.ExecuteNonQueryAsync();
             }
 

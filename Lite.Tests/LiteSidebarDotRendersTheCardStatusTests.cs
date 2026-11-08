@@ -63,7 +63,8 @@ public sealed class LiteSidebarDotRendersTheCardStatusTests
 
                 Assert.Equal(card.CardStatus, dot.CardStatus);
                 Assert.Equal(card.StatusDisplay, dot.DotStatus);
-                Assert.StartsWith(dot.DotTooltip.Split('\n')[0], card.StatusTooltip, StringComparison.Ordinal);
+                /* The dot's tooltip opens on the server's name, since the rail shows the dot alone; its second line is the card's first. */
+                Assert.StartsWith(dot.DotTooltip.Split('\n')[1], card.StatusTooltip, StringComparison.Ordinal);
             }
         }
     }
