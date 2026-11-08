@@ -166,7 +166,7 @@ public sealed class DarlingMcpHealthParserTools
             var hostOs = await DarlingSystemHealthReader.GetHostOsVersionAsync(postgres, c.ServerId, cancellationToken);
             var buckets = BucketCpu(SystemHealthHostCpu.Apply(c.Rows, hostOs), bucketMinutes);
             /* The corruption and contention charts (#6295): the Viewer's first five sick spinlock types, oldest snapshot first. */
-            var spinlockTypes = SickSpinlockTypes(c.Rows);
+            var (spinlockTypes, spinlockTypeCount) = SickSpinlockTypes(c.Rows);
 
             return Finish(notice, JsonSerializer.Serialize(new
             {
@@ -181,6 +181,8 @@ public sealed class DarlingMcpHealthParserTools
                 bucket_minutes = bucketMinutes,
                 snapshots = c.Rows.Count,
                 sick_spinlock_types = spinlockTypes,
+                /* #8187: how many sick spinlock types the window had, so the page can say "top 5 of N types" when some were left out. */
+                sick_spinlock_type_count = spinlockTypeCount,
                 /* Every bucket is shown, so the page's row-limit notice (total_entries above shown) never fires on this answer. */
                 total_entries = buckets.Count,
                 shown = buckets.Count,
@@ -223,15 +225,24 @@ public sealed class DarlingMcpHealthParserTools
     private static bool IsSickSpinlock(string? type) =>
         !string.IsNullOrEmpty(type) && !string.Equals(type, "none", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The sick spinlock types the Viewer's Sick Spinlocks chart draws: the first five distinct names, taking the snapshots
-    /// oldest first. The chart read names them once so the page draws the same series in the same order.</summary>
-    internal static List<string> SickSpinlockTypes(IEnumerable<SystemHealthRecord> rows) =>
-        rows.Where(r => r.EventTime.HasValue && IsSickSpinlock(r.SickSpinlockType))
-            .OrderBy(r => r.EventTime)
-            .Select(r => r.SickSpinlockType!)
-            .Distinct()
-            .Take(5)
+    /// <summary>How many sick spinlock types the chart read names: the ones with the most backoffs in the window, as the Viewer's chart draws (#8187).</summary>
+    internal const int SickSpinlockSeriesLimit = 5;
+
+    /// <summary>The sick spinlock types the Viewer's Sick Spinlocks chart draws (#8187): the <see cref="SickSpinlockSeriesLimit"/> types with
+    /// the most backoffs in the window (a snapshot with no count counts as 1, the value it plots as), busiest first and ties by name; and
+    /// how many types there were, so the page can say when it left some out. The chart read names them once so the page draws the same
+    /// series in the same order.</summary>
+    internal static (List<string> Top, int Total) SickSpinlockTypes(IEnumerable<SystemHealthRecord> rows)
+    {
+        var ranked = rows
+            .Where(r => r.EventTime.HasValue && IsSickSpinlock(r.SickSpinlockType))
+            .GroupBy(r => r.SickSpinlockType!, StringComparer.Ordinal)
+            .OrderByDescending(g => g.Sum(r => (double)(r.SpinlockBackoffs ?? 1)))
+            .ThenBy(g => g.Key, StringComparer.Ordinal)
+            .Select(g => g.Key)
             .ToList();
+        return (ranked.Take(SickSpinlockSeriesLimit).ToList(), ranked.Count);
+    }
 
     /// <summary>Groups the snapshots into <paramref name="bucketMinutes"/>-wide buckets aligned to the UTC epoch (every ladder
     /// width divides a day, so none straddles midnight) and averages each CPU reading over the snapshots that carry it.
