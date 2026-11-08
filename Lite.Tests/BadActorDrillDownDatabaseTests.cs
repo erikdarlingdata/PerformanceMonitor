@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
@@ -116,6 +118,23 @@ public sealed class BadActorDrillDownDatabaseTests : IClassFixture<SharedDuckDbF
     }
 
     [Fact]
+    public async Task ThePlanAnalysis_FetchesTheFindingsOwnDatabasesPlan()
+    {
+        await ClearAsync();
+        await SeedBothDatabasesAsync();
+
+        /* The cheap database's serial plan and the expensive database's plan sit at the same newest
+           collection_time, so a lookup by hash alone has only the aggregate's order to choose by. */
+        var expensive = new RecordingPlanFetcher();
+        await new DrillDownCollector(_duckDb, expensive).EnrichFindingsAsync([NewFinding(ExpensiveDb)], Context());
+        Assert.Equal(new[] { ExpensivePlan + "H" }, expensive.Handles);
+
+        var cheap = new RecordingPlanFetcher();
+        await new DrillDownCollector(_duckDb, cheap).EnrichFindingsAsync([NewFinding(CheapDb)], Context());
+        Assert.Equal(new[] { CheapSerialPlan + "H" }, cheap.Handles);
+    }
+
+    [Fact]
     public async Task TheFactCollector_EmitsOneFactPerHash_ForTheHighestScoringDatabase()
     {
         await ClearAsync();
@@ -130,18 +149,32 @@ public sealed class BadActorDrillDownDatabaseTests : IClassFixture<SharedDuckDbF
         Assert.Equal(ExpensiveExecutions, (long)badActor.Metadata["execution_count"]);
     }
 
+    private static AnalysisFinding NewFinding(string? databaseName) => new()
+    {
+        RootFactKey = FactKey,
+        StoryPath = FactKey,
+        PathKeys = [FactKey],
+        /* Past the display gate, below which the expensive drill-downs are skipped wholesale. */
+        Severity = 1.0,
+        /* What InferenceEngine copies from the root fact: the database the fact was scored on. */
+        DatabaseName = databaseName,
+    };
+
+    /// <summary>Records the plan handles the plan analysis asks for and returns no plan.</summary>
+    private sealed class RecordingPlanFetcher : IPlanFetcher
+    {
+        public List<string> Handles { get; } = [];
+
+        public Task<string?> FetchPlanXmlAsync(int serverId, string planHandle, CancellationToken cancellationToken)
+        {
+            Handles.Add(planHandle);
+            return Task.FromResult<string?>(null);
+        }
+    }
+
     private async Task<JsonElement> CollectBadActorAsync(string? databaseName)
     {
-        var finding = new AnalysisFinding
-        {
-            RootFactKey = FactKey,
-            StoryPath = FactKey,
-            PathKeys = [FactKey],
-            /* Past the display gate, below which the expensive drill-downs are skipped wholesale. */
-            Severity = 1.0,
-            /* What InferenceEngine copies from the root fact: the database the fact was scored on. */
-            DatabaseName = databaseName,
-        };
+        var finding = NewFinding(databaseName);
 
         await new DrillDownCollector(_duckDb).EnrichFindingsAsync([finding], Context());
 
@@ -191,8 +224,8 @@ public sealed class BadActorDrillDownDatabaseTests : IClassFixture<SharedDuckDbF
 INSERT INTO query_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash,
      creation_time, max_dop, min_dop, delta_execution_count, delta_worker_time, delta_elapsed_time,
-     delta_logical_reads, delta_spills, query_text)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $11, $12, $13, 0, $14)";
+     delta_logical_reads, delta_spills, query_text, plan_handle)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $11, $12, $13, 0, $14, $15)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
@@ -208,6 +241,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $11, $12, $13, 0, $14)";
         /* 1,000 reads per execution: enough to keep the cheap row past the collector's low-impact skip. */
         cmd.Parameters.Add(new DuckDBParameter { Value = executions * 1_000L });
         cmd.Parameters.Add(new DuckDBParameter { Value = "SELECT * FROM dbo.SynthBadActorTable" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = planHash + "H" });
         await cmd.ExecuteNonQueryAsync();
     }
 }

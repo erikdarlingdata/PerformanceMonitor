@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -100,19 +101,33 @@ VALUES
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    private static AnalysisFinding NewFinding(string? databaseName) => new()
+    {
+        RootFactKey = FactKey,
+        StoryPath = FactKey,
+        PathKeys = [FactKey],
+        /* Past the display gate, below which the expensive drill-downs are skipped wholesale. */
+        Severity = 1.0,
+        /* What InferenceEngine copies from the root fact: the database the fact was scored on. */
+        DatabaseName = databaseName,
+    };
+
+    /// <summary>Records the plan handles the plan analysis asks for and returns no plan.</summary>
+    private sealed class RecordingPlanFetcher : IPlanFetcher
+    {
+        public List<string> Handles { get; } = [];
+
+        public Task<string?> FetchPlanXmlAsync(int serverId, string planHandle, CancellationToken cancellationToken)
+        {
+            Handles.Add(planHandle);
+            return Task.FromResult<string?>(null);
+        }
+    }
+
     private static async Task<JsonElement> CollectBadActorAsync(
         NpgsqlDataSource postgres, AnalysisContext context, string? databaseName)
     {
-        var finding = new AnalysisFinding
-        {
-            RootFactKey = FactKey,
-            StoryPath = FactKey,
-            PathKeys = [FactKey],
-            /* Past the display gate, below which the expensive drill-downs are skipped wholesale. */
-            Severity = 1.0,
-            /* What InferenceEngine copies from the root fact: the database the fact was scored on. */
-            DatabaseName = databaseName,
-        };
+        var finding = NewFinding(databaseName);
 
         await new PgDrillDownCollector(postgres).EnrichFindingsAsync([finding], context);
 
@@ -216,6 +231,22 @@ VALUES
         Assert.Equal(ExpensiveExecutions, row.GetProperty("execution_count").GetInt64());
         Assert.Equal(710.74, row.GetProperty("avg_cpu_ms").GetDouble());
         Assert.Equal(JsonValueKind.Null, row.GetProperty("dop_note").ValueKind);
+    });
+
+    [Fact]
+    public Task ThePlanAnalysis_FetchesTheFindingsOwnDatabasesPlan() => RunSeededAsync(async (connectionString, context, _) =>
+    {
+        await using var postgres = NpgsqlDataSource.Create(connectionString);
+
+        /* The cheap database's serial plan and the expensive database's plan sit at the same newest
+           collection_time, so a lookup by hash alone has only the aggregate's order to choose by. */
+        var expensive = new RecordingPlanFetcher();
+        await new PgDrillDownCollector(postgres, planFetcher: expensive).EnrichFindingsAsync([NewFinding(ExpensiveDb)], context);
+        Assert.Equal(new[] { ExpensivePlan + "H" }, expensive.Handles);
+
+        var cheap = new RecordingPlanFetcher();
+        await new PgDrillDownCollector(postgres, planFetcher: cheap).EnrichFindingsAsync([NewFinding(CheapDb)], context);
+        Assert.Equal(new[] { CheapSerialPlan + "H" }, cheap.Handles);
     });
 
     [Fact]
