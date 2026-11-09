@@ -108,7 +108,9 @@ public sealed class OversizedPlanBacklogReadPins
                 .Select(p => p.Name)
                 .ToArray());
 
-        foreach (var sql in AllReadSql)
+        /* The sweep-pass count is a read of collection_log, not of the backlog table, so it sits outside AllReadSql's
+           column and size pins, but it answers under the same clock rule: its day start is a parameter. */
+        foreach (var sql in AllReadSql.Append(DarlingOversizedPlanBacklogReader.SweepPassesLastDaySql))
         {
             Assert.DoesNotContain("now()", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("date_trunc", sql, StringComparison.Ordinal);
