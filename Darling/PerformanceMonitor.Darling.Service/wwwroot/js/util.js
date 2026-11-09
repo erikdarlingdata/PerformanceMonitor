@@ -1836,13 +1836,6 @@ export function busyRetryStrip(seconds) {
   return strip;
 }
 
-/**
- * #6800: runs `read`, and when the service refuses it busy (429) calls `onBusy(seconds)`, waits the Retry-After the reply named and
- * runs it once more. The second answer is the caller's, whatever it is, so a second refusal shows as the error it is. An abort of
- * `signal` during the wait returns { kind: "aborted" } without the second read.
- * #7942: the wait counts as a read of the page, on the scope current when it starts, so the poll loop neither stamps the page updated
- * nor plans the next poll while the second read has not run. The hold ends as the second read starts and counts itself.
- */
 /** #8417: the timer the Retry-After wait of retryOnceWhenBusy runs on. The page's own setTimeout and clearTimeout; a test harness puts
  *  its own in their place and advances the wait itself, so nothing in a test waits on wall-clock time. */
 export const busyRetryClock = {
@@ -1850,6 +1843,13 @@ export const busyRetryClock = {
   clearTimeout: (timer) => clearTimeout(timer),
 };
 
+/**
+ * #6800: runs `read`, and when the service refuses it busy (429) calls `onBusy(seconds)`, waits the Retry-After the reply named and
+ * runs it once more. The second answer is the caller's, whatever it is, so a second refusal shows as the error it is. An abort of
+ * `signal` during the wait returns { kind: "aborted" } without the second read.
+ * #7942: the wait counts as a read of the page, on the scope current when it starts, so the poll loop neither stamps the page updated
+ * nor plans the next poll while the second read has not run. The hold ends as the second read starts and counts itself.
+ */
 export async function retryOnceWhenBusy(read, onBusy, signal) {
   const first = await read();
   const seconds = busyRetryAfter(first);
