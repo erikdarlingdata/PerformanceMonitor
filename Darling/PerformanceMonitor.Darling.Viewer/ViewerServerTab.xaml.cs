@@ -271,6 +271,7 @@ public partial class ViewerServerTab : UserControl
         ArgumentNullException.ThrowIfNull(server);
         _server = server;
         ServerNameText.Text = server.DisplayName;
+        ApplyPlanCorrectionEmptyTexts(PlanCorrectionTarget());
     }
 
     /// <summary>
