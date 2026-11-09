@@ -1633,7 +1633,19 @@
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" x:Name="StatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+            <!-- The message keeps to one line; the whole text is its tooltip, and an empty bar opens none. -->
+            <TextBlock Grid.Column="0" x:Name="StatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis">
+                <TextBlock.Style>
+                    <Style TargetType="TextBlock">
+                        <Setter Property="ToolTip" Value="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+                        <Style.Triggers>
+                            <Trigger Property="Text" Value="">
+                                <Setter Property="ToolTip" Value="{x:Null}"/>
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </TextBlock.Style>
+            </TextBlock>
             <TextBlock Grid.Column="1" x:Name="SeatText" Text="Access: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
             <TextBlock Grid.Column="2" x:Name="CollectorHealthText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
             <TextBlock Grid.Column="3" x:Name="DatabaseSizeText" Text="Database: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>

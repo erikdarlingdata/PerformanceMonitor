@@ -1338,12 +1338,16 @@ public partial class MainWindow : Window
 
     private async Task LoadVisibleTabAsync()
     {
+        /* The tab whose load this is, read once: the reader may have moved to another tab by the time the load finishes or fails, and
+           its stamp or its failure belongs to this one. */
+        var selected = MainTabs.SelectedItem as TabItem;
         try
         {
-            switch (MainTabs.SelectedItem)
+            switch (selected)
             {
-                case TabItem { Content: ViewerServerTab serverTab }:
+                case TabItem { Content: ViewerServerTab serverTab } tab:
                     await serverTab.RefreshActiveInnerTabAsync();
+                    StampRefreshed(tab, serverTab.ServerDisplayName);
                     break;
                 case TabItem tab when ReferenceEquals(tab, OverviewTab):
                     await LoadOverviewAsync();
@@ -1406,7 +1410,7 @@ public partial class MainWindow : Window
         {
             /* #8133: a failed fleet read must not leave the Overview saying it is loading. */
             OverviewLoadingText.Visibility = Visibility.Collapsed;
-            SetTabStatus(MainTabs.SelectedItem as TabItem, $"refresh failed: {ex.Message}");
+            SetTabStatus(selected, $"refresh failed: {ex.Message}");
         }
     }
 
