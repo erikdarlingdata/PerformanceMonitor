@@ -583,23 +583,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     return ToHttpResult(nonIntegerRefusal, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
                 }
 
-                int? scopedServerId = null;
                 var allowedTagIds = DarlingWebSeat.FromContext(context).AllowedTagIds;
-                IReadOnlyList<int>? allowedServerIds = null;
-                if (allowedTagIds is not null)
-                {
-                    allowedServerIds = await AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
-                    if (!IsScopedFleetRead(name) || !string.IsNullOrWhiteSpace(Server(context)))
-                    {
-                        scopedServerId = await AuthorizedWebServerAsync(postgres, context, allowedTagIds);
-                        if (scopedServerId is null)
-                        {
-                            return DarlingWebStatementSweep.JsonText("""{"error":"Server data is unavailable to this token."}""",
-                                DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds,
-                                context.RequestAborted, StatusCodes.Status403Forbidden);
-                        }
-                    }
-                }
 
                 using var readScope = ReadScope.Open(logger);
                 readScope.Scope.CaptureStatements = true;
@@ -609,7 +593,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                    The key is the query string as sent, before the read below adds its own as_of. A hit skips admission. */
                 /* #6800: a whole-fleet read of get_resource_use_by_tag (no server) over a window of 24 hours or more is cached for its own TTL. */
                 var fleetRead = ReadAdmission.IsFleetRead(name, Server(context), WebWindowHours(name, key => First(context, key)));
-                if (allowedServerIds is null && readAdmission is { } admission && admission.IsCached(ReadSurface.Web, name, admissionBand, fleetRead))
+                if (allowedTagIds is null && readAdmission is { } admission && admission.IsCached(ReadSurface.Web, name, admissionBand, fleetRead))
                 {
                     var cache = admission.Cache;
                     var ttl = ReadResultCache.TtlFor(name, admissionBand, fleetRead);
@@ -715,6 +699,23 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
                     try
                     {
+                        int? scopedServerId = null;
+                        int[]? allowedServerIds = null;
+                        if (allowedTagIds is not null)
+                        {
+                            allowedServerIds = await AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
+                            if (!IsScopedFleetRead(name) || !string.IsNullOrWhiteSpace(Server(context)))
+                            {
+                                scopedServerId = await AuthorizedWebServerAsync(postgres, context, allowedTagIds, allowedServerIds);
+                                if (scopedServerId is null)
+                                {
+                                    return new WebReadAnswer(DarlingWebStatementSweep.JsonText("""{"error":"Server data is unavailable to this token."}""",
+                                        DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds,
+                                        context.RequestAborted, StatusCodes.Status403Forbidden), null, ReadOutcome.Ok);
+                                }
+                            }
+                        }
+
                         /* A newest-first capped read is judged against the window it read: with no anchor sent, the end is
                            taken once here and handed to both the read and the note check. A request with its own anchor
                            is left as sent. */

@@ -221,7 +221,7 @@ public static partial class DarlingWebEndpoints
     }
 
     internal static async Task<int?> AuthorizedWebServerAsync(
-        NpgsqlDataSource postgres, HttpContext context, IReadOnlyList<int> allowedTagIds)
+        NpgsqlDataSource postgres, HttpContext context, IReadOnlyList<int> allowedTagIds, int[]? allowedServerIds = null)
     {
         var query = context.Request.Query;
         // Refuse ambiguous or missing selectors instead of letting the tool choose a server.
@@ -233,7 +233,7 @@ public static partial class DarlingWebEndpoints
                 return null;
             }
 
-            var ids = await AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
+            var ids = allowedServerIds ?? await AllowedWebServerIdsAsync(postgres, allowedTagIds, context.RequestAborted);
             return Array.IndexOf(ids, id) >= 0 ? id : null;
         }
 
@@ -254,24 +254,7 @@ public static partial class DarlingWebEndpoints
             return null;
         }
 
-        // One statement sees the tree and its assignments in the same PostgreSQL snapshot.
-        await using var command = postgres.CreateCommand("""
-            WITH RECURSIVE allowed_tags(id) AS (
-                SELECT id FROM config.server_tags WHERE id = ANY($1)
-                UNION
-                SELECT child.id FROM config.server_tags child
-                JOIN allowed_tags parent ON child.parent_id = parent.id
-            )
-            SELECT EXISTS (
-                SELECT 1 FROM config.server_tag_map assignment
-                JOIN allowed_tags tag ON tag.id = assignment.tag_id
-                WHERE assignment.server_id = $2
-            )
-            """);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer,
-            System.Linq.Enumerable.ToArray(allowedTagIds));
-        command.Parameters.AddWithValue(resolved.ServerId);
-        return (bool)(await command.ExecuteScalarAsync(context.RequestAborted))! ? resolved.ServerId : null;
+        var serverIds = allowedServerIds ?? await AllowedWebServerIdsAsync(postgres, allowedTagIds, context.RequestAborted);
+        return Array.IndexOf(serverIds, resolved.ServerId) >= 0 ? resolved.ServerId : null;
     }
 }

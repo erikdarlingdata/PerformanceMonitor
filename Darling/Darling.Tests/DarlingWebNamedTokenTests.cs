@@ -282,7 +282,7 @@ public sealed class DarlingWebNamedTokenTests
 
     /// <summary>The real pipeline, as <see cref="DarlingWebHostGateLiveTests"/> builds it, in network mode with the shared token and
     /// <paramref name="webTokens"/>. The signing key is fixed so a second server reads the first one's cookie.</summary>
-    private static async Task<TestServer> BuildServer(DarlingWebTokenSet? webTokens, CapturingTestLogger? hostLogger = null, NpgsqlDataSource? dataSource = null)
+    private static async Task<TestServer> BuildServer(DarlingWebTokenSet? webTokens, CapturingTestLogger? hostLogger = null, NpgsqlDataSource? dataSource = null, ReadAdmission? readAdmission = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -294,7 +294,7 @@ public sealed class DarlingWebNamedTokenTests
 
         var host = new DarlingWebHostService(
             hostLogger is null ? Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingWebHostService>.Instance : new HostLogger(hostLogger),
-            new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
+            new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache(), readAdmission: readAdmission);
 
         host.ConfigurePipeline(
             app, postgres, networkMode: true,
@@ -305,6 +305,26 @@ public sealed class DarlingWebNamedTokenTests
 
         await app.StartAsync();
         return app.GetTestServer();
+    }
+
+    [Fact]
+    public async Task BusyScopedRead_DoesNotQueryTheStore()
+    {
+        const string route = "get_wait_stats";
+        var ct = TestContext.Current.CancellationToken;
+        var admission = new ReadAdmission(TimeProvider.System, TimeSpan.Zero, null, maxHeavyReads: 1);
+        using var held = await Task.Run(() => admission.AdmitAsync(ReadSurface.Web, route, ReadWindowBand.SevenDays, ct), ct);
+        Assert.True(held.MayRun);
+
+        var entry = new WebTokenEntry { Name = "finance", Token = ReaderToken, Role = "reader", AllowedTagIds = [41] };
+        var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        using var server = await BuildServer(SetFor(entry), dataSource: postgres, readAdmission: admission);
+        var cookie = await SignIn(server, ReaderToken);
+        // Any attempt to resolve scope from the store now fails before the busy response can be returned.
+        await postgres.DisposeAsync();
+
+        var (response, _) = await Send(server, HttpMethods.Get, "/api/read/get_wait_stats?server=finance-server&hours=168", cookie);
+        Assert.Equal(StatusCodes.Status429TooManyRequests, response.Response.StatusCode);
     }
 
     [Fact]
