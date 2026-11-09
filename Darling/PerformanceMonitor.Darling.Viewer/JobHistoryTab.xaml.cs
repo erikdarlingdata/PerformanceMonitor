@@ -96,9 +96,11 @@ public partial class JobHistoryTab : UserControl
     internal static Task ShowJobHistoryDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc, IEnumerable<ViewerJobHistoryRow> read) =>
         ViewerServerTab.ShowEventDataStartAsync(banner, probe, "Job History", startUtc, read.Select(r => r.RunDateTimeUtc), RowCap);
 
-    /// <summary>The scope (a server id, or null for All Servers) the picker's "Data starts" note was last read for, and when.</summary>
+    /// <summary>The scope (a server id, or null for All Servers) the picker's "Data starts" note was last read for, when, and what it
+    /// read, so a load within the read's life writes the note again: a failed read on another scope hides it in between.</summary>
     private int? _oldestRetainedScope;
     private DateTime _oldestRetainedReadUtc = DateTime.MinValue;
+    private DateTime? _oldestRetainedUtc;
 
     /// <summary>
     /// Points the picker's "Data starts" note at the oldest job history the store holds for the scope on screen (the picked server's
@@ -114,6 +116,7 @@ public partial class JobHistoryTab : UserControl
         if (_dataService == null) return;
         if (_oldestRetainedScope == serverId && DateTime.UtcNow - _oldestRetainedReadUtc < ViewerServerTab.ServerDataStartMaxAge)
         {
+            TimeRangePickerControl.DataStartUtc = _oldestRetainedUtc;
             return;
         }
 
@@ -134,6 +137,7 @@ public partial class JobHistoryTab : UserControl
         if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
         _oldestRetainedScope = serverId;
         _oldestRetainedReadUtc = DateTime.UtcNow;
+        _oldestRetainedUtc = oldest;
         TimeRangePickerControl.DataStartUtc = oldest;
     }
 
