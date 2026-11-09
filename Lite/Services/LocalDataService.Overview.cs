@@ -579,7 +579,7 @@ public class ServerSummaryItem
     {
         get
         {
-            if (CpuIsStale || !CpuPercent.HasValue) return "--";
+            if (IsOffline || CpuIsStale || !CpuPercent.HasValue) return "--";
             /* #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so there is no total to show. The
                figure is the SQL Server's own, and says so. */
             if (!OtherProcessCpuPercent.HasValue) return $"SQL CPU {CpuPercent:F0}%";
@@ -587,10 +587,24 @@ public class ServerSummaryItem
         }
     }
     /// <summary>#8162: the CPU row's detail column, the host's other-process share ("Other: 5%"). Empty when the CPU figure is not shown
-    /// (stale, or never measured) or the server cannot report the other-process figure (#7682).</summary>
+    /// (stale, or never measured) or the server cannot report the other-process figure (#7682). #8465: an offline card's row says
+    /// when the server was last collected instead (<see cref="StaleDetail"/>), the Darling card's rule.</summary>
     public string CpuDetail =>
-        CpuIsStale || !CpuPercent.HasValue || !OtherProcessCpuPercent.HasValue ? "" : $"Other: {OtherProcessCpuPercent:F0}%";
-    public string MemoryDisplay => MemoryMb.HasValue ? $"{MemoryMb / 1024.0:F1} GB" : "--";
+        IsOffline ? StaleDetail
+        : CpuIsStale || !CpuPercent.HasValue || !OtherProcessCpuPercent.HasValue ? "" : $"Other: {OtherProcessCpuPercent:F0}%";
+
+    /* #8465: an offline card shows no measurement at all. Its memory figure is from before the server went dark, and a calm
+       "32.0 GB" under a red Offline reads as live health, so Memory reads "--" as CPU, Blocking and Deadlocks do: the Darling
+       card's rule. The figure stays on the item, because the alert engine reads it. */
+    public string MemoryDisplay => MemoryMb.HasValue && !IsOffline ? $"{MemoryMb / 1024.0:F1} GB" : "--";
+
+    /// <summary>#8465: the detail an offline card's CPU row carries in place of a reading, in the Darling card's words: when the
+    /// server was last collected ("last collected 3d ago", <see cref="MinutesAgoText"/>), or "no recent collection" when nothing
+    /// was. A server whose newest collection is past the offline mark has no current value, only the last one collected.</summary>
+    public string StaleDetail =>
+        LastCollectionTime.HasValue
+            ? "last collected " + MinutesAgoText.Format(Math.Max(0, (int)(DateTime.UtcNow - LastCollectionTime.Value).TotalMinutes))
+            : "no recent collection";
     /* #8304: an offline card has no hour counts to show. Its stored counts are from before the server went dark, and a green
        "0" under a red Offline reads as a healthy server, so Blocking and Deadlocks read "--" in the card's unknown grey, as
        CPU does for a reading it cannot show. The counts themselves stay on the item: the alert engine reads them. */
