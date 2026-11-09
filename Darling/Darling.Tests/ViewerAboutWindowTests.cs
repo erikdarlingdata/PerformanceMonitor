@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// heading is the title bar's product name, and its description names both engines the service monitors, SQL Server and
 /// PostgreSQL, since the store it opens can hold either.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerAboutWindowTests
 {
     private const string ThemeUri = "pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml";
