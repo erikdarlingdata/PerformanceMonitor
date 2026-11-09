@@ -43,8 +43,20 @@ SELECT
     /// The one-line reason a Query Store read on this server is empty because it is a readable secondary with <c>query_store_replica</c> off,
     /// or <c>null</c> when it is not or the read fails: it runs on a path that already found nothing.
     /// </summary>
+    public static Task<string?> MessageAsync(
+        NpgsqlDataSource postgres, int serverId, string serverName, int commandTimeoutSeconds, CancellationToken cancellationToken = default) =>
+        MessageAsync(postgres, serverId, serverName, healthCaptureRefreshes: true, commandTimeoutSeconds, cancellationToken);
+
+    /// <summary>
+    /// #8361: the same judgment as the gate the collection scheduler applies to <c>query_store_hints</c>. The newest
+    /// <c>query_store_health</c> capture is evidence only while the <c>query_store_health</c> collector can refresh it on this server
+    /// (<paramref name="healthCaptureRefreshes"/>, its effective schedule's enabled state). When it cannot, the capture is frozen at
+    /// whatever role the server had when it was taken, so a server that failed over to primary would read as a secondary for as long
+    /// as the capture stood: the capture is then left out and the newest <c>ag_replica_role</c> decides alone. A read's wording
+    /// (<see cref="MessageAsync(NpgsqlDataSource, int, string, int, CancellationToken)"/>) always counts the capture.
+    /// </summary>
     public static async Task<string?> MessageAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, string serverName, bool healthCaptureRefreshes, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -60,8 +72,8 @@ SELECT
             return CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
                 serverName,
                 reader.IsDBNull(0) ? null : reader.GetString(0),
-                (int)reader.GetInt64(2),
-                (int)reader.GetInt64(3),
+                healthCaptureRefreshes ? (int)reader.GetInt64(2) : 0,
+                healthCaptureRefreshes ? (int)reader.GetInt64(3) : 0,
                 replicaConfigured: !reader.IsDBNull(1),
                 "Darling collects Query Store from a registered server only when that server is not a readable secondary, and query_store_replica is off for it. " +
                 "Register the primary, or set query_store_replica on the primary to read Query Store from a readable secondary (edit_server).");

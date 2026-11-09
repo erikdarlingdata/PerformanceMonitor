@@ -175,11 +175,25 @@ internal static class DarlingGatedCollectorRows
             : Array.Empty<object>();
 
     /// <summary>
-    /// #8361: the readable-secondary sentence for this server (<see cref="DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync"/>),
-    /// or null when its last known role is not one or the store cannot say.
+    /// #8361: the readable-secondary sentence for this server under the same judgment the scheduler's gate applies, or null when
+    /// its last known role is not one or the store cannot say. The newest <c>query_store_health</c> capture counts only while that
+    /// collector's effective schedule (the store's rows, as <c>StoreConfigProvider.ResolveSchedule</c> reads them) lets it refresh on
+    /// this server; disabled, the newest <c>ag_replica_role</c> decides alone, so the row agrees with the gate after a failover.
     /// </summary>
-    internal static Task<string?> QueryStoreSecondaryMessageAsync(NpgsqlDataSource postgres, int serverId, string serverName, CancellationToken cancellationToken) =>
-        DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, serverId, serverName, cancellationToken);
+    internal static async Task<string?> QueryStoreSecondaryMessageAsync(NpgsqlDataSource postgres, int serverId, string serverName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var overrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, serverId, cancellationToken);
+            var healthCaptureRefreshes = StoreConfigProvider.ResolveSchedule(QueryStoreHealthCollector.Instance.Name, serverId, overrides).Enabled;
+            return await DarlingQueryStoreReadableSecondary.MessageAsync(
+                postgres, serverId, serverName, healthCaptureRefreshes, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>
     /// The rows for <paramref name="serverName"/>, or none when the server is not PostgreSQL, the engine read
