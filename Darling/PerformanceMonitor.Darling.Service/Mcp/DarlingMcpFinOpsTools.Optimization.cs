@@ -151,12 +151,21 @@ public sealed partial class DarlingMcpFinOpsTools
 
         /* The same 7-day coverage rule the recommendation row and the Server Inventory count use: an idle claim needs a query-stats
            sample on each of the last 7 UTC days, else the list is empty and the section says why. */
-        var idleRead = await DarlingFinOpsOptimizationReader.GetIdleDatabaseReadAsync(postgres, resolved.ServerId, now.AddDays(-IdleDatabaseWindowDays), timeout, ct);
+        var idleTask = DarlingFinOpsOptimizationReader.GetIdleDatabaseReadAsync(postgres, resolved.ServerId, now.AddDays(-IdleDatabaseWindowDays), timeout, ct);
+        /* The five sections read five tables over their own windows and none depends on another, so they run concurrently and the
+           answer takes as long as the slowest of them, not the sum: the 24 hours of wait and query rows are the two largest raw
+           scans the FinOps views make, and a server's first visit pays them cold. */
+        var tempdbTask = DarlingFinOpsOptimizationReader.GetTempdbSummaryAsync(postgres, resolved.ServerId, now.AddHours(-TempdbWindowHours), timeout, ct);
+        var waitsTask = DarlingFinOpsOptimizationReader.GetWaitCategorySummaryAsync(postgres, resolved.ServerId, now.AddHours(-hoursBack), timeout, ct);
+        var queriesTask = DarlingFinOpsOptimizationReader.GetExpensiveQueriesAsync(postgres, resolved.ServerId, textStart, limit, timeout, ct);
+        var grantsTask = DarlingFinOpsUtilizationReader.GetMemoryGrantEfficiencyAsync(postgres, resolved.ServerId, MemoryGrantWindowHours, timeout, ct);
+        await Task.WhenAll(idleTask, tempdbTask, waitsTask, queriesTask, grantsTask);
+        var idleRead = await idleTask;
         var idle = idleRead.Rows;
-        var tempdb = await DarlingFinOpsOptimizationReader.GetTempdbSummaryAsync(postgres, resolved.ServerId, now.AddHours(-TempdbWindowHours), timeout, ct);
-        var waits = await DarlingFinOpsOptimizationReader.GetWaitCategorySummaryAsync(postgres, resolved.ServerId, now.AddHours(-hoursBack), timeout, ct);
-        var queries = await DarlingFinOpsOptimizationReader.GetExpensiveQueriesAsync(postgres, resolved.ServerId, textStart, limit, timeout, ct);
-        var grants = await DarlingFinOpsUtilizationReader.GetMemoryGrantEfficiencyAsync(postgres, resolved.ServerId, MemoryGrantWindowHours, timeout, ct);
+        var tempdb = await tempdbTask;
+        var waits = await waitsTask;
+        var queries = await queriesTask;
+        var grants = await grantsTask;
 
         /* A gated section is asked only when it came back empty, as every capability check is. */
         var idleGate = idle.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "database_size_stats", ct) : null;

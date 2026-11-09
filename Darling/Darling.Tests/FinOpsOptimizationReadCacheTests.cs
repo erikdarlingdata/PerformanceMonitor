@@ -105,4 +105,61 @@ public sealed class FinOpsOptimizationReadCacheTests
 
         Assert.Equal(3, calls);
     }
+
+    /// <summary>The hold needs a server and the view the table names, as the tool reads the view: trimmed and in any case. A blank
+    /// server is no server, another view is not held, and neither is another route with the same view word.</summary>
+    [Fact]
+    public void TheOptimizationRead_IsHeld_OnlyWithAServerAndItsView()
+    {
+        Assert.True(ReadAdmission.IsServerHeldRead(Route, "alpha", "optimization"));
+        Assert.True(ReadAdmission.IsServerHeldRead(Route, "alpha", " Optimization "));
+        Assert.False(ReadAdmission.IsServerHeldRead(Route, null, "optimization"));
+        Assert.False(ReadAdmission.IsServerHeldRead(Route, "  ", "optimization"));
+        Assert.False(ReadAdmission.IsServerHeldRead(Route, "alpha", "utilization"));
+        Assert.False(ReadAdmission.IsServerHeldRead(Route, "alpha", null));
+        Assert.False(ReadAdmission.IsServerHeldRead("get_finops_inventory", "alpha", "optimization"));
+    }
+
+    [Fact]
+    public void TheOptimizationHold_IsFiveMinutes_WhateverTheBand()
+    {
+        Assert.Equal(TimeSpan.FromMinutes(5), ReadAdmission.ServerHeldTtl(Route, "optimization"));
+        Assert.Null(ReadAdmission.ServerHeldTtl(Route, "utilization"));
+        Assert.Equal(TimeSpan.FromMinutes(5), ReadResultCache.TtlFor(Route, ReadWindowBand.OneDay, fleetRead: false, "optimization", serverHeld: true));
+        Assert.Equal(TimeSpan.FromMinutes(5), ReadResultCache.TtlFor(Route, ReadWindowBand.None, fleetRead: false, "optimization", serverHeld: true));
+        /* Not held: the band's TTL, as before. */
+        Assert.Equal(ReadResultCache.TtlFor(Route, ReadWindowBand.OneDay, fleetRead: false), ReadResultCache.TtlFor(Route, ReadWindowBand.OneDay, fleetRead: false, "utilization", serverHeld: false));
+    }
+
+    [Fact]
+    public void IsCached_HoldsForTheOptimizationRead_OnBothSurfaces_AndItTakesNoSlot()
+    {
+        var admission = LightAdmission(new TimerTimeProvider());
+        foreach (var surface in new[] { ReadSurface.Web, ReadSurface.Mcp })
+        {
+            Assert.True(admission.IsCached(surface, Route, ReadWindowBand.OneDay, fleetRead: false, serverHeld: true));
+            Assert.False(admission.IsCached(surface, Route, ReadWindowBand.OneDay, fleetRead: false, serverHeld: false));
+        }
+
+        Assert.False(admission.IsHeavy(ReadSurface.Web, Route, ReadWindowBand.OneDay, out _));
+    }
+
+    /// <summary>The MCP call is held with a string server_name and the view; without a server, with another view, or with a server_name of
+    /// another kind it is not.</summary>
+    [Theory]
+    [InlineData("{\"view\":\"optimization\",\"server_name\":\"alpha\"}", true)]
+    [InlineData("{\"view\":\"optimization\",\"server_name\":\"alpha\",\"hours_back\":4,\"limit\":20}", true)]
+    [InlineData("{\"view\":\"Optimization\",\"server_name\":\"alpha\"}", true)]
+    [InlineData("{\"view\":\"optimization\"}", false)]
+    [InlineData("{\"view\":\"optimization\",\"server_name\":\" \"}", false)]
+    [InlineData("{\"view\":\"optimization\",\"server_name\":7}", false)]
+    [InlineData("{\"view\":\"utilization\",\"server_name\":\"alpha\"}", false)]
+    [InlineData("{\"server_name\":\"alpha\"}", false)]
+    public void AnMcpOptimizationCall_IsHeld_WithAServerAndTheView(string arguments, bool expected)
+    {
+        var parsed = System.Text.Json.JsonSerializer.Deserialize<System.Collections.Generic.Dictionary<string, System.Text.Json.JsonElement>>(arguments)!;
+
+        Assert.Equal(expected, PerformanceMonitor.Darling.Service.Mcp.McpToolLatencyFilter.IsServerHeldRead(Route, parsed));
+        Assert.False(PerformanceMonitor.Darling.Service.Mcp.McpToolLatencyFilter.IsServerHeldRead("get_finops_inventory", parsed));
+    }
 }
