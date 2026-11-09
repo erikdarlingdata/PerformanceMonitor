@@ -46,11 +46,6 @@ public sealed class McpQueryTagWriteUndoTests : IDisposable
         Directory.CreateDirectory(_tempDir);
         _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "undo.duckdb"));
         _duckDb.InitializeAsync().GetAwaiter().GetResult();
-        /* #8490: the write lock is process-wide, and a budgeted writer polls for it with no queue position for all but the last second
-           of its budget (#7256), so against parallel classes whose parked writers win every handoff the budget can run out polling and
-           a create answers with an error that has no tag. The larger of the two budgets a LocalDataService built this way gives its
-           writers, so its background and its user writes both park at once, and the budget is a real bound on the wait. */
-        _duckDb.WriteLockParkTail = LocalDataService.UserWriteLockBudget;
         _data = new LocalDataService(_duckDb);
     }
 
@@ -255,19 +250,22 @@ public sealed class McpQueryTagWriteUndoTests : IDisposable
     /// #8490: the write lock is process-wide, and the classes running alongside take it while they build their own databases. A
     /// budgeted writer polls for it with no queue position for all but the last second of its budget (#7256), and the writers those
     /// classes park on the lock win every handoff, so a create from this fixture could spend its whole budget polling, time out, and
-    /// answer with an error that has no tag, which NewTagAsync then dereferences. This fixture's writers park for their whole budget
-    /// instead: while another writer holds the lock, a create is a waiting writer the moment it asks, and once the holder releases it
-    /// answers with the tag. The holder here is a budgeted writer on its own thread, released in finally on every path.
+    /// answer with an error that has no tag, which NewTagAsync then dereferences. This host starts every initializer parked for its
+    /// whole budget instead: while another writer holds the lock, a create is a waiting writer the moment it asks, and once the holder
+    /// releases it answers with the tag. The holder here is its own initializer's budgeted writer on its own thread, released in
+    /// finally on every path, and the create's mode is read from the fixture initializer's own writer counts, so neither the holder nor
+    /// the measurement depends on what the other classes' writers are doing.
     /// </summary>
     [Fact]
     public async Task CreateQueryTag_ParksOnTheWriteLock_WhileAnotherWriterHoldsIt_AndAnswersWithTheTagOnceItIsFree()
     {
         var budget = LocalDataService.UserWriteLockBudget;
+        using var holderDb = new DuckDbInitializer(Path.Combine(_tempDir, "holder.duckdb")) { WriteLockParkTail = budget };
         var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var release = new ManualResetEventSlim(false);
         var holder = Task.Factory.StartNew(() =>
         {
-            using var writeLock = _duckDb.AcquireWriteLock(budget);
+            using var writeLock = holderDb.AcquireWriteLock(budget);
             held.SetResult();
             release.Wait(budget);
         }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
@@ -281,13 +279,11 @@ public sealed class McpQueryTagWriteUndoTests : IDisposable
                 await holder;
             }
 
-            var waitingBefore = DuckDbInitializer.WaitingWriteCountForTests;
-            var pendingBefore = DuckDbInitializer.PendingWriteCountForTests;
             create = Task.Run(() => McpQueryTagTools.CreateQueryTagCore(_data, "parked", null, null), CancellationToken.None);
-            TestWait.WaitUntil(() => DuckDbInitializer.PendingWriteCountForTests > pendingBefore, budget, TimeSpan.FromMilliseconds(5), "create_query_tag reached the write-lock wait");
+            TestWait.WaitUntil(() => _duckDb.PollingWriterCountForTests + _duckDb.ParkedWriterCountForTests > 0, ParkBackstop, TimeSpan.FromMilliseconds(5), "create_query_tag reached the write-lock wait");
 
             Assert.True(
-                TestWait.TryWaitUntil(() => DuckDbInitializer.WaitingWriteCountForTests > waitingBefore, ParkBackstop, TimeSpan.FromMilliseconds(5)),
+                TestWait.TryWaitUntil(() => _duckDb.ParkedWriterCountForTests > 0, ParkBackstop, TimeSpan.FromMilliseconds(5)),
                 "create_query_tag polls for the write lock with no queue position instead of parking as a waiting writer, so the parked writers of the classes running alongside win every handoff, its budget runs out, and the tool answers with an error that has no tag");
 
             release.Set();

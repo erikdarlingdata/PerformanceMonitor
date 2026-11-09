@@ -207,6 +207,15 @@ public partial class DuckDbInitializer : IDisposable
 
     private static int s_pollingWriters;
 
+    /* Test seam (#8490): this initializer's own budgeted writers between asking for the write lock and holding it, by mode:
+       polling with no queue position, or parked as a waiting writer. Per instance, unlike PendingWriteCountForTests, so a test
+       reads its own writers whatever the other initializers in the process are doing. */
+    internal int PollingWriterCountForTests => Volatile.Read(ref _pollingWriters);
+    internal int ParkedWriterCountForTests => Volatile.Read(ref _parkedWriters);
+
+    private int _pollingWriters;
+    private int _parkedWriters;
+
     /* Fires in ResetDatabaseCoreAsync after the database and WAL files are deleted and before the schema is
        recreated: a test throws from it to stand in for a process kill with no database file on disk. */
     internal static Action? AfterDatabaseFilesDeletedForTests { get; set; }
@@ -375,6 +384,7 @@ public partial class DuckDbInitializer : IDisposable
         var deadline = waitStarted + ToTimestampTicks(timeout);
         var parkAt = deadline - ToTimestampTicks(WriteLockParkTail < timeout ? WriteLockParkTail : timeout);
         Interlocked.Increment(ref s_pollingWriters);
+        Interlocked.Increment(ref _pollingWriters);
         try
         {
             while (true)
@@ -397,6 +407,7 @@ public partial class DuckDbInitializer : IDisposable
         finally
         {
             Interlocked.Decrement(ref s_pollingWriters);
+            Interlocked.Decrement(ref _pollingWriters);
         }
 
         var remaining = Stopwatch.GetElapsedTime(Stopwatch.GetTimestamp(), deadline);
@@ -405,9 +416,17 @@ public partial class DuckDbInitializer : IDisposable
             remaining = TimeSpan.Zero;
         }
 
-        if (!s_dbLock.TryEnterWriteLock(remaining))
+        Interlocked.Increment(ref _parkedWriters);
+        try
         {
-            return null;
+            if (!s_dbLock.TryEnterWriteLock(remaining))
+            {
+                return null;
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _parkedWriters);
         }
 
         return new LockReleaser(s_dbLock, write: true, StoreLockHolders.Register(holderMember, holderFile, write: true), WriteHoldWarnAfter);
@@ -429,9 +448,17 @@ public partial class DuckDbInitializer : IDisposable
     /// An instance value rather than a static so a test can set it on its own initializer; a tail no shorter than the
     /// writer's budget makes it park at once.
     /// </summary>
-    internal TimeSpan WriteLockParkTail { get; set; } = DefaultWriteLockParkTail;
+    internal TimeSpan WriteLockParkTail { get; set; } = InitialWriteLockParkTail;
 
     internal static readonly TimeSpan DefaultWriteLockParkTail = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// The tail every new initializer starts with: <see cref="DefaultWriteLockParkTail"/> in the product, where nothing sets it.
+    /// A test host whose budgets are bounds on the wait rather than polling windows sets this once, before any initializer is
+    /// built, to the budget its writers use, so every budgeted writer in that process parks at once and the budget is the only
+    /// bound (#8490); a test whose subject is the shipped tail sets <see cref="WriteLockParkTail"/> on its own initializer.
+    /// </summary>
+    internal static TimeSpan InitialWriteLockParkTail { get; set; } = DefaultWriteLockParkTail;
 
     /// <summary>
     /// #5731 hold watchdog: a WRITE hold that lasts longer than this logs one warning naming the holder when it

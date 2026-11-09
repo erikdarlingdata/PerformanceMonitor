@@ -85,6 +85,8 @@ public sealed class BudgetedWriterPollTests : IDisposable
     public void ANewReaderGetsTheLockWhileABudgetedWriterWaitsBehindALongRead()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
+        /* The shipped tail: this class's subject is the poll, and the host starts every other initializer parked (#8490). */
+        initializer.WriteLockParkTail = DuckDbInitializer.DefaultWriteLockParkTail;
         var longReadHeld = new ManualResetEventSlim(false);
         var releaseLongRead = new ManualResetEventSlim(false);
         var longRead = StartThread(() =>
@@ -144,6 +146,8 @@ public sealed class BudgetedWriterPollTests : IDisposable
     public void AWriterPollingAgainstReadersThatNeverLeaveAGap_GetsTheLockWithinItsBudget_AndTheReadersFlowUntilItParks()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
+        /* The shipped tail: this class's subject is the poll, and the host starts every other initializer parked (#8490). */
+        initializer.WriteLockParkTail = DuckDbInitializer.DefaultWriteLockParkTail;
         using var stop = new CancellationTokenSource();
         long entries = 0;
 

@@ -53,10 +53,6 @@ public sealed class LiteInvestigationL2Tests : IDisposable
         Directory.CreateDirectory(_tempDir);
         _db = new DuckDbInitializer(Path.Combine(_tempDir, "lite.duckdb"));
         _db.InitializeAsync().GetAwaiter().GetResult();
-        /* #8490: the write lock is process-wide, and a budgeted writer polls for it with no queue position for all but the last second
-           of its budget (#7256), so against parallel classes whose parked writers win every handoff a two-minute budget can run out
-           polling. A tail no shorter than the budget parks this fixture's writers at once, and the budget is a real bound on the wait. */
-        _db.WriteLockParkTail = DuckDbInvestigationStoreTests.TestLockBudget;
         /* Windows auth, so AddServer never touches the credential store. */
         _servers = new ServerManager(_tempDir);
         _store = new DuckDbInvestigationStore(_db, () => _now, DuckDbInvestigationStoreTests.TestLockBudget,
@@ -333,19 +329,22 @@ public sealed class LiteInvestigationL2Tests : IDisposable
     /// #8490: the write lock is process-wide, and the classes running alongside take it while they build their own databases. A
     /// budgeted writer polls for it with no queue position for all but the last second of its budget (#7256), and the writers those
     /// classes park on the lock win every handoff, so a purge from this fixture could spend its whole two-minute budget polling and
-    /// then fail naming a holder that had the lock for a fraction of a second. This fixture's writers park for their whole budget
-    /// instead: while another writer holds the lock, a purge is a waiting writer the moment it asks, and it holds the lock as soon as
-    /// the holder releases. The holder here is a budgeted writer on its own thread, released in finally on every path.
+    /// then fail naming a holder that had the lock for a fraction of a second. This host starts every initializer parked for its whole
+    /// budget instead: while another writer holds the lock, a purge is a waiting writer the moment it asks, and it holds the lock as
+    /// soon as the holder releases. The holder here is its own initializer's budgeted writer on its own thread, released in finally on
+    /// every path, and the purge's mode is read from the fixture initializer's own writer counts, so neither the holder nor the
+    /// measurement depends on what the other classes' writers are doing.
     /// </summary>
     [Fact]
     public async Task APurge_ParksOnTheWriteLock_WhileAnotherWriterHoldsIt_InsteadOfPolling()
     {
         var budget = DuckDbInvestigationStoreTests.TestLockBudget;
+        using var holderDb = new DuckDbInitializer(Path.Combine(_tempDir, "holder.duckdb")) { WriteLockParkTail = budget };
         var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var release = new ManualResetEventSlim(false);
         var holder = Task.Factory.StartNew(() =>
         {
-            using var writeLock = _db.AcquireWriteLock(budget);
+            using var writeLock = holderDb.AcquireWriteLock(budget);
             held.SetResult();
             release.Wait(budget);
         }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
@@ -359,13 +358,11 @@ public sealed class LiteInvestigationL2Tests : IDisposable
                 await holder;
             }
 
-            var waitingBefore = DuckDbInitializer.WaitingWriteCountForTests;
-            var pendingBefore = DuckDbInitializer.PendingWriteCountForTests;
             purge = Task.Run(() => _store.PurgeAsync(Ct), CancellationToken.None);
-            TestWait.WaitUntil(() => DuckDbInitializer.PendingWriteCountForTests > pendingBefore, budget, TimeSpan.FromMilliseconds(5), "the purge reached the write-lock wait");
+            TestWait.WaitUntil(() => _db.PollingWriterCountForTests + _db.ParkedWriterCountForTests > 0, ParkBackstop, TimeSpan.FromMilliseconds(5), "the purge reached the write-lock wait");
 
             Assert.True(
-                TestWait.TryWaitUntil(() => DuckDbInitializer.WaitingWriteCountForTests > waitingBefore, ParkBackstop, TimeSpan.FromMilliseconds(5)),
+                TestWait.TryWaitUntil(() => _db.ParkedWriterCountForTests > 0, ParkBackstop, TimeSpan.FromMilliseconds(5)),
                 "the purge polls for the write lock with no queue position instead of parking as a waiting writer, so the parked writers of the classes running alongside win every handoff and its budget runs out");
 
             release.Set();
