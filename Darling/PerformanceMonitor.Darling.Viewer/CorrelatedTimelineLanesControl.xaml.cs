@@ -722,9 +722,13 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             : ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
 
     /* A lane whose read failed is drawn as the empty lane is (its ruler and grid) and says only that the read failed, so it cannot
-       pass for a quiet healthy lane. */
+       pass for a quiet healthy lane. The lane is cleared first, as the data paths clear it: the series the last refresh drew would
+       otherwise stay under the note, the crosshair would still read their values, and a lane that fails again would carry two notes. */
     private void ShowFailed(ScottPlot.WPF.WpfPlot chart, string title)
     {
+        ClearChart(chart);
+        ApplyTheme(chart);
+        _crosshairManager?.ClearLane(chart);
         ShowEmpty(chart, title);
         MarkFailed(chart);
     }
