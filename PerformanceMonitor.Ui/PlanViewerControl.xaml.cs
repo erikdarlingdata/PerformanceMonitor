@@ -191,6 +191,12 @@ public partial class PlanViewerControl : UserControl
         InsightsExpander.Expanded += (_, _) => { if (!_applyingInsightsFit) _insightsSetByUser = true; };
         InsightsExpander.Collapsed += (_, _) => { if (!_applyingInsightsFit) _insightsSetByUser = true; };
 
+        /* The insights strip scrolls sideways, so it measures its grid with no width limit, and a star column measured that way sizes
+           to its content: the Wait Stats card would take its longest row and its rows would never ellipsize. The grid's width is set
+           instead (BoundInsightsGridToStrip), after each layout pass, since the content-sized columns change with the statement and
+           the server metadata, and only when the bound has moved, so the pass that applies it is the last. */
+        InsightsGrid.LayoutUpdated += (_, _) => BoundInsightsGridToStrip();
+
         // The splitter writes the dragged size straight onto the column, so that is where the
         // remembered width (#4574) comes from - no drag tracking of our own.
         var widthDescriptor = System.ComponentModel.DependencyPropertyDescriptor.FromProperty(
@@ -202,6 +208,30 @@ public partial class PlanViewerControl : UserControl
             if (width.IsAbsolute && width.Value > 0)
                 _propertiesPanelWidth = width.Value;
         });
+    }
+
+    /// <summary>
+    /// Bounds the insights grid's width: the strip's width, so in a wide window the Wait Stats column fills what the four
+    /// content-sized columns leave and its rows ellipsize as that width allows; or, when the strip is narrower than that, the four
+    /// content-sized columns (each capped at 360 px) plus the Wait Stats column's minimum, so the grid keeps its minimums and the
+    /// strip scrolls to the rest. Ported from PerformanceStudio (erikdarlingdata/PerformanceStudio#688).
+    /// </summary>
+    private void BoundInsightsGridToStrip()
+    {
+        var stripWidth = InsightsStrip.ViewportWidth;
+        if (stripWidth <= 0 || double.IsInfinity(stripWidth))
+            return;
+
+        var columns = InsightsGrid.ColumnDefinitions;
+        var contentColumns = 0.0;
+        for (var i = 0; i < columns.Count - 1; i++)
+            contentColumns += columns[i].ActualWidth;
+        var width = Math.Max(stripWidth, contentColumns + columns[columns.Count - 1].MinWidth);
+        /* An exact comparison: the bound's inputs do not depend on the grid's own width, so the pass that applies it is the last,
+           and a tolerance would leave the grid a fraction of a pixel wider than the strip at a fractional display scale, which
+           shows a scroll bar. A Width that is not yet set (NaN) compares unequal and is set. */
+        if (InsightsGrid.Width != width)
+            InsightsGrid.Width = width;
     }
 
     /// <summary>Unsubscribes from theme changes. Hosts must call this when the plan tab/window is closed.</summary>
