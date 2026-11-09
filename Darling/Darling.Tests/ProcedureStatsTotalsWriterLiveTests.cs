@@ -1163,17 +1163,21 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
     /// image installs the extension into <c>template1</c>), while its raw tables are plain tables that were never converted. The
     /// gated raw purge owns raw HYPERTABLES, whose chunks it drops; a plain table has no chunks, so the sweep's DELETE is the only
     /// purge those rows ever get. The sweep therefore purges the raw rows past the horizon, and the totals follow the raw floor as
-    /// on any plain store. A sweep that left the raw table to the gated purge on the extension row alone would hold both tables'
-    /// rows past the horizon for good.
+    /// on any plain store, whichever way the worker's <c>timescaleAvailable</c> latch reads: true, as the service passes it once
+    /// its setup block has created the extension and found the row, or false, in the window after a failed setup block. A sweep
+    /// that left the raw table to the gated purge on the extension row alone, or held it behind the rollup coverage gate and
+    /// <c>drop_chunks</c> as if it were a hypertable, would hold both tables' rows past the horizon for good.
     /// </summary>
-    [Fact]
-    public async Task TheRealRetentionSweep_OnPlainRawTablesInADatabaseWithTheExtensionRow_PurgesTheRawRowsAndTheirTotals()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TheRealRetentionSweep_OnPlainRawTablesInADatabaseWithTheExtensionRow_PurgesTheRawRowsAndTheirTotals(bool timescaleAvailable)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
-        const int serverId = -945321;
+        var serverId = timescaleAvailable ? -945322 : -945321;
 
-        await using var rig = await Rig.OpenAsync(serverId, "ProcTotalsPurgeExtRow", ct, plainStore: true);
+        await using var rig = await Rig.OpenAsync(serverId, timescaleAvailable ? "ProcTotalsPurgeExtRowOn" : "ProcTotalsPurgeExtRow", ct, plainStore: true);
 
         var bodySucceeded = false;
         try
@@ -1194,15 +1198,17 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
             Assert.Equal(3L, (await TotalsAsync(rig.Connection, ct)).Totals);
 
             var logger = new CapturingLogger();
-            await DarlingRetention.PurgeAsync(rig.DataSource, false, logger, ct, retentionDaysFor: static _ => 40);
+            await DarlingRetention.PurgeAsync(rig.DataSource, timescaleAvailable, logger, ct, retentionDaysFor: static _ => 40);
 
+            var rawWarnings = logger.Entries
+                .Where(static entry => entry.Level == Microsoft.Extensions.Logging.LogLevel.Warning && entry.Message.Contains("procedure_stats", StringComparison.Ordinal))
+                .Select(static entry => entry.Message)
+                .ToList();
+            Assert.True(rawWarnings.Count == 0, "no warning names the raw table or its totals: " + string.Join(" | ", rawWarnings));
             Assert.Equal(1L, await RawRowsAsync(rig.Connection, ct));
             var (count, oldest) = await TotalsAsync(rig.Connection, ct);
             Assert.Equal(1L, count);
             Assert.True(oldest > now.AddDays(-2), "only the recent collection's totals row is left");
-            Assert.DoesNotContain(logger.Entries, static entry =>
-                entry.Level == Microsoft.Extensions.Logging.LogLevel.Warning
-                && entry.Message.Contains("procedure_stats", StringComparison.Ordinal));
 
             bodySucceeded = true;
         }

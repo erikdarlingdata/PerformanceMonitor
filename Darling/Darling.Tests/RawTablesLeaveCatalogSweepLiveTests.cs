@@ -373,9 +373,9 @@ FROM generate_series(2, 20) AS n", connection) { CommandTimeout = SetupTimeoutSe
     /// Pin 4: a stale <c>timescaleAvailable</c> latch cannot reopen the drop path for the three raw
     /// relations. On a store WITH the extension present, the same interior-hole seed as
     /// <see cref="InteriorHole_SurvivesSweep_RawTableLeavesDropPath"/> must still hold the hole's rows even
-    /// when the caller passes <c>timescaleAvailable: false</c> — the skip is decided on the live
-    /// <c>pg_extension</c> probe (<see cref="DarlingRetention.ProbeRawSkipSafeAsync"/>), never on the
-    /// worker's latch argument.
+    /// when the caller passes <c>timescaleAvailable: false</c> — the skip is decided on the live hypertable
+    /// probe (<see cref="DarlingRetention.ProbeGatedRawRelationsAsync"/>, which lists the raw relations that
+    /// are hypertables in this store), never on the worker's latch argument.
     /// </summary>
     [Fact]
     public async Task StaleTimescaleAvailableLatch_DoesNotReopenDropPath()
