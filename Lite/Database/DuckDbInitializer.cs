@@ -213,8 +213,13 @@ public partial class DuckDbInitializer : IDisposable
     internal int PollingWriterCountForTests => Volatile.Read(ref _pollingWriters);
     internal int ParkedWriterCountForTests => Volatile.Read(ref _parkedWriters);
 
+    /* Test seam (#8490): this initializer's own readers between asking for the read lock and holding it. Per instance, unlike
+       WaitingReadCountForTests, for the same reason as the writer counts above. */
+    internal int WaitingReaderCountForTests => Volatile.Read(ref _waitingReaders);
+
     private int _pollingWriters;
     private int _parkedWriters;
+    private int _waitingReaders;
 
     /* Fires in ResetDatabaseCoreAsync after the database and WAL files are deleted and before the schema is
        recreated: a test throws from it to stand in for a process kill with no database file on disk. */
@@ -249,6 +254,7 @@ public partial class DuckDbInitializer : IDisposable
         CancellationToken cancellationToken,
         [CallerMemberName] string? holderMember = null, [CallerFilePath] string? holderFile = null)
     {
+        Interlocked.Increment(ref _waitingReaders);
         try
         {
             if (!cancellationToken.CanBeCanceled)
@@ -271,6 +277,10 @@ public partial class DuckDbInitializer : IDisposable
                protected" case, not a bug to surface. Either way, return a no-op disposable so the caller
                proceeds normally. */
             return NoOpDisposable.Instance;
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _waitingReaders);
         }
         return new LockReleaser(s_dbLock, write: false, StoreLockHolders.Register(holderMember, holderFile, write: false));
     }
@@ -724,7 +734,20 @@ public partial class DuckDbInitializer : IDisposable
         /* Never wait — a reader must never block behind the trim (#4262 round 1 finding 1). If the write
            lock is busy, skip this cycle; the next one TrimInterval later gets another try. The wait is
            TrimLockWaitForTests: zero outside tests. */
-        if (!s_dbLock.TryEnterWriteLock(TrimLockWaitForTests))
+        /* Counted as this initializer's parked writer while it waits (#8490), so a test that holds the lock against the cycle can
+           tell this cycle's wait from another initializer's. Zero wait outside tests, so the count is never raised there. */
+        Interlocked.Increment(ref _parkedWriters);
+        bool trimWriteHeld;
+        try
+        {
+            trimWriteHeld = s_dbLock.TryEnterWriteLock(TrimLockWaitForTests);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _parkedWriters);
+        }
+
+        if (!trimWriteHeld)
         {
             RecordTrimSkip();
             _logger?.LogDebug(
