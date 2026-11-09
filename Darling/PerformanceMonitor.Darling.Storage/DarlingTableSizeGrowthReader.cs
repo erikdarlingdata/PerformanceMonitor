@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -27,12 +28,13 @@ namespace PerformanceMonitor.Darling.Storage;
 /// snapshot exists but the table was not in it, or where no snapshot old enough exists) plus the
 /// store's span, and the derivations live in the properties below where each can refuse.</para>
 /// </summary>
-/// <param name="ReservedMb7dAgo">The table's reserved MB at the newest snapshot at or before the 7-day cutoff; null when
-/// no such snapshot exists or the table was not in it.</param>
+/// <param name="ReservedMb7dAgo">The table's reserved MB at the snapshot nearest the 7-day cutoff within a day either side
+/// (<see cref="GrowthBaselineReach.Tolerance"/>); null when no such snapshot exists or the table was not in it.</param>
 /// <param name="ReservedMb30dAgo">Same for the 30-day cutoff.</param>
 /// <param name="ReservedMbOldest">The table's reserved MB at the store's EARLIEST snapshot; null when the table was not
 /// in it (created since).</param>
-/// <param name="Snapshot7dTime">The snapshot the 7-day baseline was read from; null when the store holds nothing that old.</param>
+/// <param name="Snapshot7dTime">The snapshot the 7-day baseline was read from; null when no snapshot lies within a day of the
+/// cutoff, because the store is younger than that or has a gap there.</param>
 /// <param name="Snapshot30dTime">Same for 30 days.</param>
 /// <param name="EarliestSnapshotTime">The store's oldest index_object_stats capture for this server.</param>
 /// <param name="LatestSnapshotTime">The store's newest — the snapshot every current_* figure is read from.</param>
@@ -44,15 +46,25 @@ public sealed record TableSizeGrowthRow(
     double? ReservedMb7dAgo, double? ReservedMb30dAgo, double? ReservedMbOldest,
     DateTime? Snapshot7dTime, DateTime? Snapshot30dTime, DateTime EarliestSnapshotTime, DateTime LatestSnapshotTime, int DaysOfData)
 {
-    /// <summary>Growth since the 7-day baseline; null when there is no such baseline for this table.</summary>
-    public double? Growth7dMb => ReservedMb7dAgo is { } b ? CurrentReservedMb - b : null;
+    /// <summary>Whether the 7-day baseline snapshot exists and sits within reach of its window (<see cref="GrowthBaselineReach"/>):
+    /// the span from it to the latest snapshot is 6 to 8 days to the nearest day. A collector whose latest snapshot is itself
+    /// days old finds its baseline only a day or two before it, and a figure measured over that is not a 7-day figure.</summary>
+    public bool Covers7d => GrowthBaselineReach.Covers(Snapshot7dTime, LatestSnapshotTime, GrowthBaselineReach.ShortWindowDays);
 
-    /// <summary>Growth since the 30-day baseline; null when there is no such baseline for this table.</summary>
-    public double? Growth30dMb => ReservedMb30dAgo is { } b ? CurrentReservedMb - b : null;
+    /// <summary>Same for the 30-day baseline: the span is 29 to 31 days.</summary>
+    public bool Covers30d => GrowthBaselineReach.Covers(Snapshot30dTime, LatestSnapshotTime, GrowthBaselineReach.LongWindowDays);
+
+    /// <summary>Growth since the 7-day baseline; null when there is no such baseline for this table, or the baseline
+    /// snapshot is out of reach of the window.</summary>
+    public double? Growth7dMb => Covers7d && ReservedMb7dAgo is { } b ? CurrentReservedMb - b : null;
+
+    /// <summary>Growth since the 30-day baseline; null when there is no such baseline for this table, or the baseline
+    /// snapshot is out of reach of the window.</summary>
+    public double? Growth30dMb => Covers30d && ReservedMb30dAgo is { } b ? CurrentReservedMb - b : null;
 
     /// <summary>Percent growth over the 30-day baseline; null without a baseline, and null when the baseline
     /// is 0 (no denominator — a table that was empty 30 days ago has no ratio, not an infinite one).</summary>
-    public double? GrowthPct30d => ReservedMb30dAgo is > 0 ? (CurrentReservedMb - ReservedMb30dAgo.Value) * 100.0 / ReservedMb30dAgo.Value : null;
+    public double? GrowthPct30d => Covers30d && ReservedMb30dAgo is > 0 ? (CurrentReservedMb - ReservedMb30dAgo.Value) * 100.0 / ReservedMb30dAgo.Value : null;
 
     /// <summary>Growth since the store's earliest snapshot — the honest figure when the nominal windows
     /// are out of reach. Null when the store holds a single day (no span) or the table was not in the
@@ -75,8 +87,10 @@ public static class DarlingTableSizeGrowthReader
     /// <summary>
     /// Per-table size + growth over the daily snapshots — Lite's <c>GetObjectSizeGrowthAsync</c> ported to
     /// Postgres: roll indexes up per (database, schema, table) at the latest snapshot, and read the same
-    /// table's reserved size at the newest snapshot at/older-than the 7-day ($2) and 30-day ($3) cutoffs and
-    /// at the store's earliest snapshot. Ranks by current reserved size descending, cap $4. $1 server_id.
+    /// table's reserved size at the snapshot nearest the 7-day ($2) and 30-day ($3) cutoffs within $6 seconds either side
+    /// (<see cref="GrowthBaselineReach.Tolerance"/>, the storage-growth read's rule; the later snapshot on a tie, and NULL when
+    /// none lies within the tolerance) and at the store's earliest snapshot. Ranks by current reserved size descending, cap $4.
+    /// $1 server_id.
     /// <para>#5244: $5 is the database filter (a text[], NULL = every database; the shape of <see cref="DatabaseFilter.Clause"/>).
     /// It sits on the four snapshot CTEs and NOT on <c>boundaries</c>, so the snapshot anchors, the store's span and
     /// the 7-day and 30-day baselines stay the server's: a filtered and an unfiltered call read the same captures,
@@ -87,19 +101,36 @@ public static class DarlingTableSizeGrowthReader
     /// baseline at all read as growth 0. Each baseline now comes back as its own nullable column, beside the
     /// snapshot time it was read from and the store's span, and <see cref="TableSizeGrowthRow"/> derives
     /// each growth figure from exactly the baseline it names or declines to. The two cutoff snapshots are
-    /// resolved once in <c>boundaries</c> with <c>FILTER</c> so the baseline CTEs and the projected snapshot
-    /// times cannot disagree about which capture was used.</para>
+    /// resolved once, in <c>span</c> (the newest within the tolerance at or before each cutoff and the oldest within it
+    /// after, by <c>FILTER</c>) and <c>boundaries</c> (the nearer of the two), so the baseline CTEs and the projected
+    /// snapshot times cannot disagree about which capture was used.</para>
     /// </summary>
     public const string Sql = """
-        WITH boundaries AS (
+        WITH span AS (
             SELECT
                 MAX(collection_time) AS latest_time,
                 MIN(collection_time) AS earliest_time,
-                CAST(MAX(collection_time) AS date) - CAST(MIN(collection_time) AS date) AS days_of_data,
-                MAX(collection_time) FILTER (WHERE collection_time <= $2) AS snapshot_7d_time,
-                MAX(collection_time) FILTER (WHERE collection_time <= $3) AS snapshot_30d_time
+                MAX(collection_time) FILTER (WHERE collection_time <= $2::timestamp AND collection_time >= $2::timestamp - make_interval(secs => $6)) AS before_7d,
+                MIN(collection_time) FILTER (WHERE collection_time > $2::timestamp AND collection_time <= $2::timestamp + make_interval(secs => $6)) AS after_7d,
+                MAX(collection_time) FILTER (WHERE collection_time <= $3::timestamp AND collection_time >= $3::timestamp - make_interval(secs => $6)) AS before_30d,
+                MIN(collection_time) FILTER (WHERE collection_time > $3::timestamp AND collection_time <= $3::timestamp + make_interval(secs => $6)) AS after_30d
             FROM v_index_object_stats
             WHERE server_id = $1
+        ),
+        boundaries AS (
+            SELECT
+                latest_time,
+                earliest_time,
+                CAST(latest_time AS date) - CAST(earliest_time AS date) AS days_of_data,
+                CASE WHEN before_7d IS NULL THEN after_7d
+                     WHEN after_7d IS NULL THEN before_7d
+                     WHEN after_7d - $2::timestamp <= $2::timestamp - before_7d THEN after_7d
+                     ELSE before_7d END AS snapshot_7d_time,
+                CASE WHEN before_30d IS NULL THEN after_30d
+                     WHEN after_30d IS NULL THEN before_30d
+                     WHEN after_30d - $3::timestamp <= $3::timestamp - before_30d THEN after_30d
+                     ELSE before_30d END AS snapshot_30d_time
+            FROM span
         ),
         latest AS (
             SELECT database_name, schema_name, table_name,
@@ -176,6 +207,7 @@ public static class DarlingTableSizeGrowthReader
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff30dUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
         command.Parameters.Add(databases.Parameter());
+        command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = GrowthBaselineReach.Tolerance.TotalSeconds });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
