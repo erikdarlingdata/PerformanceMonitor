@@ -39,23 +39,34 @@ SELECT
     (SELECT COUNT(*) FROM v_query_store_health AS h
       WHERE h.server_id = $1 AND (h.readonly_reason & 8) <> 0
         AND h.capture_time = (SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1)
-        AND h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF')";
+        AND h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF'),
+    run.fanout_item_count::bigint,
+    run.log_id IS NOT NULL
+FROM (SELECT 1) AS one
+LEFT JOIN LATERAL (
+    SELECT cl.log_id, cl.fanout_item_count
+    FROM collection_log AS cl
+    WHERE cl.server_id = $1 AND cl.collector_name = 'query_store' AND cl.status = 'SUCCESS'
+      AND cl.collection_time > COALESCE((SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1), '-infinity'::timestamp)
+    ORDER BY cl.collection_time DESC
+    LIMIT 1) AS run ON TRUE";
 
     /// <summary>
-    /// The one-line reason a Query Store read on this server is empty because it is a readable secondary with <c>query_store_replica</c> off,
-    /// or <c>null</c> when it is not or the read fails: it runs on a path that already found nothing.
+    /// The judgment with the newest capture counted as one the <c>query_store_health</c> collector refreshes, for a caller that has not
+    /// resolved that collector's schedule. The service's reads, the scheduler's gate, <c>get_collection_health</c> and the viewer's tag
+    /// roll-up resolve it and call <see cref="MessageAsync(NpgsqlDataSource, int, string, bool, int, CancellationToken)"/>.
     /// </summary>
     public static Task<string?> MessageAsync(
         NpgsqlDataSource postgres, int serverId, string serverName, int commandTimeoutSeconds, CancellationToken cancellationToken = default) =>
         MessageAsync(postgres, serverId, serverName, healthCaptureRefreshes: true, commandTimeoutSeconds, cancellationToken);
 
     /// <summary>
-    /// #8361: the same judgment as the gate the collection scheduler applies to <c>query_store_hints</c>. The newest
-    /// <c>query_store_health</c> capture is evidence only while the <c>query_store_health</c> collector can refresh it on this server
-    /// (<paramref name="healthCaptureRefreshes"/>, its effective schedule's enabled state). When it cannot, the capture is frozen at
-    /// whatever role the server had when it was taken, so a server that failed over to primary would read as a secondary for as long
-    /// as the capture stood: the capture is then left out and the newest <c>ag_replica_role</c> decides alone. A read's wording
-    /// (<see cref="MessageAsync(NpgsqlDataSource, int, string, int, CancellationToken)"/>) always counts the capture.
+    /// #6554, #8361: the one-line reason a Query Store read on this server is empty because it is a readable secondary with
+    /// <c>query_store_replica</c> off, or <c>null</c> when it is not or the read fails (it runs on a path that already found nothing).
+    /// The judgment the collection scheduler's gate on <c>query_store_hints</c>, <c>get_collection_health</c>, the Query Store reads'
+    /// <c>not_collected</c> answer and the viewer's tag roll-up all apply, <see cref="Message"/>, from <see cref="FactsSql"/>.
+    /// <paramref name="healthCaptureRefreshes"/> is whether the <c>query_store_health</c> collector's effective schedule lets it refresh
+    /// the capture on this server.
     /// </summary>
     public static async Task<string?> MessageAsync(
         NpgsqlDataSource postgres, int serverId, string serverName, bool healthCaptureRefreshes, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
@@ -71,18 +82,69 @@ SELECT
                 return null;
             }
 
-            return CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
+            return Message(
                 serverName,
                 reader.IsDBNull(0) ? null : reader.GetString(0),
-                healthCaptureRefreshes ? (int)reader.GetInt64(2) : 0,
-                healthCaptureRefreshes ? (int)reader.GetInt64(3) : 0,
+                (int)reader.GetInt64(2),
+                (int)reader.GetInt64(3),
                 replicaConfigured: !reader.IsDBNull(1),
-                SettingClause);
+                healthCaptureRefreshes,
+                reader.IsDBNull(4) ? null : reader.GetInt64(4),
+                reader.GetBoolean(5));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// #8402: the one judgment the scheduler's gate, <c>get_collection_health</c> and the Query Store reads apply to a server's facts,
+    /// <see cref="CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage"/> with the frozen-capture rule in front of it. The
+    /// newest <c>query_store_health</c> capture counts while the <c>query_store_health</c> collector can refresh it
+    /// (<paramref name="healthCaptureRefreshes"/>). When it cannot, the capture is frozen at whatever role the server had when it was
+    /// taken, and only an Availability Group role in the newest <c>ag_replica_role</c> can overrule it (<see cref="RoleAnswers"/>): a
+    /// frozen all-secondary capture under a PRIMARY role is a failover, and the collector runs; a frozen capture under a SECONDARY role
+    /// is read as that role. A role that is null, Standalone or anything else carries no answer: the properties collector writes
+    /// Standalone for every instance outside an availability group, a readable standby and a primary promoted after a failover alike,
+    /// so the newest successful <c>query_store</c> collector run newer than the capture decides, by its enumeration (a fact that
+    /// refreshes on its own cadence whatever <c>query_store_health</c>'s schedule). The enumeration skips the same readable-secondary
+    /// databases, and a database whose Query Store is off, so a run that found databases to read (<paramref name="newerRunFanout"/>
+    /// above zero) leaves the capture out whatever it stored; a run that found none (no fanout) corroborates the frozen capture, which
+    /// then decides; a run from before the capture, or none at all (<paramref name="newerRunExists"/> false), decides nothing and the
+    /// role decides. A database with Query Store off is left out of the capture's counts, so a frozen capture of such databases never
+    /// reads as a secondary. Null when the server is not a readable secondary under that rule, or a <c>query_store_replica</c> is set for it.
+    /// </summary>
+    /// <param name="healthDatabases">Databases in the newest capture, leaving out tempdb and any database whose Query Store is OFF.</param>
+    /// <param name="healthSecondaryDatabases">Of those, how many carry the readable-secondary bit.</param>
+    /// <param name="newerRunFanout">The databases the newest successful <c>query_store</c> run newer than the capture found to read (<c>fanout_item_count</c>); null when it found none, or when there is no such run.</param>
+    /// <param name="newerRunExists">Whether a successful <c>query_store</c> run newer than the capture is logged at all. A run from before the capture decides nothing.</param>
+    public static string? Message(
+        string serverName, string? agReplicaRole, int healthDatabases, int healthSecondaryDatabases, bool replicaConfigured, bool healthCaptureRefreshes,
+        long? newerRunFanout, bool newerRunExists)
+    {
+        /* A live primary's run stores zero rows most slots (closed intervals only), so its rows say nothing; the enumeration does. */
+        var captureCounts = healthCaptureRefreshes
+            || (!RoleAnswers(agReplicaRole) && newerRunExists && (newerRunFanout ?? 0) == 0);
+        return CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
+            serverName,
+            agReplicaRole,
+            captureCounts ? healthDatabases : 0,
+            captureCounts ? healthSecondaryDatabases : 0,
+            replicaConfigured,
+            SettingClause);
+    }
+
+    /// <summary>
+    /// Whether a collected <c>ag_replica_role</c> names an Availability Group role, PRIMARY or SECONDARY. Standalone (a server
+    /// outside any availability group, a readable standby among them), RESOLVING, blank and null do not, and say nothing about
+    /// whether the server's Query Store is the primary's, replicated.
+    /// </summary>
+    public static bool RoleAnswers(string? agReplicaRole)
+    {
+        var role = agReplicaRole?.Trim();
+        return string.Equals(role, "Primary", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(role, "Secondary", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -115,10 +177,20 @@ SELECT ids.server_id,
        role.ag_replica_role,
        EXISTS (SELECT 1 FROM config.config_monitored_servers AS c WHERE c.server_id = ids.server_id AND NULLIF(btrim(c.query_store_replica), '') IS NOT NULL) AS replica_configured,
        COALESCE(counts.health_databases, 0),
-       COALESCE(counts.health_secondary_databases, 0)
+       COALESCE(counts.health_secondary_databases, 0),
+       run.fanout_item_count::bigint,
+       run.log_id IS NOT NULL
 FROM ids
 LEFT JOIN role ON role.server_id = ids.server_id
-LEFT JOIN counts ON counts.server_id = ids.server_id";
+LEFT JOIN newest AS n ON n.server_id = ids.server_id
+LEFT JOIN counts ON counts.server_id = ids.server_id
+LEFT JOIN LATERAL (
+    SELECT cl.log_id, cl.fanout_item_count
+    FROM collection_log AS cl
+    WHERE cl.server_id = ids.server_id AND cl.collector_name = 'query_store' AND cl.status = 'SUCCESS'
+      AND cl.collection_time > COALESCE(n.capture_time, '-infinity'::timestamp)
+    ORDER BY cl.collection_time DESC
+    LIMIT 1) AS run ON TRUE";
 
     /// <summary>One server the fleet form asks about: its id, the name the sentence carries, and whether its <c>query_store_health</c> capture can refresh.</summary>
     public readonly record struct FleetServer(int ServerId, string ServerName, bool HealthCaptureRefreshes);
@@ -151,13 +223,15 @@ LEFT JOIN counts ON counts.server_id = ids.server_id";
                     continue;
                 }
 
-                var message = CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
+                var message = Message(
                     server.ServerName,
                     reader.IsDBNull(1) ? null : reader.GetString(1),
-                    server.HealthCaptureRefreshes ? (int)reader.GetInt64(3) : 0,
-                    server.HealthCaptureRefreshes ? (int)reader.GetInt64(4) : 0,
+                    (int)reader.GetInt64(3),
+                    (int)reader.GetInt64(4),
                     replicaConfigured: reader.GetBoolean(2),
-                    SettingClause);
+                    server.HealthCaptureRefreshes,
+                    reader.IsDBNull(5) ? null : reader.GetInt64(5),
+                    reader.GetBoolean(6));
                 if (message is not null)
                 {
                     messages[server.ServerId] = message;

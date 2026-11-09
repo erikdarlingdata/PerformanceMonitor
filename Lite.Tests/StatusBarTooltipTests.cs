@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -21,13 +22,16 @@ namespace PerformanceMonitorLite.Tests;
 /// cleared message leaves) opens no tooltip at all. The real main window is built on the shared STA thread with the Dark theme and
 /// hosted at 900x600. The Viewer's twin is in ViewerStatusBarLinesTests.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class StatusBarTooltipTests
 {
     [Fact]
     public void AnEmptyBar_OpensNoTooltip_AndAFilledOneCarriesItsText()
     {
-        var findings = StaTestThread.Run(() => WithTheme(() =>
+        var findings = InOwnFolder(dir => StaTestThread.Run(() => WithTheme(() =>
         {
+            /* The window reads the app's three store paths when it is built and writes servers.json beside them; it gets a folder of its own (#8434). */
+            using var paths = new AppPathsScope(dir);
             var w = new MainWindow();
             var root = (UIElement)w.Content;
             w.Content = null;
@@ -58,7 +62,7 @@ public sealed class StatusBarTooltipTests
             {
                 host.Close();
             }
-        }));
+        })));
 
         Assert.True(findings.Count == 0, string.Join(Environment.NewLine, findings));
     }
@@ -80,6 +84,21 @@ public sealed class StatusBarTooltipTests
             {
                 app.Resources.MergedDictionaries.Add(d);
             }
+        }
+    }
+
+    /// <summary>Runs <paramref name="body"/> with a scratch folder of the test's own, deleted afterwards.</summary>
+    private static T InOwnFolder<T>(Func<string, T> body)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "StatusBarTooltip_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        try
+        {
+            return body(dir);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
         }
     }
 }

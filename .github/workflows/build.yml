@@ -881,14 +881,14 @@ jobs:
 
           # Lite: download previous + pack (from the SIGNED velopack output, not the raw publish dir)
           Invoke-VpkChannelDownload 'lite' 'releases/velopack-lite'
-          vpk pack -u PerformanceMonitorLite -v $env:VERSION -p signed/Lite-Velopack -e PerformanceMonitorLite.exe -o releases/velopack-lite --channel lite
+          vpk pack -u PerformanceMonitorLite -v $env:VERSION -p signed/Lite-Velopack -e PerformanceMonitorLite.exe -o releases/velopack-lite --channel lite --packTitle "Performance Monitor Lite" --packAuthors "Darling Data, LLC"
           if ($LASTEXITCODE -ne 0) { throw "vpk pack for channel 'lite' failed (exit $LASTEXITCODE)." }
 
           # Darling Viewer remote-seat installer (#1555): download previous + pack (from the SIGNED
           # velopack output). Its own 'darlingviewer' channel/delta feed, separate from the co-located
           # viewer inside PerformanceMonitorDarling-*.zip (which stays plain-zip only).
           Invoke-VpkChannelDownload 'darlingviewer' 'releases/velopack-darlingviewer'
-          vpk pack -u PerformanceMonitorDarlingViewer -v $env:VERSION -p signed/DarlingViewer-Velopack -e PerformanceMonitor.Darling.Viewer.exe -o releases/velopack-darlingviewer --channel darlingviewer
+          vpk pack -u PerformanceMonitorDarlingViewer -v $env:VERSION -p signed/DarlingViewer-Velopack -e PerformanceMonitor.Darling.Viewer.exe -o releases/velopack-darlingviewer --channel darlingviewer --packTitle "Performance Monitor Darling Viewer" --packAuthors "Darling Data, LLC"
           if ($LASTEXITCODE -ne 0) { throw "vpk pack for channel 'darlingviewer' failed (exit $LASTEXITCODE)." }
 
       # #3288: Velopack GENERATES three executables during `vpk pack` — the portable launcher
@@ -1389,7 +1389,7 @@ jobs:
       # Checked: cosign 2.6.5 and 3.0.6 both verify it with the command above.
       - name: Install cosign
         if: github.event_name == 'release'
-        uses: sigstore/cosign-installer@v4.1.2
+        uses: sigstore/cosign-installer@v4.1.3
 
       - name: Sign container image (keyless, Sigstore)
         if: github.event_name == 'release'

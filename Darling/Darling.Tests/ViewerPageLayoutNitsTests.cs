@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// short, a footer label parted from its value, grid columns that leave the free width empty, and a search box with no placeholder. Each
 /// fact reads the realized result of the real control.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerPageLayoutNitsTests
 {
     private readonly ITestOutputHelper _output;

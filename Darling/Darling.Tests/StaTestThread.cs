@@ -434,6 +434,9 @@ internal sealed class StaHost
             var engineLoadedAtStart = StaThreadProbe.RenderEngineLoaded();
             _step = "(the body named no step)";
             Interlocked.Exchange(ref _stepTick, began);
+            /* #8395: a theme change inside the body is recorded against the calling test; a body that creates the Application merged before it could be watched. */
+            var applicationExistedBefore = Application.Current is not null;
+            ApplicationThemeGuard.Observe();
             var finished = dispatcher.InvokeAsync(() => Job(body, e => error = e)).Task.Unwrap();
             if (!finished.Wait(HangGuard))
             {
@@ -450,6 +453,7 @@ internal sealed class StaHost
                     + DescribeStuckBody(opsAtStart, engineLoadedAtStart));
             }
 
+            ApplicationThemeGuard.ObserveAfterBody(applicationExistedBefore);
             error?.Throw();
             lock (_strays)
             {

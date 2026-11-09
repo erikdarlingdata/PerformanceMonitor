@@ -333,6 +333,39 @@ LEFT JOIN absent AS a ON a.database_name = h.database_name AND a.query_id = h.qu
     }
 
     /// <summary>
+    /// <c>hints_returned</c> is how many the page lists, not how many the read holds: a server with three hints read one at a time
+    /// answers 1 on every page while <c>total_hints</c> stays 3, and the last page, asked with room to spare, counts only what is left.
+    /// </summary>
+    [Fact]
+    public async Task APagedRead_CountsHintsReturned_AsThePage_NotTheWholeRead()
+    {
+        await WithStoreAsync(16, async (connection, ct) =>
+        {
+            var at = DateTime.UtcNow.AddMinutes(-5);
+            await InsertAsync(connection, ct, at, null, null, null, null, null);
+            await InsertAsync(connection, ct, at, 1, 101, "OPTION (MAXDOP 1)", null, 0);
+            await InsertAsync(connection, ct, at, 2, 102, "OPTION (USE HINT ('NOPE'))", "UNSUPPORTED_HINT", 4);
+            await InsertAsync(connection, ct, at, 3, 103, "OPTION (OPTIMIZE FOR UNKNOWN)", null, 0);
+        }, async (postgres, ct) =>
+        {
+            var first = Parse(await DarlingMcpForcedPlanTools.GetQueryStoreHints(postgres, ServerName, 24, null, DatabaseFilter.All, null, limit: 1, offset: 0, ct));
+            Assert.Equal(3, first.GetProperty("total_hints").GetInt32());
+            Assert.Equal(1, first.GetProperty("limit").GetInt32());
+            Assert.Equal(1, first.GetProperty("query_store_hints").GetArrayLength());
+            Assert.Equal(1, first.GetProperty("hints_returned").GetInt32());
+            Assert.True(first.GetProperty("has_more").GetBoolean());
+            Assert.Equal(1, first.GetProperty("next_offset").GetInt32());
+
+            var last = Parse(await DarlingMcpForcedPlanTools.GetQueryStoreHints(postgres, ServerName, 24, null, DatabaseFilter.All, null, limit: 5, offset: 2, ct));
+            Assert.Equal(3, last.GetProperty("total_hints").GetInt32());
+            Assert.Equal(1, last.GetProperty("query_store_hints").GetArrayLength());
+            Assert.Equal(1, last.GetProperty("hints_returned").GetInt32());
+            Assert.False(last.GetProperty("has_more").GetBoolean());
+            return 0;
+        });
+    }
+
+    /// <summary>
     /// The read holds at most <see cref="DarlingQueryStoreHintReader.MaxHints"/> hints across every database. Two databases hold 2101 between
     /// them and the one FAILING hint is in the database that sorts last: the cut must not drop it, the answer must say it was cut, and every
     /// count must be the whole-set figure (or named as a count of what was returned).
@@ -364,7 +397,11 @@ SELECT -($6 + g), $1, $2, $3, $4, $6 + g, $6 + g, 'OPTION (MAXDOP 1)', 0, 'USER'
 
             Assert.True(root.GetProperty("read_capped").GetBoolean());
             Assert.True(root.GetProperty("truncated").GetBoolean());
-            Assert.Equal(DarlingQueryStoreHintReader.MaxHints, root.GetProperty("hints_returned").GetInt32());
+            /* hints_returned counts the page, which is the default limit here, not the 2000 the read holds. */
+            Assert.Equal(DarlingMcpForcedPlanTools.MaxListed, root.GetProperty("hints_returned").GetInt32());
+            Assert.Equal(root.GetProperty("query_store_hints").GetArrayLength(), root.GetProperty("hints_returned").GetInt32());
+            /* The read itself fills to its cap: the page note names the 2000 it holds, so a smaller read would not pass as a capped one. */
+            Assert.Contains("Listed 200 of 2000 hints", root.GetProperty("page_note").GetString(), StringComparison.Ordinal);
             Assert.Equal(wholeSet, root.GetProperty("total_hints").GetInt32());
             Assert.Equal(1, root.GetProperty("failing_hints").GetInt32());
             Assert.Contains("2000", root.GetProperty("page_note").GetString(), StringComparison.Ordinal);

@@ -91,9 +91,13 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         {
             var chart = charts[lane];
             ApplyTheme(chart);
-            /* #8086: until the first read comes back a lane shows the empty chart's sentence, not ScottPlot's default -10 to 10
-               axes. The first update resets the chart, which drops this. */
+            /* #8086: until the first read comes back a lane has the empty chart's look, not ScottPlot's default -10 to 10 axes. Its
+               sentence says the lane is loading, not that the window holds no data: the store may hold the window's samples while
+               the first read waits on it. The first update resets the chart, which drops this. */
             emptyLook.RefreshEmptyChart(chart, laneNames[lane], "");
+            foreach (var sentence in chart.Plot.GetPlottables<ScottPlot.Plottables.Text>())
+                sentence.LabelText = LoadingSentence(laneNames[lane]);
+            chart.Refresh();
             // Disable zoom/pan/drag but keep mouse events for crosshair
             chart.UserInputProcessor.UserActionResponses.Clear();
             SetupLaneDrillDown(chart);
@@ -703,6 +707,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
         chart.Refresh();
     }
+
+    /// <summary>The sentence a lane shows until its first read comes back.</summary>
+    internal static string LoadingSentence(string laneName) => $"Loading {laneName} data...";
 
     /// <summary>The sentence an empty lane shows, the one the other charts use.</summary>
     private string EmptySentence(ScottPlot.WPF.WpfPlot chart) => $"No {LaneName(chart)} data in this window";

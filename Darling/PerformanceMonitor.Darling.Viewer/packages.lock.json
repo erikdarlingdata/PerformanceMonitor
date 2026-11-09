@@ -8,6 +8,17 @@
         "resolved": "2.0.1",
         "contentHash": "dtxmeZXzV2GzSm91aZ3hqzgoeVoARSkDPVCYfhVUNyyKBWYxMgNC0EcLiSYxD4Uc4alq/2qb3SmV8DgAENLRLQ=="
       },
+      "ModelContextProtocol": {
+        "type": "Direct",
+        "requested": "[2.4.0, )",
+        "resolved": "2.4.0",
+        "contentHash": "3oMhK5W0G3H8+1SbMosV7meE6sKQfmzLKSNtjQ3dGZ+IJU5RomKTs/bKWHFyOJQNMWk//+iClQJfcMpHnwCFsg==",
+        "dependencies": {
+          "Microsoft.Extensions.Caching.Abstractions": "10.0.14",
+          "Microsoft.Extensions.Hosting.Abstractions": "10.0.14",
+          "ModelContextProtocol.Core": "[2.4.0]"
+        }
+      },
       "ScottPlot.WPF": {
         "type": "Direct",
         "requested": "[5.1.59, )",
@@ -107,10 +118,10 @@
       },
       "Microsoft.Extensions.Caching.Abstractions": {
         "type": "Transitive",
-        "resolved": "10.0.13",
-        "contentHash": "UOJqcdNMoFcV/5RUcOlVKq9pPmbrcmbpLx5iYz9QtrmMcWRQzlL5Q/NZRfbPPLNyIEc1HWjjs5Z7nIwqewU1sg==",
+        "resolved": "10.0.14",
+        "contentHash": "enSfqeENnSjGH3YAYKsCtsa5ob0HNiwF2nwJiC2yhilNXTlD/0prxrgPkWjoAp9svJcu04AiEIKtdh/A54P2fA==",
         "dependencies": {
-          "Microsoft.Extensions.Primitives": "10.0.13"
+          "Microsoft.Extensions.Primitives": "10.0.14"
         }
       },
       "Microsoft.Extensions.Caching.Memory": {
@@ -127,10 +138,10 @@
       },
       "Microsoft.Extensions.Configuration.Abstractions": {
         "type": "Transitive",
-        "resolved": "10.0.13",
-        "contentHash": "DY4C2qzTt2lOIY3VoscBH/TCwTolI5DKOfgJLuI+k1QUvRNT5vTMS58AOerNiihdVRStO0wEpLeRWA8jytzHBQ==",
+        "resolved": "10.0.14",
+        "contentHash": "4YdfvaoWn3tB1xQQHGrhRTFWJ8fGOqxThxduynSZy9ZFTiSaUi3vX4EK/kj8h2HQMwTlks9MWV1fv2WRBv5/1w==",
         "dependencies": {
-          "Microsoft.Extensions.Primitives": "10.0.13"
+          "Microsoft.Extensions.Primitives": "10.0.14"
         }
       },
       "Microsoft.Extensions.DependencyInjection.Abstractions": {
@@ -140,46 +151,46 @@
       },
       "Microsoft.Extensions.Diagnostics.Abstractions": {
         "type": "Transitive",
-        "resolved": "10.0.13",
-        "contentHash": "oZzqZze8ed1fLS20HtIrkPxQXGRG/koq09srIw2ptnDHm9RHfwB++d35hosB/cXc55TH7Pshv85O0txongjCIg==",
+        "resolved": "10.0.14",
+        "contentHash": "vm+PPso6vOwGeX52MdOPh6z/R6KHgxQUwqq7k7Jc9jhy2JOxO2KB4xfoJQBBp2Ni8M4zKgJ4r2a1dgrYG7+MKw==",
         "dependencies": {
-          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.13",
-          "Microsoft.Extensions.Options": "10.0.13"
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.14",
+          "Microsoft.Extensions.Options": "10.0.14"
         }
       },
       "Microsoft.Extensions.FileProviders.Abstractions": {
         "type": "Transitive",
-        "resolved": "10.0.13",
-        "contentHash": "BZDwtN3uoWRghDi5lRRZPDjMMCg2Ds7J6YEYjqka/TLjqnzquEpXyvchrIMeoubwT1ns23ow6PPeAoBHJO81Rw==",
+        "resolved": "10.0.14",
+        "contentHash": "rAqf2Em2ZjLqNbcLJlboQnXNyJP604F960TsCKNiP00Ur6ExIc1mcwmNb8L2eTRT8RC8UKx/GjecoWcW2Sj7bw==",
         "dependencies": {
-          "Microsoft.Extensions.Primitives": "10.0.13"
+          "Microsoft.Extensions.Primitives": "10.0.14"
         }
       },
       "Microsoft.Extensions.Hosting.Abstractions": {
         "type": "Transitive",
-        "resolved": "10.0.13",
-        "contentHash": "zIrbe9vkIFXxW3mOApIOWXw+xMwX7Cgsptr3ZSlglJt4hW2qp4fB/JU1NHgAevteBNH4PicvU9DsFPHxlnnloA==",
+        "resolved": "10.0.14",
+        "contentHash": "p6NUEkmlaB+FujQZTtyNBKFULQO+Fj8SKuYdYHASQso+RkeYdFDPNsMM4mtOHqx1GZNQnZm/inmsqGkja/Dw2w==",
         "dependencies": {
-          "Microsoft.Extensions.Configuration.Abstractions": "10.0.13",
-          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.13",
-          "Microsoft.Extensions.Diagnostics.Abstractions": "10.0.13",
-          "Microsoft.Extensions.FileProviders.Abstractions": "10.0.13",
-          "Microsoft.Extensions.Logging.Abstractions": "10.0.13"
+          "Microsoft.Extensions.Configuration.Abstractions": "10.0.14",
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.14",
+          "Microsoft.Extensions.Diagnostics.Abstractions": "10.0.14",
+          "Microsoft.Extensions.FileProviders.Abstractions": "10.0.14",
+          "Microsoft.Extensions.Logging.Abstractions": "10.0.14"
         }
       },
       "Microsoft.Extensions.Options": {
         "type": "Transitive",
-        "resolved": "10.0.13",
-        "contentHash": "tmMJgdrE4uhf1JcNs9CV9moAHW+hmDuvgMiPpnQxarKaUxqI2eN33sYK5S4l9Uw+rG9PJvlm4qPxMhvolTDTaQ==",
+        "resolved": "10.0.14",
+        "contentHash": "EeN/33S418m9oWEaZY4N5T+BNxtOqNTIFoFbIgBKwylh4OJPKIWFAzbIhpTdNbwUs26MhkmbLCAbdY+YCJ1dIQ==",
         "dependencies": {
-          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.13",
-          "Microsoft.Extensions.Primitives": "10.0.13"
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.14",
+          "Microsoft.Extensions.Primitives": "10.0.14"
         }
       },
       "Microsoft.Extensions.Primitives": {
         "type": "Transitive",
-        "resolved": "10.0.13",
-        "contentHash": "ZjTwxzhiw2TMEzIbUDkMF0dfDB2I4NQgIfKD0ELu9/5Mk+SRGdKZcD0/lvBrRCAPo6KN2r0BW86MRancoyJkoA=="
+        "resolved": "10.0.14",
+        "contentHash": "1bbZqqCJTPba3inTADExbp/9PsGVyvGOX3zr6tFr7ySCgVkX9Lpw7BV0TizktNItd3SsbUu1sQfSAYm1GZMoNw=="
       },
       "Microsoft.Identity.Client": {
         "type": "Transitive",
@@ -265,11 +276,11 @@
       },
       "ModelContextProtocol.Core": {
         "type": "Transitive",
-        "resolved": "2.3.0",
-        "contentHash": "EDpbQholhVWoNumb0Ab3oGv9LmXOLgaD5ixEIUkrnzpnqD0TJCSHTJ5G71/J1KlrQ98aWDclWTPMffKTnCJoMw==",
+        "resolved": "2.4.0",
+        "contentHash": "q98pZMlcxhsh0LpGXcT2ow7sGNveCPhDlJT3zJ7Cz5nNyPmPkm8P57dUIUpzv1w6qWbdSZcR/Z+RbZtNYjEmXQ==",
         "dependencies": {
           "Microsoft.Extensions.AI.Abstractions": "10.11.0",
-          "Microsoft.Extensions.Logging.Abstractions": "10.0.13"
+          "Microsoft.Extensions.Logging.Abstractions": "10.0.14"
         }
       },
       "OpenTK": {
@@ -464,20 +475,20 @@
       "performancemonitor.alerting": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.11.0, )",
-          "PerformanceMonitor.Notifications": "[3.11.0, )"
+          "PerformanceMonitor.Common": "[3.12.0, )",
+          "PerformanceMonitor.Notifications": "[3.12.0, )"
         }
       },
       "performancemonitor.analysis": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.11.0, )"
+          "PerformanceMonitor.Common": "[3.12.0, )"
         }
       },
       "performancemonitor.collectors": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.11.0, )"
+          "PerformanceMonitor.Common": "[3.12.0, )"
         }
       },
       "performancemonitor.common": {
@@ -485,7 +496,7 @@
         "dependencies": {
           "CredentialManagement": "[1.0.2, )",
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.14, )",
-          "ModelContextProtocol": "[2.3.0, )"
+          "ModelContextProtocol": "[2.4.0, )"
         }
       },
       "performancemonitor.darling.analysis": {
@@ -493,48 +504,48 @@
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.1.1, )",
           "Microsoft.Data.SqlClient.Extensions.Azure": "[7.1.1, )",
-          "ModelContextProtocol": "[2.3.0, )",
-          "PerformanceMonitor.Analysis": "[3.11.0, )",
-          "PerformanceMonitor.Collectors": "[3.11.0, )",
-          "PerformanceMonitor.Common": "[3.11.0, )",
-          "PerformanceMonitor.Darling.Storage": "[3.11.0, )",
-          "PerformanceMonitor.Notifications": "[3.11.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.11.0, )"
+          "ModelContextProtocol": "[2.4.0, )",
+          "PerformanceMonitor.Analysis": "[3.12.0, )",
+          "PerformanceMonitor.Collectors": "[3.12.0, )",
+          "PerformanceMonitor.Common": "[3.12.0, )",
+          "PerformanceMonitor.Darling.Storage": "[3.12.0, )",
+          "PerformanceMonitor.Notifications": "[3.12.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.12.0, )"
         }
       },
       "performancemonitor.darling.storage": {
         "type": "Project",
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.14, )",
-          "ModelContextProtocol": "[2.3.0, )",
+          "ModelContextProtocol": "[2.4.0, )",
           "Npgsql": "[10.0.3, )",
-          "PerformanceMonitor.Alerting": "[3.11.0, )",
-          "PerformanceMonitor.Analysis": "[3.11.0, )",
-          "PerformanceMonitor.Collectors": "[3.11.0, )",
-          "PerformanceMonitor.Common": "[3.11.0, )",
-          "PerformanceMonitor.Notifications": "[3.11.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.11.0, )"
+          "PerformanceMonitor.Alerting": "[3.12.0, )",
+          "PerformanceMonitor.Analysis": "[3.12.0, )",
+          "PerformanceMonitor.Collectors": "[3.12.0, )",
+          "PerformanceMonitor.Common": "[3.12.0, )",
+          "PerformanceMonitor.Notifications": "[3.12.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.12.0, )"
         }
       },
       "performancemonitor.notifications": {
         "type": "Project",
         "dependencies": {
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.14, )",
-          "PerformanceMonitor.Analysis": "[3.11.0, )"
+          "PerformanceMonitor.Analysis": "[3.12.0, )"
         }
       },
       "performancemonitor.plananalysis": {
         "type": "Project",
         "dependencies": {
           "Microsoft.Data.SqlClient": "[7.1.1, )",
-          "PerformanceMonitor.Common": "[3.11.0, )"
+          "PerformanceMonitor.Common": "[3.12.0, )"
         }
       },
       "performancemonitor.ui": {
         "type": "Project",
         "dependencies": {
-          "PerformanceMonitor.Common": "[3.11.0, )",
-          "PerformanceMonitor.PlanAnalysis": "[3.11.0, )",
+          "PerformanceMonitor.Common": "[3.12.0, )",
+          "PerformanceMonitor.PlanAnalysis": "[3.12.0, )",
           "ScottPlot.WPF": "[5.1.59, )"
         }
       },
@@ -583,17 +594,6 @@
         "contentHash": "SwcbEBtkECq3D2oywvHkm46fyrX9Dd2JPWphDnHUc2+cUWR1Mdo41atAjh/9iZjgQxuvbKfZKXqostT/LZfefA==",
         "dependencies": {
           "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.14"
-        }
-      },
-      "ModelContextProtocol": {
-        "type": "CentralTransitive",
-        "requested": "[2.3.0, )",
-        "resolved": "2.3.0",
-        "contentHash": "PHZ0q8xTAoysqUKpA5gC0RGJSfwpZhfsNz+9Sw0X0RzFFVHjIE52sx6C+ogMn+LSE+FfiYiNscPJhM6q6DMT6Q==",
-        "dependencies": {
-          "Microsoft.Extensions.Caching.Abstractions": "10.0.13",
-          "Microsoft.Extensions.Hosting.Abstractions": "10.0.13",
-          "ModelContextProtocol.Core": "[2.3.0]"
         }
       },
       "Npgsql": {

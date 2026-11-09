@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// carries X labels and gets room for them, each lane's caption sits in the lane's top left (no left gutter), and the lanes' plot
 /// rectangles still line up.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerOverviewLanesFillTests
 {
     private readonly ITestOutputHelper _output;

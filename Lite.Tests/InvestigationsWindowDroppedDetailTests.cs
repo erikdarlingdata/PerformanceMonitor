@@ -24,6 +24,7 @@ namespace PerformanceMonitorLite.Tests;
 /// list's answer clears the grid's pick and the pane. The detail then answers: the pane stays cleared, because the read was for a
 /// request the window no longer has picked. The web page's twin is InvestigationsPageTests in Darling.Tests.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class InvestigationsWindowDroppedDetailTests
 {
     private static readonly DateTime T0 = new(2026, 10, 14, 12, 0, 0, DateTimeKind.Utc);

@@ -57,6 +57,7 @@ namespace Darling.Tests;
 /// the pins below hold a one-of-six card exactly where #3528 left it.</para>
 /// </summary>
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
+[Collection("application-theme")] // #8395: reads a card brush off the STA thread
 public sealed class UnmeasuredMetricsAreNotHealthyTests
 {
     private static readonly DateTime Now = new(2026, 9, 10, 12, 0, 0, DateTimeKind.Utc);

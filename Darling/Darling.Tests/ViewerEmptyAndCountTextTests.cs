@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /// beside the sidebar of a 1280x800 and a 900x600 window, and reads the realized font style, weight, brush and bounds of each element.
 /// With REFRESH_SHOTS_DIR set, each screen is saved as a PNG.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerEmptyAndCountTextTests
 {
     private const string ViewerPack = "pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/";

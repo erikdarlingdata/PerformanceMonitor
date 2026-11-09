@@ -32,9 +32,9 @@ WHAT IT CHECKS, AND WHAT IT DELIBERATELY DOES NOT
   signature file are all invisible to it.
 
   Executables inside a published archive are checked too, because the one that matters most is
-  inside one: the portable zip's ROOT `PerformanceMonitorLite.exe` is a 399 kB launcher shim,
-  while the signed 182 kB app sits in `current/`. A check that only looked at top-level assets
-  would have passed every affected release.
+  inside one: the portable zip's ROOT launcher, a 399 kB shim named after the Velopack pack
+  title (`Performance Monitor Lite.exe`), while the signed 182 kB app sits in `current/`. A check
+  that only looked at top-level assets would have passed every affected release.
 
   Two executables are allowed to be unsigned, and only in one place each: `lib/app/*_ExecutionStub.exe`
   and `lib/app/Squirrel.exe` INSIDE a `.nupkg`. `releases.<channel>.json` records a SHA256 and a

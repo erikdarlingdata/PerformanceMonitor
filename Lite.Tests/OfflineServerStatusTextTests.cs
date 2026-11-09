@@ -180,10 +180,8 @@ public sealed class OfflineServerStatusTextTests
             Directory.CreateDirectory(dir);
             try
             {
-                foreach (var (name, value) in new[] { ("DatabasePath", Path.Combine(dir, "monitor.duckdb")), ("ConfigDirectory", dir), ("SharedConfigDirectory", dir) })
-                {
-                    typeof(App).GetProperty(name, BindingFlags.Static | BindingFlags.Public)!.SetValue(null, value);
-                }
+                /* The window reads these three paths when it is built; point them at a folder of the test's own, and put them back before the folder is deleted. */
+                using var paths = new AppPathsScope(dir);
 
                 var w = new MainWindow();
                 var root = (UIElement)w.Content;

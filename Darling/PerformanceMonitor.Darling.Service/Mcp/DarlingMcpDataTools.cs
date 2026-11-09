@@ -2255,8 +2255,10 @@ ORDER BY server_name";
                query_store_hints (nothing it could read), so its row reads HEALTHY with zero rows while its last run is recent and
                STOPPED once the gate has held it off past the cutoff. Shown as not_collected with the readable-secondary sentence
                instead, the way the Always On rows are, under the gate's own judgment: the newest health capture decides while the
-               query_store_health collector's effective schedule lets it refresh on this server, and otherwise the newest
-               ag_replica_role decides alone; a failing or denied row keeps its own. Only the listing changes: the rows still feed
+               query_store_health collector's effective schedule lets it refresh on this server; a frozen capture is overruled by a
+               PRIMARY or SECONDARY ag_replica_role, and under any other role the newest successful query_store run newer than the
+               capture decides by the databases it found to read (some found, the capture is left out; none found, it stands; no
+               such run, the role decides); a failing or denied row keeps its own. Only the listing changes: the rows still feed
                the sweep arithmetic below. */
             var queryStoreSecondary = await DarlingGatedCollectorRows.QueryStoreSecondaryMessageAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken);
             if (queryStoreSecondary is not null)
@@ -2697,8 +2699,8 @@ ORDER BY server_name";
                    than a static sentence — full_detail=true changes compactCount to 0, so the note always
                    describes what THIS response actually did instead of what the argument nominally requested. */
                 collector_detail_note = full_detail
-                    ? "full_detail=true: every field is served for every collector below."
-                    : $"{compactCount} of {CountText.Plural(shownRows.Count, "collector")} below {(compactCount == 1 ? "is" : "are")} HEALTHY with nothing to report (no errors, denials, session/extension-missing runs or abandoned cycles this window) and are compacted to collector/status/compact/total_runs/rows_stored/avg_duration_ms/last_success. {partialCount} need a look (failing, stale, stopped, erroring, denied, regressed, or an unexplained zero) and carry a leaner partial_detail shape instead of full detail: in a partial row a missing key means null, false or 0, and only collector, status, partial_detail, total_runs and errors are always present. Pass full_detail=true for every field on every collector.",
+                    ? CollectorDetailNote.FullDetail
+                    : CollectorDetailNote.Build(compactCount, shownRows.Count, partialCount, collectorRows.Count - shownRows.Count),
                 /* #6180: the response-size cut, observed (see healthReply above). Null note and false flag when every collector fit. */
                 truncated = collectorCount < collectorRows.Count,
                 collectors_returned = collectorCount,
