@@ -118,7 +118,7 @@ try {
   fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
-  modules = { views: await load(path.join("pages", "views.js")) };
+  modules = { views: await load(path.join("pages", "views.js")), util: await load("util.js") };
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
@@ -126,6 +126,19 @@ try {
 const all = (n, out = []) => { out.push(n); for (const c of n.children) all(c, out); return out; };
 const flush = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 0)); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/* #8511: the page's Retry-After wait (retryOnceWhenBusy, util.js) runs on util's busyRetryClock. The harness records each timer the page
+   arms there, with the delay it asked for, and runs it on the real clock. flushPastTheRetry is a flush whose turns end only after that
+   timer has fired: the shape the thirty turns of flush take on a loaded machine, where one turn can run tens of milliseconds. */
+const busyRetryTimers = [];
+modules.util.busyRetryClock.setTimeout = (fn, ms) => {
+  const timer = { fn, ms, cleared: false };
+  timer.fired = new Promise((resolve) => { timer.handle = setTimeout(() => { resolve(); if (!timer.cleared) fn(); }, ms); });
+  busyRetryTimers.push(timer);
+  return timer;
+};
+modules.util.busyRetryClock.clearTimeout = (timer) => { if (timer) { timer.cleared = true; clearTimeout(timer.handle); } };
+const flushPastTheRetry = async () => { await flush(); await Promise.all(busyRetryTimers.map((t) => t.fired)); await flush(); };
+const delaysAsked = () => busyRetryTimers.splice(0).map((t) => t.ms);
 const panel = (source, extra = {}) => ({ title: "Panel " + source, source, viz: "table", measure: "m", ...extra });
 const rpanel = (read, extra = {}) => ({ title: "Read " + read, read, viz: "table", columns: [{ key: "n", label: "n" }], rowsKey: "rows", ...extra });
 const dashboard = (panels) => ({ id: "v1", name: "V", definition: { panels } });
@@ -170,9 +183,10 @@ const out = {};
 {
   const main = await open(dashboard([panel("s1"), panel("s2"), panel("s3")]));
   answer(calls[0], 429);
-  await flush();
+  await flushPastTheRetry();
   out.busyOnceStrips = stripsOf(main).map((s) => s.text);
   out.busyOnceCallsWhileWaiting = sourcesOf(calls);
+  out.busyOnceRetryDelaysMs = delaysAsked();
   await sleep(1300);
   await flush();
   out.busyOnceCallsAfterWait = sourcesOf(calls);
@@ -194,6 +208,7 @@ const out = {};
   answer(calls[0], 429);
   await sleep(1300);
   await flush();
+  out.busyTwiceRetryDelaysMs = delaysAsked();
   answer(calls[2], 429);
   await flush();
   out.busyTwiceCalls = sourcesOf(calls);
@@ -290,9 +305,10 @@ const out = {};
 {
   const main = await open(dashboard([rpanel("r1"), rpanel("r2"), rpanel("r3")]));
   answer(calls[0], 429);
-  await flush();
+  await flushPastTheRetry();
   out.readBusyOnceStrips = stripsOf(main).map((s) => s.text);
   out.readBusyOnceCallsWhileWaiting = sourcesOf(calls);
+  out.readBusyOnceRetryDelaysMs = delaysAsked();
   await sleep(1300);
   await flush();
   out.readBusyOnceCallsAfterWait = sourcesOf(calls);
@@ -316,6 +332,7 @@ const out = {};
   answer(calls[0], 429);
   await sleep(1300);
   await flush();
+  out.readBusyTwiceRetryDelaysMs = delaysAsked();
   answer(calls[2], 429);
   await flush();
   out.readBusyTwiceCalls = sourcesOf(calls);

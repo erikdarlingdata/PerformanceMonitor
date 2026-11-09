@@ -59,6 +59,8 @@ public sealed class CustomViewPanelLimitBehaviourTests
 
     private static string[] Strings(JsonElement e) => e.EnumerateArray().Select(x => x.GetString()!).ToArray();
 
+    private static int[] Ints(JsonElement e) => e.EnumerateArray().Select(x => x.GetInt32()).ToArray();
+
     [Fact]
     public void SevenPanels_StartTwoReads_AndEachNextReadStartsWhenAnEarlierOneEnds()
     {
@@ -81,6 +83,8 @@ public sealed class CustomViewPanelLimitBehaviourTests
         Assert.Contains(Strings(run.GetProperty("busyOnceStrips")), s => s.StartsWith("The service is running as many long reads as it allows. Retrying in 1 second"));
         // While the first panel waits to retry it keeps its slot, so the third panel has not started.
         Assert.Equal(new[] { "s1", "s2" }, Strings(run.GetProperty("busyOnceCallsWhileWaiting")));
+        // #8511: the wait the page armed is the Retry-After the service named, one second.
+        Assert.Equal(new[] { 1000 }, Ints(run.GetProperty("busyOnceRetryDelaysMs")));
         Assert.Equal(new[] { "s1", "s2", "s1" }, Strings(run.GetProperty("busyOnceCallsAfterWait")));
         Assert.Equal(new[] { "s1", "s2", "s1", "s3" }, Strings(run.GetProperty("busyOnceCallsAtEnd")));
         Assert.Equal(0, run.GetProperty("busyOnceLoadingAtEnd").GetInt32());
@@ -91,6 +95,7 @@ public sealed class CustomViewPanelLimitBehaviourTests
     public void TwoBusyRefusals_ShowTheErrorAndARetryButton_AndRetryRunsThatPanelAgainThroughTheLimiter()
     {
         var run = Result.Value;
+        Assert.Equal(new[] { 1000 }, Ints(run.GetProperty("busyTwiceRetryDelaysMs")));
         Assert.Equal(new[] { "s1", "s2", "s1" }, Strings(run.GetProperty("busyTwiceCalls")));
         Assert.Contains("Try again in about 48 seconds.", Assert.Single(Strings(run.GetProperty("busyTwiceErrors"))));
         Assert.Equal(1, run.GetProperty("busyTwiceRetryButtons").GetInt32());
@@ -125,6 +130,7 @@ public sealed class CustomViewPanelLimitBehaviourTests
         var run = Result.Value;
         Assert.Contains(Strings(run.GetProperty("readBusyOnceStrips")), s => s.StartsWith("The service is running as many long reads as it allows. Retrying in 1 second"));
         Assert.Equal(new[] { "r1", "r2" }, Strings(run.GetProperty("readBusyOnceCallsWhileWaiting")));
+        Assert.Equal(new[] { 1000 }, Ints(run.GetProperty("readBusyOnceRetryDelaysMs")));
         Assert.Equal(new[] { "r1", "r2", "r1" }, Strings(run.GetProperty("readBusyOnceCallsAfterWait")));
         Assert.Equal(new[] { "r1", "r2", "r1", "r3" }, Strings(run.GetProperty("readBusyOnceCallsAtEnd")));
         Assert.Equal(0, run.GetProperty("readBusyOnceLoadingAtEnd").GetInt32());
@@ -136,6 +142,7 @@ public sealed class CustomViewPanelLimitBehaviourTests
     {
         var run = Result.Value;
         Assert.Equal(0, run.GetProperty("readUnknownRetryButtons").GetInt32());
+        Assert.Equal(new[] { 1000 }, Ints(run.GetProperty("readBusyTwiceRetryDelaysMs")));
         Assert.Equal(new[] { "r1", "r2", "r1" }, Strings(run.GetProperty("readBusyTwiceCalls")));
         Assert.Contains(Strings(run.GetProperty("readBusyTwiceErrors")), e => e.Contains("Try again in about 48 seconds."));
         Assert.Equal(1, run.GetProperty("readBusyTwiceRetryButtons").GetInt32());
