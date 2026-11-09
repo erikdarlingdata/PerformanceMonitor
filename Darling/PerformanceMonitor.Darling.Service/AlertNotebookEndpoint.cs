@@ -1430,6 +1430,9 @@ internal static partial class AlertNotebookEndpoint
             ["metric_name"] = row.MetricName,
             ["current_value"] = row.CurrentValue,
             ["threshold_value"] = row.ThresholdValue,
+            /* The flag get_alert_history carries: a row whose alert reports a state, not a measurement (a resolution, Database State,
+               Agent Not Running), so its stored 0 is not a reading and the header shows the dash Alert History shows for it. */
+            ["state_only"] = AlertMetricClassifier.IsStateOnly(row.MetricName),
             ["detail_text"] = row.DetailText,
             /* #7918: whether an operator dismissed this firing, so the page can show the card as a dismissed one. */
             ["dismissed"] = row.Dismissed,

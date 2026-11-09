@@ -601,8 +601,10 @@ export const READ_FIELDS = {
         { key: "alert_time", label: "Time", format: "time" },
         { key: "server_name", label: "Server" },
         { key: "metric_name", label: "Metric" },
-        { key: "current_value", label: "Value", format: "num2" },
-        { key: "threshold_value", label: "Threshold", format: "num2" },
+        /* stateZeroDash: a state-only row's stored 0 (the row's state_only: a resolution, Database State, Agent Not Running) is not a
+           reading and shows as the dash Alert History shows, not 0.00; a measured row keeps its number. */
+        { key: "current_value", label: "Value", format: "num2", stateZeroDash: true },
+        { key: "threshold_value", label: "Threshold", format: "num2", stateZeroDash: true },
         { key: "notification_type", label: "Notification" },
         { key: "muted", label: "Muted", format: "bool" },
         { key: "detail_text", label: "Detail", wrap: true, localizeAlertDetail: true },
