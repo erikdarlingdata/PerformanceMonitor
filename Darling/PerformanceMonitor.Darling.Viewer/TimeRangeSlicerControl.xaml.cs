@@ -686,8 +686,8 @@ public partial class TimeRangeSlicerControl : UserControl
     {
         if (_data.Count == 0) return;
         /* Snap to hour boundaries so slider positions align with the hourly buckets shown in the graph, inside the loaded window:
-           the grid's own load reads exactly that window, so a range that reached past its ends read rows the load never did, and
-           the "All" chip filled a grid the next refresh emptied again. */
+           the grid's own load reads exactly that window, so the range sent never reaches past its ends and the "All" chip reads
+           the rows the load reads. */
         var startUtc = FloorToHour(UtcAtNorm(_rangeStart));
         var endUtc = CeilToHour(UtcAtNorm(_rangeEnd));
         var windowStart = DateTime.SpecifyKind(DataStartUtc, DateTimeKind.Utc);
