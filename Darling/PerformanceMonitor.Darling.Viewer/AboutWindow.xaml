@@ -35,7 +35,7 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <TextBlock Grid.Row="0" Text="SQL Server Performance Monitor Darling"
+        <TextBlock Grid.Row="0" Text="Performance Monitor Darling"
                    FontSize="18" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}"
                    TextWrapping="Wrap" Margin="0,0,0,8"/>
 
@@ -44,8 +44,8 @@
 
         <TextBlock Grid.Row="2" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,8">
             The desktop viewer for the Performance Monitor Darling service. Connects to the central
-            Postgres store to show per-server dashboards, recommendations, and alerts across every
-            monitored SQL Server.
+            PostgreSQL store to show per-server dashboards, recommendations, and alerts across every
+            monitored SQL Server and PostgreSQL server.
         </TextBlock>
 
         <StackPanel Grid.Row="3" Margin="0,0,0,8">
