@@ -119,7 +119,9 @@ public sealed class MinWindowChromeTests
             using var duckDb = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
             var (rows, charts, summary) = StaTestThread.Run(() => WithTheme(theme, () =>
             {
-                var w = NewWindow(dir);
+                /* The window reads the app's three store paths when it is built; point them at the test's folder, and put them back before it is deleted. */
+                using var paths = new AppPathsScope(dir);
+                var w = NewWindow();
                 var tab = HostTab(w, duckDb);
                 Lay(w, 900, 600);
                 var main = (TabControl)tab.FindName("MainTabControl");
@@ -536,7 +538,9 @@ public sealed class MinWindowChromeTests
             Directory.CreateDirectory(dir);
             try
             {
-                var w = NewWindow(dir);
+                /* The window reads the app's three store paths when it is built; point them at the test's folder, and put them back before it is deleted. */
+                using var paths = new AppPathsScope(dir);
+                var w = NewWindow();
                 try
                 {
                     return body(w);
@@ -561,7 +565,9 @@ public sealed class MinWindowChromeTests
             using var duckDb = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
             return StaTestThread.Run(() => WithTheme(theme, () =>
             {
-                var w = NewWindow(dir);
+                /* The window reads the app's three store paths when it is built; point them at the test's folder, and put them back before it is deleted. */
+                using var paths = new AppPathsScope(dir);
+                var w = NewWindow();
                 try
                 {
                     return body(w, HostTab(w, duckDb));
@@ -578,14 +584,8 @@ public sealed class MinWindowChromeTests
         }
     }
 
-    private static MainWindow NewWindow(string dir)
+    private static MainWindow NewWindow()
     {
-        /* The window reads these three paths when it is built; point them at a folder of the test's own. */
-        foreach (var (name, value) in new[] { ("DatabasePath", Path.Combine(dir, "monitor.duckdb")), ("ConfigDirectory", dir), ("SharedConfigDirectory", dir) })
-        {
-            typeof(App).GetProperty(name, BindingFlags.Static | BindingFlags.Public)!.SetValue(null, value);
-        }
-
         var w = new MainWindow();
         var root = (UIElement)w.Content;
         w.Content = null;
