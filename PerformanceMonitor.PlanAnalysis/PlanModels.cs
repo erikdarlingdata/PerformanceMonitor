@@ -214,6 +214,9 @@ public class PlanNode
     public long ActualRows { get; set; }
     public long ActualExecutions { get; set; }
     public long ActualRowsRead { get; set; }
+    // #8381: true when a run-time counter carried ActualRowsRead. The engine writes it only for a scan or
+    // seek with a predicate, and older builds not at all, so 0 alone does not say the operator read nothing.
+    public bool HasActualRowsRead { get; set; }
     public long ActualRebinds { get; set; }
     public long ActualRewinds { get; set; }
     public long ActualElapsedMs { get; set; }

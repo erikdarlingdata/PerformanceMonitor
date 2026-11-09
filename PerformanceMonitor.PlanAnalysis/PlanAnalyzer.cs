@@ -1297,7 +1297,9 @@ public static partial class PlanAnalyzer
             /* #7891: a scan under the rows floor is a few hundred pages at most, and a narrower index cannot
                make it cheaper. An actual plan is judged on the rows it read and the scan's own share of the
                statement's time, with any own time at all standing in when the plan carries no statement time.
-               An estimated plan is judged on the table's cardinality and the scan's share of the plan's cost. */
+               An estimated plan is judged on the table's cardinality and the scan's share of the plan's cost;
+               one that carries no TableCardinality (#8381) is judged on the cost share alone, because a figure
+               the plan does not carry is not zero. */
             bool isSignificant;
             if (node.HasActualStats)
             {
@@ -1307,7 +1309,7 @@ public static partial class PlanAnalyzer
             }
             else
             {
-                isSignificant = node.TableCardinality >= ScanRuleMinRows && node.CostPercent >= 20;
+                isSignificant = (!node.HasTableCardinality || node.TableCardinality >= ScanRuleMinRows) && node.CostPercent >= 20;
             }
 
             if (isSignificant)
@@ -2967,22 +2969,40 @@ public static partial class PlanAnalyzer
     /* #7891: rule 11's gate. An estimated plan is always reported. An actual plan must have read at least
        ScanRuleMinRows rows, returned under ScanPredicateMaxSelectivity of what it read when the plan says
        how many it read, and spent at least ScanRuleMinOwnTimeSharePct of the statement's time in the scan
-       when the plan carries statement time. The impact details come out either way, so the caller does not
-       build them twice. */
+       when the plan carries statement time. The rows floor reads ActualRowsRead when the plan carries it;
+       when it does not (#8381), the table's cardinality stands in, scaled by the scan's executions (the
+       largest one thread reports, on a parallel scan) because the cardinality is a per-execution figure and
+       the rows read are a total across executions, and a plan that carries neither gives nothing to put a
+       floor on. The impact details come out either way, so the caller does not build them twice. */
     private static bool ScanPredicateIsWorthReporting(PlanNode node, PlanStatement stmt, out ScanImpact details)
     {
         details = BuildScanImpactDetails(node, stmt);
         if (!node.HasActualStats)
             return true;
 
-        if (Math.Max(node.ActualRowsRead, node.ActualRows) < ScanRuleMinRows)
+        if (node.HasActualRowsRead)
+        {
+            if (Math.Max(node.ActualRowsRead, node.ActualRows) < ScanRuleMinRows)
+                return false;
+        }
+        else if (node.HasTableCardinality && node.TableCardinality * Math.Max(1, StandInExecutions(node)) < ScanRuleMinRows)
+        {
             return false;
+        }
         if (node.ActualRowsRead > 0 && (double)node.ActualRows / node.ActualRowsRead >= ScanPredicateMaxSelectivity)
             return false;
 
         var ownShare = OwnTimeSharePct(node, stmt);
         return ownShare is null || ownShare.Value >= ScanRuleMinOwnTimeSharePct;
     }
+
+    /* #8381: the executions that scale rule 11's cardinality stand-in. The parser sums ActualExecutions across
+       threads, so on a parallel scan the sum counts the threads, not the passes over the table: at DOP 8 a
+       table read once sums to 8. The largest count any one thread reports is the passes. */
+    private static long StandInExecutions(PlanNode node) =>
+        node.PerThreadStats.Count > 1
+            ? node.PerThreadStats.Max(t => t.ActualExecutions)
+            : node.ActualExecutions;
 
     /// <summary>
     /// Checks whether a function call in a predicate is on the column side of the comparison.
