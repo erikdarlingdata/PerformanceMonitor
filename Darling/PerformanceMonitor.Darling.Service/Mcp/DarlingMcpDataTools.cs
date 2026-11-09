@@ -2029,7 +2029,9 @@ ORDER BY server_name";
     /// <summary>
     /// #6074: <c>get_collection_health</c> with <c>server_name</c> "*": one collector's liveness on every enabled server in one call, built by
     /// <see cref="CollectorFleetLiveness"/> from the one statement <see cref="CollectorFleetLiveness.LivenessSql"/> (one row per server, so the answer
-    /// is bounded by the fleet and not by the window). Two reads, each with the MCP deadline.
+    /// is bounded by the fleet and not by the window). Two reads, each with the MCP deadline; for <c>query_store_hints</c> two more
+    /// (#8361: every schedule row, then the readable-secondary facts of the servers with no run in one set-based statement), whatever
+    /// the fleet's size, so the cost of this admission-free route never grows with the number of servers.
     /// </summary>
     private static async Task<string> GetCollectionHealthFleetAsync(
         NpgsqlDataSource postgres, string? collector_name, int hours_back, CancellationToken cancellationToken)
@@ -2086,21 +2088,19 @@ ORDER BY server_name";
             }
 
             /* #8361: the scheduler does not run query_store_hints on a server whose every Query Store database is a readable
-               secondary, so such a server has no run in the window. Asked of the store for each server with no run, under the gate's
-               own judgment, so it is listed under not_applicable with the readable-secondary sentence, the way an engine gap is,
-               instead of beside servers whose service is down. */
-            Dictionary<int, string>? noRunReasons = null;
+               secondary, so such a server has no run in the window. The servers with no run that the engine gap does not already
+               list are asked about together, under the gate's own judgment and in two commands whatever their number (this route
+               answers outside admission), so each that is one is listed under not_applicable with the readable-secondary sentence,
+               the way an engine gap is, instead of beside servers whose service is down. */
+            IReadOnlyDictionary<int, string>? noRunReasons = null;
             if (string.Equals(collector, DarlingGatedCollectorRows.QueryStoreSecondaryCollector, StringComparison.Ordinal))
             {
                 var ran = runs.Select(r => r.ServerId).ToHashSet();
-                foreach (var server in servers.Where(s => !ran.Contains(s.ServerId)))
-                {
-                    var reason = await DarlingGatedCollectorRows.QueryStoreSecondaryMessageAsync(postgres, server.ServerId, server.DisplayName ?? server.ServerName, cancellationToken);
-                    if (reason is not null)
-                    {
-                        (noRunReasons ??= new Dictionary<int, string>())[server.ServerId] = reason;
-                    }
-                }
+                var asked = servers
+                    .Where(s => !ran.Contains(s.ServerId)
+                        && CollectorEngineCapability.NotCollectedMessage(s.ServerName, s.EngineEdition, s.EngineKind, collector, s.AwsRdsKind) is null)
+                    .ToList();
+                noRunReasons = await DarlingGatedCollectorRows.QueryStoreSecondaryFleetMessagesAsync(postgres, asked, cancellationToken);
             }
 
             return CollectorFleetLiveness.Build(collector, hours_back, windowStart, windowEnd, servers, runs, noRunReasons);

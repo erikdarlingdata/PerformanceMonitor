@@ -196,6 +196,38 @@ internal static class DarlingGatedCollectorRows
     }
 
     /// <summary>
+    /// #8361: the same judgment for a fleet, in two commands whatever its size: every schedule row once
+    /// (<see cref="DarlingDataReader.AllScheduleOverridesSql"/>), resolved per server in memory, then one set-based read of the
+    /// readable-secondary facts over the ids (<see cref="DarlingQueryStoreReadableSecondary.FleetFactsSql"/>). The fleet form of
+    /// <c>get_collection_health</c> answers outside admission, so the cost cannot grow with the number of servers. Empty when the
+    /// store cannot answer or there is no server to ask about.
+    /// </summary>
+    internal static async Task<IReadOnlyDictionary<int, string>> QueryStoreSecondaryFleetMessagesAsync(
+        NpgsqlDataSource postgres, IReadOnlyList<CollectorFleetLiveness.ServerFacts> servers, CancellationToken cancellationToken)
+    {
+        if (servers.Count == 0)
+        {
+            return new Dictionary<int, string>();
+        }
+
+        try
+        {
+            var overrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, serverId: null, cancellationToken);
+            var asked = servers
+                .Select(s => new DarlingQueryStoreReadableSecondary.FleetServer(
+                    s.ServerId,
+                    s.DisplayName ?? s.ServerName,
+                    StoreConfigProvider.ResolveSchedule(QueryStoreHealthCollector.Instance.Name, s.ServerId, overrides).Enabled))
+                .ToList();
+            return await DarlingQueryStoreReadableSecondary.MessagesAsync(postgres, asked, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new Dictionary<int, string>();
+        }
+    }
+
+    /// <summary>
     /// The rows for <paramref name="serverName"/>, or none when the server is not PostgreSQL, the engine read
     /// fails, or nothing is gated. Reads the server's engine edition and kind from the registry, then asks
     /// <see cref="CollectorEngineCapability.NotCollectedMessage"/> about every PostgreSQL collector.

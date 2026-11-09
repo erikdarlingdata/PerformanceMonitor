@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -75,12 +77,103 @@ SELECT
                 healthCaptureRefreshes ? (int)reader.GetInt64(2) : 0,
                 healthCaptureRefreshes ? (int)reader.GetInt64(3) : 0,
                 replicaConfigured: !reader.IsDBNull(1),
-                "Darling collects Query Store from a registered server only when that server is not a readable secondary, and query_store_replica is off for it. " +
-                "Register the primary, or set query_store_replica on the primary to read Query Store from a readable secondary (edit_server).");
+                SettingClause);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return null;
         }
     }
+
+    /// <summary>
+    /// #8361: <see cref="FactsSql"/> for a set of servers in one statement, $1 an integer array of server ids: one row per id, with
+    /// the newest <c>ag_replica_role</c>, whether a <c>query_store_replica</c> is named, and the newest capture's counts (0 and 0 for
+    /// a server with no capture). The fleet form of <c>get_collection_health</c> answers outside admission, so its reasons cost one
+    /// command for the whole fleet rather than one per server.
+    /// </summary>
+    public const string FleetFactsSql = @"
+WITH ids AS (SELECT unnest($1::integer[]) AS server_id),
+role AS (
+    SELECT DISTINCT ON (sp.server_id) sp.server_id, sp.ag_replica_role
+    FROM server_properties AS sp
+    JOIN ids ON ids.server_id = sp.server_id
+    ORDER BY sp.server_id, sp.collection_time DESC),
+newest AS (
+    SELECT h.server_id, MAX(h.capture_time) AS capture_time
+    FROM v_query_store_health AS h
+    JOIN ids ON ids.server_id = h.server_id
+    GROUP BY h.server_id),
+counts AS (
+    SELECT h.server_id,
+           COUNT(*) AS health_databases,
+           COUNT(*) FILTER (WHERE (h.readonly_reason & 8) <> 0) AS health_secondary_databases
+    FROM v_query_store_health AS h
+    JOIN newest AS n ON n.server_id = h.server_id AND n.capture_time = h.capture_time
+    WHERE h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF'
+    GROUP BY h.server_id)
+SELECT ids.server_id,
+       role.ag_replica_role,
+       EXISTS (SELECT 1 FROM config.config_monitored_servers AS c WHERE c.server_id = ids.server_id AND NULLIF(btrim(c.query_store_replica), '') IS NOT NULL) AS replica_configured,
+       COALESCE(counts.health_databases, 0),
+       COALESCE(counts.health_secondary_databases, 0)
+FROM ids
+LEFT JOIN role ON role.server_id = ids.server_id
+LEFT JOIN counts ON counts.server_id = ids.server_id";
+
+    /// <summary>One server the fleet form asks about: its id, the name the sentence carries, and whether its <c>query_store_health</c> capture can refresh.</summary>
+    public readonly record struct FleetServer(int ServerId, string ServerName, bool HealthCaptureRefreshes);
+
+    /// <summary>
+    /// #8361: the readable-secondary sentence for each of <paramref name="servers"/> that is one, under the gate's judgment
+    /// (<see cref="MessageAsync(NpgsqlDataSource, int, string, bool, int, CancellationToken)"/>), from one <see cref="FleetFactsSql"/>
+    /// round trip; a server that is not one has no entry. Empty when the read fails or there is no server to ask about.
+    /// </summary>
+    public static async Task<IReadOnlyDictionary<int, string>> MessagesAsync(
+        NpgsqlDataSource postgres, IReadOnlyList<FleetServer> servers, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        var messages = new Dictionary<int, string>();
+        if (servers.Count == 0)
+        {
+            return messages;
+        }
+
+        try
+        {
+            var byId = servers.ToDictionary(s => s.ServerId);
+            await using var command = postgres.CreateCommand(FleetFactsSql);
+            command.CommandTimeout = commandTimeoutSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = servers.Select(s => s.ServerId).Distinct().ToArray() });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (!byId.TryGetValue(reader.GetInt32(0), out var server))
+                {
+                    continue;
+                }
+
+                var message = CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
+                    server.ServerName,
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    server.HealthCaptureRefreshes ? (int)reader.GetInt64(3) : 0,
+                    server.HealthCaptureRefreshes ? (int)reader.GetInt64(4) : 0,
+                    replicaConfigured: reader.GetBoolean(2),
+                    SettingClause);
+                if (message is not null)
+                {
+                    messages[server.ServerId] = message;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            messages.Clear();
+        }
+
+        return messages;
+    }
+
+    /// <summary>Why the product does not read Query Store on a readable secondary, and the setting that changes that.</summary>
+    private const string SettingClause =
+        "Darling collects Query Store from a registered server only when that server is not a readable secondary, and query_store_replica is off for it. " +
+        "Register the primary, or set query_store_replica on the primary to read Query Store from a readable secondary (edit_server).";
 }
