@@ -111,7 +111,7 @@ public sealed class DarlingMcpCustomAlertTools
         "here is accepted there too. A count-aggregate predicate that can fire when the count is 0 is always rejected: it " +
         "cannot tell zero events from a stalled collector. " +
         "<<GUIDE>> " +
-        "Dry-run: validates a custom-alert-rule definition WITHOUT persisting anything. A servers scope is checked against the registry: an entry that is not an enabled server's registry name (a display name, a partial name, a typo) answers valid:false with unmatched_servers naming each entry and the registry name it resolves to, because the sweep matches registry names only and such a rule would never fire. Returns {valid:true} or " +
+        "Dry-run: validates a custom-alert-rule definition WITHOUT persisting anything. A servers scope is checked against the registry: an entry that is not an enabled server's registry name (a display name, a partial name, a typo) answers valid:false with unmatched_servers naming each entry and the registry name it resolves to (registry_name), or the candidate registry names when several servers answer to it (registry_names), because the sweep matches registry names only and such an entry never evaluates. Returns {valid:true} or " +
         "{valid:false, error:\"...\"} naming the first problem. This is the exact authority " +
         "create_custom_alert_rule / update_custom_alert_rule run before saving AND the evaluator applies when " +
         "it loads a rule, so use it to iterate on a generated definition until it is valid. The definition is a " +
@@ -147,10 +147,11 @@ public sealed class DarlingMcpCustomAlertTools
             }
 
             /* A servers-scoped rule is matched against registry names at sweep time, so its list is checked against the registry
-               here, as create and update check it before saving. A registry read that fails makes no claim: the rule validates on
-               its shape alone. */
-            var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
-            return ValidationAnswer(parsed, error, fault is null ? servers : null);
+               here, as create and update check it before saving. The whole registry, enabled or not: a disabled server is still a
+               registered one, and the sweep matches it again when it is re-enabled. A registry read that fails makes no claim: the
+               rule validates on its shape alone. */
+            var registry = await LoadRegistryOrNullAsync(postgres, cancellationToken);
+            return ValidationAnswer(parsed, error, registry);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -173,7 +174,7 @@ public sealed class DarlingMcpCustomAlertTools
             return JsonSerializer.Serialize(new
             {
                 valid = false,
-                error = UnmatchedScopeSentence(unmatched),
+                error = UnmatchedScopeSentence(unmatched, parsed!.ScopeServers.Count),
                 unmatched_servers = UnmatchedNodes(unmatched),
             }, McpHelpers.JsonOptions);
         }
@@ -182,28 +183,57 @@ public sealed class DarlingMcpCustomAlertTools
     }
 
     /// <summary>
-    /// The <c>invalid</c> answer a save refuses a servers-scoped definition with when an entry is not an enabled server's registry
-    /// name (the same <c>error</c> and <c>unmatched_servers</c> the dry run gives), or null when every entry is one, when the rule is
+    /// The <c>invalid</c> answer a save refuses a servers-scoped definition with when an entry is not a registered server's name
+    /// (the same <c>error</c> and <c>unmatched_servers</c> the dry run gives), or null when every entry is one, when the rule is
     /// not servers-scoped, and when the registry read fails: then the save makes no claim and the definition stands on its shape alone,
-    /// as validate_custom_alert_rule answers in that case. One check for create_custom_alert_rule, update_custom_alert_rule and the
-    /// agent arm's create, so a save and its dry run agree.
+    /// as validate_custom_alert_rule answers in that case. Entries in <paramref name="alreadyInScope"/> (the stored rule's own scope,
+    /// on an update) are not judged: a server disabled or removed since the save never blocks an edit to the rule that names it.
+    /// One check for create_custom_alert_rule, update_custom_alert_rule and the agent arm's create, so a save and its dry run agree.
     /// </summary>
-    internal static async Task<string?> ScopeRefusalAsync(CustomAlertRuleDefinition parsed, NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    internal static async Task<string?> ScopeRefusalAsync(
+        CustomAlertRuleDefinition parsed, NpgsqlDataSource postgres, IReadOnlyCollection<string>? alreadyInScope = null,
+        CancellationToken cancellationToken = default)
     {
         if (parsed.ScopeMode != CustomAlertScopeMode.Servers) return null;
-        var (servers, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres, cancellationToken);
-        if (fault is not null) return null;
-        var unmatched = UnmatchedScopeServers(parsed, servers);
+        var registry = await LoadRegistryOrNullAsync(postgres, cancellationToken);
+        if (registry is null) return null;
+        var unmatched = UnmatchedScopeServers(parsed, registry)
+            .Where(u => alreadyInScope is null || !alreadyInScope.Any(e => string.Equals(e, u.Entry, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
         if (unmatched.Count == 0) return null;
         return JsonSerializer.Serialize(new
         {
             status = "invalid",
-            message = UnmatchedScopeSentence(unmatched),
+            message = UnmatchedScopeSentence(unmatched, parsed.ScopeServers.Count),
             unmatched_servers = UnmatchedNodes(unmatched),
         }, McpHelpers.JsonOptions);
     }
 
-    /// <summary>A <c>scope.servers</c> entry no enabled server carries as its registry name. <paramref name="RegistryName"/> is the one
+    /// <summary>Every registered server, enabled or not, by id; the population a <c>scope.servers</c> entry is judged against.</summary>
+    internal const string RegistrySql = "SELECT server_id, server_name, display_name FROM servers ORDER BY server_id";
+
+    /// <summary>The whole registry (<see cref="RegistrySql"/>), or null when the read fails: the scope check then makes no claim.</summary>
+    private static async Task<IReadOnlyList<RegisteredServer>?> LoadRegistryOrNullAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var servers = new List<RegisteredServer>();
+            await using var command = postgres.CreateCommand(RegistrySql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                servers.Add(new RegisteredServer(reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2)));
+            }
+            return servers;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>A <c>scope.servers</c> entry no registered server carries as its registry name. <paramref name="RegistryName"/> is the one
     /// server it resolves to the way <c>server_name</c> does (exact, then partial, display names included); <paramref name="RegistryNames"/>
     /// are the candidates when several servers answer to it; both are null when it matches nothing.</summary>
     internal sealed record UnmatchedScopeServer(string Entry, string? RegistryName, IReadOnlyList<string>? RegistryNames);
@@ -235,16 +265,18 @@ public sealed class DarlingMcpCustomAlertTools
     private static IEnumerable<object> UnmatchedNodes(IReadOnlyList<UnmatchedScopeServer> unmatched) =>
         unmatched.Select(u => new { entry = u.Entry, registry_name = u.RegistryName, registry_names = u.RegistryNames });
 
-    private static string UnmatchedScopeSentence(IReadOnlyList<UnmatchedScopeServer> unmatched)
+    private static string UnmatchedScopeSentence(List<UnmatchedScopeServer> unmatched, int scopeEntries)
     {
         var parts = unmatched.Select(u =>
             u.RegistryNames is { } several ? $"'{u.Entry}' matches several servers ({string.Join(", ", several)}): pass one of those registry names"
             : u.RegistryName is { } one ? $"'{u.Entry}' is not a registry name (it resolves to '{one}': use that)"
-            : $"'{u.Entry}' matches no monitored server");
+            : $"'{u.Entry}' matches no registered server");
+        var consequence = unmatched.Count >= scopeEntries
+            ? "saved as written this rule would never fire"
+            : "saved as written this rule will not evaluate on those servers";
         return "scope.servers names servers the rule would never evaluate: " + string.Join("; ", parts)
-            + ". The sweep matches each entry against the registry name alone (not a display name or a partial name), so saved as "
-            + "written this rule would never fire. unmatched_servers lists each entry with the registry name it points at, or the "
-            + "candidates when several match.";
+            + ". The sweep matches each entry against the registry name alone (not a display name or a partial name), so "
+            + consequence + ". unmatched_servers lists each entry with the registry name it points at, or the candidates when several match.";
     }
 
     [McpServerTool(Name = "create_custom_alert_rule"), Description(
@@ -287,7 +319,11 @@ public sealed class DarlingMcpCustomAlertTools
             {
                 return Outcome("invalid", error ?? "definition is invalid.");
             }
-            /* The registry check the dry run makes, so a scope of display or partial names is refused here too and never saved inert. */            if (await ScopeRefusalAsync(parsed, postgres) is { } scopeRefusal)            {                return scopeRefusal;            }
+            /* The registry check the dry run makes, so a scope of display or partial names is refused here too and never saved inert. */
+            if (await ScopeRefusalAsync(parsed, postgres) is { } scopeRefusal)
+            {
+                return scopeRefusal;
+            }
 
             var store = new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds);
             var result = await store.CreateAsync(name, description, definition, enabled, DarlingWebEndpoints.McpEditorPrincipal, expiresAtUtc: expiry);
@@ -360,18 +396,21 @@ public sealed class DarlingMcpCustomAlertTools
                 return Outcome("invalid", "Provide at least one field to change (name, description, definition, enabled, or expires_at_utc).");
             }
 
-            /* A new definition is validated BEFORE any store hit (TryParse is pure), so a bad one returns
-               'invalid' without opening a connection. A definition that is NOT being changed is passed through
-               unchanged and NOT re-validated: it was validated when stored, and a rename or a pause must not be
+            /* A new definition's shape is checked first (TryParse is pure, no store hit), then the rule is fetched, then a servers
+               scope's entries that are NEW to the stored scope are checked against the registry: an entry the rule already carried
+               is never re-judged, so a server disabled or removed since the save cannot block an edit to the same rule, while an
+               added entry that matches nothing is refused as a create would refuse it. A definition that is NOT being changed is
+               passed through unchanged and NOT re-validated: it was validated when stored, and a rename or a pause must not be
                blocked by a measure that has since drifted out of the catalog. */
+            CustomAlertRuleDefinition? parsed = null;
             if (definition is not null)
             {
-                var (parsed, error) = CustomAlertRuleDefinition.TryParse(definition);
-                if (parsed is null || error is not null)
+                var (parsedNew, error) = CustomAlertRuleDefinition.TryParse(definition);
+                if (parsedNew is null || error is not null)
                 {
                     return Outcome("invalid", error ?? "definition is invalid.");
                 }
-                /* The registry check the dry run makes, so a scope of display or partial names is refused here too and never saved inert. */                if (await ScopeRefusalAsync(parsed, postgres) is { } scopeRefusal)                {                    return scopeRefusal;                }
+                parsed = parsedNew;
             }
 
             var store = new CustomAlertRuleStore(postgres, McpCommandDeadlines.ReadSeconds);
@@ -382,6 +421,15 @@ public sealed class DarlingMcpCustomAlertTools
             }
 
             var row = currentOk.Rule;
+            if (parsed is not null)
+            {
+                var (stored, _) = CustomAlertRuleDefinition.TryParse(row.DefinitionJson, enforcePerfmonRate: false);
+                var alreadyInScope = stored is { ScopeMode: CustomAlertScopeMode.Servers } ? stored.ScopeServers : [];
+                if (await ScopeRefusalAsync(parsed, postgres, alreadyInScope: alreadyInScope) is { } scopeRefusal)
+                {
+                    return scopeRefusal;
+                }
+            }
             var (expiry, expiryError) = ResolveUpdateExpiry(expires_at_utc, row.ExpiresAtUtc);
             if (expiryError is not null)
             {
@@ -595,7 +643,7 @@ public sealed class DarlingMcpCustomAlertTools
                     status = "no_in_scope_servers",
                     rule_id = resolvedId,
                     name = ruleName,
-                    note = unmatched.Count > 0 ? UnmatchedScopeSentence(unmatched) + " " + HysteresisNote : HysteresisNote,
+                    note = unmatched.Count > 0 ? UnmatchedScopeSentence(unmatched, def.ScopeServers.Count) + " " + HysteresisNote : HysteresisNote,
                     unmatched_servers = unmatched.Count > 0 ? UnmatchedNodes(unmatched) : null,
                     results = Array.Empty<object>(),
                 }, McpHelpers.JsonOptions);

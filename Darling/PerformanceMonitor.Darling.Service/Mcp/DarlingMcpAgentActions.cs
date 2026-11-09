@@ -442,7 +442,7 @@ internal static class DarlingMcpAgentActions
                 if (parsed is null || error is not null)
                     throw new AgentToolOutcomeException(DarlingMcpAlertTools.Outcome("invalid", error ?? "definition is invalid."));
                 /* The registry check the dry run and the operator's create make, so a scope of display or partial names is never saved inert. */
-                if (await DarlingMcpCustomAlertTools.ScopeRefusalAsync(parsed, postgres, token) is { } scopeRefusal)
+                if (await DarlingMcpCustomAlertTools.ScopeRefusalAsync(parsed, postgres, cancellationToken: token) is { } scopeRefusal)
                     throw new AgentToolOutcomeException(scopeRefusal);
                 var (expiry, expiryError) = DarlingMcpCustomAlertTools.ResolveCreateExpiry(expiresAtUtc);
                 if (expiryError is not null)
