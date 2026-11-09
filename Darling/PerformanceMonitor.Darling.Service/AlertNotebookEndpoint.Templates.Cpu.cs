@@ -25,7 +25,7 @@ internal static partial class AlertNotebookEndpoint
     /// <summary>High CPU (spec §3): header, status, then the resolved server's own engine's cells (#8323,
     /// <see cref="AuthoredContext.EngineKind"/>). The metric fires on both engines (#2719). SQL Server: the SQL Server CPU
     /// timeline, the top-queries and top-procedures-by-CPU drill-downs, then scheduler pressure. PostgreSQL (Aurora
-    /// included): the PostgreSQL CPU timeline and <c>get_pg_top_queries</c>. With no engine (a fleet-level store with
+    /// included): the PostgreSQL CPU timeline and <c>get_pg_top_queries</c>, titled by its measure (total execution time). With no engine (a fleet-level store with
     /// no server, or a registry row no connect has stamped) both timelines and every drill-down are emitted, the shape
     /// <see cref="DarlingTriageEndpoint.SectionsByMetric"/>'s "High CPU" row uses, and the wrong engine's cells answer
     /// empty or not collected. A panel for a measure the engine cannot have is never drawn for a known engine: it would
@@ -61,7 +61,8 @@ internal static partial class AlertNotebookEndpoint
         }
         else
         {
-            cells.Add(AuthoredReadCell("get_pg_top_queries", "Top queries by CPU", serverName, asOf,
+            /* get_pg_top_queries ranks query shapes by total execution time; pg_stat_statements has no CPU column. */
+            cells.Add(AuthoredReadCell("get_pg_top_queries", "Top queries by execution time", serverName, asOf,
                 ("hours", "24"), ("limit", "10")));
         }
 
