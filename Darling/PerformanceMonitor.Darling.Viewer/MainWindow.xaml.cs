@@ -1346,8 +1346,8 @@ public partial class MainWindow : Window
             switch (selected)
             {
                 case TabItem { Content: ViewerServerTab serverTab }:
+                    /* The tab writes its own line, "<display name> — refreshed …" or "refresh failed: …", through the writer wired in OpenServerTab. */
                     await serverTab.RefreshActiveInnerTabAsync();
-                    StampRefreshed(selected, serverTab.ServerDisplayName);
                     break;
                 case TabItem tab when ReferenceEquals(tab, OverviewTab):
                     await LoadOverviewAsync();

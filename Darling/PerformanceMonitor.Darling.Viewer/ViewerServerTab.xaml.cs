@@ -90,9 +90,6 @@ public partial class ViewerServerTab : UserControl
 
     private readonly ViewerDataService _dataService;
     private DarlingServer _server;
-
-    /// <summary>The display name of the server this tab shows, for the host's status bar stamp.</summary>
-    public string ServerDisplayName => _server.DisplayName;
     private readonly ViewerServerStore? _serverStore;
 
     private bool _refreshInFlight;
