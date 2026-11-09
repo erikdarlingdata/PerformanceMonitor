@@ -646,8 +646,10 @@ public static partial class DarlingWebEndpoints
 
     /// <summary>#8323: the plain sentence a composed cell answers when the store stopped it at its statement timeout: what
     /// the cell was reading (<paramref name="body"/>'s <c>windowStart</c>/<c>windowEnd</c>, else its <c>hours</c>, else the
-    /// default window) and for how many servers (<c>server</c>: one name, a list, or none for every server), and what to
-    /// do next. The engine's own text rides beside it, in <c>detail</c>, not in this sentence.</summary>
+    /// default window) and for how many servers, counted by the run's own scope rule
+    /// (<see cref="ComposePanelRunner.ServerScopeOf"/>: the top-level <c>server</c> name or list, else the bound server
+    /// variable; the literal "All" and blank entries are no server, so a fleet run reads every server), and what to do next.
+    /// The engine's own text rides beside it, in <c>detail</c>, not in this sentence.</summary>
     internal static string ComposeStatementTimeoutSentence(JsonObject? body)
     {
         string window;
@@ -663,12 +665,7 @@ public static partial class DarlingWebEndpoints
             window = hours == 1 ? "the past hour" : "the past " + hours.ToString(CultureInfo.InvariantCulture) + " hours";
         }
 
-        var servers = body?["server"] switch
-        {
-            JsonArray names => names.Count,
-            JsonValue one when one.TryGetValue<string>(out var name) && !string.IsNullOrWhiteSpace(name) => 1,
-            _ => 0,
-        };
+        var servers = body is null ? 0 : ComposePanelRunner.ServerScopeOf(body)?.Count ?? 0;
         var scope = servers == 0 ? "every server" : servers == 1 ? "1 server" : servers.ToString(CultureInfo.InvariantCulture) + " servers";
 
         return "The store stopped this cell at its statement timeout. It was reading " + window + " for " + scope
