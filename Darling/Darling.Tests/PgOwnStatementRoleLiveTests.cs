@@ -262,7 +262,7 @@ public sealed class PgOwnStatementRoleLiveTests
     /// statements under two logins, the fetch, the store's register and upsert, and the read), and the margin covers
     /// whatever a background worker on the cluster runs meanwhile.
     /// </summary>
-    private const int ChainEntries = 64;
+    internal const int ChainEntries = 64;
 
     /// <summary>
     /// Makes sure <c>pg_stat_statements</c> has at least <see cref="ChainEntries"/> free slots. When it has fewer, runs
@@ -298,7 +298,7 @@ public sealed class PgOwnStatementRoleLiveTests
     /// so the family shares no entry with <see cref="FillerStatement"/>'s sums, with a bare <c>SELECT 1</c>, or with the
     /// chain's own single-column statements.
     /// </summary>
-    private static string HeadroomStatement(int n)
+    internal static string HeadroomStatement(int n)
     {
         var variant = n & 7;
         var rest = n >> 3;
@@ -359,7 +359,7 @@ public sealed class PgOwnStatementRoleLiveTests
     /// chain's own <c>SELECT $1 + $2</c>; <paramref name="side"/> bounds the columns and the terms, and the family holds
     /// <c>8 * side * (side + 1)</c> shapes.
     /// </summary>
-    private static string FillerStatement(int n, int side)
+    internal static string FillerStatement(int n, int side)
     {
         var variant = n & 7;
         var rest = n >> 3;
