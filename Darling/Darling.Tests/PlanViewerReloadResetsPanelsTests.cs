@@ -34,7 +34,7 @@ public sealed class PlanViewerReloadResetsPanelsTests
     {
         StaTestThread.Run(async () =>
         {
-            var control = new PlanViewerControl();
+            var control = NewControl();
             try
             {
                 var host = Host(control);
@@ -72,7 +72,7 @@ public sealed class PlanViewerReloadResetsPanelsTests
     {
         StaTestThread.Run(async () =>
         {
-            var control = new PlanViewerControl();
+            var control = NewControl();
             try
             {
                 var host = Host(control);
@@ -103,7 +103,7 @@ public sealed class PlanViewerReloadResetsPanelsTests
     {
         StaTestThread.Run(async () =>
         {
-            var control = new PlanViewerControl();
+            var control = NewControl();
             try
             {
                 var host = Host(control);
@@ -179,4 +179,16 @@ public sealed class PlanViewerReloadResetsPanelsTests
     private static string Scan(int nodeId) =>
         $"<RelOp NodeId=\"{nodeId}\" PhysicalOp=\"Table Scan\" LogicalOp=\"Table Scan\" EstimateRows=\"1\" EstimateIO=\"0.003\" EstimateCPU=\"0.0001\" AvgRowSize=\"9\" EstimatedTotalSubtreeCost=\"0.0032\" TableCardinality=\"100\" Parallel=\"0\" EstimateRebinds=\"0\" EstimateRewinds=\"0\" EstimatedExecutionMode=\"Row\">"
         + $"<OutputList/><TableScan Ordered=\"0\" ForcedIndex=\"0\" ForceScan=\"0\" NoExpandHint=\"0\" Storage=\"RowStore\"><DefinedValues/><Object Database=\"[db]\" Schema=\"[dbo]\" Table=\"[t{nodeId}]\" IndexKind=\"Heap\" Storage=\"RowStore\"/></TableScan></RelOp>";
+
+    /// <summary>A plan viewer carrying the Viewer's Dark theme in its own resources, so its brushes resolve without
+    /// touching the application-scope theme.</summary>
+    private static PlanViewerControl NewControl()
+    {
+        var control = new PlanViewerControl();
+        control.Resources.MergedDictionaries.Add(new ResourceDictionary
+        {
+            Source = new Uri("pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml"),
+        });
+        return control;
+    }
 }
