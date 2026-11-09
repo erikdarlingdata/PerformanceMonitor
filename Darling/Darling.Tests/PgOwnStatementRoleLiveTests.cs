@@ -109,7 +109,10 @@ public sealed class PgOwnStatementRoleLiveTests
         await PgStatementTable.ForcePassAsync(target, ct);
 
         /* On a narrow table a pass frees about one forcing batch, which the rest of that batch fills again: with fewer than
-           two slots free the fill runs no batch, and there is no window to land a pass in. */
+           two slots free the fill runs no batch, and there is no window to land a pass in. The count read runs once first:
+           its first run takes a slot the view leaves out until that run completes, so only a second run counts every slot
+           the fill will see. */
+        await EntryCountAsync(target, ct);
         var freeAfterPass = max - await EntryCountAsync(target, ct);
         Assert.SkipWhen(freeAfterPass < 2,
             $"pg_stat_statements.max is {max}: the forced pass left {freeAfterPass} free slot(s), so the fill runs no batch.");
