@@ -6,6 +6,7 @@
    dropped. Everything else is views.js as shipped: the catalog check, the cell routing, the in-flight limiter. */
 import fs from "node:fs";
 import vm from "node:vm";
+import { isStateZero } from "../PerformanceMonitor.Darling.Service/wwwroot/js/util.js";
 
 const [viewsPath, scenario] = process.argv.slice(-2);
 
@@ -39,7 +40,9 @@ const context = vm.createContext({
   relTime: String,
   localTime: String,
   fmtNum: String,
-  renderPanel: (desc, onSettled) => { calls.reads.push({ read: desc.read, title: desc.title, rowsKey: desc.rowsKey || null, columns: Array.isArray(desc.columns) ? desc.columns.length : 0, viz: desc.viz, series: Array.isArray(desc.series) ? desc.series.length : 0, stats: Array.isArray(desc.stats) ? desc.stats.length : 0, xKey: desc.xKey || null }); settleLater(onSettled); return card(desc.title, "read"); },
+  // The real shared predicate, so the header's dash rule is the product's and not a stand-in.
+  isStateZero,
+  renderPanel: (desc, onSettled) => { calls.reads.push({ read: desc.read, title: desc.title, rowsKey: desc.rowsKey || null, columns: Array.isArray(desc.columns) ? desc.columns.length : 0, stateZeroDash: Array.isArray(desc.columns) ? desc.columns.filter((c) => c.stateZeroDash === true).map((c) => c.key) : [], viz: desc.viz, series: Array.isArray(desc.series) ? desc.series.length : 0, stats: Array.isArray(desc.stats) ? desc.stats.length : 0, xKey: desc.xKey || null }); settleLater(onSettled); return card(desc.title, "read"); },
   setPanelSignal: () => {},
   VIZ: { table: () => null, line: () => null, stat: () => null, bandlist: () => null },
   renderComposedPanelCard: (spec, scope, onSettled) => {
@@ -91,6 +94,11 @@ const scenarios = {
   // A measured row, and a measured row whose reading really is 0.
   measured: { cells: [header], opts: { alert: { ...alert, current_value: 90, threshold_value: 80, state_only: false }, catalog, scopeServer: "SRV1" } },
   measuredZero: { cells: [header], opts: { alert: { ...alert, current_value: 0, threshold_value: 0, state_only: false }, catalog, scopeServer: "SRV1" } },
+  // The notebook's own Alert History table cell: its value columns carry the state-zero dash rule the Alert History page applies.
+  historyTable: {
+    cells: [header, { type: "read", read: "get_alert_history", viz: "table", title: "Alert history", params: { server: "SRV1", hours: "24" } }],
+    opts: { alert, catalog: { reads: [{ name: "get_alert_history" }], compose: { measures: [] } }, scopeServer: "SRV1" },
+  },
   // A cell kind the page has no renderer for must say so.
   unknownKind: { cells: [header, { type: "sparkline", title: "Mystery cell" }], opts: { alert, catalog } },
   // Three panels that cannot start a load, then a read: if a bad panel held its limiter slot the read never draws.

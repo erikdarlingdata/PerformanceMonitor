@@ -21,7 +21,7 @@
  */
 
 import { el, mount, apiGet, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, captionStrip, localTime, fmtNum,
-         alertDeliveryState, localizeAlertDetail } from "../util.js";
+         alertDeliveryState, localizeAlertDetail, isStateZero } from "../util.js";
 import { VIZ } from "../panels.js";
 import { suggestViz, deriveVizConfig } from "../derive.js";
 import { renderNotebookDoc } from "./views.js";
@@ -44,10 +44,10 @@ function alertStatusText(a) {
   return "Not sent";
 }
 
-/* One side of the alert's value fields: a state-only row's stored 0 is not a reading and shows as the dash Alert History shows
-   (its stateOrNumber, on the row node's state_only); a nonzero value on such a row is a real measurement and stays a number. */
+/* One side of the alert's value fields: a state-only row's stored 0 (util.js's isStateZero, the rule Alert History applies) is not a
+   reading and shows as the dash Alert History shows; anything else is the number, in this page's format. */
 function stateOrNum(a, key) {
-  return a.state_only === true && Number(a[key]) === 0 ? "—" : fmtNum(a[key], 1);
+  return isStateZero(a, key) ? "—" : fmtNum(a[key], 1);
 }
 
 /* One matched alert-history row as a labeled field list (the lead card's body). */

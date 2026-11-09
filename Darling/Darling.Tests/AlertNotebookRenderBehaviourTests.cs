@@ -199,4 +199,19 @@ public sealed class AlertNotebookRenderBehaviourTests
         TryRun("measuredZero", out var zero);
         Assert.Equal("current 0 vs threshold 0", Fields(zero)["Value vs threshold"]);
     }
+
+    /// <summary>The notebook's own Alert History table cell shows a resolution row's stored zeros as the dash too: the read's table
+    /// (resolved from the shipped read catalog) carries the state-zero dash rule on its Value and Threshold columns and on no other.</summary>
+    [Fact]
+    public void TheAlertHistoryTableCell_CarriesTheStateZeroDashRule_OnItsValueColumns()
+    {
+        if (!TryRun("historyTable", out var r)) return;
+
+        Assert.Empty(Strings(r, "errors"));
+        var read = r.GetProperty("reads").EnumerateArray().Single(x => x.GetProperty("read").GetString() == "get_alert_history");
+        Assert.Equal(8, read.GetProperty("columns").GetInt32());
+        Assert.Equal(
+            new[] { "current_value", "threshold_value" },
+            read.GetProperty("stateZeroDash").EnumerateArray().Select(e => e.GetString()).ToArray());
+    }
 }

@@ -25,7 +25,7 @@
  * descriptions) reaches the DOM through el()/textContent (R4 — never innerHTML).
  */
 
-import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, localizeIsoText, localizeAlertDetail, fmtNum, storeHash } from "../util.js";
+import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, localizeIsoText, localizeAlertDetail, fmtNum, isStateZero, storeHash } from "../util.js";
 import { rollingHoursPicker } from "../page-range.js";
 import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
 import { holdsPage, keepScroll, refreshGridInPlace, showAround, showPage, showRefreshError } from "../refresh-in-place.js";
@@ -1072,10 +1072,10 @@ function notShownCard(title, message) {
   ]);
 }
 
-/* One side of the alert's value line: a state-only row's stored 0 is not a reading and shows as the dash Alert History shows
-   (its stateOrNumber, on get_alert_history's state_only); a nonzero value on such a row is a real measurement and stays a number. */
+/* One side of the alert's value line: a state-only row's stored 0 (util.js's isStateZero, the rule Alert History applies) is not a
+   reading and shows as the dash Alert History shows; anything else is the number, in this page's format. */
 function stateOrNum(a, key) {
-  return a.state_only === true && Number(a[key]) === 0 ? "—" : fmtNum(a[key], 1);
+  return isStateZero(a, key) ? "—" : fmtNum(a[key], 1);
 }
 
 /* The header cell: the endpoint's own alert facts, rendered directly (no read — they arrived with the envelope).
@@ -1092,8 +1092,9 @@ function renderAlertHeaderCell(cell, opts) {
     if (a.database) rows.push(["Database", a.database]);
     if (typeof a.total_occurrences === "number") rows.push(["Total occurrences", String(a.total_occurrences)]);
     /* current_value/threshold_value (#4368): same fmtNum(_, 1) triage.js's alertFields uses for the matched
-       alert card, so the two pages format the same fields the same way. Omitted only when BOTH are absent —
-       fmtNum already renders a lone missing side as "\u2014" rather than dropping the whole line. */
+       alert card, so the two pages format the same fields the same way. Omitted when both sides are absent, or when both
+       are a state-only row's stored zeros (below); fmtNum renders a lone missing side as "\u2014" rather than dropping
+       the whole line. */
     if (typeof a.current_value === "number" || typeof a.threshold_value === "number") {
       /* A state-only row's stored zeros are not readings (stateOrNum): the line is left out when both sides are dashes
          rather than print 0 against 0, the way Alert History shows a dash in each column. */
