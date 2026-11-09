@@ -7,12 +7,14 @@
  */
 
 using System.Collections.Generic;
+using System.Globalization;
 
 namespace PerformanceMonitor.PlanAnalysis;
 
 /// <summary>
 /// Finds the <c>@name</c> references in a statement's code, in order, repeats included. A reference is an
-/// <c>@</c> followed by one or more letters, digits or underscores. String literals (<c>'...'</c>, including an
+/// <c>@</c> followed by one or more word characters: letters, decimal digits, non-spacing marks and connector
+/// punctuation, the set .NET's <c>\w</c> matches, so a name with a combining mark or a <c>‿</c> is one token. String literals (<c>'...'</c>, including an
 /// <c>N</c>-prefixed one, with <c>''</c> for a quote inside), <c>--</c> comments to the end of the line, nested
 /// <c>/* */</c> comments, <c>"quoted"</c> identifiers (<c>""</c> inside) and <c>[bracketed]</c> names (<c>]]</c>
 /// inside) are stepped over whole, since an <c>@</c> inside them is text, not a variable. A reference starts only
@@ -114,5 +116,11 @@ public static class VariableReferenceScanner
         return text.Length;
     }
 
-    private static bool IsWordCharacter(char c) => char.IsLetterOrDigit(c) || c == '_';
+    private static bool IsWordCharacter(char c) => char.GetUnicodeCategory(c) switch
+    {
+        UnicodeCategory.UppercaseLetter or UnicodeCategory.LowercaseLetter or UnicodeCategory.TitlecaseLetter
+            or UnicodeCategory.ModifierLetter or UnicodeCategory.OtherLetter
+            or UnicodeCategory.DecimalDigitNumber or UnicodeCategory.NonSpacingMark or UnicodeCategory.ConnectorPunctuation => true,
+        _ => false,
+    };
 }

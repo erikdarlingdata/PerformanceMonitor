@@ -45,10 +45,25 @@ public sealed class PlanViewer8457VariableScanTests
     [InlineData("SELECT 'it''s', @id FROM dbo.t", "@id")]
     [InlineData("SELECT N'@n', @id FROM dbo.t", "@id")]
     [InlineData("SELECT [@b], \"@q\", @id FROM dbo.t", "@id")]
-    [InlineData("SELECT ']', [a]]b], @id", "@id")]
+    [InlineData("SELECT ']', [a]]@b], @id", "@id")]
     public void TheCodeVariable_IsStillFound_BesideTextThatOnlyLooksLikeOne(string text, string expected)
     {
         Assert.Equal([expected], ParameterCard.FindUnresolvedVariables(text, NoParameters, null));
+    }
+
+    [Fact]
+    public void ANameWithACombiningMarkOrAConnector_IsOneToken()
+    {
+        // "@café" in decomposed form, e then U+0301; "‿" is connector punctuation. Both are word characters to \w.
+        const string Cafe = "@cafe\u0301";
+        const string Tie = "@x\u203Fy";
+        var parameters = new List<PlanParameter>
+        {
+            new() { Name = Cafe, DataType = "int", CompiledValue = "1", RuntimeValue = "1" },
+        };
+
+        Assert.Equal([Cafe, Tie], VariableReferenceScanner.Scan($"SELECT {Cafe}, {Tie}"));
+        Assert.Empty(ParameterCard.FindUnresolvedVariables($"SELECT * FROM dbo.t WHERE n = {Cafe}", parameters, null));
     }
 
     [Fact]
