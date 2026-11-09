@@ -27,7 +27,7 @@ namespace Darling.Tests;
 /// The Viewer's dialogs, rendered with its Dark theme: the column filter popup names a column by its header; the Edit Server
 /// dialog heads itself Edit; Credential Profiles with no profiles says so inside its grid; Database State Overrides calls its state
 /// column the last known state and its reset button names that column; Manage Mute Rules keeps its empty-grid message on one line
-/// at the window's own size; the Analysis and Alert Muting card headings are sized and placed like the Delivery card's, the
+/// at the window's own size; the Analysis, Alert Muting and Triage Defaults card headings are sized and placed like the Delivery card's, the
 /// Analysis description sits under its heading as the Teams description does, and the Analysis note points at the Delivery tab;
 /// Manage Servers shows every column at its default size; and, from the theme, a disabled PasswordBox keeps a disabled TextBox's
 /// fill while a chosen radio button marks itself with the accent.
@@ -144,6 +144,21 @@ public sealed class ViewerDialogsWalkTests
         });
 
         Assert.True(muting == delivery, $"Alert Muting is {Describe(muting)}; the Delivery card's heading is {Describe(delivery)}");
+    }
+
+    [Fact]
+    public void TheTriageDefaultsHeading_IsSizedAndPlacedLikeTheDeliveryCardHeading()
+    {
+        var (triage, delivery) = WithSettings(window =>
+        {
+            var deliveryHeading = TextBlocks(SelectTab(window, "DeliveryTab")).First(t => t.Text == "Delivery");
+            var deliveryAt = HeadingPlacement(deliveryHeading);
+
+            var triageHeading = TextBlocks(SelectTab(window, "MutingTriageTab")).Single(t => t.Text == "Triage Defaults");
+            return (HeadingPlacement(triageHeading), deliveryAt);
+        });
+
+        Assert.True(triage == delivery, $"Triage Defaults is {Describe(triage)}; the Delivery card's heading is {Describe(delivery)}");
     }
 
     [Fact]
