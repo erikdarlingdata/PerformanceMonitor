@@ -15,6 +15,7 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Targets;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -28,7 +29,12 @@ namespace Darling.Tests;
 /// records its call. The test first proves the copies do run on a connection without the pin, then runs the collectors
 /// through the service's own connection string and asserts they return rows and the copies never ran.</para>
 /// </summary>
-[Collection("live-postgres")]
+/* pg-cluster-roles, not live-postgres: this class runs statements once and reads them back from pg_stat_statements, whose
+   hash table is cluster-wide. In the parallel collections every other session adds shapes, and an eviction pass can take
+   this class's entries between its statements and its read however much room PgStatementTable secured first. The
+   collection runs alone, after the parallel collections, so no other session adds shapes meanwhile and the dealloc
+   bracket is a tripwire that names a pass instead of a step that retries one. */
+[Collection("pg-cluster-roles")]
 public sealed class PgCollectorSearchPathLiveTests
 {
     private const string Database = "pm6143_owned";
@@ -157,6 +163,14 @@ public sealed class PgCollectorSearchPathLiveTests
 
             var runtime = await RuntimeAsync(admin, Database, Monitor, ct);
             Assert.Equal("pg_catalog,pg_temp", await ScalarTextAsync(runtime.ConnectionString, "SHOW search_path", ct));
+
+            /* The scheduled path below writes its rows into the shared store. The pg-cluster-roles collection has no fixture
+               that migrates it, so this scenario migrates it itself, as the other members that write to it do. */
+            await using (var storeAdmin = new NpgsqlConnection(adminConnectionString!))
+            {
+                await storeAdmin.OpenAsync(ct);
+                await PgMigrations.MigrateAsync(storeAdmin, ct);
+            }
 
             await using var store = NpgsqlDataSource.Create(adminConnectionString!);
             var runner = new DarlingCollectorRunner(

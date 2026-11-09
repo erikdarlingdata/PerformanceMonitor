@@ -25,6 +25,9 @@ namespace Darling.Tests;
 /// statements made. The body calls <see cref="BeforeReadAsync"/> between its statements and its first read; on a run
 /// that forces a pass, that is where the pass lands. <see cref="PgStatementTable.RunAsync"/> secures room in the table
 /// before each run and runs the body again when a pass landed inside it, so the run it returns is one the pass missed.
+/// The classes that use it run in the <c>pg-cluster-roles</c> collection, alone, so in a test run no other session
+/// adds shapes while a body runs and a pass inside it is a finding, not a race the retry absorbs: the retry is what
+/// makes a forcing run pass, and what a run beside another session falls back on.
 /// </summary>
 internal sealed class PgStatementTableAttempt
 {

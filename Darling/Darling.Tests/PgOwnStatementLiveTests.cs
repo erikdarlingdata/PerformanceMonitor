@@ -31,7 +31,12 @@ namespace Darling.Tests;
 /// a service statement that dominates a quiet server beside an ordinary application statement and read it the way the
 /// pages, the charts and the Analysis pass do.</para>
 /// </summary>
-[Collection("live-postgres")]
+/* pg-cluster-roles, not live-postgres: this class runs statements once and reads them back from pg_stat_statements, whose
+   hash table is cluster-wide. In the parallel collections every other session adds shapes, and an eviction pass can take
+   this class's entries between its statements and its read however much room PgStatementTable secured first. The
+   collection runs alone, after the parallel collections, so no other session adds shapes meanwhile and the dealloc
+   bracket is a tripwire that names a pass instead of a step that retries one. */
+[Collection("pg-cluster-roles")]
 public sealed class PgOwnStatementLiveTests
 {
     internal const int ServerId = -756701;
