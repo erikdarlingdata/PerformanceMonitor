@@ -178,6 +178,7 @@ LIMIT 5";
 
         var items = new List<object>();
         cmd.CommandText = plan.Apply(cmd.CommandText);
+        StatementObserver?.Invoke("top_cpu_queries", cmd.CommandText);
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
@@ -836,6 +837,7 @@ LIMIT 5";
         cmd.Parameters.Add(new DuckDBParameter { Value = finding.DatabaseName ?? "" });
 
         cmd.CommandText = plan.Apply(cmd.CommandText);
+        StatementObserver?.Invoke("bad_actor_query", cmd.CommandText);
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         if (await reader.ReadAsync(context.CancellationToken))
         {

@@ -8,40 +8,95 @@
 
 using System;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Analysis;
+using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Tests;
 using Xunit;
 
 namespace Lite.Tests;
 
 /// <summary>
-/// Lite's half of the cross-SKU text guard for #3648. The exact counterpart of
-/// <c>Darling.Tests.DrillDownDopProvenanceParityTests</c>, built to the shape
-/// <c>QueryHighDopStaleMaxDopParityTests</c> established: Darling's twin does the cross-STORE comparison
-/// (its <c>build.yml</c> filter covers every Lite <c>.cs</c> file, so it runs on an edit to either analysis
-/// tree); this file owns Lite's own census — that the <c>top_cpu_queries</c> and <c>bad_actor_query</c> reads
-/// carry the per-plan provenance shape rather than the old hash-folded <c>MAX(max_dop)</c>, and that an
-/// unknown DOP is projected as null rather than 0 — and meta-pins Darling's guard, so weakening the byte-
-/// identity comparison over there fails here, under the <c>lite</c> filter that reaches Darling's test tree.
-/// #8470: both reads are one text, <c>PerformanceMonitor.Common.DrillDownSql</c>; <see cref="LiteInlineSql"/>
-/// resolves the constant each Lite method assigns, so a method that re-inlines a copy fails here.
+/// Lite's half of the cross-SKU text guard for #3648. The <c>top_cpu_queries</c> and <c>bad_actor_query</c> reads are
+/// one text, <c>PerformanceMonitor.Common.DrillDownSql</c> (#8470), that both apps run: Darling's
+/// <c>DrillDownSqlTests</c> holds its constants to it, and this class watches what Lite's two drill-down methods hand
+/// DuckDB when they run and holds that to it, so a method that runs a copy of its own, however close, fails here. It also
+/// owns Lite's own census: the text carries the per-plan provenance shape rather than the old hash-folded
+/// <c>MAX(max_dop)</c>, and an unknown DOP is projected as null rather than 0.
 ///
 /// <para><b>Why not read Darling's SQL from here.</b> The <c>lite</c> filter does not reach
 /// <c>Darling/PerformanceMonitor.Darling.Analysis</c>, and <c>CrossAppGuardCiGateTests</c> fails any Lite
 /// guard whose source read PR CI cannot run (#2839): a guard that compares the two apps cannot live behind a
-/// filter that fires for only one of them. Darling's constants are public, so its suite compares them against
-/// the Common constant Lite's methods name without parsing its own file.</para>
+/// filter that fires for only one of them. Both apps hold their own text to the Common constant instead.</para>
 /// </summary>
-public sealed class DrillDownDopProvenanceParityTests
+public sealed class DrillDownDopProvenanceParityTests : IClassFixture<SharedDuckDbFixture>
 {
+    private const int ServerId = 84700;
+    private const string ServerName = "DrillDownSqlSrv";
     private const string LiteFile = "Lite/Analysis/DrillDownCollector.Queries.cs";
-    private const string DarlingGuard = "Darling/Darling.Tests/DrillDownDopProvenanceParityTests.cs";
+
+    private static readonly DateTime WindowEnd = new(2026, 8, 18, 14, 30, 0, DateTimeKind.Unspecified);
+    private static readonly DateTime WindowStart = WindowEnd.AddHours(-4);
+
+    private readonly DuckDbInitializer _duckDb;
+
+    public DrillDownDopProvenanceParityTests(SharedDuckDbFixture fixture)
+    {
+        fixture.ResetData();
+        _duckDb = fixture.DuckDb;
+    }
+
+    private static string CommonText(string name) => name switch
+    {
+        nameof(DrillDownSql.TopCpuQueries) => DrillDownSql.TopCpuQueries,
+        nameof(DrillDownSql.BadActorDetail) => DrillDownSql.BadActorDetail,
+        _ => throw new ArgumentOutOfRangeException(nameof(name), name, "not a DrillDownSql constant"),
+    };
 
     [Theory]
-    [InlineData("CollectTopCpuQueries")]
-    [InlineData("CollectBadActorDetail")]
-    public void TheDrillDownSql_CarriesThePerPlanProvenanceShape_NotTheHashFoldedMaximum(string liteMethod)
+    [InlineData("CPU_SQL_PERCENT", "top_cpu_queries", nameof(DrillDownSql.TopCpuQueries))]
+    [InlineData("BAD_ACTOR_0x8470HASH", "bad_actor_query", nameof(DrillDownSql.BadActorDetail))]
+    public async Task TheDrillDown_RunsTheCommonText_AsTheArchivePlanRewritesIt(string factKey, string drillDown, string constant)
     {
-        var sql = LiteInlineSql(liteMethod);
+        /* What the method hands DuckDB, taken at the moment it runs. The archive plan may swap v_query_stats for the
+           hot table first, so the expectation is the Common constant through the same plan over the same window; with
+           nothing archived that is the constant itself. Anything else the method runs, an inline copy differing by one
+           character included, fails here. */
+        string? executed = null;
+        var collector = new DrillDownCollector(_duckDb)
+        {
+            StatementObserver = (key, sql) =>
+            {
+                if (key == drillDown) executed = sql;
+            },
+        };
+
+        var finding = new AnalysisFinding
+        {
+            RootFactKey = factKey,
+            StoryPath = factKey,
+            /* #3859: the collector matches on PathKeys, not on a split of the rendered path. */
+            PathKeys = [factKey],
+            /* Past the 0.5 display gate — below it the expensive drill-downs are skipped wholesale. */
+            Severity = 1.0,
+        };
+
+        await collector.EnrichFindingsAsync([finding], Context());
+
+        Assert.True(executed is not null, $"{drillDown} did not run");
+        var plan = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", WindowStart, CancellationToken.None);
+        Assert.Equal(plan.Apply(CommonText(constant)), executed);
+    }
+
+    [Theory]
+    [InlineData(nameof(DrillDownSql.TopCpuQueries))]
+    [InlineData(nameof(DrillDownSql.BadActorDetail))]
+    public void TheDrillDownSql_CarriesThePerPlanProvenanceShape_NotTheHashFoldedMaximum(string constant)
+    {
+        var sql = CommonText(constant);
 
         /* The headline is the NEWEST plan's reading, picked by a newest-first ranking with the tie-breakers
            spelled out (compile time, then CPU spent) and their null placement made explicit — DuckDB and
@@ -75,41 +130,11 @@ public sealed class DrillDownDopProvenanceParityTests
         Assert.Contains("dop_note = QueryDopProvenance.Note(maxDop, maxDopAnyPlan, maxDopAnyPlanLastSeen, planCount)", source, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void DarlingsTwinGuard_StillComparesBothReadsByteForByte_SoNeitherSideCanFallBehind()
+    private static AnalysisContext Context() => new()
     {
-        /* Meta-pin: Darling's guard must keep BOTH reads in its byte-identity theory and keep reading Lite's
-           inline text. Dropping a row, or narrowing the comparison to a Contains, is how one SKU's read would
-           start drifting under a green board. */
-        var guard = ParitySource.ReadFile(DarlingGuard);
-        Assert.Contains("public void TheDrillDownSql_IsByteIdenticalAcrossSkus(", guard, StringComparison.Ordinal);
-        Assert.Contains("{ \"CollectTopCpuQueries\", PgDrillDownCollector.TopCpuQueriesSql }", guard, StringComparison.Ordinal);
-        Assert.Contains("{ \"CollectBadActorDetail\", PgDrillDownCollector.BadActorDetailSql }", guard, StringComparison.Ordinal);
-        Assert.Contains("Assert.Equal(Lf(darlingSql), Lf(LiteInlineSql(liteMethod)));", guard, StringComparison.Ordinal);
-        Assert.Contains("RepoFile.ReadRepoFile(\"Lite\", \"Analysis\", \"DrillDownCollector.Queries.cs\")", guard, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// The SQL Lite's method runs: the <c>PerformanceMonitor.Common.DrillDownSql</c> constant that the first
-    /// <c>cmd.CommandText = ...;</c> assignment after the method's declaration names (#8470). A method that assigns
-    /// anything else, an inline literal or another constant, fails here naming what it assigns.
-    /// </summary>
-    private static string LiteInlineSql(string methodName)
-    {
-        var source = ParitySource.ReadFile(LiteFile);
-        var start = source.IndexOf($"Task {methodName}(", StringComparison.Ordinal);
-        Assert.True(start >= 0, $"{methodName} not found in {LiteFile}");
-        const string Marker = "cmd.CommandText = ";
-        var expressionStart = source.IndexOf(Marker, start, StringComparison.Ordinal) + Marker.Length;
-        var expressionEnd = source.IndexOf(";", expressionStart, StringComparison.Ordinal);
-        var expression = source[expressionStart..expressionEnd].Trim();
-        var text = expression switch
-        {
-            "DrillDownSql.TopCpuQueries" => DrillDownSql.TopCpuQueries,
-            "DrillDownSql.BadActorDetail" => DrillDownSql.BadActorDetail,
-            _ => null,
-        };
-        Assert.True(text is not null, $"{methodName} runs {expression}, not a PerformanceMonitor.Common.DrillDownSql constant");
-        return text!;
-    }
+        ServerId = ServerId,
+        ServerName = ServerName,
+        TimeRangeStart = WindowStart,
+        TimeRangeEnd = WindowEnd,
+    };
 }

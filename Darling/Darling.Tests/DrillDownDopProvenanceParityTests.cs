@@ -8,7 +8,6 @@
 
 using System;
 using System.Text.RegularExpressions;
-using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using Xunit;
 
@@ -16,53 +15,35 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Darling's half of the cross-SKU text guard for #3648: the <c>top_cpu_queries</c> and <c>bad_actor_query</c>
-/// drill-down SQL is one text, <c>PerformanceMonitor.Common.DrillDownSql</c> (#8470), that Lite's
-/// <c>cmd.CommandText</c> names and Darling's <see cref="PgDrillDownCollector.TopCpuQueriesSql"/> /
-/// <see cref="PgDrillDownCollector.BadActorDetailSql"/> are. The two readers must run it BYTE-IDENTICAL, so
-/// neither can re-inline a copy of its own, and it must carry the per-plan provenance shape rather than the old
-/// hash-folded <c>MAX(max_dop)</c>.
+/// drill-down SQL is one text, <c>PerformanceMonitor.Common.DrillDownSql</c> (#8470), that Darling's
+/// <see cref="PgDrillDownCollector.TopCpuQueriesSql"/> and <see cref="PgDrillDownCollector.BadActorDetailSql"/> are
+/// (<c>DrillDownSqlTests</c> holds them to it) and that Lite's two drill-down methods hand DuckDB when they run (Lite's
+/// <c>DrillDownDopProvenanceParityTests</c> watches them). This class pins what the text Darling runs must carry: the
+/// per-plan provenance shape rather than the old hash-folded <c>MAX(max_dop)</c>, and readers on both sides that
+/// project an unknown DOP as null, never 0.
 ///
-/// <para><b>Why identical text and not two independent pins.</b> #2705 fixed Darling's stale-max_dop
-/// cross-check and closed without a record that Lite had a twin; #2999 is what that cost. The two drill-down
-/// reads here were already character-for-character the same before #3648 (the port kept Lite's text), and the
-/// provenance columns are engine-neutral (<c>ROW_NUMBER() OVER</c>, <c>MAX() OVER</c>, <c>CASE</c> aggregates,
-/// explicit <c>NULLS LAST</c>), so the strongest guard available is equality: a read that stops running the
-/// Common text fails here until it is brought back.</para>
-///
-/// <para><b>Why this side hosts the comparison.</b> <c>build.yml</c>'s <c>darling</c> path filter covers
-/// every Lite <c>.cs</c> file as well as the whole Darling tree, so this suite runs on an edit to EITHER
-/// analysis tree; the <c>lite</c> filter does not reach <c>Darling/PerformanceMonitor.Darling.Analysis</c>, and
-/// a guard comparing the two apps cannot live behind a filter that fires for only one of them (#2839,
-/// <c>CrossAppGuardCiGateTests</c>). Lite's <c>DrillDownDopProvenanceParityTests</c> pins Lite's own shape and
-/// meta-pins this file. Darling's text is read from the compiled constants rather than from source, so
-/// nothing here depends on parsing Darling's own file.</para>
+/// <para><b>Why one text and not two independent pins.</b> #2705 fixed Darling's stale-max_dop cross-check and closed
+/// without a record that Lite had a twin; #2999 is what that cost. The two drill-down reads were already
+/// character-for-character the same before #3648 (the port kept Lite's text), and the provenance columns are
+/// engine-neutral (<c>ROW_NUMBER() OVER</c>, <c>MAX() OVER</c>, <c>CASE</c> aggregates, explicit <c>NULLS LAST</c>), so
+/// the strongest guard available is one constant each app is held to: a read that stops running it fails in its own
+/// suite until it is brought back.</para>
 /// </summary>
 public sealed class DrillDownDopProvenanceParityTests
 {
-    private const string LiteFile = "Lite/Analysis/DrillDownCollector.Queries.cs";
-
-    public static TheoryData<string, string> Reads => new()
+    private static string DarlingText(string name) => name switch
     {
-        { "CollectTopCpuQueries", PgDrillDownCollector.TopCpuQueriesSql },
-        { "CollectBadActorDetail", PgDrillDownCollector.BadActorDetailSql },
+        nameof(PgDrillDownCollector.TopCpuQueriesSql) => PgDrillDownCollector.TopCpuQueriesSql,
+        nameof(PgDrillDownCollector.BadActorDetailSql) => PgDrillDownCollector.BadActorDetailSql,
+        _ => throw new ArgumentOutOfRangeException(nameof(name), name, "not a PgDrillDownCollector drill-down text"),
     };
 
     [Theory]
-    [MemberData(nameof(Reads))]
-    public void TheDrillDownSql_IsByteIdenticalAcrossSkus(string liteMethod, string darlingSql)
+    [InlineData(nameof(PgDrillDownCollector.TopCpuQueriesSql))]
+    [InlineData(nameof(PgDrillDownCollector.BadActorDetailSql))]
+    public void TheDrillDownSql_CarriesThePerPlanProvenanceShape_NotTheHashFoldedMaximum(string name)
     {
-        /* Both sides LF-normalised: the constant carries the line endings of the checkout it was compiled
-           from and the source read carries the checkout's on-disk endings, which agree on any one runner but
-           are not the claim under test. */
-        Assert.Equal(Lf(darlingSql), Lf(LiteInlineSql(liteMethod)));
-    }
-
-    [Theory]
-    [MemberData(nameof(Reads))]
-    public void TheDrillDownSql_CarriesThePerPlanProvenanceShape_NotTheHashFoldedMaximum(string liteMethod, string darlingSql)
-    {
-        _ = liteMethod;
-        var sql = Lf(darlingSql);
+        var sql = Lf(DarlingText(name));
 
         /* The headline is the NEWEST plan's reading, picked by a newest-first ranking with the tie-breakers
            spelled out (compile time, then CPU spent) and their null placement made explicit — DuckDB and
@@ -104,28 +85,4 @@ public sealed class DrillDownDopProvenanceParityTests
     }
 
     private static string Lf(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
-
-    /// <summary>
-    /// The SQL Lite's method runs: the <c>PerformanceMonitor.Common.DrillDownSql</c> constant that the first
-    /// <c>cmd.CommandText = ...;</c> assignment after the method's declaration names (#8470). A method that assigns
-    /// anything else, an inline literal or another constant, fails here naming what it assigns.
-    /// </summary>
-    private static string LiteInlineSql(string methodName)
-    {
-        var source = RepoFile.ReadRepoFile("Lite", "Analysis", "DrillDownCollector.Queries.cs");
-        var start = source.IndexOf($"Task {methodName}(", StringComparison.Ordinal);
-        Assert.True(start >= 0, $"{methodName} not found in {LiteFile}");
-        const string Marker = "cmd.CommandText = ";
-        var expressionStart = source.IndexOf(Marker, start, StringComparison.Ordinal) + Marker.Length;
-        var expressionEnd = source.IndexOf(";", expressionStart, StringComparison.Ordinal);
-        var expression = source[expressionStart..expressionEnd].Trim();
-        var text = expression switch
-        {
-            "DrillDownSql.TopCpuQueries" => DrillDownSql.TopCpuQueries,
-            "DrillDownSql.BadActorDetail" => DrillDownSql.BadActorDetail,
-            _ => null,
-        };
-        Assert.True(text is not null, $"{methodName} runs {expression}, not a PerformanceMonitor.Common.DrillDownSql constant");
-        return text!;
-    }
 }
