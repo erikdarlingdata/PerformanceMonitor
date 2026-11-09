@@ -1345,9 +1345,9 @@ public partial class MainWindow : Window
         {
             switch (selected)
             {
-                case TabItem { Content: ViewerServerTab serverTab } tab:
+                case TabItem { Content: ViewerServerTab serverTab }:
                     await serverTab.RefreshActiveInnerTabAsync();
-                    StampRefreshed(tab, serverTab.ServerDisplayName);
+                    StampRefreshed(selected, serverTab.ServerDisplayName);
                     break;
                 case TabItem tab when ReferenceEquals(tab, OverviewTab):
                     await LoadOverviewAsync();
