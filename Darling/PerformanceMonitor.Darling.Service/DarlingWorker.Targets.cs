@@ -846,8 +846,9 @@ public sealed partial class DarlingWorker
     /// <c>ag_replica_role</c> reads Secondary; never when a <c>query_store_replica</c> is set for it. The same store facts the Query
     /// Store reads' <c>not_collected</c> answer is built from (<see cref="DarlingQueryStoreReadableSecondary"/>), read on each call.
     /// The capture counts while the <c>query_store_health</c> collector's effective schedule lets it refresh on this server;
-    /// disabled, the capture is frozen and only a PRIMARY or SECONDARY role overrules it, so a failover reaches the gate while a
-    /// readable standby whose role carries no answer stays gated by the capture, as the reads judge it (#8402). The read runs in the
+    /// disabled, the capture is frozen: a PRIMARY or SECONDARY role overrules it, and under any other role the newest query_store run
+    /// decides, so a failover reaches the gate while a readable standby whose run reads nothing stays gated, as the reads judge it
+    /// (#8402). The read runs in the
     /// sweep body and carries the sweep deadline like every other store command there. False when the store cannot answer, so the collector runs.
     /// </summary>
     internal async Task<bool> IsQueryStoreReadableSecondaryAsync(ServerLoopState server, ServerRuntime runtime, CancellationToken cancellationToken)

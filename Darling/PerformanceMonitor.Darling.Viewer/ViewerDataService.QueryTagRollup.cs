@@ -178,6 +178,16 @@ public sealed partial class ViewerDataService
         }
 
         var withRows = data.Sections.GetValueOrDefault(QueryTagRollupSection.QueryStore.Name)?.Select(f => f.ServerId).ToHashSet() ?? [];
+        IReadOnlyList<CollectorScheduleRow>? scheduleRows = null;
+        /* Whether the query_store_health collector's effective schedule lets it refresh its capture on the server: the server's own
+           row, then the fleet row, then enabled, the layers the service's schedule resolution reads. */
+        static bool QueryStoreHealthCaptureRefreshes(IReadOnlyList<CollectorScheduleRow> rows, int serverId)
+        {
+            var own = rows.FirstOrDefault(r => r.ServerId == serverId && string.Equals(r.CollectorName, "query_store_health", StringComparison.Ordinal));
+            var fleet = rows.FirstOrDefault(r => r.ServerId is null && string.Equals(r.CollectorName, "query_store_health", StringComparison.Ordinal));
+            return own?.Enabled ?? fleet?.Enabled ?? true;
+        }
+
         foreach (var server in servers)
         {
             if (!data.Refused.ContainsKey(server.ServerId) || withRows.Contains(server.ServerId) || skip.ContainsKey(server.ServerId))
@@ -185,8 +195,12 @@ public sealed partial class ViewerDataService
                 continue;
             }
 
+            /* #8402: the same judgment the MCP roll-up and the scheduler's gate apply, with the query_store_health collector's effective
+               schedule read from the store's rows, so the window and the tools agree on which server is a readable secondary. */
+            scheduleRows ??= await ReadScheduleOverridesForHealthAsync(cancellationToken);
             if (await DarlingQueryStoreReadableSecondary.MessageAsync(
-                    _dataSource, server.ServerId, server.DisplayName, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken) is { } reason)
+                    _dataSource, server.ServerId, server.DisplayName, QueryStoreHealthCaptureRefreshes(scheduleRows, server.ServerId),
+                    ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken) is { } reason)
             {
                 reasons[server.ServerId] = reason;
             }
