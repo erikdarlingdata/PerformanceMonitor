@@ -140,6 +140,7 @@ public partial class AlertsHistoryTab : UserControl
 
         var displayCount = AlertsDataGrid.ItemsSource is ICollection<AlertHistoryRow> coll ? coll.Count : alerts.Count;
         NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
+        DismissAllButton.IsEnabled = displayCount > 0 && !_dismissInFlight;
         AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ServerTimeHelper.CurrentDisplayMode, ListSpansServers); // D5: the column names its clock
         RangePicker.Refresh(); // the range label names the same clock
         DataGridHeaderFit.Apply(AlertsDataGrid); // #6136: the longer title widens its column
@@ -422,7 +423,7 @@ public partial class AlertsHistoryTab : UserControl
     private void SetDismissInFlight(bool inFlight)
     {
         _dismissInFlight = inFlight;
-        DismissAllButton.IsEnabled = !inFlight;
+        DismissAllButton.IsEnabled = !inFlight && AlertsDataGrid.Items.Count > 0;
         DismissWaitIndicator.Visibility = inFlight ? Visibility.Visible : Visibility.Collapsed;
         if (inFlight)
         {

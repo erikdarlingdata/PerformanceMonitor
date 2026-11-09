@@ -16,7 +16,8 @@
          the window off-screen with the buttons unreachable (NoResize left no recovery). The form scrolls
          in a star row, the status + buttons are pinned OUTSIDE the scroll so they are always visible,
          and MaxHeight clamps the window to the work area - the Dashboard twin's proven shape. -->
-    <Grid Margin="16">
+    <!-- A form's width when the window is wider: the boxes stay one width and the window's spare width is even on both sides. -->
+    <Grid Margin="16" MaxWidth="560">
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>

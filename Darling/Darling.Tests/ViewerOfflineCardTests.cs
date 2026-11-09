@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// as CPU does; and a dated Last Collect stamp fits inside the card. The card is the Overview's own template, rendered with the
 /// theme loaded and read back.
 /// </summary>
+[Collection("viewer-time-statics")]
 public sealed class ViewerOfflineCardTests
 {
     private const string ThemeUri = "pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml";

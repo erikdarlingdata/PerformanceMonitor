@@ -45,6 +45,7 @@ public partial class MuteRuleEditDialog : Window
     public MuteRuleEditDialog(MuteRule? existingRule = null, bool scheduleSupported = true)
     {
         InitializeComponent();
+        AppendCensusMetrics();
         _scheduleSupported = scheduleSupported;
         BuildScheduleSection();
 
@@ -87,6 +88,9 @@ public partial class MuteRuleEditDialog : Window
             ServerNameBox.Text = context.ServerName;
         if (!string.IsNullOrEmpty(context.MetricName))
             SelectMetric(context.MetricName);
+        else
+            /* #8350: an alert with no metric name cannot be muted by type. Say so, instead of leaving "(any)" to read as a choice. */
+            MetricScopeNote.Visibility = Visibility.Visible;
         if (!string.IsNullOrEmpty(context.DatabaseName))
             DatabasePatternBox.Text = context.DatabaseName;
         if (context.SeedQueryTextPattern(PerformanceMonitor.Common.SensitiveStatements.Text) is { } seededQueryText)
@@ -224,17 +228,45 @@ public partial class MuteRuleEditDialog : Window
         }
     }
 
+    /// <summary>
+    /// Selects <paramref name="metricName"/>, adding it to the list first when nothing names it: an analysis finding's or a
+    /// custom rule's metric is minted per finding or rule, and the engines still judge mute rules against that exact name,
+    /// so the rule keeps the alert's own type instead of falling back to "(any)" (#8350).
+    /// </summary>
     private void SelectMetric(string metricName)
+    {
+        var index = IndexOfMetric(metricName);
+        if (index < 0)
+            index = MetricCombo.Items.Add(new ComboBoxItem { Content = metricName });
+        MetricCombo.SelectedIndex = index;
+    }
+
+    /// <summary>
+    /// The Metric list names every alert type the engines judge mute rules for, read from the shared census
+    /// (<see cref="MuteRuleMetricList.Names"/>, every family, since the service raises them all), after the entries the markup
+    /// lists first, so an alert of any censused type can be muted by type alone.
+    /// </summary>
+    private void AppendCensusMetrics()
+    {
+        foreach (var metric in MuteRuleMetricList.Names)
+        {
+            if (IndexOfMetric(metric) < 0)
+                MetricCombo.Items.Add(new ComboBoxItem { Content = metric });
+        }
+    }
+
+    private int IndexOfMetric(string metricName)
     {
         for (int i = 0; i < MetricCombo.Items.Count; i++)
         {
             if (MetricCombo.Items[i] is ComboBoxItem item &&
                 string.Equals(item.Content?.ToString(), metricName, StringComparison.OrdinalIgnoreCase))
             {
-                MetricCombo.SelectedIndex = i;
-                return;
+                return i;
             }
         }
+
+        return -1;
     }
 
     /// <summary>#7122: the two explanation lines state what the chosen action does, so a digest rule is not described as a mute.</summary>
@@ -365,10 +397,11 @@ public partial class MuteRuleEditDialog : Window
 
         /* #1839's "Blocking Wait Time" carries the same blocked-process context as "Blocking Detected",
            so it offers the same database/query-text pattern fields. */
-        bool showDatabase = metric is null or "(any)" or "Blocking Detected" or "Blocking Wait Time" or "Deadlocks Detected" or "Long-Running Query" or AlertFamily.ClientTimeoutsMetric;
+        /* Database State carries the database whose state changed, so a rule from it is scoped to that database. */
+        bool showDatabase = metric is null or "(any)" or "Blocking Detected" or "Blocking Wait Time" or "Deadlocks Detected" or "Long-Running Query" or "Database State" or AlertFamily.ClientTimeoutsMetric;
         bool showWaitType = metric is null or "(any)" or "Poison Wait" or "Long-Running Query";
         bool showQueryText = metric is null or "(any)" or "Blocking Detected" or "Blocking Wait Time" or "Long-Running Query";
-        bool showJobName = metric is null or "(any)" or "Long-Running Job";
+        bool showJobName = metric is null or "(any)" or "Long-Running Job" or "Failed Agent Job";
         /* #5640: Client Timeouts offers Database AND Client Application, the two dimensions its alert carries, so the
            same "Mute this alert" click makes the same rule here, in Lite and on the web page. */
         bool showClientApp = metric is null or "(any)" or AlertFamily.ClientTimeoutsMetric;
