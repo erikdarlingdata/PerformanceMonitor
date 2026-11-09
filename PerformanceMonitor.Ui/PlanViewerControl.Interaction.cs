@@ -82,21 +82,24 @@ public partial class PlanViewerControl
     }
 
     /// <summary>
-    /// Centres the operator in the viewport. Node coordinates are unscaled layout positions, so they
-    /// are multiplied by the zoom level to get canvas pixels; the offset is then clamped, because
-    /// asking a ScrollViewer for a negative offset on a plan smaller than the viewport just leaves
-    /// it where it was and looks like the navigation did nothing.
+    /// Centres the operator in the viewport: its own middle, half a node's width and height in from
+    /// its layout position, not its top-left corner (#8449). Node coordinates are unscaled layout
+    /// positions, so <see cref="MinimapLayout.GetNodeCenterOffset"/> multiplies them by the zoom level
+    /// to get canvas pixels, the same offset the minimap's double-click scrolls to; the offset is then
+    /// clamped, because asking a ScrollViewer for a negative offset on a plan smaller than the viewport
+    /// just leaves it where it was and looks like the navigation did nothing.
     /// </summary>
     private void ScrollNodeIntoView(PlanNode node)
     {
-        var targetX = node.X * _zoomLevel - (PlanScrollViewer.ViewportWidth / 2);
-        var targetY = node.Y * _zoomLevel - (PlanScrollViewer.ViewportHeight / 2);
+        var (targetX, targetY) = MinimapLayout.GetNodeCenterOffset(
+            node.X, node.Y, PlanLayoutEngine.NodeWidth, PlanLayoutEngine.GetNodeHeight(node),
+            _zoomLevel, PlanScrollViewer.ViewportWidth, PlanScrollViewer.ViewportHeight);
 
         var maxX = Math.Max(0, PlanScrollViewer.ExtentWidth - PlanScrollViewer.ViewportWidth);
         var maxY = Math.Max(0, PlanScrollViewer.ExtentHeight - PlanScrollViewer.ViewportHeight);
 
-        PlanScrollViewer.ScrollToHorizontalOffset(Math.Clamp(targetX, 0, maxX));
-        PlanScrollViewer.ScrollToVerticalOffset(Math.Clamp(targetY, 0, maxY));
+        PlanScrollViewer.ScrollToHorizontalOffset(Math.Min(targetX, maxX));
+        PlanScrollViewer.ScrollToVerticalOffset(Math.Min(targetY, maxY));
     }
 
     private ContextMenu BuildNodeContextMenu(PlanNode node)
@@ -172,7 +175,8 @@ public partial class PlanViewerControl
         _zoomLevel = Math.Max(MinZoom, Math.Min(MaxZoom, level));
         ZoomTransform.ScaleX = _zoomLevel;
         ZoomTransform.ScaleY = _zoomLevel;
-        ZoomLevelText.Text = $"{(int)(_zoomLevel * 100)}%";
+        // The nearest whole percent (#8449): a Fit zoom of 0.2999 reads 30%, not the truncated 29%.
+        ZoomLevelText.Text = $"{Math.Round(_zoomLevel * 100, MidpointRounding.AwayFromZero)}%";
         UpdateMinimapViewportBox();
     }
 

@@ -25,7 +25,7 @@
 
 import { countWord } from "../plain-text.js";
 import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, noticeStrip, disclosure,
-         ALERT_STATE_LABELS, applyFormat, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder, storeHash, NO_MESSAGE_TEXT_PREFIX } from "../util.js";
+         ALERT_STATE_LABELS, applyFormat, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder, storeHash, NO_MESSAGE_TEXT_PREFIX, isStateZero } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf, gridRowShown } from "../panels.js";
 import { copyText } from "../grid-tools.js";
 import { pageRangePicker, windowResultOfSpec } from "../page-range.js";
@@ -45,10 +45,8 @@ const SEVERITY_RANK = { critical: 0, warning: 1, info: 2, resolution: 3 };
 
 /* #7646: a state-only alert (get_alert_history's state_only, the server's AlertMetricClassifier.IsStateOnly) never had a number, so
    its stored 0 shows as a dash, as the Viewer's grid does, not as "0.0". A nonzero value on such a row is a real measurement and
-   stays a number. The CSV export and the copy commands carry the same dash (copyValue), and the raw number on every other row. */
-function isStateZero(a, key) {
-  return a.state_only === true && Number(a[key]) === 0;
-}
+   stays a number. The rule is util.js's isStateZero, shared with the triage card and the notebook. The CSV export and the copy
+   commands carry the same dash (copyValue), and the raw number on every other row. */
 function stateOrNumber(a, key) {
   return isStateZero(a, key) ? "—" : applyFormat("num1", a[key]);
 }

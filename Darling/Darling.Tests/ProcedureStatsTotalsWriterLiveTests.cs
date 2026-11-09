@@ -906,7 +906,10 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
     /// a server whose first batch has no anchor and once for a later batch with an anchor and an empty range.
     /// </summary>
     [Fact]
-    public async Task AnEmptyGap_CostsOneProbeStatement_NoSavepointNoTimeoutNoGapStatement()
+    public Task AnEmptyGap_CostsOneProbeStatement_NoSavepointNoTimeoutNoGapStatement()
+        => EmptyGapAsync(forcePass: false);
+
+    internal async Task EmptyGapAsync(bool forcePass)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
@@ -926,16 +929,26 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
                 Convert.ToInt64(await ScalarAsync(rig.Connection,
                     "SELECT COALESCE(SUM(calls), 0)::bigint FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND query LIKE '" + like + "'", ct));
 
-            await ExecAsync(rig.Connection, "SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)", ct);
+            /* The whole window, from the counter's reset to the last count, runs under PgStatementTable: the view is
+               cluster-wide, and an eviction pass from another session between the batches and the counts takes the entries
+               run once or twice first, the anchor probe's among them, which a run the pass landed in is voided and run
+               again for. A second run writes the same two batches again, which recompute the same rows and totals. */
+            var run = await PgStatementTable.RunAsync(rig.Connection, ct, async pass =>
+            {
+                await ExecAsync(rig.Connection, "SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)", ct);
 
-            /* The server's first batch (no totals row, so no anchor) and a second one (an anchor, an empty range between it and the batch). */
-            Assert.Equal(1, await rig.WriteAsync(T0, new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10, 1, 60) }, ct));
-            Assert.Equal(1, await rig.WriteAsync(T0.AddMinutes(1), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 11, 1, 60) }, ct));
+                /* The server's first batch (no totals row, so no anchor) and a second one (an anchor, an empty range between it and the batch). */
+                Assert.Equal(1, await rig.WriteAsync(T0, new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10, 1, 60) }, ct));
+                Assert.Equal(1, await rig.WriteAsync(T0.AddMinutes(1), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 11, 1, 60) }, ct));
 
-            Assert.Equal(2L, await CallsAsync("%a.anchor IS NOT NULL%"));
-            Assert.Equal(0L, await CallsAsync("%pst_gap%"));
-            Assert.Equal(0L, await CallsAsync("%set_config(%"));
-            Assert.Equal(0L, await CallsAsync("%s.collection_time > $3%"));
+                await pass.BeforeReadAsync(ct);
+
+                Assert.Equal(2L, await CallsAsync("%a.anchor IS NOT NULL%"));
+                Assert.Equal(0L, await CallsAsync("%pst_gap%"));
+                Assert.Equal(0L, await CallsAsync("%set_config(%"));
+                Assert.Equal(0L, await CallsAsync("%s.collection_time > $3%"));
+            }, forcePass, forcePassCallsAtMost: 2);
+            PgStatementTable.AssertNoPassInside(run);
 
             bodySucceeded = true;
         }
@@ -1220,4 +1233,18 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
 
     private static async Task<long> RawRowsAsync(NpgsqlConnection connection, CancellationToken ct) =>
         Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.procedure_stats", ct));
+}
+
+/* pg-cluster-roles, not the parallel own-store shape: the fact fills pg_stat_statements until eviction passes have taken the
+   body's own entries, on purpose, and in the parallel collections those passes take the other sessions' entries run once
+   as well. The collection runs alone, after the parallel collections, so the fill takes nobody else's entries. The body
+   is the one ProcedureStatsTotalsWriterLiveTests runs without the forced pass, and it mints its own scratch database. */
+
+/// <summary>The forcing run of <see cref="ProcedureStatsTotalsWriterLiveTests"/>'s counting body: an eviction pass between the batches and the counts, and the counts are still of the probes the batches ran.</summary>
+[Collection("pg-cluster-roles")]
+public sealed class ProcedureStatsTotalsWriterForcedPassLiveTests
+{
+    [Fact]
+    public Task AnEmptyGap_CostsOneProbeStatement_NoSavepointNoTimeoutNoGapStatement_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => new ProcedureStatsTotalsWriterLiveTests().EmptyGapAsync(forcePass: true);
 }

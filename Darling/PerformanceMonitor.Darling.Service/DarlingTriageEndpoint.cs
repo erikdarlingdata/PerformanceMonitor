@@ -924,6 +924,9 @@ internal static class DarlingTriageEndpoint
         ["metric_name"] = row.MetricName,
         ["current_value"] = row.CurrentValue,
         ["threshold_value"] = row.ThresholdValue,
+        /* The flag get_alert_history carries: a row whose alert reports a state, not a measurement, so its stored 0 is not a reading
+           and the alert card shows the dash Alert History shows for it. */
+        ["state_only"] = AlertMetricClassifier.IsStateOnly(row.MetricName),
         ["alert_sent"] = row.AlertSent,
         ["notification_type"] = row.NotificationType,
         ["send_error"] = row.SendError,
