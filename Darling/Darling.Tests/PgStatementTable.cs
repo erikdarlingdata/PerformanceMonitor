@@ -94,10 +94,12 @@ internal static class PgStatementTable
     /// the run can only come from another session; a run that a pass did land in is voided and the body runs again,
     /// whether the body finished or its reads failed on the entries the pass took. A failure in a run with no pass inside
     /// is the body's own and comes out of here as it was thrown; a skip and a cancellation come out whatever the counter
-    /// did. With <paramref name="forcePass"/>, the first run's <see cref="PgStatementTableAttempt.BeforeReadAsync"/>
-    /// forces a pass, which that run then voids. Returns the last run, whose
-    /// <see cref="PgStatementTableAttempt.PassesInside"/> is 0 unless every run had a pass inside it; when the last of
-    /// those runs failed as well, fails with the pass count and the reads' failure.
+    /// did. When the body failed and the counter read after it fails too (a body whose connection broke leaves one that
+    /// refuses every command), the two come out together as an <see cref="AggregateException"/>, the body's first. With
+    /// <paramref name="forcePass"/>, the first run's <see cref="PgStatementTableAttempt.BeforeReadAsync"/> forces a pass,
+    /// which that run then voids. Returns the last run, whose <see cref="PgStatementTableAttempt.PassesInside"/> is 0
+    /// unless every run had a pass inside it; when the last of those runs failed as well, fails with the pass count and
+    /// the reads' failure.
     /// </summary>
     public static Task<PgStatementTableAttempt> RunAsync(
         NpgsqlConnection connection, CancellationToken ct, Func<PgStatementTableAttempt, Task> body, bool forcePass = false)
@@ -130,7 +132,19 @@ internal static class PgStatementTable
                 failure = ExceptionDispatchInfo.Capture(ex);
             }
 
-            attempt.Finish(await dealloc(connection, ct));
+            long? deallocAtEnd;
+            try
+            {
+                deallocAtEnd = await dealloc(connection, ct);
+            }
+            catch (Exception ex) when (failure is not null)
+            {
+                /* The counter cannot say whose the body's failure is, and that failure is the root cause: a body whose
+                   command broke the connection leaves one every later command refuses, this read among them. */
+                throw new AggregateException(failure.SourceException, ex);
+            }
+
+            attempt.Finish(deallocAtEnd);
             if (attempt.PassesInside == 0)
             {
                 failure?.Throw();
