@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// is built and laid out off screen at the size under test (it is never shown, so its load, which connects to the store, does not
 /// run). Every number is read from a rendered control.
 /// </summary>
+[Collection("viewer-time-statics")]
 public sealed class ViewerMinWindowChromeTests
 {
     /* The rail the sidebar collapses to (the column's MinWidth in MainWindow.xaml) and its open width. */
@@ -407,7 +408,21 @@ public sealed class ViewerMinWindowChromeTests
 
     private static MainWindow NewWindow()
     {
-        var w = new MainWindow();
+        /* The shell's constructor applies the stored time display mode to ViewerTimeHelper. This class tests the chrome, so the mode and
+           the clock are put back once the shell exists; the class is in the viewer-time-statics collection for the moment in between. */
+        var savedMode = ViewerTimeHelper.CurrentDisplayMode;
+        var savedClock = ViewerTimeHelper.ActiveServerClock;
+        MainWindow w;
+        try
+        {
+            w = new MainWindow();
+        }
+        finally
+        {
+            ViewerTimeHelper.CurrentDisplayMode = savedMode;
+            ViewerTimeHelper.ActiveServerClock = savedClock;
+        }
+
         var root = (UIElement)w.Content;
         w.Content = null;
         var host = new Window { Content = root, Width = 900, Height = 600, Left = 0, Top = 0, WindowStartupLocation = WindowStartupLocation.Manual, ShowInTaskbar = false };
