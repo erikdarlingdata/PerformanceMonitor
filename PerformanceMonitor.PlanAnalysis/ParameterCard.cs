@@ -69,6 +69,22 @@ public static partial class ParameterCard
             Sniffed: sniffed);
     }
 
+    /// <summary>The note a runtime cell carries when its value differs from the compiled one.</summary>
+    public const string SniffedNote = "Runtime value differs from compiled: possible parameter sniffing";
+
+    /// <summary>
+    /// The tooltip of one Compiled or Runtime cell. A cell its column trims carries its whole value, so the value
+    /// can be read when the card is too narrow to show it; a sniffed runtime cell carries its value first and
+    /// <see cref="SniffedNote"/> after it, trimmed or not, so neither hides the other; a cell shown whole and not
+    /// sniffed carries nothing.
+    /// </summary>
+    public static string? ValueCellTooltip(string text, bool sniffed, bool trimmed)
+    {
+        if (sniffed)
+            return text.Length == 0 ? SniffedNote : text + Environment.NewLine + SniffedNote;
+        return trimmed && text.Length > 0 ? text : null;
+    }
+
     /// <summary>
     /// The annotation lines the card shows below the table (or in place of the table when there are no
     /// parameters at all), in PerformanceStudio's order: the no-parameters/local-variables state OR the

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -1403,12 +1404,7 @@ public partial class PlanViewerControl
             }
 
             if (runtimeCol >= 0)
-            {
-                var tooltip = row.Sniffed
-                    ? "Runtime value differs from compiled: possible parameter sniffing"
-                    : null;
-                AddParamCell(grid, rowIndex, runtimeCol, row.RuntimeText, row.Sniffed ? sniffedBrush : valueBrush, tooltip: tooltip);
-            }
+                AddParamCell(grid, rowIndex, runtimeCol, row.RuntimeText, row.Sniffed ? sniffedBrush : valueBrush, sniffed: row.Sniffed);
 
             rowIndex++;
         }
@@ -1420,7 +1416,7 @@ public partial class PlanViewerControl
     }
 
     private static void AddParamCell(Grid grid, int row, int col, string text, Brush brush,
-        FontWeight fontWeight = default, string? tooltip = null)
+        FontWeight fontWeight = default, bool sniffed = false)
     {
         var tb = new TextBlock
         {
@@ -1433,16 +1429,36 @@ public partial class PlanViewerControl
             MaxWidth = 200,
             Background = Brushes.Transparent
         };
-        // Name and DataType columns are short — no need for max width.
         if (col <= 1)
+        {
+            // Name and DataType columns are short — no need for max width.
             tb.MaxWidth = double.PositiveInfinity;
-        if (tooltip != null)
-            tb.ToolTip = tooltip;
-        else if (text.Length > 30)
-            tb.ToolTip = text;
+            if (text.Length > 30)
+                tb.ToolTip = text;
+        }
+        else
+        {
+            // A value column shares what the card leaves after Name and Data Type, so whether a cell is cut is known
+            // only once it is laid out: the tooltip is chosen again at every size, and a cell with no size yet counts
+            // as cut, so its value is never hidden.
+            tb.ToolTip = ParameterCard.ValueCellTooltip(text, sniffed, trimmed: true);
+            tb.SizeChanged += (_, _) => tb.ToolTip = ParameterCard.ValueCellTooltip(text, sniffed, IsTrimmed(tb));
+        }
         Grid.SetRow(tb, row);
         Grid.SetColumn(tb, col);
         grid.Children.Add(tb);
+    }
+
+    /// <summary>Whether the cell's text is wider than the width its column gave it, so an ellipsis cuts it.</summary>
+    private static bool IsTrimmed(TextBlock cell)
+    {
+        if (cell.Text.Length == 0)
+            return false;
+        var natural = new FormattedText(
+            cell.Text, CultureInfo.CurrentUICulture, cell.FlowDirection,
+            new Typeface(cell.FontFamily, cell.FontStyle, cell.FontWeight, cell.FontStretch),
+            cell.FontSize, Brushes.Black, VisualTreeHelper.GetDpi(cell).PixelsPerDip).WidthIncludingTrailingWhitespace;
+        return natural > cell.ActualWidth - cell.Padding.Left - cell.Padding.Right + 1.0;
     }
 
     private void AddParameterAnnotation(ParameterCardAnnotation annotation)
