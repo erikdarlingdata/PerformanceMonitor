@@ -448,8 +448,9 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
     /// <summary>#4232: ONE cache for every store this reader serves — <c>get_daily_summary_range</c> shares it
     /// between the web viewer's <c>/api/read</c> mirror and MCP clients, because both paths call this same
     /// method. Keyed inside <see cref="DailySummaryRangeCache{TRow}"/> by (store, server, range, routed
-    /// statement); <see cref="NpgsqlDataSource"/> has no value-equality override, so distinct stores — including
-    /// a live test's own <c>ScratchPostgres</c> database — never collide on one store's cached block.</summary>
+    /// statement), where the store is <see cref="DailySummaryRangeCache.StoreKeyFor"/>: the host, port and database
+    /// a data source reaches, compared by value. Two pools over one store share a block, and distinct stores
+    /// (including a live test's own <c>ScratchPostgres</c> database) never collide, because they name another database.</summary>
     internal static DailySummaryRangeCache<DailySummaryReadRow> RangeCache { get; private set; } = new();
 
     /// <summary>#4232: test-only reset for <see cref="RangeCache"/>. This cache is by design stale for a closed day -- a row that lands late for
@@ -578,7 +579,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
            statement itself returns spans more than one day, but these post-read judgments do move between
            refreshes, so they are re-applied after the join every time). */
         Task<List<DailySummaryReadRow>> ReadRawAsync(string sql, IReadOnlyList<string>? scope) => RangeCache.GetRangeAsync(
-            storeKey: postgres,
+            storeKey: DailySummaryRangeCache.StoreKeyFor(postgres), // #8451: the store, not this host's pool: the warmer builds through another
             serverId: serverId,
             fromDate: fromDate,
             toDate: toDate,

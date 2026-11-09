@@ -33,6 +33,31 @@ public sealed partial class DarlingMcpFinOpsTools
     /// <summary>The fixed ceiling on the idle-database list.</summary>
     internal const int MaxIdleDatabaseRows = 500;
 
+    /// <summary>Test-only: wraps each section read of the optimization view (the section's payload key, then the read to start and
+    /// await), so a test can count how many section reads are in flight at once. Held per async flow, as the web dispatch's test entry
+    /// is, so only the flow that set it sees it; null in every production run, and the read then runs unwrapped.</summary>
+    private static readonly AsyncLocal<Func<string, Func<Task>, Task>?> s_testOnlyOptimizationSectionRead = new();
+
+    internal static Func<string, Func<Task>, Task>? TestOnlyOptimizationSectionRead
+    {
+        get => s_testOnlyOptimizationSectionRead.Value;
+        set => s_testOnlyOptimizationSectionRead.Value = value;
+    }
+
+    /// <summary>One section read of the optimization view, through <see cref="TestOnlyOptimizationSectionRead"/> when a test set it.</summary>
+    private static async Task<T> SectionAsync<T>(string section, Func<Task<T>> read)
+    {
+        var wrap = TestOnlyOptimizationSectionRead;
+        if (wrap is null)
+        {
+            return await read();
+        }
+
+        Task<T>? started = null;
+        await wrap(section, () => started = read());
+        return await started!;
+    }
+
     private const int IdleDatabaseWindowDays = 7;
     private const int TempdbWindowHours = 24;
     private const int MemoryGrantWindowHours = 24;
@@ -151,12 +176,25 @@ public sealed partial class DarlingMcpFinOpsTools
 
         /* The same 7-day coverage rule the recommendation row and the Server Inventory count use: an idle claim needs a query-stats
            sample on each of the last 7 UTC days, else the list is empty and the section says why. */
-        var idleRead = await DarlingFinOpsOptimizationReader.GetIdleDatabaseReadAsync(postgres, resolved.ServerId, now.AddDays(-IdleDatabaseWindowDays), timeout, ct);
+        var idleRead = await SectionAsync("idle_databases", () =>
+            DarlingFinOpsOptimizationReader.GetIdleDatabaseReadAsync(postgres, resolved.ServerId, now.AddDays(-IdleDatabaseWindowDays), timeout, ct));
         var idle = idleRead.Rows;
-        var tempdb = await DarlingFinOpsOptimizationReader.GetTempdbSummaryAsync(postgres, resolved.ServerId, now.AddHours(-TempdbWindowHours), timeout, ct);
-        var waits = await DarlingFinOpsOptimizationReader.GetWaitCategorySummaryAsync(postgres, resolved.ServerId, now.AddHours(-hoursBack), timeout, ct);
-        var queries = await DarlingFinOpsOptimizationReader.GetExpensiveQueriesAsync(postgres, resolved.ServerId, textStart, limit, timeout, ct);
-        var grants = await DarlingFinOpsUtilizationReader.GetMemoryGrantEfficiencyAsync(postgres, resolved.ServerId, MemoryGrantWindowHours, timeout, ct);
+        /* The 24 hours of wait and query rows are the two largest raw scans the FinOps views make, and a server's first visit pays them
+           cold; neither depends on the other, so the two run together and the read takes as long as the slower of them. Only those two:
+           each section read holds a pooled connection while it runs, the read pool is bounded (DarlingManagedPostgres.DefaultMaxPoolSize,
+           24), and nothing bounds how many first visits run at once, so one read never holds more than two connections. The three cheap
+           sections run one at a time around them. */
+        var waitsTask = SectionAsync("wait_categories", () =>
+            DarlingFinOpsOptimizationReader.GetWaitCategorySummaryAsync(postgres, resolved.ServerId, now.AddHours(-hoursBack), timeout, ct));
+        var queriesTask = SectionAsync("expensive_queries", () =>
+            DarlingFinOpsOptimizationReader.GetExpensiveQueriesAsync(postgres, resolved.ServerId, textStart, limit, timeout, ct));
+        await Task.WhenAll(waitsTask, queriesTask);
+        var waits = await waitsTask;
+        var queries = await queriesTask;
+        var tempdb = await SectionAsync("tempdb_pressure", () =>
+            DarlingFinOpsOptimizationReader.GetTempdbSummaryAsync(postgres, resolved.ServerId, now.AddHours(-TempdbWindowHours), timeout, ct));
+        var grants = await SectionAsync("memory_grant_efficiency", () =>
+            DarlingFinOpsUtilizationReader.GetMemoryGrantEfficiencyAsync(postgres, resolved.ServerId, MemoryGrantWindowHours, timeout, ct));
 
         /* A gated section is asked only when it came back empty, as every capability check is. */
         var idleGate = idle.Count == 0 ? await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "database_size_stats", ct) : null;
