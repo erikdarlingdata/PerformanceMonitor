@@ -20,7 +20,8 @@ namespace Darling.Tests;
 /// without the attribute is judged on the scan's cost share alone. Rule 11 "Scan With Predicate" judges an
 /// actual plan on ActualRowsRead; when the plan has none, the table's cardinality stands in, scaled by the
 /// scan's executions because the cardinality is a per-execution figure and the rows read are a total, and
-/// when it carries neither there is no floor.
+/// when it carries neither there is no floor. On a parallel scan the executions are the largest one thread
+/// reports, not the sum across threads, which counts the threads rather than the passes over the table.
 /// </summary>
 public sealed class PlanSync8381AbsentFigureTests
 {
@@ -83,6 +84,16 @@ public sealed class PlanSync8381AbsentFigureTests
         Assert.Single(WarningsOfType(xml, "Scan With Predicate"));
     }
 
+    /// <summary>A parallel scan at DOP 8 of a 2,000 row table: thread 0 reports no executions and threads 1 to 8
+    /// one each. The table was read once, so the stand-in is 2,000 and the scan stays under the floor; the sum of
+    /// the threads' executions, 8, would put it at 16,000.</summary>
+    [Fact]
+    public void ScanWithPredicate_NoRowsRead_ParallelTwoThousandRowTable_OneExecutionPerThread_DoesNotWarn()
+    {
+        var xml = ActualPlanWithoutRowsReadParallel(tableCardinality: 2_000, workerThreads: 8, rowsPerThread: 10);
+        Assert.Empty(WarningsOfType(xml, "Scan With Predicate"));
+    }
+
     /// <summary>Neither figure: the plan gives nothing to put a floor on, so the scan is reported.</summary>
     [Fact]
     public void ScanWithPredicate_NoRowsRead_NoTableCardinality_Warns()
@@ -110,6 +121,18 @@ public sealed class PlanSync8381AbsentFigureTests
             $"<RunTimeInformation><RunTimeCountersPerThread Thread=\"0\" ActualRows=\"{rowsReturned}\" ActualExecutions=\"{executions}\" " +
             "ActualElapsedms=\"5\" ActualCPUms=\"5\" ActualLogicalReads=\"100\" /></RunTimeInformation>";
         var scan = Scan(estimateRows: rowsReturned, tableCardinality, scanCost: 1.0, runtime, Predicate);
+        return Head + Statement(scan, statementCost: 1.0, queryTimeStats: "") + Tail;
+    }
+
+    /// <summary>The same statement with a parallel scan's counters: thread 0 with no executions, and
+    /// <paramref name="workerThreads"/> threads with one execution each, none carrying ActualRowsRead.</summary>
+    private static string ActualPlanWithoutRowsReadParallel(double tableCardinality, int workerThreads, long rowsPerThread)
+    {
+        var threads = "<RunTimeCountersPerThread Thread=\"0\" ActualRows=\"0\" ActualExecutions=\"0\" ActualElapsedms=\"5\" ActualCPUms=\"0\" ActualLogicalReads=\"0\" />";
+        for (var i = 1; i <= workerThreads; i++)
+            threads += $"<RunTimeCountersPerThread Thread=\"{i}\" ActualRows=\"{rowsPerThread}\" ActualExecutions=\"1\" ActualElapsedms=\"5\" ActualCPUms=\"5\" ActualLogicalReads=\"10\" />";
+        var runtime = $"<RunTimeInformation>{threads}</RunTimeInformation>";
+        var scan = Scan(estimateRows: rowsPerThread * workerThreads, tableCardinality, scanCost: 1.0, runtime, Predicate);
         return Head + Statement(scan, statementCost: 1.0, queryTimeStats: "") + Tail;
     }
 
