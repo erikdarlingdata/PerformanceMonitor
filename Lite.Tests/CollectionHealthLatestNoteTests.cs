@@ -51,7 +51,7 @@ public sealed class CollectionHealthLatestNoteTests : IClassFixture<SharedDuckDb
 
     /// <summary>The real probe-failure note for a count, from the shared driver — the text the defect rides on.</summary>
     private static string ProbeNote(int count) =>
-        string.Format(CultureInfo.InvariantCulture, EnumeratedCollectorDriver.ProbeFailureNoteFormat, count);
+        EnumeratedCollectorDriver.BuildNote(enumerationWasEmpty: false, probeFailureCount: count)!;
 
     [Fact]
     public async Task LastNote_IsTheNewestNote_NotTheLexicographicallyGreatestOne()

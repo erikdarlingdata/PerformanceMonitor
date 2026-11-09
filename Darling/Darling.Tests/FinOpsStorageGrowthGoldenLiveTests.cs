@@ -60,7 +60,7 @@ public sealed class FinOpsStorageGrowthGoldenLiveTests
             var map = new Dictionary<string, object?>();
             foreach (var (key, id) in new[] { ("a", ServerIdA), ("b", ServerIdB), ("c", ServerIdC), ("d", ServerIdD) })
             {
-                var heat = await viewer.GetObjectGrowthHeatmapDataAsync(id, HeatDb, 30, 4, ct);
+                var heat = await viewer.GetObjectGrowthHeatmapDataAsync(id, HeatDb, TimeZoneInfo.Utc, 30, 4, ct);
                 map[key] = new Dictionary<string, object?>
                 {
                     ["storageGrowth"] = await viewer.GetStorageGrowthAsync(id, cancellationToken: ct),

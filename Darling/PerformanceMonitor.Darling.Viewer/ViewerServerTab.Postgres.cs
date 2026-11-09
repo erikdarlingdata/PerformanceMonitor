@@ -362,10 +362,10 @@ public partial class ViewerServerTab
             + $"{CollectorCadenceText.Span(extensionMinutes)} has nothing here yet.")
             + (rows.Count == 0
                 ? string.Empty
-                : $"  {actionable} extension(s) this product can use are available on this server and NOT "
+                : $"  {CountText.Plural(actionable, "extension")} this product can use {(actionable == 1 ? "is" : "are")} available on this server and NOT "
                   + "installed — each is one CREATE EXTENSION away."
                   + (outdated > 0
-                      ? $"  {outdated} are installed but behind the version the server offers, which is worth "
+                      ? $"  {outdated} {(outdated == 1 ? "is" : "are")} installed but behind the version the server offers, which is worth "
                         + "fixing with ALTER EXTENSION … UPDATE: a stale extension can be missing columns a "
                         + "collector reads, and that surfaces as a confusing error rather than as a gap."
                       : string.Empty)
@@ -384,7 +384,7 @@ public partial class ViewerServerTab
         PgExtensionCensusNote.Text = rows.Count == 0
             ? "Extension Install Census: nothing is created on this server beyond what PostgreSQL installs itself, or the inventory has not been collected yet. "
               + "This census counts only extensions somebody created; the available-but-absent ones are the actionable rows in the grid above."
-            : $"Extension Install Census: {rows.Count} extension(s) created on this server, one row each, counted across all {census[0].DatabasesTotal:N0} database(s). "
+            : $"Extension Install Census: {CountText.Plural(rows.Count, "extension")} created on this server, one row each, counted across all {CountText.Plural(census[0].DatabasesTotal, "database")}. "
               + "No row limit touches it.";
     }
 
@@ -480,12 +480,14 @@ public partial class ViewerServerTab
 
         var off = audit.Facets.Where(f => f.Verdict == DarlingPgLoggingAudit.Off).Select(f => f.Setting).ToList();
         var unknown = audit.Facets.Where(f => f.Verdict == DarlingPgLoggingAudit.Unknown).Select(f => f.Setting).ToList();
+        var instrumented = audit.Facets.Count(f => f.Verdict == DarlingPgLoggingAudit.Instrumented);
+        var partial = audit.Facets.Count(f => f.Verdict == DarlingPgLoggingAudit.Partial);
         PgLoggingAuditNote.Text =
             $"From the newest configuration snapshot ({PgDisplay.SnapshotTime(audit.CapturedAt)}), not the live server. "
-            + $"{audit.Facets.Count(f => f.Verdict == DarlingPgLoggingAudit.Instrumented)} setting(s) write every line "
-            + $"they can, {audit.Facets.Count(f => f.Verdict == DarlingPgLoggingAudit.Partial)} are partial (a threshold "
+            + $"{CountText.Plural(instrumented, "setting")} {(instrumented == 1 ? "writes" : "write")} every line "
+            + $"{(instrumented == 1 ? "it" : "they")} can, {partial} {(partial == 1 ? "is" : "are")} partial (a threshold "
             + "is filtering, which is the recommended posture for log_min_duration_statement), "
-            + $"{off.Count} are off and {unknown.Count} are not in the snapshot."
+            + $"{off.Count} {(off.Count == 1 ? "is" : "are")} off and {unknown.Count} {(unknown.Count == 1 ? "is" : "are")} not in the snapshot."
             + (off.Count > 0 ? "  Off: " + string.Join(", ", off) + "." : string.Empty)
             + (unknown.Count > 0 ? "  Not in the snapshot: " + string.Join(", ", unknown) + "." : string.Empty);
     }
@@ -508,7 +510,7 @@ public partial class ViewerServerTab
             var text = detail.Count == 0
                 ? "No wait graph is stored for this deadlock any more: a report can age out of retention while its row is still on screen."
                 : $"Deadlock at {PgDisplay.SnapshotTime(detail[0].OccurredAtUtc)}, victim PID {detail[0].VictimPid}, "
-                  + $"{detail[0].ParticipantCount} session(s)\n\n{detail[0].GraphText}";
+                  + $"{CountText.Plural(detail[0].ParticipantCount, "session")}\n\n{detail[0].GraphText}";
 
             var window = new Window
             {
@@ -571,10 +573,10 @@ public partial class ViewerServerTab
             "This collector runs HOURLY, so a server added in the last hour has nothing here yet.")
             + (chosen.Count == 0
                 ? string.Empty
-                : $"  {chosen.Count} setting(s) differ from the compiled-in default; the rest are omitted "
+                : $"  {CountText.Plural(chosen.Count, "setting")} {(chosen.Count == 1 ? "differs" : "differ")} from the compiled-in default; the rest are omitted "
                   + "rather than truncated.")
             + (pendingRestart.Count > 0
-                ? $"  {pendingRestart.Count} setting(s) are PENDING RESTART — "
+                ? $"  {CountText.Plural(pendingRestart.Count, "setting")} {(pendingRestart.Count == 1 ? "is" : "are")} PENDING RESTART — "
                   + string.Join(", ", pendingRestart)
                   + " — meaning the configuration file has been changed and reloaded but the running "
                   + "server is still using the previous value. The file and the server disagree until the "
@@ -820,7 +822,7 @@ public partial class ViewerServerTab
 
         return new PanelNoteText(
             $"{queuedCount:N0} lock {(queuedCount == 1 ? "queue" : "queues")} across {totalCaptures:N0} captures.",
-            $"{queuedCount:N0} lock queue(s) across {totalCaptures:N0} captures. These are SAMPLES, "
+            $"{CountText.Plural(queuedCount, "lock queue")} across {CountText.Plural(totalCaptures, "capture")}. These are SAMPLES, "
             + "so the capture columns are the denominator: a queue seen once in 60 captures is a blip, "
             + "and one seen in 55 is a standing problem. The Mode column decides the remedy — an "
             + "ungranted AccessExclusiveLock is a DDL everything else is queued behind. A blank "
@@ -920,7 +922,7 @@ public partial class ViewerServerTab
                 + "pg_stat_kcache is not installed - the Extensions panel says whether it is available "
                 + "here. Where it IS installed, this separates a query that was WAITING from one that "
                 + "was burning processor, which elapsed time alone cannot do.")
-            : new PanelNoteText($"{rows.Count:N0} statement(s) by OS CPU. Read bytes are I/O that reached the DEVICE, so "
+            : new PanelNoteText($"{CountText.Plural(rows.Count, "statement")} by OS CPU. Read bytes are I/O that reached the DEVICE, so "
               + "zero with high CPU is a cached workload behaving well rather than a missing "
               + "measurement. Query ID joins the statement grid above."
               + (reset
@@ -959,10 +961,10 @@ public partial class ViewerServerTab
                 + "DATABASE, so it may be installed in one database and not another - the Extensions "
                 + "panel says which. Note also that its sample_rate defaults to 1/max_connections, so a "
                 + "lightly-used database can genuinely record nothing.")
-            : new PanelNoteText($"{rows.Count:N0} predicate(s), sampled at {sampled:P2} of executions - these counts are a "
+            : new PanelNoteText($"{CountText.Plural(rows.Count, "predicate")}, sampled at {sampled:P2} of executions - these counts are a "
               + "SAMPLE, so a small number means the sampler fired rarely rather than the predicate "
               + "being rare. Filtered % with no supporting index is the index candidate. "
-              + $"{misestimated:N0} predicate(s) show an estimate error of 10x or worse, which is a "
+              + $"{CountText.Plural(misestimated, "predicate")} {(misestimated == 1 ? "shows" : "show")} an estimate error of 10x or worse, which is a "
               + "different problem: the planner does not understand that column, and an index will not "
               + "fix a plan built on a wrong row count.", null));
     }
@@ -1004,12 +1006,12 @@ public partial class ViewerServerTab
                 + "That read needs pg_read_server_files AND an explicit GRANT EXECUTE on pg_read_file; the "
                 + "role alone does not carry it. On Aurora and RDS there is no filesystem to read, so this "
                 + "panel stays empty by design.")
-            : new PanelNoteText($"{rows.Count:N0} plan shape(s), ranked by TOTAL time - a plan that takes 40ms constantly "
+            : new PanelNoteText($"{CountText.Plural(rows.Count, "plan shape")}, ranked by TOTAL time - a plan that takes 40ms constantly "
               + "costs more than one that took 900ms once. Captures counts how often the collector SAW "
               + "the plan, not how often it ran. Plan JSON is redacted at collection: query text is "
               + "dropped and literals are replaced, so nothing here carries customer values."
               + (orphans > 0
-                  ? $" {orphans:N0} plan(s) have no query id, so they cannot be joined to a statement. A zero id means "
+                  ? $" {CountText.Plural(orphans, "plan")} {(orphans == 1 ? "has" : "have")} no query id, so {(orphans == 1 ? "it" : "they")} cannot be joined to a statement. A zero id means "
                     + "compute_query_id is off, or the target logs to csvlog on PostgreSQL 13, whose csvlog has no query_id column."
                   : string.Empty), null));
     }
@@ -1438,15 +1440,15 @@ public partial class ViewerServerTab
               + "answer — pg_stat_replication is the primary-side view and reports nothing unless this "
               + "server is cascading to a downstream of its own. On a primary it means nothing is "
               + "replicating from it, which is either correct or the finding."
-            : $"{rows.Count:N0} standby connection(s). The worst any of them fell behind in this window was "
+            : $"{CountText.Plural(rows.Count, "standby connection")}. The worst {(rows.Count == 1 ? "it" : "any of them")} fell behind in this window was "
               + $"{worst:N0} bytes of unapplied WAL — that column, not the current one, is what catches a "
               + "replica that drifts far behind and recovers before anybody looks. Rank on BYTES rather than "
               + "the lag columns: measured against a stalled standby, the time lag read 2.8 seconds for a "
               + "33.7 MB backlog, because it times the round trip of the last replayed record rather than "
               + "sizing the backlog."
               + (flapping > 0
-                  ? $"  {flapping:N0} standby(s) appeared in fewer samples than were taken, which means they "
-                    + "have been DISCONNECTING — every other column shows that as healthy."
+                  ? $"  {CountText.Plural(flapping, "standby")} appeared in fewer samples than were taken, which means {(flapping == 1 ? "it has" : "they have")} "
+                    + "been DISCONNECTING — every other column shows that as healthy."
                   : string.Empty);
     }
 
@@ -1508,7 +1510,7 @@ public partial class ViewerServerTab
                     ? "Bloat figures are ESTIMATES computed from column-width statistics - the table itself "
                       + "is never read. Confirm one with pgstattuple before rewriting anything."
                     : $"Bloat figures are ESTIMATES computed from column-width statistics. {suppressed} of "
-                      + $"{bloatRows.Count} row(s) have NO publishable estimate and show a dash rather than "
+                      + $"{CountText.Plural(bloatRows.Count, "row")} {(suppressed == 1 ? "has" : "have")} NO publishable estimate and {(suppressed == 1 ? "shows" : "show")} a dash rather than "
                       + "a number - see the Confidence column. If most of them say 'no column statistics', "
                       + "the monitoring login cannot SELECT these tables: pg_stats is filtered by SELECT "
                       + "privilege and pg_monitor does not grant it, so granting pg_read_all_data "
@@ -1642,7 +1644,7 @@ public partial class ViewerServerTab
               + "covered, and when this does record it records EVERY btree at any size, which is why its "
               + "index count exceeds the usage panel's. " + coverage.Message
             : $"ESTIMATED from catalog statistics - no index page is read. About "
-              + $"{page.ReclaimableBytesShown:N0} bytes look reclaimable across {rows.Count:N0} index(es), "
+              + $"{page.ReclaimableBytesShown:N0} bytes look reclaimable across {CountText.Plural(rows.Count, "index", "indexes")}, "
               + "and the answered rows are ranked by that figure: a percentage ranks the wrong thing, "
               + "since a tiny index at 20% is worth kilobytes next to a large one at 70%. Measured against "
               + "pgstatindex ground truth, median absolute error is 2.79 percentage points and p90 is 6.63 "
@@ -1650,7 +1652,7 @@ public partial class ViewerServerTab
               + "its own. The Exact Measurement column carries the pgstatindex call for that; it walks "
               + "every page, so run it on the one index concerned rather than on a schedule."
               + (exactly > 0
-                  ? $"  {exactly:N0} row(s) are older EXACT measurements still inside retention rather "
+                  ? $"  {CountText.Plural(exactly, "row")} {(exactly == 1 ? "is an older EXACT measurement" : "are older EXACT measurements")} still inside retention rather "
                     + "than estimates - the Kind column says which, and Leaf Density is populated only on "
                     + "those. A blank density on an estimated row means the index was never walked, which "
                     + "is not the same as a walk that found no leaf pages."
@@ -1704,7 +1706,7 @@ public partial class ViewerServerTab
         PgColumnStatsNote.Text = rows.Count == 0
             ? "No column statistics were collected. That is NOT the same as clean statistics. "
               + coverage.Message
-            : $"Ranked by suspicion, not alphabetically. {skewed:N0} column(s) have a single value covering "
+            : $"Ranked by suspicion, not alphabetically. {CountText.Plural(skewed, "column")} {(skewed == 1 ? "has" : "have")} a single value covering "
               + "a quarter or more of the table, which is the PostgreSQL analogue of parameter sniffing: a "
               + "plan that suits most values is catastrophic for that one. Low correlation on a wide column "
               + "is the other shape, and it is why an index scan was rejected on a column that obviously "

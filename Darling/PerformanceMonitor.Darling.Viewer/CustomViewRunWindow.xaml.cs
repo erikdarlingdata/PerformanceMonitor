@@ -106,7 +106,7 @@ public partial class CustomViewRunWindow : Window
                 }
             }
 
-            RunStatus.Text = $"{items.Count(i => i.Kind == ViewerRunItemKind.Composed)} panel(s) run.";
+            RunStatus.Text = $"{CountText.Plural(items.Count(i => i.Kind == ViewerRunItemKind.Composed), "panel")} run.";
         }
         catch (OperationCanceledException)
         {

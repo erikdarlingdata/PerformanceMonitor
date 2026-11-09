@@ -38,7 +38,7 @@ public sealed class ViewerPgWaitSamplingSummaryTests
         var rows = new List<DarlingPgWaitSamplingReader.PgWaitSamplingRow> { Row(null), Row(null), Row(null) };
 
         Assert.Equal(0, PgDisplay.WaitSamplingAttributedCount(rows));
-        Assert.StartsWith("3 wait event(s), 0 attributed to a query.",
+        Assert.StartsWith("3 wait events, 0 attributed to a query.",
             PgDisplay.WaitSamplingSummary(rows, serviceTier: true, instrumentKnown: true, "every 5 minutes", reset: false),
             StringComparison.Ordinal);
     }

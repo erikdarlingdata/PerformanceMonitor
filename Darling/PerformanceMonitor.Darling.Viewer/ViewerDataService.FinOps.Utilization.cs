@@ -67,8 +67,9 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// The zone the FinOps day tables count <paramref name="serverId"/>'s days in: the selected time display on that server's clock (its
-    /// collected clock, else the viewer machine's offset), the rule the Application Connections rows read their times by.
+    /// The zone the FinOps day tables and the Object Growth heatmap count <paramref name="serverId"/>'s days in: the selected time display
+    /// on that server's clock (its collected clock, else the viewer machine's offset), the rule the Application Connections rows read
+    /// their times by.
     /// </summary>
     internal async Task<TimeZoneInfo> DisplayDayZoneAsync(int serverId, CancellationToken cancellationToken = default) =>
         ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, await GetServerClockOrMachineAsync(serverId, cancellationToken));

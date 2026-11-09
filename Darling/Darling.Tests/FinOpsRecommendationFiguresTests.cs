@@ -216,7 +216,7 @@ public sealed class FinOpsRecommendationFiguresTests
         InEnUs(() =>
         {
             var two = FinOpsRecommendationFigures.Dormant(Idle(2, 1536m), 0m, 0m)!;
-            Assert.Equal("2 idle database(s) consuming 3.0GB", two.Finding);
+            Assert.Equal("2 idle databases consuming 3.0GB", two.Finding);
             Assert.Equal("Medium", two.Severity);
             Assert.Equal("High", two.Confidence);
             Assert.Equal("Databases", two.Category);
@@ -251,7 +251,7 @@ public sealed class FinOpsRecommendationFiguresTests
         {
             var names = Enumerable.Range(1, 11).Select(i => $"dev{i}").ToList();
             var row = FinOpsRecommendationFigures.DevTest(names)!;
-            Assert.Equal("11 possible dev/test database(s) on production server", row.Finding);
+            Assert.Equal("11 possible dev/test databases on production server", row.Finding);
             Assert.Equal("Databases matching dev/test patterns: dev1, dev2, dev3, dev4, dev5, dev6, dev7, dev8, dev9, dev10 and 1 more" +
                          ". If these are non-production workloads, consider moving to a lower-cost tier or separate server.", row.Detail);
             Assert.Equal("Environment", row.Category);

@@ -162,7 +162,7 @@
   "alert_cooldown_minutes": 5,          // clamped 1-120
   "email_cooldown_minutes": 15,         // clamped 1-120
   "alert_delivery_mode": "Summary",     // "Summary" (one digest) or "PerEvent"
-  "alert_per_event_max_per_cycle": 10,  // PerEvent only; clamped 1-100
+  "alert_per_event_max_per_cycle": 5,   // PerEvent only; clamped 1-100
 
   // ---- Mute rules and dismissals -------------------------------------------------------------
   // Anything other than the four listed strings is ignored and the default kept.

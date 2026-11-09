@@ -102,7 +102,7 @@ public sealed class PgStatementEvictionNoteTests
         var note = PgStatementEvictionNote.Build(new DarlingPgStatementReader.PgEvictionInfo(true, 5, 5000));
 
         Assert.NotNull(note);
-        Assert.Contains("evicted entries 5 time(s)", note, StringComparison.Ordinal);
+        Assert.Contains("evicted entries 5 times", note, StringComparison.Ordinal);
         Assert.Contains("currently 5000", note, StringComparison.Ordinal);
     }
 
@@ -112,7 +112,7 @@ public sealed class PgStatementEvictionNoteTests
         var note = PgStatementEvictionNote.Build(new DarlingPgStatementReader.PgEvictionInfo(true, 2, null));
 
         Assert.NotNull(note);
-        Assert.Contains("evicted entries 2 time(s)", note, StringComparison.Ordinal);
+        Assert.Contains("evicted entries 2 times", note, StringComparison.Ordinal);
         Assert.DoesNotContain("currently", note, StringComparison.Ordinal);
     }
 

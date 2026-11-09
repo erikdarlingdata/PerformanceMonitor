@@ -165,7 +165,9 @@ public partial class FinOpsTab
     private async Task LoadFinOpsObjectGrowthAsync(string databaseName)
     {
         var days = GetFinOpsObjectHeatmapDaysBack();
-        var (objects, samples) = await _dataService.GetObjectGrowthHeatmapDataAsync(_server.ServerId, databaseName, days);
+        /* The heatmap's columns are days of the selected time display on this server's clock, the days the FinOps day tables count. */
+        var dayZone = await _dataService.DisplayDayZoneAsync(_server.ServerId);
+        var (objects, samples) = await _dataService.GetObjectGrowthHeatmapDataAsync(_server.ServerId, databaseName, dayZone, days);
 
         /* One canonical, deterministic top-of-chart-first ranking drives BOTH the companion grid and the
            heatmap rows, so they can never disagree (and stay identical across Dashboard/Lite). */

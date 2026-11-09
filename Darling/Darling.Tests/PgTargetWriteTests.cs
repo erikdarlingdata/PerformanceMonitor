@@ -887,7 +887,7 @@ public sealed class PgTargetWriteTests
         var restarted = Pressure(0.6, 10);
         restarted.Metadata["postmaster_restart_count"] = 2;
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(restarted))!;
-        Assert.Contains("PostgreSQL restarted 2 time(s) inside the window; a shutdown checkpoint counts as requested and its own write and sync phases land in the same counters", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("PostgreSQL restarted 2 times inside the window; a shutdown checkpoint counts as requested and its own write and sync phases land in the same counters", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("left out of the requested count and the checkpoint write and sync time rather than read as WAL pressure", block.Investigation, StringComparison.Ordinal);
 
         var steady = Pressure(0.6, 10);

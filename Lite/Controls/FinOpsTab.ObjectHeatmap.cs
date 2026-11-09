@@ -140,7 +140,9 @@ public partial class FinOpsTab : UserControl
         try
         {
             var days = GetObjectHeatmapDaysBack();
-            var (objects, samples) = await Task.Run(() => _dataService.GetObjectGrowthHeatmapDataAsync(serverId, databaseName, days));
+            /* The heatmap's columns are days of the selected time display on the selected server's clock, the days the FinOps day tables count. */
+            var dayZone = await SelectedServerDayZoneAsync(serverId);
+            var (objects, samples) = await Task.Run(() => _dataService.GetObjectGrowthHeatmapDataAsync(serverId, databaseName, days, dayZone: dayZone));
             if (_loads.Superseded(nameof(LoadObjectGrowthAsync), gen)) return;
 
             // One canonical, deterministic top-of-chart-first ranking drives BOTH the companion grid and
