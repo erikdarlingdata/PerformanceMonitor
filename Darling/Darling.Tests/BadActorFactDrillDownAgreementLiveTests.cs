@@ -21,15 +21,15 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #8403: the BAD_ACTOR fact and its <c>bad_actor_query</c> drill-down state the same per-execution averages
-/// for the same database, hash, window and execution count. A snapshot in which a long execution accrued CPU
-/// and reads but no execution completed has <c>delta_execution_count</c> 0; the drill-down sums that
-/// snapshot's work into the query's totals, and the fact must count the same rows, or the finding's headline
+/// for the same database, hash, window and execution count. The store holds <c>query_stats</c> rows whose
+/// <c>delta_execution_count</c> is 0 while <c>delta_worker_time</c> and <c>delta_logical_reads</c> are not; the
+/// drill-down sums them into the query's totals, and the fact must count the same rows, or the finding's headline
 /// average sits under the drill-down printed beside it.
 ///
-/// <para>The fixture is one hash in one database: a snapshot with 1,000 completions at 500 ms CPU and 100,000
-/// reads each, then a snapshot with no completion and 300 s of CPU and 50 M reads. Over the window the query
+/// <para>The fixture is one hash in one database: a row with 1,000 executions at 500 ms CPU and 100,000 reads
+/// each, then a row with a zero execution delta carrying 300 s of CPU and 50 M reads. Over the window the query
 /// did 800 s of CPU and 150 M reads across 1,000 executions: 800 ms and 150,000 reads each. A second hash
-/// whose only rows carry no completions stays below the fact's execution bar.</para>
+/// whose only row has a zero execution delta stays below the fact's execution bar.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class BadActorFactDrillDownAgreementLiveTests
@@ -45,13 +45,13 @@ public sealed class BadActorFactDrillDownAgreementLiveTests
     private const long Executions = 1_000L;
     private const long CompletedCpuUs = 500_000_000L;
     private const long CompletedReads = 100_000_000L;
-    private const long InFlightCpuUs = 300_000_000L;
-    private const long InFlightReads = 50_000_000L;
+    private const long ZeroExecutionCpuUs = 300_000_000L;
+    private const long ZeroExecutionReads = 50_000_000L;
 
-    private const double ExpectedAvgCpuMs = (CompletedCpuUs + InFlightCpuUs) / (double)Executions / 1000.0;
-    private const double ExpectedAvgReads = (CompletedReads + InFlightReads) / (double)Executions;
-    private const long ExpectedTotalCpuUs = CompletedCpuUs + InFlightCpuUs;
-    private const long ExpectedTotalReads = CompletedReads + InFlightReads;
+    private const double ExpectedAvgCpuMs = (CompletedCpuUs + ZeroExecutionCpuUs) / (double)Executions / 1000.0;
+    private const double ExpectedAvgReads = (CompletedReads + ZeroExecutionReads) / (double)Executions;
+    private const long ExpectedTotalCpuUs = CompletedCpuUs + ZeroExecutionCpuUs;
+    private const long ExpectedTotalReads = CompletedReads + ZeroExecutionReads;
 
     private static DateTime TruncateToSeconds(DateTime t) =>
         DateTime.SpecifyKind(new DateTime(t.Ticks - (t.Ticks % TimeSpan.TicksPerSecond)), DateTimeKind.Unspecified);
@@ -125,8 +125,8 @@ VALUES
     }
 
     /// <summary>
-    /// Migrates, clears the test server's rows, seeds the completed snapshot, the completion-less snapshot and
-    /// the completion-less-only hash, then runs <paramref name="body"/> over a four-hour window.
+    /// Migrates, clears the test server's rows, seeds the executions row, the zero-execution row and the hash
+    /// whose only row has a zero execution delta, then runs <paramref name="body"/> over a four-hour window.
     /// </summary>
     private static async Task RunSeededAsync(Func<string, AnalysisContext, Task> body)
     {
@@ -163,11 +163,11 @@ VALUES
 
             await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
             {
-                /* The snapshot in which the executions completed, then the one in which a long execution ran
-                   on without completing. */
+                /* The row carrying the executions, then a row whose execution delta is 0 while its CPU and reads
+                   deltas are not. */
                 await SeedAsync(connection, Hash, periodEnd.AddMinutes(-30), Executions, CompletedCpuUs, CompletedReads, ct);
-                await SeedAsync(connection, Hash, periodEnd.AddMinutes(-20), 0L, InFlightCpuUs, InFlightReads, ct);
-                /* A hash that never completed in the window: 600 s of CPU, no executions. */
+                await SeedAsync(connection, Hash, periodEnd.AddMinutes(-20), 0L, ZeroExecutionCpuUs, ZeroExecutionReads, ct);
+                /* A hash whose only row has a zero execution delta: 600 s of CPU, no executions. */
                 await SeedAsync(connection, NoCompletionHash, periodEnd.AddMinutes(-20), 0L, 600_000_000L, 1_000_000L, ct);
             }
 

@@ -37,10 +37,10 @@ public partial class DuckDbFactCollector
             await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
-            /* #8403: every row of the window counts, including a snapshot in which a long execution accrued CPU and reads
-               but no execution completed (delta_execution_count 0). The BAD_ACTOR drill-down sums the same rows, so the
-               finding's headline average and the drill-down beside it describe the same work. The execution bar in HAVING
-               still gates on completions, and the ordering guards its divisor. */
+            /* #8403: every row of the window counts, including a row whose execution delta is 0 while its CPU and reads
+               deltas are not. The store holds such rows, and the BAD_ACTOR drill-down and the totals already sum them, so
+               the fact sums the same rows and the finding's headline average and the drill-down beside it describe the
+               same work. The execution bar in HAVING still gates on the execution sum, and the ordering guards its divisor. */
             cmd.CommandText = @"
 SELECT
     database_name,
