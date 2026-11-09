@@ -356,7 +356,7 @@ public sealed class PgIndexBloatGridReachTests
             Assert.Contains(
                 N(answerlessInGrid) + (answerlessInGrid == 1 ? " index" : " indexes") + " with NO answer", prose, StringComparison.Ordinal);
             Assert.Contains(
-                N(answeredInGrid) + (answeredInGrid == 1 ? " answered index" : " answered indexes") + " behind them", prose, StringComparison.Ordinal);
+                N(answeredInGrid) + (answeredInGrid == 1 ? " answered index" : " answered indexes") + " behind " + (answerlessInGrid == 1 ? "it" : "them") + " ranked by reclaimable bytes", prose, StringComparison.Ordinal);
 
             /* CLOSED: no other number may appear. Each permitted figure is either a count of the grid, a
                count of a READ that the sentence labels as one, or the cap the grid was given.
@@ -408,6 +408,26 @@ public sealed class PgIndexBloatGridReachTests
                     "CUT at " + N(answerlessInGrid) + " of the ", prose, StringComparison.Ordinal);
             }
         }
+    }
+
+    /// <summary>One answerless index and one answered index past the grid: the prose says "behind it", "ranks below" and
+    /// "is not in the grid", where the many-case says "behind them", "rank below" and "are not in the grid".</summary>
+    [Fact]
+    public void TheProseReadsSingular_ForOneAnswerlessIndexAndOneAnsweredIndexPastTheGrid()
+    {
+        var cap = ViewerRowCap();
+        var (leading, answered) = Reads(1, cap, cap);
+        var page = Compose(leading, answered, cap);
+
+        Assert.Equal(1, page.AnswerlessShown);
+        Assert.Equal(cap - 1, page.AnsweredShown);
+        Assert.Equal(1, page.AnsweredNotShown);
+        Assert.Contains(
+            "THIS GRID holds 1 index with NO answer, listed first, and " + N(cap - 1) + " answered indexes behind it ranked by reclaimable bytes",
+            page.Composition, StringComparison.Ordinal);
+        Assert.Contains(
+            "1 further answered index this read returned ranks below the ones shown and is not in the grid.",
+            page.Composition, StringComparison.Ordinal);
     }
 
     /// <summary>

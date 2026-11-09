@@ -1446,8 +1446,8 @@ public partial class ViewerServerTab
               + "33.7 MB backlog, because it times the round trip of the last replayed record rather than "
               + "sizing the backlog."
               + (flapping > 0
-                  ? $"  {CountText.Plural(flapping, "standby")} appeared in fewer samples than were taken, which means {(flapping == 1 ? "it" : "they")} "
-                    + "have been DISCONNECTING — every other column shows that as healthy."
+                  ? $"  {CountText.Plural(flapping, "standby")} appeared in fewer samples than were taken, which means {(flapping == 1 ? "it has" : "they have")} "
+                    + "been DISCONNECTING — every other column shows that as healthy."
                   : string.Empty);
     }
 
@@ -1509,7 +1509,7 @@ public partial class ViewerServerTab
                     ? "Bloat figures are ESTIMATES computed from column-width statistics - the table itself "
                       + "is never read. Confirm one with pgstattuple before rewriting anything."
                     : $"Bloat figures are ESTIMATES computed from column-width statistics. {suppressed} of "
-                      + $"{CountText.Plural(bloatRows.Count, "row")} {(bloatRows.Count == 1 ? "has" : "have")} NO publishable estimate and {(bloatRows.Count == 1 ? "shows" : "show")} a dash rather than "
+                      + $"{CountText.Plural(bloatRows.Count, "row")} {(suppressed == 1 ? "has" : "have")} NO publishable estimate and {(suppressed == 1 ? "shows" : "show")} a dash rather than "
                       + "a number - see the Confidence column. If most of them say 'no column statistics', "
                       + "the monitoring login cannot SELECT these tables: pg_stats is filtered by SELECT "
                       + "privilege and pg_monitor does not grant it, so granting pg_read_all_data "

@@ -103,7 +103,7 @@ public readonly record struct PgIndexBloatGridPage<TRow>(
         string.Create(
             CultureInfo.InvariantCulture,
             $"THIS GRID holds {CountText.Plural(AnswerlessShown, "index", "indexes")} with NO answer, listed first, and "
-            + $"{CountText.Plural(AnsweredShown, "answered index", "answered indexes")} behind them ranked by reclaimable bytes. Those are "
+            + $"{CountText.Plural(AnsweredShown, "answered index", "answered indexes")} behind {(AnswerlessShown == 1 ? "it" : "them")} ranked by reclaimable bytes. Those are "
             + $"counts of the grid and not of the server - the census above is the population, and this "
             + $"grid is two capped reads of it.")
         + (TheLeadWasTruncatedForTheAnswers
@@ -120,7 +120,7 @@ public readonly record struct PgIndexBloatGridPage<TRow>(
             ? string.Create(
                 CultureInfo.InvariantCulture,
                 $"  {CountText.Plural(AnsweredNotShown, "further answered index", "further answered indexes")} this read returned {(AnsweredNotShown == 1 ? "ranks" : "rank")} below the "
-                + $"ones shown and are not in the grid.")
+                + $"ones shown and {(AnsweredNotShown == 1 ? "is" : "are")} not in the grid.")
             : string.Empty);
 }
 

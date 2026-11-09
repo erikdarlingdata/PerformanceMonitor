@@ -52,8 +52,12 @@ public sealed class NoDatabaseAccessNoteTests
         var note = EnumeratedCollectorDriver.BuildNote(false, new[] { NoAccess("Sales") }, awsRds: true);
 
         Assert.NotNull(note);
-        Assert.Contains("give the monitoring login a user in each of them", note);
+        Assert.Contains("give the monitoring login a user in it", note);
         Assert.Contains("1 online user database", note);
+
+        var two = EnumeratedCollectorDriver.BuildNote(false, new[] { NoAccess("Sales"), NoAccess("Billing") }, awsRds: true);
+        Assert.Contains("2 online user databases not collected", two);
+        Assert.Contains("so nothing was collected from them. Amazon RDS has no CONNECT ANY DATABASE, so give the monitoring login a user in each of them", two);
     }
 
     [Fact]
@@ -95,7 +99,7 @@ public sealed class NoDatabaseAccessNoteTests
         Assert.Equal(new[] { "Open" }, outcome.Items);
         Assert.Single(outcome.ProbeFailures);
         Assert.Contains("Locked", outcome.Note);
-        Assert.Contains("give the monitoring login a user in each of them", outcome.Note);
+        Assert.Contains("give the monitoring login a user in it", outcome.Note);
     }
 
     [Fact]

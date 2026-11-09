@@ -328,7 +328,7 @@ public partial class DatabaseStateOverridesWindow : Window
                    mark them as no longer changed, so the retry writes only the rest. */
                 var outcome = saved == 0
                     ? "nothing was changed"
-                    : $"{saved} of {CountText.Plural(changed.Count, "change")} {(changed.Count == 1 ? "was" : "were")} saved and the rest were not";
+                    : $"{saved} of {CountText.Plural(changed.Count, "change")} {(saved == 1 ? "was" : "were")} saved and the rest were not";
                 StatusText.Text = StoreBusyReport.Report("DatabaseStates", "Save database state overrides", ex, "saving the overrides", outcome);
             }
         }

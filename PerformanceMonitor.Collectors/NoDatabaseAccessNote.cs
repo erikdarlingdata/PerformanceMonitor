@@ -184,7 +184,7 @@ ORDER BY
             $"{CountText.Plural(databases.Count, "online user database")} not collected: the monitoring login has no user in {named}, so nothing was collected from {(databases.Count == 1 ? "it" : "them")}");
 
         return awsRds
-            ? text + ". Amazon RDS has no CONNECT ANY DATABASE, so give the monitoring login a user in each of them"
+            ? text + $". Amazon RDS has no CONNECT ANY DATABASE, so give the monitoring login a user in {(databases.Count == 1 ? "it" : "each of them")}"
             : text;
     }
 }

@@ -1034,7 +1034,7 @@ public partial class MainWindow
             var message = registrySaved
                 ? $"Imported {CountText.Plural(imported, "server definition")}."
                 : $"Read {CountText.Plural(imported, "server definition")}, but {(imported == 1 ? "it" : "they")} could not be saved to "
-                  + $"{Path.GetFileName(ViewerServerStore.DefaultFilePath())} — see the viewer log. They will "
+                  + $"{Path.GetFileName(ViewerServerStore.DefaultFilePath())} — see the viewer log. {(imported == 1 ? "It" : "They")} will "
                   + "not be there on the next launch.";
             if (skipped > 0)
             {
