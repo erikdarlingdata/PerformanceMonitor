@@ -46,12 +46,7 @@ public sealed class OverviewFleetHealthSingleFlightLiveTests
     public Task ConcurrentOverviewCards_ShareOneFleetWideRead_NotOnePerCard()
         => ConcurrentCardsAsync(forcePass: false);
 
-    /// <summary>The same run with an eviction pass forced between the racers and the count: the count is of the read the racers shared.</summary>
-    [Fact]
-    public Task ConcurrentOverviewCards_ShareOneFleetWideRead_NotOnePerCard_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
-        => ConcurrentCardsAsync(forcePass: true);
-
-    private async Task ConcurrentCardsAsync(bool forcePass)
+    internal async Task ConcurrentCardsAsync(bool forcePass)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live Overview fleet-health single-flight test.");
@@ -215,4 +210,18 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", connection);
         command.Parameters.AddWithValue(5);
         await command.ExecuteNonQueryAsync(ct);
     }
+}
+
+/* pg-cluster-roles, not the parallel own-store shape: the fact fills pg_stat_statements until eviction passes have taken the
+   body's own entries, on purpose, and in the parallel collections those passes take the other sessions' entries run once
+   as well. The collection runs alone, after the parallel collections, so the fill takes nobody else's entries. The body
+   is the one OverviewFleetHealthSingleFlightLiveTests runs without the forced pass, and it mints its own scratch database. */
+
+/// <summary>The forcing run of <see cref="OverviewFleetHealthSingleFlightLiveTests"/>'s counting body: an eviction pass between the racers and the count, and the count is still of the one read they shared.</summary>
+[Collection("pg-cluster-roles")]
+public sealed class OverviewFleetHealthSingleFlightForcedPassLiveTests
+{
+    [Fact]
+    public Task ConcurrentOverviewCards_ShareOneFleetWideRead_NotOnePerCard_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => new OverviewFleetHealthSingleFlightLiveTests().ConcurrentCardsAsync(forcePass: true);
 }

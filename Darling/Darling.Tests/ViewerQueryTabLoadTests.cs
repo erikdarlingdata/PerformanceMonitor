@@ -403,12 +403,7 @@ public sealed class ViewerQueryTabLoadTests
     public Task HourlyTextLookup_IsOneStatement_ForAnyNumberOfRows_AndAnswersEachRowsOwnText()
         => HourlyTextLookupIsOneStatementAsync(forcePass: false);
 
-    /// <summary>The same run with an eviction pass forced between the lookup and the count: the count is of the statement the lookup ran.</summary>
-    [Fact]
-    public Task HourlyTextLookup_IsOneStatement_ForAnyNumberOfRows_AndAnswersEachRowsOwnText_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
-        => HourlyTextLookupIsOneStatementAsync(forcePass: true);
-
-    private async Task HourlyTextLookupIsOneStatementAsync(bool forcePass)
+    internal async Task HourlyTextLookupIsOneStatementAsync(bool forcePass)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the live query-tab load pins.");
         var ct = TestContext.Current.CancellationToken;
@@ -542,12 +537,7 @@ FROM (VALUES
     public Task StatusBarStoreSize_MeasuresTheLiveDirectoryOnce_WhenNoSizeIsRecorded()
         => StatusBarMeasuresOnceAsync(forcePass: false);
 
-    /// <summary>The same run with an eviction pass forced between the size read and the count: the count is of the walk the read made.</summary>
-    [Fact]
-    public Task StatusBarStoreSize_MeasuresTheLiveDirectoryOnce_WhenNoSizeIsRecorded_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
-        => StatusBarMeasuresOnceAsync(forcePass: true);
-
-    private async Task StatusBarMeasuresOnceAsync(bool forcePass)
+    internal async Task StatusBarMeasuresOnceAsync(bool forcePass)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the live query-tab load pins.");
         var ct = TestContext.Current.CancellationToken;
@@ -625,4 +615,22 @@ FROM (VALUES
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
         }
     }
+}
+
+/* pg-cluster-roles, not the parallel own-store shape: the fact fills pg_stat_statements until eviction passes have taken the
+   body's own entries, on purpose, and in the parallel collections those passes take the other sessions' entries run once
+   as well. The collection runs alone, after the parallel collections, so the fill takes nobody else's entries. The body
+   is the one ViewerQueryTabLoadTests runs without the forced pass, and it mints its own scratch database. */
+
+/// <summary>The forcing run of <see cref="ViewerQueryTabLoadTests"/>'s counting body: an eviction pass between the statements and the count, and the count is still of the calls the statements made.</summary>
+[Collection("pg-cluster-roles")]
+public sealed class ViewerQueryTabLoadForcedPassLiveTests
+{
+    [Fact]
+    public Task HourlyTextLookup_IsOneStatement_ForAnyNumberOfRows_AndAnswersEachRowsOwnText_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => new ViewerQueryTabLoadTests().HourlyTextLookupIsOneStatementAsync(forcePass: true);
+
+    [Fact]
+    public Task StatusBarStoreSize_MeasuresTheLiveDirectoryOnce_WhenNoSizeIsRecorded_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => new ViewerQueryTabLoadTests().StatusBarMeasuresOnceAsync(forcePass: true);
 }

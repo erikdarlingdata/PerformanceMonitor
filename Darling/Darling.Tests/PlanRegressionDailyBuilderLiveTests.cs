@@ -462,12 +462,7 @@ ANALYZE collect.plan_regression_daily_built;", ct);
     public Task TheGc_ProbesTheTotalsByIndex_NeverScansThem_AndRemovesExpiredDaysWhileLiveDaysStay()
         => GcProbesTheTotalsAsync(forcePass: false);
 
-    /// <summary>The same run with an eviction pass forced between the cleanup and its count: the count is of the deletes the cleanup ran.</summary>
-    [Fact]
-    public Task TheGc_ProbesTheTotalsByIndex_NeverScansThem_AndRemovesExpiredDaysWhileLiveDaysStay_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
-        => GcProbesTheTotalsAsync(forcePass: true);
-
-    private async Task GcProbesTheTotalsAsync(bool forcePass)
+    internal async Task GcProbesTheTotalsAsync(bool forcePass)
     {
         await RunLiveAsync(async (scratch, connection, ct) =>
         {
@@ -753,4 +748,18 @@ AND   query ~ '^DELETE FROM collect\.plan_regression_daily(\s|$)';", connection)
 
         return string.Empty;
     }
+}
+
+/* pg-cluster-roles, not the parallel own-store shape: the fact fills pg_stat_statements until eviction passes have taken the
+   body's own entries, on purpose, and in the parallel collections those passes take the other sessions' entries run once
+   as well. The collection runs alone, after the parallel collections, so the fill takes nobody else's entries. The body
+   is the one PlanRegressionDailyBuilderLiveTests runs without the forced pass, and it mints its own scratch database. */
+
+/// <summary>The forcing run of <see cref="PlanRegressionDailyBuilderLiveTests"/>'s counting body: an eviction pass between the cleanup and the count, and the count is still of the delete the cleanup ran.</summary>
+[Collection("pg-cluster-roles")]
+public sealed class PlanRegressionDailyBuilderForcedPassLiveTests
+{
+    [Fact]
+    public Task TheGc_ProbesTheTotalsByIndex_NeverScansThem_AndRemovesExpiredDaysWhileLiveDaysStay_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => new PlanRegressionDailyBuilderLiveTests().GcProbesTheTotalsAsync(forcePass: true);
 }

@@ -171,6 +171,127 @@ public sealed class PgStatementTableLiveTests
         return (int)(await read.ExecuteScalarAsync(ct))!;
     }
 
+    /// <summary>
+    /// With <c>callsAtMost</c> 2, <see cref="PgStatementTable.ForcePassAsync"/> takes the entries run at most twice in the
+    /// connection's database: the fill's shapes run three times, so they sort above an entry run twice, and the fill goes on
+    /// until no entry run once or twice is left. A fill that takes the entries run once only stops while the body's entry
+    /// run twice is in place, among the fill's own shapes.
+    /// </summary>
+    [Fact]
+    public async Task TheForcedPass_TakesTheDatabasesEntriesRunTwice_WhenAskedForTheEntriesRunAtMostTwice()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the statement table test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        /* #1776 own-store: CREATE EXTENSION would leave residue in the shared store; two scratch databases of its own go with it. */
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct, emptyStore: true);
+        await using var other = await ScratchPostgres.CreateAsync(cs!, ct, emptyStore: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var competitor = new NpgsqlConnection(other.ConnectionString);
+        await competitor.OpenAsync(ct);
+        try
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements");
+            await DarlingMcpTestData.ExecAsync(connection, ct, "SELECT pg_stat_statements_reset()");
+        }
+        catch (PostgresException ex) when (ex.SqlState is "55000" or "58P01" or "0A000" or "42501")
+        {
+            Assert.Skip("pg_stat_statements is not available on this server: " + ex.Message);
+        }
+
+        /* Six passes' worth of entries run once in the other database: the passes a fill that takes the entries run once
+           brings on take these, never the entries run twice. */
+        var max = await PgStatementTable.MaxEntriesAsync(connection, ct);
+        var next = 0;
+        for (; next < 6 * (max * 5 / 100);)
+        {
+            await DarlingMcpTestData.ExecAsync(competitor, ct, CompetitorBatch(ref next));
+        }
+
+        await DarlingMcpTestData.ExecAsync(connection, ct, "SELECT 843201 + 1 AS pm8432_twice");
+        await DarlingMcpTestData.ExecAsync(connection, ct, "SELECT 843201 + 1 AS pm8432_twice");
+        await PgStatementTable.ForcePassAsync(connection, ct, callsAtMost: 2);
+
+        Assert.True(await MarkedEntriesAsync(connection, "pm8432_twice", ct) == 0, "the forced pass left the body's entry run twice in place.");
+    }
+
+    /// <summary>
+    /// With <c>database</c> named, <see cref="PgStatementTable.ForcePassAsync"/> reads back the entries of that database, so a
+    /// body whose statements run in a database other than the one the counter is read from gets its own entries taken. A
+    /// fill that reads back the counter's own database stops at its first pass when that database has nothing run once, and
+    /// the body's entry, run once since the last pass, sorts above the entries run once before it and stays.
+    /// </summary>
+    [Fact]
+    public async Task TheForcedPass_TakesTheNamedDatabasesEntries_WhenTheBodysStatementsRunInAnotherDatabaseThanTheCounter()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the statement table test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        /* #1776 own-store: CREATE EXTENSION would leave residue in the shared store; three scratch databases of its own go with
+           it: the counter's, the body's and the competitors'. */
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct, emptyStore: true);
+        await using var bodyDb = await ScratchPostgres.CreateAsync(cs!, ct, emptyStore: true);
+        await using var other = await ScratchPostgres.CreateAsync(cs!, ct, emptyStore: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var again = new NpgsqlConnection(scratch.ConnectionString);
+        await again.OpenAsync(ct);
+        await using var body = new NpgsqlConnection(bodyDb.ConnectionString);
+        await body.OpenAsync(ct);
+        await using var competitor = new NpgsqlConnection(other.ConnectionString);
+        await competitor.OpenAsync(ct);
+        try
+        {
+            /* Twice each, so the counter's database has no entry run once of its own: what the fill reads back must then be
+               the body's database's. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements");
+            await DarlingMcpTestData.ExecAsync(again, ct, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements");
+            await DarlingMcpTestData.ExecAsync(connection, ct, "SELECT pg_stat_statements_reset()");
+            await DarlingMcpTestData.ExecAsync(again, ct, "SELECT pg_stat_statements_reset()");
+        }
+        catch (PostgresException ex) when (ex.SqlState is "55000" or "58P01" or "0A000" or "42501")
+        {
+            Assert.Skip("pg_stat_statements is not available on this server: " + ex.Message);
+        }
+
+        /* The fill's own first-time statements on the counter's database run once here, and again inside the fill below. */
+        await PgStatementTable.ForcePassAsync(connection, ct);
+
+        /* Six passes' worth of entries run once in the competitors' database, then exactly one pass, so they sort below any
+           entry run once from here on. */
+        var max = await PgStatementTable.MaxEntriesAsync(connection, ct);
+        var next = 0;
+        for (; next < 6 * (max * 5 / 100);)
+        {
+            await DarlingMcpTestData.ExecAsync(competitor, ct, CompetitorBatch(ref next));
+        }
+
+        var before = await PgStatementTable.DeallocAsync(connection, ct);
+        for (var dealloc = before; dealloc == before; dealloc = await PgStatementTable.DeallocAsync(connection, ct))
+        {
+            Assert.True(next < 2 * max, $"{next} statement shapes brought no eviction pass on a table of {max} entries.");
+            var batch = CompetitorBatch(ref next);
+            await DarlingMcpTestData.ExecAsync(competitor, ct, batch);
+            await DarlingMcpTestData.ExecAsync(competitor, ct, batch);
+        }
+
+        await DarlingMcpTestData.ExecAsync(body, ct, "SELECT 843202 + 1 AS pm8432_elsewhere");
+        await PgStatementTable.ForcePassAsync(connection, ct, database: body.Database);
+
+        Assert.True(await MarkedEntriesAsync(connection, "pm8432_elsewhere", ct) == 0, "the forced pass left the body's entry in the other database in place.");
+    }
+
+    /// <summary>How many entries of any database carry <paramref name="marker"/> in their text.</summary>
+    private static async Task<int> MarkedEntriesAsync(NpgsqlConnection connection, string marker, CancellationToken ct)
+    {
+        await using var read = new NpgsqlCommand("SELECT count(*)::int FROM pg_stat_statements WHERE query LIKE $1", connection);
+        read.Parameters.AddWithValue("%" + marker + "%");
+        return (int)(await read.ExecuteScalarAsync(ct))!;
+    }
+
     /// <summary>One fill batch's worth of competitor shapes, from <paramref name="next"/> on, as one command text.</summary>
     private static string CompetitorBatch(ref int next)
     {

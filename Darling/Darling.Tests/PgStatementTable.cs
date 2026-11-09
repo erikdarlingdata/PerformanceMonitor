@@ -34,9 +34,13 @@ namespace Darling.Tests;
 internal sealed class PgStatementTableAttempt
 {
     private readonly bool _forcePass;
+    private readonly int _callsAtMost;
+    private readonly string? _database;
 
-    internal PgStatementTableAttempt(NpgsqlConnection connection, int number, bool forcePass, long? deallocAtStart)
+    internal PgStatementTableAttempt(NpgsqlConnection connection, int number, bool forcePass, long? deallocAtStart, int callsAtMost = 1, string? database = null)
     {
+        _callsAtMost = callsAtMost;
+        _database = database;
         Connection = connection;
         Number = number;
         _forcePass = forcePass;
@@ -65,7 +69,7 @@ internal sealed class PgStatementTableAttempt
         {
             try
             {
-                await PgStatementTable.ForcePassAsync(Connection, ct);
+                await PgStatementTable.ForcePassAsync(Connection, ct, _callsAtMost, _database);
             }
             catch (Exception ex) when (ex is not OperationCanceledException and not Xunit.Sdk.SkipException)
             {
@@ -118,8 +122,9 @@ internal static class PgStatementTable
     /// the reads' failure.
     /// </summary>
     public static Task<PgStatementTableAttempt> RunAsync(
-        NpgsqlConnection connection, CancellationToken ct, Func<PgStatementTableAttempt, Task> body, bool forcePass = false)
-        => RunAsync(connection, ct, body, forcePass, EnsureHeadroomAsync, DeallocAsync);
+        NpgsqlConnection connection, CancellationToken ct, Func<PgStatementTableAttempt, Task> body, bool forcePass = false,
+        int forcePassCallsAtMost = 1, string? forcePassDatabase = null)
+        => RunAsync(connection, ct, body, forcePass, EnsureHeadroomAsync, DeallocAsync, forcePassCallsAtMost, forcePassDatabase);
 
     /// <summary>
     /// <see cref="RunAsync(NpgsqlConnection, CancellationToken, Func{PgStatementTableAttempt, Task}, bool)"/> with the two
@@ -129,13 +134,14 @@ internal static class PgStatementTable
     /// </summary>
     internal static async Task<PgStatementTableAttempt> RunAsync(
         NpgsqlConnection connection, CancellationToken ct, Func<PgStatementTableAttempt, Task> body, bool forcePass,
-        Func<NpgsqlConnection, CancellationToken, Task> ensureHeadroom, Func<NpgsqlConnection, CancellationToken, Task<long?>> dealloc)
+        Func<NpgsqlConnection, CancellationToken, Task> ensureHeadroom, Func<NpgsqlConnection, CancellationToken, Task<long?>> dealloc,
+        int forcePassCallsAtMost = 1, string? forcePassDatabase = null)
     {
         PgStatementTableAttempt attempt;
         for (var number = 1; ; number++)
         {
             await ensureHeadroom(connection, ct);
-            attempt = new PgStatementTableAttempt(connection, number, forcePass && number == 1, await dealloc(connection, ct));
+            attempt = new PgStatementTableAttempt(connection, number, forcePass && number == 1, await dealloc(connection, ct), forcePassCallsAtMost, forcePassDatabase);
             ExceptionDispatchInfo? failure = null;
             try
             {
@@ -262,7 +268,7 @@ internal static class PgStatementTable
     /// a failure. Skips where the counter is unavailable or the table is wider than <see cref="MaxEntriesTheFillerCanFill"/>,
     /// and fails if the shapes a pass needs moved nothing (the module is not tracking this session's statements).
     /// </summary>
-    public static async Task ForcePassAsync(NpgsqlConnection connection, CancellationToken ct)
+    public static async Task ForcePassAsync(NpgsqlConnection connection, CancellationToken ct, int callsAtMost = 1, string? database = null)
     {
         var start = await DeallocAsync(connection, ct);
         Assert.SkipWhen(start is null, "pg_stat_statements_info is not available on this server, so an eviction pass cannot be forced and observed.");
@@ -315,7 +321,7 @@ internal static class PgStatementTable
             }
 
             Assert.True(passes < maxPasses,
-                $"{passes} eviction passes (dealloc {start} -> {dealloc}) left {left.Count} entries run once in this database in place on a table of {max} entries: "
+                $"{passes} eviction passes (dealloc {start} -> {dealloc}) left {left.Count} entries run at most {callsAtMost} time(s) in database {database ?? connection.Database} in place on a table of {max} entries: "
                 + string.Join(" | ", left.Take(5)));
         }
     }

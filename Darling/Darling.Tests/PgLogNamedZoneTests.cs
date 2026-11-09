@@ -243,12 +243,7 @@ public sealed class PgLogNamedZoneTests
     public Task TheZoneNameIsLookedUpOncePerSetting_AndTheConnectionKeepsItsZone()
         => ZoneNameLookedUpOnceAsync(forcePass: false);
 
-    /// <summary>The same run with an eviction pass forced between the lookups and the count: the count is of the scan the lookups ran.</summary>
-    [Fact]
-    public Task TheZoneNameIsLookedUpOncePerSetting_AndTheConnectionKeepsItsZone_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
-        => ZoneNameLookedUpOnceAsync(forcePass: true);
-
-    private async Task ZoneNameLookedUpOnceAsync(bool forcePass)
+    internal async Task ZoneNameLookedUpOnceAsync(bool forcePass)
     {
         var ct = TestContext.Current.CancellationToken;
         await using var connection = await OpenPinnedAsync();
@@ -332,4 +327,18 @@ public sealed class PgLogNamedZoneTests
 
         Assert.Equal(before, await SessionZoneAsync());
     }
+}
+
+/* pg-cluster-roles, not the parallel own-store shape: the fact fills pg_stat_statements until eviction passes have taken the
+   body's own entries, on purpose, and in the parallel collections those passes take the other sessions' entries run once
+   as well. The collection runs alone, after the parallel collections, so the fill takes nobody else's entries. The body
+   is the one PgLogNamedZoneTests runs without the forced pass, and it mints its own scratch database. */
+
+/// <summary>The forcing run of <see cref="PgLogNamedZoneTests"/>'s counting body: an eviction pass between the lookups and the count, and the count is still of the scan the lookups shared.</summary>
+[Collection("pg-cluster-roles")]
+public sealed class PgLogNamedZoneForcedPassLiveTests
+{
+    [Fact]
+    public Task TheZoneNameIsLookedUpOncePerSetting_AndTheConnectionKeepsItsZone_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => new PgLogNamedZoneTests().ZoneNameLookedUpOnceAsync(forcePass: true);
 }

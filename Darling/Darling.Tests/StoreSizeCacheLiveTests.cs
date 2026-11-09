@@ -39,12 +39,7 @@ public sealed class StoreSizeCacheLiveTests
     public Task TwoRefreshesInsideTheWindow_ReadPgDatabaseSizeOnce()
         => TwoRefreshesAsync(forcePass: false);
 
-    /// <summary>The same run with an eviction pass forced between the refreshes and the count: the count is of the call the refreshes made.</summary>
-    [Fact]
-    public Task TwoRefreshesInsideTheWindow_ReadPgDatabaseSizeOnce_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
-        => TwoRefreshesAsync(forcePass: true);
-
-    private async Task TwoRefreshesAsync(bool forcePass)
+    internal async Task TwoRefreshesAsync(bool forcePass)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live store-size cache test.");
@@ -142,4 +137,18 @@ public sealed class StoreSizeCacheLiveTests
         reset.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
         await reset.ExecuteNonQueryAsync(ct);
     }
+}
+
+/* pg-cluster-roles, not the parallel own-store shape: the fact fills pg_stat_statements until eviction passes have taken the
+   body's own entries, on purpose, and in the parallel collections those passes take the other sessions' entries run once
+   as well. The collection runs alone, after the parallel collections, so the fill takes nobody else's entries. The body
+   is the one StoreSizeCacheLiveTests runs without the forced pass, and it mints its own scratch database. */
+
+/// <summary>The forcing run of <see cref="StoreSizeCacheLiveTests"/>'s counting body: an eviction pass between the refreshes and the count, and the count is still of the call the refreshes made.</summary>
+[Collection("pg-cluster-roles")]
+public sealed class StoreSizeCacheForcedPassLiveTests
+{
+    [Fact]
+    public Task TwoRefreshesInsideTheWindow_ReadPgDatabaseSizeOnce_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => new StoreSizeCacheLiveTests().TwoRefreshesAsync(forcePass: true);
 }

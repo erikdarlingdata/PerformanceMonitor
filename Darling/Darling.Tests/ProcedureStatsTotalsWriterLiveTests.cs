@@ -909,12 +909,7 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
     public Task AnEmptyGap_CostsOneProbeStatement_NoSavepointNoTimeoutNoGapStatement()
         => EmptyGapAsync(forcePass: false);
 
-    /// <summary>The same run with an eviction pass forced between the batches and the counts: the counts are of the statements the batches ran.</summary>
-    [Fact]
-    public Task AnEmptyGap_CostsOneProbeStatement_NoSavepointNoTimeoutNoGapStatement_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
-        => EmptyGapAsync(forcePass: true);
-
-    private async Task EmptyGapAsync(bool forcePass)
+    internal async Task EmptyGapAsync(bool forcePass)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
@@ -1238,4 +1233,18 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
 
     private static async Task<long> RawRowsAsync(NpgsqlConnection connection, CancellationToken ct) =>
         Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.procedure_stats", ct));
+}
+
+/* pg-cluster-roles, not the parallel own-store shape: the fact fills pg_stat_statements until eviction passes have taken the
+   body's own entries, on purpose, and in the parallel collections those passes take the other sessions' entries run once
+   as well. The collection runs alone, after the parallel collections, so the fill takes nobody else's entries. The body
+   is the one ProcedureStatsTotalsWriterLiveTests runs without the forced pass, and it mints its own scratch database. */
+
+/// <summary>The forcing run of <see cref="ProcedureStatsTotalsWriterLiveTests"/>'s counting body: an eviction pass between the batches and the counts, and the counts are still of the probes the batches ran.</summary>
+[Collection("pg-cluster-roles")]
+public sealed class ProcedureStatsTotalsWriterForcedPassLiveTests
+{
+    [Fact]
+    public Task AnEmptyGap_CostsOneProbeStatement_NoSavepointNoTimeoutNoGapStatement_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => new ProcedureStatsTotalsWriterLiveTests().EmptyGapAsync(forcePass: true);
 }
