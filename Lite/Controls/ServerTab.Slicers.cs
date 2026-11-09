@@ -91,7 +91,7 @@ public partial class ServerTab : UserControl
             if (data.Count == 0)
                 ActiveQueriesSlicer.ShowEmpty("No active query samples in the selected time window.");
             else
-                ActiveQueriesSlicer.LoadData(data, "Sessions", slicerStart, slicerEnd);
+                ActiveQueriesSlicer.LoadData(data, "Sessions", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
         }
         catch (Exception ex)
         {

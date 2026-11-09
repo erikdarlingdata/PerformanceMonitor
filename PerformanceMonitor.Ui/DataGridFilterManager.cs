@@ -282,11 +282,65 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
         SetItemsSourcePreservingSort(filteredData);
     }
 
+    /// <summary>The property each bound column shows, by its binding path, read once per path.</summary>
+    private readonly Dictionary<string, System.Reflection.PropertyInfo?[]> _columnProperties = new();
+
+    /// <summary>
+    /// The values the grid's bound columns show for <paramref name="row"/>, or null when no column is bound. A refresh hands the grid new
+    /// row objects, so the row the user selected is found again by what it shows: the new row with the same value in every bound column is
+    /// the same row to the person reading it. Dotted paths are followed; a path the row type does not have reads as null.
+    /// </summary>
+    private object?[]? RowKey(T row)
+    {
+        var key = new List<object?>();
+        foreach (var column in _dataGrid.Columns)
+        {
+            if (column is not DataGridBoundColumn { Binding: Binding { Path.Path: { Length: > 0 } path } })
+                continue;
+
+            if (!_columnProperties.TryGetValue(path, out var chain))
+            {
+                var parts = path.Split('.');
+                chain = new System.Reflection.PropertyInfo?[parts.Length];
+                Type? type = typeof(T);
+                for (var i = 0; i < parts.Length && type is not null; i++)
+                {
+                    chain[i] = type.GetProperty(parts[i]);
+                    type = chain[i]?.PropertyType;
+                }
+                _columnProperties[path] = chain;
+            }
+
+            object? value = row;
+            foreach (var property in chain)
+            {
+                value = value is null || property is null ? null : property.GetValue(value);
+            }
+            key.Add(value);
+        }
+
+        return key.Count == 0 ? null : key.ToArray();
+    }
+
     private void SetItemsSourcePreservingSort(System.Collections.IEnumerable? newSource)
     {
         var savedSorts = _dataGrid.Items.SortDescriptions.ToList();
+        var selectedKey = _dataGrid.SelectedItem is T selected ? RowKey(selected) : null;
 
         _dataGrid.ItemsSource = newSource;
+
+        /* The selected row survives the swap as the new row that shows the same values; the scroll position is the grid's own. */
+        if (selectedKey is not null && newSource is not null)
+        {
+            foreach (var item in newSource)
+            {
+                if (item is T row && RowKey(row) is { } key && key.SequenceEqual(selectedKey))
+                {
+                    _dataGrid.SelectedItem = row;
+                    break;
+                }
+            }
+        }
 
         if (savedSorts.Count > 0)
         {

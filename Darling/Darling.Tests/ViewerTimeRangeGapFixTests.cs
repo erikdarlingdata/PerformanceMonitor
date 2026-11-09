@@ -159,10 +159,10 @@ public sealed class ViewerTimeRangeGapFixTests
         }
     }
 
-    // ── R7: every banner site feeds the picker's data-start note ──
+    // ── R7: the banner sites are counted; no banner feeds a picker's data-start note ──
 
     [Fact]
-    public void TheBannerSites_AreCountedAndEveryOneFeedsThePickersNote()
+    public void TheBannerSites_AreCounted_AndNoneFeedsThePickersNote()
     {
         var updateSites = 0;
         var eventSites = 0;
@@ -175,43 +175,23 @@ public sealed class ViewerTimeRangeGapFixTests
         }
 
         /* A new banner site changes these counts: it must go through UpdateTruncationBanner (the event surfaces through
-           ShowEventDataStartAsync, which ends in it), which feeds the note below. Raise the count with the site. */
+           ShowEventDataStartAsync, which ends in it). Raise the count with the site. */
         Assert.Equal(35, updateSites);
         Assert.Equal(30, eventSites);
 
+        /* A banner's floor is the oldest row inside the window it was probed for, which for a covered window is the window's own
+           start, so no banner site feeds a picker's "Data starts" note. A server tab's picker names the server's data start, and the
+           Job History tab's picker names the oldest job history the store holds for its scope, a read the tab makes itself. */
         var update = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.MemberText(ViewerFile("ViewerServerTab.Queries.cs"), "UpdateTruncationBanner"));
-        Assert.Matches(@"\{\s*ViewerDataStartNote\.Feed\(banner, floor\);", update);
+        Assert.DoesNotMatch(@"\bDataStartUtc\b|\bViewerDataStartNote\b", update);
+        Assert.False(File.Exists(Path.Combine(viewerDir, "ViewerDataStartNote.cs")), "a banner site feeds a picker's note");
 
         var show = ViewerTypedRangeTests.StripComments(ViewerTypedRangeTests.MemberText(ViewerFile("ViewerServerTab.EventDataStart.cs"), "ShowEventDataStartAsync"));
         Assert.Single(Regex.Matches(show, @"\bUpdateTruncationBanner\("));
 
-        /* The feed reaches the Job History tab's own picker and sets its note from the floor with no query; a server tab's
-           picker names the server's data start instead, so the feed stops at the tab. */
-        var note = ViewerTypedRangeTests.StripComments(ViewerFile("ViewerDataStartNote.cs"));
-        Assert.Contains("jobHistory.RecordDataStart(floor)", note, StringComparison.Ordinal);
-        Assert.DoesNotContain("await", note, StringComparison.Ordinal);
-        Assert.Contains("TimeRangePickerControl.DataStartUtc = floor", Code("JobHistoryTab.xaml.cs"), StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void TheFeed_ReachesOnlyABannerThatIsOnScreenInATab()
-    {
-        StaTestThread.Run(() =>
-        {
-            var banner = new TextBlock();
-            var host = new Border();
-            var outer = new StackPanel();
-            Assert.Null(ViewerDataStartNote.FindAncestor<StackPanel>(banner));
-
-            host.Child = banner;
-            outer.Children.Add(host);
-            Assert.Same(host, ViewerDataStartNote.FindAncestor<Border>(banner));
-            Assert.Same(outer, ViewerDataStartNote.FindAncestor<StackPanel>(banner));
-
-            /* A bare banner (a test's control, or a tab that is not on screen) feeds nothing and throws nothing. */
-            ViewerDataStartNote.Feed(new TextBlock(), new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Unspecified));
-            ViewerDataStartNote.Feed(banner, null);
-        });
+        var jobHistory = Code("JobHistoryTab.xaml.cs");
+        Assert.DoesNotContain("RecordDataStart", jobHistory, StringComparison.Ordinal);
+        Assert.Contains("GetJobHistoryOldestRetainedAsync(", jobHistory, StringComparison.Ordinal);
     }
 
     // ── R8: Alert History's longest choice ──

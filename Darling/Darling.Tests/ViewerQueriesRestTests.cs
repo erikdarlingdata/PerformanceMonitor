@@ -329,10 +329,10 @@ public sealed class ViewerQuerySnapshotsSqlTests
     }
 
     [Fact]
-    public void ActiveQuerySlicerSql_BucketsByHour_SevenColumnShape()
+    public void ActiveQuerySlicerSql_BucketsAtTheWindowsWidth_SevenColumnShape()
     {
         var sql = ViewerDataService.ActiveQuerySlicerSql;
-        Assert.Contains("date_trunc('hour', collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("date_bin(CAST($6 AS integer) * INTERVAL '1 minute', collection_time,", sql, StringComparison.Ordinal);
         Assert.Contains("FROM query_snapshots", sql, StringComparison.Ordinal);
         Assert.Contains("COUNT(*) AS session_count", sql, StringComparison.Ordinal);
         Assert.Contains("COALESCE(SUM(cpu_time_ms), 0)", sql, StringComparison.Ordinal);
