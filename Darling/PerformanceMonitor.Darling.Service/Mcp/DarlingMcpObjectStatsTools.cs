@@ -56,7 +56,7 @@ public sealed class DarlingMcpObjectStatsTools
     /// </summary>
     private const int ObjectLockingTop = 75;
 
-    [McpServerTool(Name = "get_table_index_sizes"), Description("Gets the 100 largest tables with per-table size, growth (7d/30d/daily rate), and row counts from the latest daily snapshot. Indexes are rolled up per table. Use to find storage hot-spots and fast-growing tables for capacity planning. Growth is measured only over history the store actually holds: the history block says how many days of snapshots exist and whether the 7-day and 30-day baselines are reachable; growth_7d_mb / growth_30d_mb / growth_pct_30d are null (with the reason in growth_note) when their baseline does not exist, never re-labelled from a nearer one, and growth_over_available_history_* always spans exactly growth_window_days. A table absent from a baseline snapshot (created since) reports null growth for that window, not 0. tables_returned and truncated bound the page.")]
+    [McpServerTool(Name = "get_table_index_sizes"), Description("Gets the 100 largest tables with per-table size, growth (7d/30d/daily rate), and row counts from the latest daily snapshot. Indexes are rolled up per table. Use to find storage hot-spots and fast-growing tables for capacity planning. Growth is measured only over history the store actually holds: the history block says how many days of snapshots exist and whether the 7-day and 30-day baselines are reachable; growth_7d_mb / growth_30d_mb / growth_pct_30d are null (with the reason in growth_note) when their baseline does not exist or sits outside the span the window may cover (within half the window of it), never re-labelled from a nearer or a farther one, and growth_over_available_history_* always spans exactly growth_window_days. A table absent from a baseline snapshot (created since) reports null growth for that window, not 0. tables_returned and truncated bound the page.")]
     public static Task<string> GetTableIndexSizes(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -118,8 +118,8 @@ public sealed class DarlingMcpObjectStatsTools
 
             /* The store's span is one fact for every row (the boundaries CTE), so it is published once. */
             var span = page[0];
-            var covers7d = span.Snapshot7dTime is not null;
-            var covers30d = span.Snapshot30dTime is not null;
+            var covers7d = span.Covers7d;
+            var covers30d = span.Covers30d;
 
             var result = page.Select(r => new
             {
@@ -156,11 +156,7 @@ public sealed class DarlingMcpObjectStatsTools
                     history_days_available = span.DaysOfData,
                     covers_7d = covers7d,
                     covers_30d = covers30d,
-                    note = covers30d
-                        ? null
-                        : $"The store holds {CountText.Plural(span.DaysOfData, "day")} of index snapshots for this server, so the "
-                          + (covers7d ? "30-day baseline does not exist: growth_30d_mb and growth_pct_30d are null" : "7-day and 30-day baselines do not exist: growth_7d_mb, growth_30d_mb and growth_pct_30d are null")
-                          + " rather than re-measured over a shorter span under the same name. Read growth_over_available_history_*: it spans exactly growth_window_days.",
+                    note = HistoryNote(span),
                 },
                 tables_returned = page.Count,
                 truncated,
@@ -174,10 +170,41 @@ public sealed class DarlingMcpObjectStatsTools
     }
 
     /// <summary>
+    /// The history block's note: why a nominal window is not covered, published once for the page. Null when both
+    /// windows are. A window has no baseline when the store holds no snapshot that old, or when the newest snapshot at
+    /// or before its cutoff sits outside the span its figure may cover (<see cref="GrowthBaselineReach"/>): a store
+    /// with a gap in its snapshots resolves the 7-day and the 30-day cutoff to the same old snapshot, and the 7-day
+    /// figure measured from it would be the 30-day one under another name. Lite's twin words it identically.
+    /// </summary>
+    internal static string? HistoryNote(TableSizeGrowthRow span)
+    {
+        var covers7d = span.Covers7d;
+        var covers30d = span.Covers30d;
+        if (covers7d && covers30d) return null;
+
+        var outOfReach7d = GrowthBaselineReach.OutOfReachClause(span.Snapshot7dTime, span.LatestSnapshotTime, GrowthBaselineReach.ShortWindowDays);
+        var outOfReach30d = GrowthBaselineReach.OutOfReachClause(span.Snapshot30dTime, span.LatestSnapshotTime, GrowthBaselineReach.LongWindowDays);
+        if (outOfReach7d is null && outOfReach30d is null)
+        {
+            /* No snapshot old enough: the store is younger than the window. */
+            return $"The store holds {CountText.Plural(span.DaysOfData, "day")} of index snapshots for this server, so the "
+                + (covers7d ? "30-day baseline does not exist: growth_30d_mb and growth_pct_30d are null" : "7-day and 30-day baselines do not exist: growth_7d_mb, growth_30d_mb and growth_pct_30d are null")
+                + " rather than re-measured over a shorter span under the same name. Read growth_over_available_history_*: it spans exactly growth_window_days.";
+        }
+
+        var clauses = new List<string>();
+        if (!covers7d) clauses.Add(outOfReach7d ?? "no snapshot 7+ days old exists");
+        if (!covers30d) clauses.Add(outOfReach30d ?? "no snapshot 30+ days old exists");
+        var figures = covers7d ? "growth_30d_mb and growth_pct_30d are" : covers30d ? "growth_7d_mb is" : "growth_7d_mb, growth_30d_mb and growth_pct_30d are";
+        return $"The store holds {CountText.Plural(span.DaysOfData, "day")} of index snapshots for this server, but {string.Join(", and ", clauses)}, so {figures} null"
+            + " rather than measured over a span outside the window. Read growth_over_available_history_*: it spans exactly growth_window_days.";
+    }
+
+    /// <summary>
     /// Why a row's growth figures are null, when they are (#3541 A12): the store has no snapshot old enough
-    /// for the window, or the snapshot exists but this table was not in it (created since), or there is no
-    /// span at all. Null when every figure is defined, so the common row carries no note. Lite's twin words
-    /// it identically.
+    /// for the window, or that snapshot sits outside the span the window's figure may cover, or the snapshot
+    /// exists but this table was not in it (created since), or there is no span at all. Null when every figure
+    /// is defined, so the common row carries no note. Lite's twin words it identically.
     /// </summary>
     internal static string? GrowthNote(TableSizeGrowthRow r)
     {
@@ -186,10 +213,14 @@ public sealed class DarlingMcpObjectStatsTools
             notes.Add("the store holds a single day of snapshots for this server, so no growth is knowable yet: every growth figure is null, not 0");
         if (r.Snapshot7dTime is null)
             notes.Add("no snapshot 7+ days old exists, so growth_7d_mb is null");
+        else if (!r.Covers7d)
+            notes.Add("the 7-day baseline snapshot is outside the span a 7-day figure may cover (history.note says where it sits), so growth_7d_mb is null");
         else if (r.ReservedMb7dAgo is null)
             notes.Add($"this table was not in the {r.Snapshot7dTime:o} snapshot (created since), so growth_7d_mb is null: its whole current size is newer than 7 days");
         if (r.Snapshot30dTime is null)
             notes.Add("no snapshot 30+ days old exists, so growth_30d_mb and growth_pct_30d are null");
+        else if (!r.Covers30d)
+            notes.Add("the 30-day baseline snapshot is outside the span a 30-day figure may cover (history.note says where it sits), so growth_30d_mb and growth_pct_30d are null");
         else if (r.ReservedMb30dAgo is null)
             notes.Add($"this table was not in the {r.Snapshot30dTime:o} snapshot (created since), so growth_30d_mb and growth_pct_30d are null");
         else if (r.ReservedMb30dAgo <= 0)

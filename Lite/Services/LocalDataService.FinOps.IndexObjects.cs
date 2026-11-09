@@ -739,15 +739,25 @@ public class ObjectSizeGrowthBaselineRow
     /// <summary>Whole calendar days between the earliest and latest snapshots. 0 means one day of snapshots: no growth is knowable.</summary>
     public int DaysOfData { get; set; }
 
-    /// <summary>Growth since the 7-day baseline; null when there is no such baseline for this table.</summary>
-    public decimal? Growth7dMb => ReservedMb7dAgo is { } b ? CurrentReservedMb - b : null;
+    /// <summary>Whether the 7-day baseline snapshot exists and sits within reach of its window (<see cref="GrowthBaselineReach"/>):
+    /// the span from it to the latest snapshot is 3.5 to 10.5 days. A store with a gap in its snapshots resolves the
+    /// cutoff to a snapshot far older than the window, and a figure measured from that is not a 7-day figure.</summary>
+    public bool Covers7d => GrowthBaselineReach.Covers(Snapshot7dTime, LatestSnapshotTime, GrowthBaselineReach.ShortWindowDays);
 
-    /// <summary>Growth since the 30-day baseline; null when there is no such baseline for this table.</summary>
-    public decimal? Growth30dMb => ReservedMb30dAgo is { } b ? CurrentReservedMb - b : null;
+    /// <summary>Same for the 30-day baseline: the span is 15 to 45 days.</summary>
+    public bool Covers30d => GrowthBaselineReach.Covers(Snapshot30dTime, LatestSnapshotTime, GrowthBaselineReach.LongWindowDays);
+
+    /// <summary>Growth since the 7-day baseline; null when there is no such baseline for this table, or the baseline
+    /// snapshot is out of reach of the window.</summary>
+    public decimal? Growth7dMb => Covers7d && ReservedMb7dAgo is { } b ? CurrentReservedMb - b : null;
+
+    /// <summary>Growth since the 30-day baseline; null when there is no such baseline for this table, or the baseline
+    /// snapshot is out of reach of the window.</summary>
+    public decimal? Growth30dMb => Covers30d && ReservedMb30dAgo is { } b ? CurrentReservedMb - b : null;
 
     /// <summary>Percent growth over the 30-day baseline; null without a baseline, and null on a 0 baseline
     /// (no denominator — a table that was empty 30 days ago has no ratio, not an infinite one).</summary>
-    public decimal? GrowthPct30d => ReservedMb30dAgo is > 0 ? (CurrentReservedMb - ReservedMb30dAgo.Value) * 100m / ReservedMb30dAgo.Value : null;
+    public decimal? GrowthPct30d => Covers30d && ReservedMb30dAgo is > 0 ? (CurrentReservedMb - ReservedMb30dAgo.Value) * 100m / ReservedMb30dAgo.Value : null;
 
     /// <summary>Growth since the store's earliest snapshot — the honest figure when the nominal windows are out
     /// of reach. Null when the store holds a single day (no span) or the table was not in the earliest snapshot.</summary>
