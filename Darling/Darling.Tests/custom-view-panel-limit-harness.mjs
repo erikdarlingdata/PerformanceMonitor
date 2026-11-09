@@ -125,20 +125,20 @@ try {
 
 const all = (n, out = []) => { out.push(n); for (const c of n.children) all(c, out); return out; };
 const flush = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 0)); };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-/* #8511: the page's Retry-After wait (retryOnceWhenBusy, util.js) runs on util's busyRetryClock. The harness records each timer the page
-   arms there, with the delay it asked for, and runs it on the real clock. flushPastTheRetry is a flush whose turns end only after that
-   timer has fired: the shape the thirty turns of flush take on a loaded machine, where one turn can run tens of milliseconds. */
+/* #8511: the page's Retry-After wait (retryOnceWhenBusy, util.js) runs on util's busyRetryClock, which the harness drives: a timer is held,
+   with the delay the page asked for, and fires nothing on its own, so a capture made while the panel waits sees the page before the retry
+   however long the turns before it take. releaseBusyRetry fires the held timers, runs the turns that follow them, and returns the delays
+   the page asked for. Nothing waits on wall-clock time. */
 const busyRetryTimers = [];
-modules.util.busyRetryClock.setTimeout = (fn, ms) => {
-  const timer = { fn, ms, cleared: false };
-  timer.fired = new Promise((resolve) => { timer.handle = setTimeout(() => { resolve(); if (!timer.cleared) fn(); }, ms); });
-  busyRetryTimers.push(timer);
-  return timer;
+modules.util.busyRetryClock.setTimeout = (fn, ms) => { const timer = { fn, ms, cleared: false }; busyRetryTimers.push(timer); return timer; };
+modules.util.busyRetryClock.clearTimeout = (timer) => { if (timer) timer.cleared = true; };
+const releaseBusyRetry = async () => {
+  await flush(); /* the turns in which the page reads the refusal and arms its wait */
+  const held = busyRetryTimers.splice(0);
+  for (const timer of held) if (!timer.cleared) timer.fn();
+  await flush();
+  return held.map((t) => t.ms);
 };
-modules.util.busyRetryClock.clearTimeout = (timer) => { if (timer) { timer.cleared = true; clearTimeout(timer.handle); } };
-const flushPastTheRetry = async () => { await flush(); await Promise.all(busyRetryTimers.map((t) => t.fired)); await flush(); };
-const delaysAsked = () => busyRetryTimers.splice(0).map((t) => t.ms);
 const panel = (source, extra = {}) => ({ title: "Panel " + source, source, viz: "table", measure: "m", ...extra });
 const rpanel = (read, extra = {}) => ({ title: "Read " + read, read, viz: "table", columns: [{ key: "n", label: "n" }], rowsKey: "rows", ...extra });
 const dashboard = (panels) => ({ id: "v1", name: "V", definition: { panels } });
@@ -183,12 +183,10 @@ const out = {};
 {
   const main = await open(dashboard([panel("s1"), panel("s2"), panel("s3")]));
   answer(calls[0], 429);
-  await flushPastTheRetry();
+  await flush();
   out.busyOnceStrips = stripsOf(main).map((s) => s.text);
   out.busyOnceCallsWhileWaiting = sourcesOf(calls);
-  out.busyOnceRetryDelaysMs = delaysAsked();
-  await sleep(1300);
-  await flush();
+  out.busyOnceRetryDelaysMs = await releaseBusyRetry();
   out.busyOnceCallsAfterWait = sourcesOf(calls);
   answer(calls[2], 200);
   answer(calls[1], 200);
@@ -206,9 +204,7 @@ const out = {};
   answer(calls[1], 200);
   await flush();
   answer(calls[0], 429);
-  await sleep(1300);
-  await flush();
-  out.busyTwiceRetryDelaysMs = delaysAsked();
+  out.busyTwiceRetryDelaysMs = await releaseBusyRetry();
   answer(calls[2], 429);
   await flush();
   out.busyTwiceCalls = sourcesOf(calls);
@@ -305,12 +301,10 @@ const out = {};
 {
   const main = await open(dashboard([rpanel("r1"), rpanel("r2"), rpanel("r3")]));
   answer(calls[0], 429);
-  await flushPastTheRetry();
+  await flush();
   out.readBusyOnceStrips = stripsOf(main).map((s) => s.text);
   out.readBusyOnceCallsWhileWaiting = sourcesOf(calls);
-  out.readBusyOnceRetryDelaysMs = delaysAsked();
-  await sleep(1300);
-  await flush();
+  out.readBusyOnceRetryDelaysMs = await releaseBusyRetry();
   out.readBusyOnceCallsAfterWait = sourcesOf(calls);
   answer(calls[2], 200);
   answer(calls[1], 200);
@@ -330,9 +324,7 @@ const out = {};
   answer(calls[1], 200);
   await flush();
   answer(calls[0], 429);
-  await sleep(1300);
-  await flush();
-  out.readBusyTwiceRetryDelaysMs = delaysAsked();
+  out.readBusyTwiceRetryDelaysMs = await releaseBusyRetry();
   answer(calls[2], 429);
   await flush();
   out.readBusyTwiceCalls = sourcesOf(calls);
