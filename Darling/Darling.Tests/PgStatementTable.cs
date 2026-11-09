@@ -23,7 +23,8 @@ namespace Darling.Tests;
 /// an eviction pass removes the least-used five percent, and a statement run once is the least-used kind there is. A
 /// pass inside the run can take the run's own entries, so the counter says whether the reads looked at the entries the
 /// statements made. The body calls <see cref="BeforeReadAsync"/> between its statements and its first read; on a run
-/// that forces a pass, that is where the pass lands.
+/// that forces a pass, that is where the pass lands. <see cref="PgStatementTable.RunAsync"/> secures room in the table
+/// before each run and runs the body again when a pass landed inside it, so the run it returns is one the pass missed.
 /// </summary>
 internal sealed class PgStatementTableAttempt
 {
@@ -70,18 +71,87 @@ internal static class PgStatementTable
     /// <summary>The largest table <see cref="ForcePassAsync"/> fills; a cluster set wider than this skips the forcing test.</summary>
     private const int MaxEntriesTheFillerCanFill = 20_000;
 
+    /// <summary>The free slots a run secures before its statements: the bodies add a few dozen entries at most, and the margin covers what a background worker on the cluster runs meanwhile.</summary>
+    private const int Headroom = 64;
+
+    /// <summary>The runs a body gets before a pass inside every one of them is a failure.</summary>
+    private const int MaxAttempts = 5;
+
     /// <summary>
-    /// Runs <paramref name="body"/> once, with the eviction counter read before and after it. With
-    /// <paramref name="forcePass"/>, the body's <see cref="PgStatementTableAttempt.BeforeReadAsync"/> forces an eviction
-    /// pass. Returns the run, whose <see cref="PgStatementTableAttempt.PassesInside"/> says whether a pass landed inside it.
+    /// Runs <paramref name="body"/> until no eviction pass lands inside it, up to <see cref="MaxAttempts"/> times. Before
+    /// each run, <see cref="EnsureHeadroomAsync"/> makes sure the table has room for the body's entries, so a pass inside
+    /// the run can only come from another session; a run that a pass did land in is voided and the body runs again. With
+    /// <paramref name="forcePass"/>, the first run's <see cref="PgStatementTableAttempt.BeforeReadAsync"/> forces a pass,
+    /// which that run then voids. Returns the last run, whose <see cref="PgStatementTableAttempt.PassesInside"/> is 0
+    /// unless every run had a pass inside it.
     /// </summary>
     public static async Task<PgStatementTableAttempt> RunAsync(
         NpgsqlConnection connection, CancellationToken ct, Func<PgStatementTableAttempt, Task> body, bool forcePass = false)
     {
-        var attempt = new PgStatementTableAttempt(connection, 1, forcePass, await DeallocAsync(connection, ct));
-        await body(attempt);
-        attempt.Finish(await DeallocAsync(connection, ct));
-        return attempt;
+        PgStatementTableAttempt attempt;
+        for (var number = 1; ; number++)
+        {
+            await EnsureHeadroomAsync(connection, ct);
+            attempt = new PgStatementTableAttempt(connection, number, forcePass && number == 1, await DeallocAsync(connection, ct));
+            await body(attempt);
+            attempt.Finish(await DeallocAsync(connection, ct));
+            if (attempt.PassesInside == 0 || number == MaxAttempts)
+            {
+                return attempt;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Makes sure <c>pg_stat_statements</c> has at least <see cref="Headroom"/> free slots. When it has fewer, runs small
+    /// batches of distinct shapes until the module's eviction pass frees five percent of the table; a cluster whose pass
+    /// frees less than that skips with its <c>pg_stat_statements.max</c>. The shapes are a family of their own
+    /// (differences, not sums), so none of them lands on an entry <see cref="ForcePassAsync"/> already made.
+    /// </summary>
+    public static async Task EnsureHeadroomAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        const int batchSize = 8;
+        var max = await MaxEntriesAsync(connection, ct);
+        if (await EntryCountAsync(connection, ct) is not int count)
+        {
+            return;
+        }
+
+        var free = max - count;
+        var next = 0;
+        while (free < Headroom && next < Headroom + 2 * batchSize)
+        {
+            var batch = new StringBuilder();
+            for (var i = 0; i < batchSize; i++)
+            {
+                batch.Append(HeadroomShape(next++)).Append(';');
+            }
+
+            await DarlingMcpTestData.ExecAsync(connection, ct, batch.ToString());
+            free = max - (await EntryCountAsync(connection, ct) ?? count);
+        }
+
+        Assert.SkipWhen(free < Headroom,
+            $"pg_stat_statements.max is {max}: an eviction pass leaves {free} free slots, fewer than the {Headroom} a run needs.");
+    }
+
+    /// <summary>
+    /// The <paramref name="n"/>-th shape of the headroom family: two to nine columns, each <c>1</c> less one to eight more
+    /// <c>1</c>s, under one of eight WHERE/LIMIT/OFFSET suffixes. Every shape has at least one subtraction and two columns,
+    /// so the family shares no entry with <see cref="Shape"/>'s sums, with a bare <c>SELECT 1</c>, or with a test's own
+    /// single-column statements.
+    /// </summary>
+    private static string HeadroomShape(int n)
+    {
+        var variant = n & 7;
+        var rest = n >> 3;
+        var items = rest / 8 + 2;
+        var terms = rest % 8 + 1;
+        var item = "1" + string.Concat(Enumerable.Repeat("-1", terms));
+        var suffix = ((variant & 1) != 0 ? " WHERE true" : string.Empty)
+            + ((variant & 2) != 0 ? " LIMIT 1" : string.Empty)
+            + ((variant & 4) != 0 ? " OFFSET 0" : string.Empty);
+        return "SELECT " + string.Join(",", Enumerable.Repeat(item, items)) + suffix;
     }
 
     /// <summary>The run's reads looked at the entries its statements made: no eviction pass ran inside it.</summary>
