@@ -30,7 +30,7 @@ public sealed class McpObjectStatsTools
     /// </summary>
     private const int ObjectLockingTop = 75;
 
-    [McpServerTool(Name = "get_table_index_sizes"), Description("Gets the 100 largest tables with per-table size, growth (7d/30d/daily rate), and row counts from the latest daily snapshot. Indexes are rolled up per table. Use to find storage hot-spots and fast-growing tables for capacity planning. Growth is measured only over history the store actually holds: the history block says how many days of snapshots exist and whether the 7-day and 30-day baselines are reachable; growth_7d_mb / growth_30d_mb / growth_pct_30d are null (with the reason in growth_note) when their baseline does not exist or sits outside the span the window may cover (within half the window of it), never re-labelled from a nearer or a farther one, and growth_over_available_history_* always spans exactly growth_window_days. A table absent from a baseline snapshot (created since) reports null growth for that window, not 0. tables_returned and truncated bound the page.")]
+    [McpServerTool(Name = "get_table_index_sizes"), Description("Gets the 100 largest tables with per-table size, growth (7d/30d/daily rate), and row counts from the latest daily snapshot. Indexes are rolled up per table. Use to find storage hot-spots and fast-growing tables for capacity planning. Growth is measured only over history the store actually holds: the history block says how many days of snapshots exist, which snapshot each baseline was read from (baseline_7d_snapshot / baseline_30d_snapshot, null when none is that old) and whether each is reachable; growth_7d_mb / growth_30d_mb / growth_pct_30d are null (with the reason in growth_note) when their baseline does not exist or sits more than a day outside its window (6 to 8 days for 7, 29 to 31 for 30), never re-labelled from a nearer or a farther one, and growth_over_available_history_* always spans exactly growth_window_days. A table absent from a baseline snapshot (created since) reports null growth for that window, not 0. tables_returned and truncated bound the page.")]
     public static async Task<string> GetTableIndexSizes(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -110,6 +110,11 @@ public sealed class McpObjectStatsTools
                     earliest_snapshot = span.EarliestSnapshotTime.ToString("o"),
                     latest_snapshot = span.LatestSnapshotTime.ToString("o"),
                     history_days_available = span.DaysOfData,
+                    /* The snapshot each nominal-window baseline was read from (the newest at or before its cutoff), null when
+                       the store holds none that old. Two figures that agree were measured from two snapshots or from one, and
+                       a reader can see which, and how far apart the two baselines sit. */
+                    baseline_7d_snapshot = span.Snapshot7dTime?.ToString("o"),
+                    baseline_30d_snapshot = span.Snapshot30dTime?.ToString("o"),
                     covers_7d = covers7d,
                     covers_30d = covers30d,
                     note = HistoryNote(span),
@@ -182,13 +187,13 @@ public sealed class McpObjectStatsTools
         if (r.Snapshot7dTime is null)
             notes.Add("no snapshot 7+ days old exists, so growth_7d_mb is null");
         else if (!r.Covers7d)
-            notes.Add("the 7-day baseline snapshot is outside the span a 7-day figure may cover (history.note says where it sits), so growth_7d_mb is null");
+            notes.Add("the 7-day baseline snapshot is outside the span a 7-day figure may cover (history.baseline_7d_snapshot names it and history.note says where it sits), so growth_7d_mb is null");
         else if (r.ReservedMb7dAgo is null)
             notes.Add($"this table was not in the {r.Snapshot7dTime:o} snapshot (created since), so growth_7d_mb is null: its whole current size is newer than 7 days");
         if (r.Snapshot30dTime is null)
             notes.Add("no snapshot 30+ days old exists, so growth_30d_mb and growth_pct_30d are null");
         else if (!r.Covers30d)
-            notes.Add("the 30-day baseline snapshot is outside the span a 30-day figure may cover (history.note says where it sits), so growth_30d_mb and growth_pct_30d are null");
+            notes.Add("the 30-day baseline snapshot is outside the span a 30-day figure may cover (history.baseline_30d_snapshot names it and history.note says where it sits), so growth_30d_mb and growth_pct_30d are null");
         else if (r.ReservedMb30dAgo is null)
             notes.Add($"this table was not in the {r.Snapshot30dTime:o} snapshot (created since), so growth_30d_mb and growth_pct_30d are null");
         else if (r.ReservedMb30dAgo <= 0)

@@ -99,8 +99,9 @@ public static class DarlingFinOpsStorageGrowthReader
     }
 
     /// <summary>How far from its mark (7 or 30 days ago) a baseline snapshot may be: one day either side. Beyond that the baseline
-    /// is not "N days ago" and the grid says there is no sample from that long ago.</summary>
-    public static readonly TimeSpan BaselineTolerance = TimeSpan.FromDays(1);
+    /// is not "N days ago" and the grid says there is no sample from that long ago. The table-size read judges its baselines by
+    /// the same day (<see cref="GrowthBaselineReach"/>), so a database's "7 days ago" and a table's are one span.</summary>
+    public static readonly TimeSpan BaselineTolerance = GrowthBaselineReach.Tolerance;
 
     /// <summary>
     /// The snapshot NEAREST <paramref name="mark"/> (7 or 30 days before now), only when it is within <see cref="BaselineTolerance"/>

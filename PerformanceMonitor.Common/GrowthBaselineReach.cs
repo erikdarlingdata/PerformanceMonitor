@@ -15,18 +15,19 @@ namespace PerformanceMonitor.Common;
 /// How far a nominal growth window's baseline snapshot may sit from the span its name promises. get_table_index_sizes
 /// reads each baseline as the newest index snapshot at or before the window's cutoff, and the snapshots are daily at
 /// best: a collector that stalled, or a server that was out of scope for a while, leaves a gap, and the newest snapshot
-/// before a cutoff can then be weeks older than the window. A 7-day figure measured from a 41-day-old snapshot is the
+/// before a cutoff can then be weeks older than the window. A 7-day figure measured from a 30-day-old snapshot is the
 /// 30-day figure under another name, and the two read identical on every steadily growing table. A figure therefore
-/// stands only when the span it covers, from its baseline snapshot to the latest snapshot, is within half the window of
-/// the window itself: a 7-day figure spans 3.5 to 10.5 days, a 30-day figure 15 to 45. The two ranges are disjoint, so
-/// the two figures can never be one measurement, and the span's lower bound keeps a stalled collector, whose latest
-/// snapshot is itself days old, from labelling two days of growth as seven. Both products' rows judge their baselines
-/// here, so the rule is one rule.
+/// stands only when the span it covers, from its baseline snapshot to the latest snapshot, is within <see cref="Tolerance"/>
+/// of the window: a 7-day figure spans 6 to 8 days, a 30-day figure 29 to 31. The tolerance is the one get_storage_growth
+/// already judges its database baselines by, so a table's "7 days ago" and a database's "7 days ago" are the same span,
+/// the two ranges are disjoint, so the two figures can never be one measurement, and the span's lower bound keeps a stalled
+/// collector, whose latest snapshot is itself days old, from labelling two days of growth as seven. Both products' rows
+/// judge their baselines here, so the rule is one rule.
 /// </summary>
 public static class GrowthBaselineReach
 {
-    /// <summary>The slack either side of a window, as a fraction of it.</summary>
-    public const double ToleranceFraction = 0.5;
+    /// <summary>How far from its window a baseline snapshot may sit: one day either side, the storage-growth reader's rule.</summary>
+    public static readonly TimeSpan Tolerance = TimeSpan.FromDays(1);
 
     /// <summary>The shorter nominal window, in days.</summary>
     public const int ShortWindowDays = 7;
@@ -35,10 +36,10 @@ public static class GrowthBaselineReach
     public const int LongWindowDays = 30;
 
     /// <summary>The shortest span a figure for <paramref name="windowDays"/> may cover.</summary>
-    public static TimeSpan ShortestSpan(int windowDays) => TimeSpan.FromDays(windowDays * (1 - ToleranceFraction));
+    public static TimeSpan ShortestSpan(int windowDays) => TimeSpan.FromDays(windowDays) - Tolerance;
 
     /// <summary>The longest span a figure for <paramref name="windowDays"/> may cover.</summary>
-    public static TimeSpan LongestSpan(int windowDays) => TimeSpan.FromDays(windowDays * (1 + ToleranceFraction));
+    public static TimeSpan LongestSpan(int windowDays) => TimeSpan.FromDays(windowDays) + Tolerance;
 
     /// <summary>
     /// True when a baseline snapshot exists and the span from it to the latest snapshot is within reach of the window:
@@ -51,7 +52,7 @@ public static class GrowthBaselineReach
         return span >= ShortestSpan(windowDays) && span <= LongestSpan(windowDays);
     }
 
-    /// <summary>The range a figure for <paramref name="windowDays"/> may span, for a sentence: "3.5 to 10.5 days".</summary>
+    /// <summary>The range a figure for <paramref name="windowDays"/> may span, for a sentence: "6 to 8 days".</summary>
     public static string DescribeRange(int windowDays) =>
         string.Create(CultureInfo.InvariantCulture, $"{ShortestSpan(windowDays).TotalDays:0.#} to {LongestSpan(windowDays).TotalDays:0.#} days");
 

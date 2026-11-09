@@ -740,11 +740,11 @@ public class ObjectSizeGrowthBaselineRow
     public int DaysOfData { get; set; }
 
     /// <summary>Whether the 7-day baseline snapshot exists and sits within reach of its window (<see cref="GrowthBaselineReach"/>):
-    /// the span from it to the latest snapshot is 3.5 to 10.5 days. A store with a gap in its snapshots resolves the
+    /// the span from it to the latest snapshot is 6 to 8 days. A store with a gap in its snapshots resolves the
     /// cutoff to a snapshot far older than the window, and a figure measured from that is not a 7-day figure.</summary>
     public bool Covers7d => GrowthBaselineReach.Covers(Snapshot7dTime, LatestSnapshotTime, GrowthBaselineReach.ShortWindowDays);
 
-    /// <summary>Same for the 30-day baseline: the span is 15 to 45 days.</summary>
+    /// <summary>Same for the 30-day baseline: the span is 29 to 31 days.</summary>
     public bool Covers30d => GrowthBaselineReach.Covers(Snapshot30dTime, LatestSnapshotTime, GrowthBaselineReach.LongWindowDays);
 
     /// <summary>Growth since the 7-day baseline; null when there is no such baseline for this table, or the baseline
