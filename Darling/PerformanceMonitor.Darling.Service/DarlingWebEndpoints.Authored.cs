@@ -318,7 +318,7 @@ public static partial class DarlingWebEndpoints
                 context.RequestAborted.ThrowIfCancellationRequested();
             }
 
-            return ComposeRunFailureResult(outcome, "/api/compose/run", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
+            return ComposeRunFailureResult(outcome, "/api/compose/run", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, body);
         });
     }
 

@@ -83,6 +83,20 @@ public sealed class WebPgPageTruthsBehaviourTests
         Assert.Contains("Amazon Aurora", banner);
     }
 
+    /// <summary>#8323: Wait Trend is drawn on an Amazon Aurora target from the engine's cumulative counters (#8074), so the intro
+    /// no longer says it fills only on other targets, and the info text no longer calls it one of two panels left off there.</summary>
+    [Fact]
+    public void TheWaitsBanner_SaysWaitTrendFillsOnAuroraToo()
+    {
+        var note = Page.Value.GetProperty("wait").GetProperty("note").GetString()!;
+        var info = Page.Value.GetProperty("wait").GetProperty("noteInfo").GetString()!;
+
+        Assert.DoesNotContain("Wait Trend fill on any other", note, StringComparison.Ordinal);
+        Assert.Matches("Wait Trend fills[^.]*Aurora", note);
+        Assert.DoesNotContain("two sampled panels do not apply", info, StringComparison.Ordinal);
+        Assert.Contains("Wait Trend", info, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheActivityBanner_SaysTopQueryShapesNeedsPgStatStatements_NotAurora()
     {

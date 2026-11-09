@@ -17,8 +17,8 @@ namespace Darling.Tests;
 /// <summary>
 /// Pins for #4223's authored <c>authored/cpu</c> alert-notebook template
 /// (<see cref="AlertNotebookEndpoint.AuthoredTemplate"/> / <c>BuildCpuCells</c>): routing off the "High CPU"
-/// metric, the exact cell list (both engines' CPU timelines present, titled), and the no-matched-incident
-/// degrade. The shared theories in <c>AlertNotebookAuthoredTemplateTests</c> (validation, dispatch names, the
+/// metric, the exact engine-blind cell list (both engines' CPU timelines present, titled; #8323 narrows it to one
+/// engine's cells once the server's engine is known), and the no-matched-incident degrade. The shared theories in <c>AlertNotebookAuthoredTemplateTests</c> (validation, dispatch names, the
 /// compose catalog, budget, binding, viz) already cover this family via its
 /// <see cref="AlertNotebookEndpoint.s_authoredTemplates"/> row — these pins are the family-specific shape only.
 /// </summary>
@@ -41,16 +41,14 @@ public sealed class AlertNotebookTemplateCpuTests
     }
 
     [Fact]
-    public void BuildCpuCells_HasTheExactCellListWithBothEnginesPanelsTitled()
+    public void BuildCpuCells_WithNoEngine_HasTheExactCellListWithBothEnginesPanelsTitled()
     {
         var template = AlertNotebookEndpoint.AuthoredTemplate("High CPU");
         Assert.NotNull(template);
+        Assert.NotNull(template!.Value.BuildCellsWithContext);
 
-        var buildCells = template!.Value.BuildCells;
-        Assert.NotNull(buildCells);
-
-        var cells = buildCells(
-            "High CPU", "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
+        var cells = template.Value.Invoke(
+            "High CPU", "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         Assert.Equal(7, cells.Count);
 
@@ -97,15 +95,12 @@ public sealed class AlertNotebookTemplateCpuTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("High CPU");
         Assert.NotNull(template);
 
-        var buildCells = template!.Value.BuildCells;
-        Assert.NotNull(buildCells);
-
-        var withoutIncident = buildCells(
+        var withoutIncident = template!.Value.Invoke(
             "High CPU", "SRV1", AsOf, WindowStart, WindowEnd, null, null,
-            "Unknown (not collected since " + AsOf + ")");
+            "Unknown (not collected since " + AsOf + ")", AlertNotebookEndpoint.AuthoredContext.Empty);
 
-        var withIncident = buildCells(
-            "High CPU", "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
+        var withIncident = template.Value.Invoke(
+            "High CPU", "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         Assert.Equal(withIncident.Count, withoutIncident.Count);
 
