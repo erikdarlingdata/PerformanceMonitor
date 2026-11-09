@@ -132,6 +132,21 @@ internal static class DarlingMcpAgentActions
         return MetricRefusal(after.MetricName!);
     }
 
+    /// <summary>
+    /// #8473: the scope a silencing rule must have on the claim-free path too (<see cref="DarlingMcpAgentMuteDirect"/>): one server by id and a
+    /// metric that is not a protected self alert, judged by the same rules and with the same reason words as <see cref="MuteAfterImageRefusal"/>,
+    /// so leaving out <c>agent_action</c> never widens what a mute can silence. The request's-server rule is the claim path's alone. Null for a
+    /// digest, which bundles alerts rather than silencing them and keeps the scope an operator has (#7414), and for a mute inside the scope.
+    /// </summary>
+    internal static AgentActionRefusal? MuteScopeRefusal(MuteRule rule)
+    {
+        if (MuteRuleActions.Normalize(rule.Action) != MuteRuleActions.Mute)
+            return null;
+        if (rule.ServerId is null || string.IsNullOrWhiteSpace(rule.MetricName))
+            return NeedsMetric;
+        return MetricRefusal(rule.MetricName!);
+    }
+
     /// <summary>The suffix every agent-written mute reason carries.</summary>
     internal static string ReasonSuffix(AgentAction action) =>
         string.Create(CultureInfo.InvariantCulture, $"[agent:{action.AgentId} request {action.RequestId}]");
