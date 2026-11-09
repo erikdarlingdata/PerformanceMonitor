@@ -18,17 +18,18 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #8456: the Properties panel opens an Operator Details section whenever the selected operator has a row for it to print. The
-/// section's gate covers every row the section can print, so an index scan whose only detail is a FORCESEEK hint, or an update whose
-/// only detail is Halloween protection, shows that row in the panel and in "Copy all properties"; an operator with no detail at all
-/// still gets no section. The control is built on the shared STA thread and its private builders are reached by reflection, as
+/// #8456: the Properties panel shows an Operator Details section exactly when the selected operator has a row for it to print. No
+/// hand-kept gate decides it: the section opens for every operator and is removed when no row went into it, so an index scan whose only
+/// detail is a FORCESEEK hint, or an update whose only detail is Halloween protection, shows that row in the panel and in "Copy all
+/// properties", while an operator with no detail, or with only a flag that prints inside another row, gets no section anywhere. The
+/// control is built on the shared STA thread and its private builders are reached by reflection, as
 /// <see cref="PlanViewerEstimatedExecutionsTests"/> does; nothing reads source text (#5833).
 /// </summary>
 public sealed class PlanViewerOperatorDetailsCoverageTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
 
-    /// <summary>Each row Operator Details can print that no other property feeds, with the label and value it shows when it is the operator's only detail.</summary>
+    /// <summary>Each row Operator Details prints from a property that no other row shares, with the label and value it shows when it is the operator's only detail.</summary>
     public static TheoryData<string, string> SingleDetailRows() => new()
     {
         { "Primary Node Id", "3" },
@@ -52,10 +53,15 @@ public sealed class PlanViewerOperatorDetailsCoverageTests
         { "Stats Collection Id", "7" },
     };
 
+    /// <summary>Operators that print no Operator Details row: one with no detail at all, and one whose only flag prints inside the Top row, which it has no Top expression to print.</summary>
+    public static TheoryData<string> OperatorsWithoutARow() => new() { "nothing", "WITH TIES without a Top expression" };
+
+    private static PlanNode BareScan() => new() { NodeId = 1, PhysicalOp = "Index Scan", LogicalOp = "Index Scan" };
+
     /* An operator whose only Operator Details row is the one named: every other property the section reads is at its default. */
     private static PlanNode OperatorWithOnly(string row)
     {
-        var node = new PlanNode { NodeId = 1, PhysicalOp = "Index Scan", LogicalOp = "Index Scan" };
+        var node = BareScan();
         switch (row)
         {
             case "Primary Node Id": node.PrimaryNodeId = 3; break;
@@ -77,6 +83,8 @@ public sealed class PlanViewerOperatorDetailsCoverageTests
             case "Remote Data Access": node.RemoteDataAccess = true; break;
             case "Halloween Protection": node.OptimizedHalloweenProtectionUsed = true; break;
             case "Stats Collection Id": node.StatsCollectionId = 7; break;
+            case "nothing": break;
+            case "WITH TIES without a Top expression": node.WithTies = true; break;
             default: throw new ArgumentOutOfRangeException(nameof(row), row, "no operator is defined for this row");
         }
 
@@ -107,9 +115,7 @@ public sealed class PlanViewerOperatorDetailsCoverageTests
         {
             var control = new PlanViewerControl();
             ShowProperties(control, OperatorWithOnly(label));
-            var build = typeof(PlanViewerControl).GetMethod("BuildPropertiesText", Instance);
-            Assert.True(build is not null, "PlanViewerControl.BuildPropertiesText no longer exists under that name - this test's reflection anchor moved.");
-            return (string)build!.Invoke(control, Array.Empty<object>())!;
+            return CopyAllText(control);
         });
 
         Assert.Contains("Operator Details", text, StringComparison.Ordinal);
@@ -117,17 +123,74 @@ public sealed class PlanViewerOperatorDetailsCoverageTests
         Assert.Contains(value, text, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void ThePropertiesPanel_OpensNoOperatorDetails_ForAnOperatorWithNoDetail()
+    [Theory]
+    [MemberData(nameof(OperatorsWithoutARow))]
+    public void ThePropertiesPanel_AndCopyAll_HaveNoOperatorDetails_ForAnOperatorThatPrintsNoRow(string operatorWith)
     {
-        var sections = StaTestThread.Run(() =>
+        var (sections, text) = StaTestThread.Run(() =>
         {
             var control = new PlanViewerControl();
-            ShowProperties(control, new PlanNode { NodeId = 1, PhysicalOp = "Index Scan", LogicalOp = "Index Scan" });
-            return SectionTitles(control);
+            ShowProperties(control, OperatorWithOnly(operatorWith));
+            return (SectionTitles(control), CopyAllText(control));
         });
 
         Assert.DoesNotContain("Operator Details", sections);
+        Assert.DoesNotContain("Operator Details", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Every public settable property of <see cref="PlanNode"/> with a plain value, set alone by reflection to a non-default value, so a
+    /// row added to the section later is swept in without a list here: the section is never shown or copied empty, and the panel and
+    /// "Copy all properties" agree on whether it is there.
+    /// </summary>
+    [Fact]
+    public void ThePropertiesPanel_NeverShowsOrCopiesAnEmptyOperatorDetailsSection_WhateverOnePropertyAnOperatorHas()
+    {
+        var properties = typeof(PlanNode).GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.CanWrite && p.GetIndexParameters().Length == 0 && SampleValue(p.PropertyType) is not null)
+            .ToList();
+        Assert.NotEmpty(properties);
+
+        var problems = StaTestThread.Run(() =>
+        {
+            var control = new PlanViewerControl();
+            var found = new List<string>();
+            foreach (var property in properties)
+            {
+                var node = BareScan();
+                property.SetValue(node, SampleValue(property.PropertyType));
+                ShowProperties(control, node);
+
+                var section = PropertiesContent(control).Children.OfType<Expander>().FirstOrDefault(e => (e.Header as TextBlock)?.Text == "Operator Details");
+                var rowCount = section?.Content is Panel body ? body.Children.OfType<Grid>().Count() : 0;
+                var copied = CopyAllText(control).Contains("Operator Details", StringComparison.Ordinal);
+                if (section is not null && rowCount == 0)
+                {
+                    found.Add($"{property.Name}: the panel shows an Operator Details section with no row");
+                }
+
+                if (copied != (section is not null))
+                {
+                    found.Add($"{property.Name}: copy-all {(copied ? "names" : "omits")} Operator Details while the panel {(section is not null ? "shows" : "has")} {(section is not null ? "it" : "none")}");
+                }
+            }
+
+            return found;
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>A non-default value for a plain property type, or null for a type the sweep leaves alone.</summary>
+    private static object? SampleValue(Type type)
+    {
+        if (type == typeof(bool)) return true;
+        if (type == typeof(string)) return "x";
+        if (type == typeof(int)) return 1;
+        if (type == typeof(long)) return 1L;
+        if (type == typeof(List<string>)) return new List<string> { "x" };
+        if (type == typeof(List<int>)) return new List<int> { 1 };
+        return null;
     }
 
     private static void ShowProperties(PlanViewerControl control, PlanNode node)
@@ -135,6 +198,14 @@ public sealed class PlanViewerOperatorDetailsCoverageTests
         var show = typeof(PlanViewerControl).GetMethod("ShowPropertiesPanel", Instance);
         Assert.True(show is not null, "PlanViewerControl.ShowPropertiesPanel no longer exists under that name - this test's reflection anchor moved.");
         show!.Invoke(control, new object[] { node });
+    }
+
+    /// <summary>The "Copy all properties" text, rendered from the section models the panel keeps.</summary>
+    private static string CopyAllText(PlanViewerControl control)
+    {
+        var build = typeof(PlanViewerControl).GetMethod("BuildPropertiesText", Instance);
+        Assert.True(build is not null, "PlanViewerControl.BuildPropertiesText no longer exists under that name - this test's reflection anchor moved.");
+        return (string)build!.Invoke(control, Array.Empty<object>())!;
     }
 
     private static Panel PropertiesContent(PlanViewerControl control)
