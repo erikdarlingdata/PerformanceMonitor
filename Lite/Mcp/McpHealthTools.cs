@@ -778,8 +778,8 @@ public sealed class McpHealthTools
                    than a static sentence — full_detail=true changes compactCount to 0, so the note always
                    describes what THIS response actually did instead of what the argument nominally requested. */
                 collector_detail_note = full_detail
-                    ? "full_detail=true: every field is served for every collector below."
-                    : $"{compactCount} of {CountText.Plural(shownRows.Count, "collector")} below {(compactCount == 1 ? "is" : "are")} HEALTHY with nothing to report (no errors, denials, session/extension-missing runs or abandoned cycles this window) and are compacted to collector/status/compact/total_runs/rows_stored/avg_duration_ms/last_success. {partialCount} need a look (failing, stale, stopped, erroring, denied, regressed, or an unexplained zero) and carry a leaner partial_detail shape instead of full detail: in a partial row a missing key means null, false or 0, and only collector, status, partial_detail, total_runs and errors are always present. Pass full_detail=true for every field on every collector.",
+                    ? CollectorDetailNote.FullDetail
+                    : CollectorDetailNote.Build(compactCount, shownRows.Count, partialCount, collectorRows.Count - shownRows.Count),
                 /* #6180: the response-size cut, observed. Null note and false flag when every collector fit. */
                 truncated = collectorCount < collectorRows.Count,
                 collectors_returned = collectorCount,

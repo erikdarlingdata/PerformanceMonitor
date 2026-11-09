@@ -381,7 +381,7 @@ internal static class TrendBuckets
     /// </summary>
     public static string AggregateNote(int bucketMinutes, bool requested, int budgetPoints) =>
         $"Each point summarizes the collections in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start (the first point at the window's start). "
-        + "Counts are summed across the bucket, and rates and ratios are recomputed from those sums over the seconds the collections covered — never averaged from per-collection values — so a bucket the window cuts short holds smaller counts but a true rate. "
+        + "Counts are summed across the bucket, and rates and ratios are recomputed from those sums over the seconds the collections covered, never averaged from per-collection values, so a bucket the window cuts short holds smaller counts but a true rate. "
         + "peak_* and worst_* are the single most extreme collection inside the bucket, so a spike survives the rollup. "
         + Sizing(requested, budgetPoints);
 
