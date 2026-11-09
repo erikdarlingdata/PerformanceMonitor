@@ -299,13 +299,29 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         _comparisonLabel = null;
         foreach (var lane in _lanes)
         {
-            lane.Series.Clear();
+            Forget(lane);
             lane.VLine = null;
-            lane.BaselineUpper = null;
-            lane.BaselineLower = null;
-            lane.BaselineSteps = null;
-            lane.MinAnomalyValue = 0;
         }
+    }
+
+    /// <summary>
+    /// Forgets one lane's series and bands, so the hover reads nothing from it until the lane is given data again. A lane whose
+    /// read failed is cleared this way, as its chart is (#8368); its VLine stays for <see cref="ReattachVLines"/> to replace.
+    /// </summary>
+    public void ClearLane(ScottPlot.WPF.WpfPlot chart)
+    {
+        var lane = _lanes.Find(l => l.Chart == chart);
+        if (lane == null) return;
+        Forget(lane);
+    }
+
+    private static void Forget(LaneInfo lane)
+    {
+        lane.Series.Clear();
+        lane.BaselineUpper = null;
+        lane.BaselineLower = null;
+        lane.BaselineSteps = null;
+        lane.MinAnomalyValue = 0;
     }
 
     /// <summary>
