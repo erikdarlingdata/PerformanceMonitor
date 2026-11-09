@@ -29,9 +29,9 @@ WHAT IT SIGNS, AND HOW IT FINDS THEM
   payload sits one level down in `current/` and is not resubmitted.
 
   The root rule is positional, not by name, because the launcher is named after the Velopack
-  pack id rather than the application's own executable: the Darling Viewer portable zip's root
-  entry is `PerformanceMonitorDarlingViewer.exe` while the application is
-  `PerformanceMonitor.Darling.Viewer.exe` and lives at `current/`.
+  pack title (`--packTitle`, falling back to the pack id) rather than the application's own
+  executable: the Darling Viewer portable zip's root entry is `Performance Monitor Darling Viewer.exe`
+  while the application is `PerformanceMonitor.Darling.Viewer.exe` and lives at `current/`.
 
 THE PORTABLE ZIP IS A SHIPPED ARTIFACT
 
@@ -696,9 +696,9 @@ def self_test() -> int:
 
     with tempfile.TemporaryDirectory() as root:
         lite = _product_dir(root, "lite", "PerformanceMonitorLite", "PerformanceMonitorLite.exe")
-        # The Darling Viewer case: the root launcher carries the PACK ID, and the application's
-        # own executable name appears only under current/. A name-based rule misses the launcher
-        # and submits the already-signed payload instead.
+        # The Darling Viewer case: the root launcher carries the PACK TITLE (the pack id when no
+        # title is given, as here), and the application's own executable name appears only under
+        # current/. A name-based rule misses the launcher and submits the already-signed payload instead.
         viewer = _product_dir(
             root,
             "darlingviewer",

@@ -158,6 +158,27 @@ internal static class OversizedPlanBacklogSweep
     internal const int MaxPlansPerServerPerTick = 10;
 
     /// <summary>
+    /// #8404: the most rows a day of passes can take off one server's backlog when every pass finishes inside
+    /// <see cref="SweepInterval"/>: <see cref="MaxPlansPerServerPerTick"/> times the passes a day holds at that interval.
+    /// The claim bounds captured plus expired together, so this bounds the day's DRAIN, not captures alone. It is the
+    /// interval's ceiling, not the reachable figure: the worker launches a pass only after the previous one has
+    /// finished, so a pass that overruns its interval costs the next slot, and the passes that ran in a day can sit
+    /// below the interval's count. <c>get_oversized_plan_backlog</c> reports this beside <see cref="ReachableRowsPerServer"/>
+    /// for the passes its run records show. Derived from the two constants, so it moves with them.
+    /// </summary>
+    internal static int RowsPerServerPerDayCeiling => MaxPlansPerServerPerTick * (int)(TimeSpan.FromDays(1) / SweepInterval);
+
+    /// <summary>
+    /// #8404: the most rows the given number of passes could have taken off one server's backlog, each pass claiming at
+    /// most <see cref="MaxPlansPerServerPerTick"/>, captured and expired together. The figure a day's drain is held
+    /// against, for the passes that FINISHED in the day: the run record is written when a pass ends and captures are
+    /// stamped during it, so a pass in flight adds up to one claim to the drain with no record yet. The count is
+    /// store-wide and includes passes that reached no server, so this is an upper bound; a server drained at or near
+    /// it with pending rows waiting was at the cap for those passes, and with no pass finished nothing reads against it.
+    /// </summary>
+    internal static int ReachableRowsPerServer(int passes) => passes * MaxPlansPerServerPerTick;
+
+    /// <summary>
     /// WALL-CLOCK ceiling for one plan's fetch — connect, execute AND drain. It is the binding constraint,
     /// for the reason <c>ICollectorSchemaInfo.PerItemWallClockBudget</c> records: a command timeout bounds the
     /// wait for a network read and SqlClient RESETS it on every read that arrives, so a large result that
