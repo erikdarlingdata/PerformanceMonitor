@@ -130,6 +130,8 @@ try {
 
 const all = (n, out = []) => { out.push(n); for (const c of n.children) all(c, out); return out; };
 const flush = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 0)); };
+/* The page's Retry-After wait (retryOnceWhenBusy, util.js) before the refused read is sent once more, then the turns that follow it. */
+const advanceBusyRetry = async () => { await new Promise((r) => setTimeout(r, 1300)); await flush(); };
 const readsOf = (name) => asks.filter((a) => a.name === name).map((a) => a.q);
 const out = {};
 
@@ -234,13 +236,31 @@ for (const [label, refusals] of [["busyOnce", 1], ["busyTwice", 2]]) {
   await flush();
   const strips = () => all(main).filter((n) => /\bstrip\b/.test(n.attrs.class || n.className || "")).map((n) => ({ cls: n.attrs.class || n.className, text: n.textContent }));
   const seen = { readsBefore: readsOf("get_resource_use_by_tag").length, stripsBefore: strips() };
-  await new Promise((r) => setTimeout(r, 1300));
-  await flush();
+  await advanceBusyRetry();
   seen.readsAfter = readsOf("get_resource_use_by_tag").length;
   seen.stripsAfter = strips();
   seen.planCardAfter = all(main).some((n) => n.attrs["data-section"] === "plan_cache");
   busyReads = 0;
   out[label] = seen;
+}
+
+/* #8417: the same refusal while the event loop stalls past the Retry-After, as a loaded test run stalls it. The second read must not
+   be sent before the harness has counted the first: the wait is the harness's to advance, not wall-clock time's. */
+{
+  const main = new FakeNode("main");
+  main.isRoot = true;
+  asks.length = 0;
+  busyReads = 1;
+  modules.page.renderQueryTagUsage(main);
+  await flush();
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1100);
+  await flush();
+  const seen = { readsBefore: readsOf("get_resource_use_by_tag").length };
+  await advanceBusyRetry();
+  seen.readsAfter = readsOf("get_resource_use_by_tag").length;
+  seen.planCardAfter = all(main).some((n) => n.attrs["data-section"] === "plan_cache");
+  busyReads = 0;
+  out.busyUnderLoad = seen;
 }
 
 /* #8083: a store with no query tag. The page asks list_query_tags, draws one line that links to Manage Query Tags, and never sends the by-tag read:
