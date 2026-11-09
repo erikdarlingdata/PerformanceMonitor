@@ -76,7 +76,7 @@
                    Text="No mute rules yet. Add one here, or right-click an alert in Alert History to mute it."
                    Foreground="{DynamicResource ForegroundMutedBrush}"
                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                   TextWrapping="Wrap" TextAlignment="Center" MaxWidth="420"
+                   TextWrapping="Wrap" TextAlignment="Center" MaxWidth="640"
                    Visibility="Collapsed"/>
         </Grid>
 

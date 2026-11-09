@@ -988,8 +988,7 @@
                         <Border Background="{DynamicResource BackgroundLightBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,12">
                             <StackPanel>
                                 <!-- Mute Rules -->
-                                <TextBlock Text="Alert Muting" FontWeight="SemiBold" FontSize="12"
-                                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,14,0,4"/>
+                                <TextBlock Text="Alert Muting" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button x:Name="ManageMuteRulesButton" Content="_Manage Mute Rules..."
                                         Click="ManageMuteRulesButton_Click" HorizontalAlignment="Left"
                                         Padding="12,4" Margin="20,4,0,4"/>
@@ -1043,7 +1042,7 @@
                                 <TextBlock Text="Automated Analysis" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <TextBlock Text="Periodically run the triage engine and record findings in the Alerts tab. Notifications below are optional — analysis runs and stores findings even with notifications off."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                           Margin="20,0,0,4" TextWrapping="Wrap"/>
+                                           Margin="0,4,0,4" TextWrapping="Wrap"/>
                                 <CheckBox x:Name="AnalysisEnabledCheckBox" Content="Enable automated analysis"
                                           Margin="20,4,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <CheckBox x:Name="AnalysisNotificationsCheckBox" Content="Send scheduled analysis notifications"
