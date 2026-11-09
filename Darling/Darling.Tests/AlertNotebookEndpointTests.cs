@@ -424,6 +424,22 @@ public sealed class AlertNotebookEndpointTests
         Assert.False((bool?)AlertNotebookEndpoint.AlertRowNode(liveRow, null)["dismissed"]);
     }
 
+    /// <summary>The envelope says whether the matched row is state-only (a resolution, Database State, Agent Not Running), the flag
+    /// get_alert_history carries, so the header shows the dash Alert History shows for the row's stored zeros rather than 0 against 0.
+    /// The triage page's row node carries the same flag for its alert card.</summary>
+    [Fact]
+    public void AlertRowNode_SaysWhetherTheRowIsStateOnly()
+    {
+        var fired = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        var resolution = Row(fired, "Client Timeouts Cleared");
+        var measured = Row(fired, "High CPU");
+
+        Assert.True((bool?)AlertNotebookEndpoint.AlertRowNode(resolution, null)["state_only"]);
+        Assert.False((bool?)AlertNotebookEndpoint.AlertRowNode(measured, null)["state_only"]);
+        Assert.True((bool?)DarlingTriageEndpoint.AlertRowNode(resolution)["state_only"]);
+        Assert.False((bool?)DarlingTriageEndpoint.AlertRowNode(measured)["state_only"]);
+    }
+
     /* ═══════════════════════════ pure: StatusFromHistory (#4366 review F1/F2/F4) ═══════════════════════════ */
 
     /// <summary>F1: a resolution 40 minutes after <c>at</c> (past the old +15m read's edge) is now visible and
