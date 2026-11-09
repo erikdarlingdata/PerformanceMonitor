@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Darling.Tests;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Investigations;
@@ -34,6 +35,11 @@ public sealed class LiteInvestigationL2Tests : IDisposable
     private const string Evidence = "[{\"tool\":\"get_blocking\",\"arguments\":{},\"key_numbers\":\"head blocker 412 s\",\"basis\":\"verified\"}]";
 
     private static readonly DateTime Anchor = new(2026, 10, 14, 2, 10, 0, DateTimeKind.Utc);
+
+    /// <summary>How long a budgeted writer from this fixture may take to show up as a waiting writer once it asks for the held
+    /// lock. A writer that parks is one on its first step, with no sleep between asking and parking; one that polls stays out of
+    /// the waiting count for all but the last second of its two-minute budget. Ten seconds decides which, with no timing margin.</summary>
+    private static readonly TimeSpan ParkBackstop = TimeSpan.FromSeconds(10);
 
     private readonly string _tempDir;
     private readonly DuckDbInitializer _db;
@@ -317,6 +323,60 @@ public sealed class LiteInvestigationL2Tests : IDisposable
         Assert.False(await _store.RequestExistsAsync(first, Ct));
         Assert.True(await _store.RequestExistsAsync(later, Ct));
         Assert.Null(Assert.Single((await _store.ReadReportsAsync(later, null, DateTime.MinValue, 10, 10, Ct)).Reports).FamilyOf);
+    }
+
+    /// <summary>
+    /// #8490: the write lock is process-wide, and the classes running alongside take it while they build their own databases. A
+    /// budgeted writer polls for it with no queue position for all but the last second of its budget (#7256), and the writers those
+    /// classes park on the lock win every handoff, so a purge from this fixture could spend its whole two-minute budget polling and
+    /// then fail naming a holder that had the lock for a fraction of a second. This fixture's writers park for their whole budget
+    /// instead: while another writer holds the lock, a purge is a waiting writer the moment it asks, and it holds the lock as soon as
+    /// the holder releases. The holder here is a budgeted writer on its own thread, released in finally on every path.
+    /// </summary>
+    [Fact]
+    public async Task APurge_ParksOnTheWriteLock_WhileAnotherWriterHoldsIt_InsteadOfPolling()
+    {
+        var budget = DuckDbInvestigationStoreTests.TestLockBudget;
+        var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim(false);
+        var holder = Task.Factory.StartNew(() =>
+        {
+            using var writeLock = _db.AcquireWriteLock(budget);
+            held.SetResult();
+            release.Wait(budget);
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        Task<int>? purge = null;
+        try
+        {
+            await Task.WhenAny(held.Task, holder);
+            if (holder.IsFaulted)
+            {
+                await holder;
+            }
+
+            var waitingBefore = DuckDbInitializer.WaitingWriteCountForTests;
+            var pendingBefore = DuckDbInitializer.PendingWriteCountForTests;
+            purge = Task.Run(() => _store.PurgeAsync(Ct), CancellationToken.None);
+            TestWait.WaitUntil(() => DuckDbInitializer.PendingWriteCountForTests > pendingBefore, budget, TimeSpan.FromMilliseconds(5), "the purge reached the write-lock wait");
+
+            Assert.True(
+                TestWait.TryWaitUntil(() => DuckDbInitializer.WaitingWriteCountForTests > waitingBefore, ParkBackstop, TimeSpan.FromMilliseconds(5)),
+                "the purge polls for the write lock with no queue position instead of parking as a waiting writer, so the parked writers of the classes running alongside win every handoff and its budget runs out");
+
+            release.Set();
+            await holder;
+            await purge.WaitAsync(budget, Ct);
+        }
+        finally
+        {
+            release.Set();
+            await holder;
+            if (purge is not null)
+            {
+                await purge;
+            }
+        }
     }
 
     /* ---- v74 ---- */
