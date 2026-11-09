@@ -26,7 +26,7 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// #5820 slice L4: the two Lite settings <c>mcp_allow_investigations</c> and <c>mcp_data_detail</c>, the gate that serves
-/// the four investigation tools BY NAME (on AND writes off, no token), and the data-detail masking through the host's REAL
+/// the state-changing investigation tools BY NAME (on AND writes off, no token; #8461: the two reads are never gated), and the data-detail masking through the host's REAL
 /// registration (<see cref="McpHostService.RegisterMcpServer"/> and <see cref="McpHostService.AddCallToolFilters"/>). The
 /// four tool classes come later, so a stand-in class carries the four names plus one that must never be gated.
 /// </summary>
@@ -65,9 +65,16 @@ public sealed class McpInvestigationGateTests
             "{\"rows\":[{\"query_text\":\"SELECT * FROM dbo.t WHERE name = '" + Secret + "'\",\"duration_ms\":5}]}";
     }
 
-    private static readonly string[] InvestigationToolNames =
+    /// <summary>The tools that change investigation state: the ones the setting serves (#8461).</summary>
+    private static readonly string[] StateChangingNames =
     {
-        "list_investigation_requests", "claim_investigation_request", "submit_investigation_report", "get_investigation_reports",
+        "claim_investigation_request", "submit_investigation_report",
+    };
+
+    /// <summary>The investigation reads: ordinary reads, served in every configuration as Darling serves them (#8461).</summary>
+    private static readonly string[] ReadNames =
+    {
+        "list_investigation_requests", "get_investigation_reports",
     };
 
     private static async Task<TestServer> BuildServer(bool allowWrites, bool allowInvestigations, McpDataDetail dataDetail,
@@ -139,9 +146,14 @@ public sealed class McpInvestigationGateTests
     }
 
     [Fact]
-    public void TheGatedSet_IsTheFourAgentTools_AndNotTheWaitTool()
+    public void TheGatedSet_IsTheTwoStateChangingTools_NotTheReads_AndNotTheWaitTool()
     {
-        Assert.Equal(InvestigationToolNames.OrderBy(n => n), McpInvestigationPolicy.InvestigationTools.OrderBy(n => n));
+        Assert.Equal(StateChangingNames.OrderBy(n => n), McpInvestigationPolicy.InvestigationTools.OrderBy(n => n));
+        foreach (var name in ReadNames)
+        {
+            Assert.DoesNotContain(name, McpInvestigationPolicy.InvestigationTools);
+        }
+
         Assert.DoesNotContain("wait_for_investigation_requests", McpInvestigationPolicy.InvestigationTools);
     }
 
@@ -150,13 +162,13 @@ public sealed class McpInvestigationGateTests
     [InlineData(true, false)]
     [InlineData(false, true)]
     [InlineData(true, true)]
-    public async Task Gate_ServesTheFourTools_OnlyWhenInvestigationsAreOnAndWritesAreOff(bool investigations, bool writes)
+    public async Task Gate_ServesTheStateChangingTools_OnlyWhenInvestigationsAreOnAndWritesAreOff_AndTheReadsInEveryConfiguration(bool investigations, bool writes)
     {
         var served = investigations && !writes;
         using var server = await BuildServer(writes, investigations, McpDataDetail.Full);
 
         var listed = await ListedAsync(server);
-        foreach (var name in InvestigationToolNames)
+        foreach (var name in StateChangingNames)
         {
             Assert.Equal(served, listed.Contains(name));
 
@@ -169,6 +181,13 @@ public sealed class McpInvestigationGateTests
             {
                 Assert.Contains("Unknown tool", body, StringComparison.OrdinalIgnoreCase);
             }
+        }
+
+        /* #8461: the two reads are listed and answer whatever the two settings say, as they do in Darling. */
+        foreach (var name in ReadNames)
+        {
+            Assert.True(listed.Contains(name), $"{name} is a read and is listed in every configuration (investigations {investigations}, writes {writes})");
+            Assert.DoesNotContain("Unknown tool", await CallAsync(server, name), StringComparison.OrdinalIgnoreCase);
         }
 
         /* The wait tool is never gated, and the write tool follows the write switch alone. */
@@ -201,7 +220,7 @@ public sealed class McpInvestigationGateTests
 
         var served = McpInvestigationPolicy.StartupLine(allowInvestigations: true, allowWrites: false, tokenUsable: true);
         Assert.Equal(LogLevel.Information, served!.Value.Level);
-        foreach (var name in InvestigationToolNames)
+        foreach (var name in StateChangingNames)
         {
             Assert.Contains(name, served.Value.Message, StringComparison.Ordinal);
         }

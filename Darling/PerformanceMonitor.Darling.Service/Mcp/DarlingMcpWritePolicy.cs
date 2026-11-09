@@ -164,16 +164,13 @@ internal static class DarlingMcpWritePolicy
     /// The tools that write investigation state and nothing else (#5632 Phase A): an agent claims a request and
     /// returns its report. A third set, apart from <see cref="WriteTools"/>: served only with a bearer token AND
     /// <c>mcp.allowWrites</c> off (ruling R2), because one token cannot tell an agent from a person, so an agent
-    /// that holds the token must not also hold the configuration writes. The two investigation reads
-    /// (<c>list_investigation_requests</c>, <c>get_investigation_reports</c>) are ordinary reads.
+    /// that holds the token must not also hold the configuration writes. The set is the shared kind list's
+    /// (<see cref="InvestigationToolNames.StateChanging"/>, #8461): a claim, a report, and the agent's message to the request's chat
+    /// thread under its claim (#7659), so a shared name is gated by the same rule in Lite. The investigation reads
+    /// (<see cref="InvestigationToolNames.Reads"/>: <c>list_investigation_requests</c>, <c>get_investigation_reports</c>,
+    /// <c>get_investigation_evidence</c>, <c>wait_for_investigation_requests</c>) are ordinary reads, served under every policy.
     /// </summary>
-    internal static readonly IReadOnlySet<string> InvestigationTools = new HashSet<string>(StringComparer.Ordinal)
-    {
-        "claim_investigation_request",
-        "submit_investigation_report",
-        /* #7659: the agent's message to the request's chat thread, under its claim. */
-        "post_investigation_message",
-    };
+    internal static readonly IReadOnlySet<string> InvestigationTools = InvestigationToolNames.StateChanging;
 
     /// <summary>
     /// The Level 2 action tools (#5632 Phase B, #5912): write tools an agent may also call under the investigations arm

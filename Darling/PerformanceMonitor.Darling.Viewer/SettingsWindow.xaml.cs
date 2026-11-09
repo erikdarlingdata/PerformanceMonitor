@@ -1474,7 +1474,7 @@ public partial class SettingsWindow : Window
         AlertCooldownBox.Text = "5";
         EmailCooldownBox.Text = "15";
         AlertDeliveryModeBox.SelectedIndex = 0;
-        AlertPerEventMaxBox.Text = "5";
+        AlertPerEventMaxBox.Text = AlertDefaults.PerEventMax.ToString(CultureInfo.InvariantCulture);
         AnalysisIntervalBox.Text = "30";
         AnalysisNotifySeverityBox.Text = "1.5";
         /* #3712 (V137): "defaults" for the route knob is the NULL item -- the store column cleared, the service's
