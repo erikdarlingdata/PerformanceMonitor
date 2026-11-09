@@ -126,6 +126,51 @@ public sealed class ComposeStatementTimeoutAnswerTests
         Assert.Contains("24 hours", error, StringComparison.Ordinal);
     }
 
+    /// <summary>The sentence counts servers by the run's own rule (ComposePanelRunner.ParseServerScope): the literal "All", which the
+    /// notebook editor and the views page send for a fleet run, is no scope, so the cell was reading every server.</summary>
+    [Fact]
+    public void AStatementTimeout_WithServerAll_SaysEveryServer()
+    {
+        var body = new JsonObject { ["panel"] = new JsonObject(), ["hours"] = 24, ["server"] = "All" };
+
+        using var json = ResultBody(Answer(StatementTimeout(), body), out _);
+
+        var error = json.RootElement.GetProperty("error").GetString()!;
+        Assert.Contains("every server", error, StringComparison.Ordinal);
+        Assert.DoesNotContain("1 server", error, StringComparison.Ordinal);
+    }
+
+    /// <summary>With no top-level server the run scopes by the bound server variable, so the sentence counts that one.</summary>
+    [Fact]
+    public void AStatementTimeout_ScopedByTheServerVariable_SaysOneServer()
+    {
+        var body = new JsonObject
+        {
+            ["panel"] = new JsonObject(),
+            ["hours"] = 24,
+            ["values"] = new JsonObject { [ComposeVariable.ServerDimension] = "orders" },
+        };
+
+        using var json = ResultBody(Answer(StatementTimeout(), body), out _);
+
+        var error = json.RootElement.GetProperty("error").GetString()!;
+        Assert.Contains("1 server", error, StringComparison.Ordinal);
+        Assert.DoesNotContain("every server", error, StringComparison.Ordinal);
+    }
+
+    /// <summary>A null or empty entry in the list is no server, as the run reads it.</summary>
+    [Fact]
+    public void AStatementTimeout_WithABlankEntryInTheServerList_CountsTheNamedOnesOnly()
+    {
+        var body = new JsonObject { ["panel"] = new JsonObject(), ["hours"] = 24, ["server"] = new JsonArray("orders", "") };
+
+        using var json = ResultBody(Answer(StatementTimeout(), body), out _);
+
+        var error = json.RootElement.GetProperty("error").GetString()!;
+        Assert.Contains("1 server", error, StringComparison.Ordinal);
+        Assert.DoesNotContain("2 servers", error, StringComparison.Ordinal);
+    }
+
     /// <summary>#4283: the author's own syntax error is theirs to fix, so the engine's text stays the answer and nothing sits behind it.</summary>
     [Fact]
     public void ASyntaxError_StillAnswersTheEnginesText_WithNoDetail()

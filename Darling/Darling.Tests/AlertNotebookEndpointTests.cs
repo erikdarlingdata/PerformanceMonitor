@@ -823,7 +823,8 @@ public sealed class AlertNotebookEndpointTests
     {
         var titles = CpuCellTitlesFor(PerformanceMonitor.Collectors.MonitoredEngineKind.Postgres);
 
-        Assert.Equal(new[] { "High CPU", "Status", "PostgreSQL CPU", "Top queries by CPU" }, titles);
+        /* get_pg_top_queries ranks query shapes by total execution time, so its cell says so. */
+        Assert.Equal(new[] { "High CPU", "Status", "PostgreSQL CPU", "Top queries by execution time" }, titles);
     }
 
     [Fact]
