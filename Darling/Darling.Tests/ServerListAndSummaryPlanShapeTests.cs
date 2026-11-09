@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -132,8 +133,9 @@ public sealed class ServerListAndSummaryPlanShapeTests
                    varies run to run and is not this test's to control. This is ServerListSql's own LATERAL
                    body (asserted below, ignoring formatting), parameterized, so it proves the identical
                    per-server mechanism without that noise. */
-                /* #5735: the probe carries the skipped-slots exclusion the shipped read now has. */
-                const string LateralProbe = "SELECT cl.collection_time FROM v_collection_log cl WHERE cl.server_id = $1 AND " + CollectionCycleRow.NotCycleRowSql + " ORDER BY cl.collection_time DESC LIMIT 1";
+                /* #5735, #8464: the probe carries the predicate the shipped read has, the successful-collector-run filter, which
+                   leaves out failed attempts as well as the skipped-slots and analysis-pass rows. */
+                const string LateralProbe = "SELECT cl.collection_time FROM v_collection_log cl WHERE cl.server_id = $1 AND " + CollectionRunSql.SuccessfulCollectorRun + " ORDER BY cl.collection_time DESC LIMIT 1";
                 var flattenedServerListSql = Regex.Replace(DarlingDataReader.ServerListSql, @"\s+", " ");
                 Assert.Contains(
                     LateralProbe.Replace("cl.server_id = $1", "cl.server_id = s.server_id", StringComparison.Ordinal),
