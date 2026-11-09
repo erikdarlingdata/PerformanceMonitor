@@ -1,6 +1,5 @@
 using System;
 using PerformanceMonitor.Analysis;
-using PerformanceMonitorLite.Analysis;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;

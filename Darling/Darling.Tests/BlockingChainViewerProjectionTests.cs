@@ -1,7 +1,5 @@
 using System;
 using PerformanceMonitor.Analysis;
-using PerformanceMonitor.Darling.Viewer;
-
 using Xunit;
 
 namespace Darling.Tests;
