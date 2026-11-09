@@ -235,7 +235,7 @@ public sealed class DarlingMcpJobTools
                     emptyHints["truncation_note"] = notice.TruncationNote;
                 }
 
-                AddAgentState(emptyHints, scope, answerNames, await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken));
+                await AddAgentStateAsync(postgres, emptyHints, scope, answerNames, windowEnd, cancellationToken);
                 return McpHelpers.Status("empty", "No job runs matched in the requested time range.", emptyHints);
             }
 
@@ -267,7 +267,7 @@ public sealed class DarlingMcpJobTools
 
             envelope["shown"] = runs.Count;
             envelope["truncated"] = truncated;
-            AddAgentState(envelope, scope, answerNames, await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken));
+            await AddAgentStateAsync(postgres, envelope, scope, answerNames, windowEnd, cancellationToken);
             envelope["runs"] = runs;
             return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
         }
@@ -305,9 +305,26 @@ public sealed class DarlingMcpJobTools
     /// the servers that have a snapshot at or before the window's end. A named server with none reads as unknown, the same
     /// as one whose snapshot is stale at that instant. A null <paramref name="states"/> (the read failed) adds nothing.
     /// </summary>
+    private static async Task AddAgentStateAsync(
+        NpgsqlDataSource postgres, Dictionary<string, object?> envelope, (int ServerId, string DisplayName)? scope,
+        IReadOnlyDictionary<int, string> answerNames, DateTime windowEnd, CancellationToken cancellationToken)
+    {
+        var states = await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken);
+        /* A named server with no snapshot is unknown only when the agent_status collector runs on its engine. Where it does not (an
+           RDS instance, an Azure SQL Database) the gap is structural, and the description says so instead of sending the reader
+           to collection health, the same engine gate get_running_jobs and get_agent_alerts answer through. */
+        string? notCollected = null;
+        if (states is { Count: 0 } && scope is { } named)
+        {
+            var reasons = await DarlingEngineCapability.NotCollectedReasonsAsync(postgres, [(named.ServerId, named.DisplayName)], "agent_status", cancellationToken);
+            reasons.TryGetValue(named.ServerId, out notCollected);
+        }
+        AddAgentState(envelope, scope, answerNames, states, notCollected);
+    }
+
     private static void AddAgentState(
         Dictionary<string, object?> envelope, (int ServerId, string DisplayName)? scope,
-        IReadOnlyDictionary<int, string> answerNames, List<DarlingJobReader.AgentState>? states)
+        IReadOnlyDictionary<int, string> answerNames, List<DarlingJobReader.AgentState>? states, string? notCollected = null)
     {
         if (states is null) return;
         if (scope is null)
@@ -322,7 +339,7 @@ public sealed class DarlingMcpJobTools
 
         var one = states.Count > 0
             ? states[0]
-            : new DarlingJobReader.AgentState(scope.Value.DisplayName, null, DarlingJobReader.AgentUnknownDescription, null, default);
+            : new DarlingJobReader.AgentState(scope.Value.DisplayName, null, notCollected ?? DarlingJobReader.AgentUnknownDescription, null, default);
         envelope["agent_running"] = one.AgentRunning;
         envelope["agent_status_desc"] = one.AgentStatusDesc;
         envelope["next_run"] = McpHelpers.FormatEffectiveStart(one.NextRunUtc);

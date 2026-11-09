@@ -37,7 +37,8 @@ public partial class ServerTab : UserControl
         EmptyState.SetText(ProcedureStatsGrid, "No procedure executions in the selected time window.");
         EmptyState.SetText(BlockedProcessReportGrid, "No blocked process reports in the selected time window.");
         EmptyState.SetText(DeadlockGrid, "No deadlocks in the selected time window.");
-        EmptyState.SetText(PlanCorrectionGrid, "No plan corrections in the selected time window.");
+        /* The two plan-correction grids are worded by the server's version, which this tab learns before its first load. */
+        ApplyPlanCorrectionEmptyTexts(PlanCorrectionTarget());
         _runningJobsFilterMgr = new DataGridFilterManager<RunningJobRow>(RunningJobsGrid);
         _longQueryFilterMgr = new DataGridFilterManager<LongQueryCompletionRow>(LongQueryCompletionsGrid);
         _serverConfigFilterMgr = new DataGridFilterManager<ServerConfigRow>(ServerConfigGrid);
