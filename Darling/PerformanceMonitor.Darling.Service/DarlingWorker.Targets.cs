@@ -845,7 +845,8 @@ public sealed partial class DarlingWorker
     /// <c>query_store_health</c> capture that Query Store is on for is a readable secondary, or, with no such database, its newest
     /// <c>ag_replica_role</c> reads Secondary; never when a <c>query_store_replica</c> is set for it. The same store facts the Query
     /// Store reads' <c>not_collected</c> answer is built from (<see cref="DarlingQueryStoreReadableSecondary"/>), read on each call.
-    /// False when the store cannot answer, so the collector runs.
+    /// The read runs in the sweep body and carries the sweep deadline like every other store command there. False when the store
+    /// cannot answer, so the collector runs.
     /// </summary>
     internal async Task<bool> IsQueryStoreReadableSecondaryAsync(ServerLoopState server, ServerRuntime runtime, CancellationToken cancellationToken)
     {
@@ -860,7 +861,7 @@ public sealed partial class DarlingWorker
         }
 
         var message = await DarlingQueryStoreReadableSecondary.MessageAsync(
-            _postgres, runtime.ServerId, server.Config.DisplayName, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            _postgres, runtime.ServerId, server.Config.DisplayName, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
         return message is not null;
     }
 
