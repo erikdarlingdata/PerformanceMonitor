@@ -46,7 +46,7 @@
                       SelectionMode="Single"
                       SelectionChanged="RunsDataGrid_SelectionChanged">
                 <DataGrid.Columns>
-                    <DataGridTextColumn Header="Swept at" Binding="{Binding SweptAtLocal}" SortMemberPath="SweptAtUtc" Width="150"/>
+                    <DataGridTextColumn Header="Swept at" Binding="{Binding SweptAtLocal}" SortMemberPath="SweptAtUtc" Width="Auto" MinWidth="150"/>
                     <DataGridTextColumn Header="Flags" Binding="{Binding Flags}" Width="170"/>
                     <DataGridTextColumn Header="Servers" Binding="{Binding ServersText}" Width="120"/>
                     <DataGridTextColumn Header="Bands" Binding="{Binding BandsText}" Width="*" MinWidth="160"/>
@@ -169,9 +169,9 @@
                         <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="150"/>
                         <DataGridTextColumn Header="Item" Binding="{Binding Item}" Width="180"/>
                         <DataGridTextColumn Header="State" Binding="{Binding State}" Width="80"/>
-                        <DataGridTextColumn Header="Position" Binding="{Binding Position}" Width="170"/>
-                        <DataGridTextColumn Header="First ever seen" Binding="{Binding FirstSeen}" SortMemberPath="FirstSeenUtc" Width="140"/>
-                        <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeen}" SortMemberPath="LastSeenUtc" Width="140"/>
+                        <DataGridTextColumn Header="Position" Binding="{Binding Position}" Width="Auto" MinWidth="170"/>
+                        <DataGridTextColumn Header="First ever seen" Binding="{Binding FirstSeen}" SortMemberPath="FirstSeenUtc" Width="Auto" MinWidth="140"/>
+                        <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeen}" SortMemberPath="LastSeenUtc" Width="Auto" MinWidth="140"/>
                         <DataGridTextColumn Header="Condition / evidence" Binding="{Binding Condition}" Width="*" MinWidth="200">
                             <DataGridTextColumn.ElementStyle>
                                 <Style TargetType="TextBlock">

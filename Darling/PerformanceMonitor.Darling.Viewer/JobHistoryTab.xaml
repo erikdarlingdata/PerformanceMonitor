@@ -161,7 +161,7 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding CategoryName}" Width="120">
+                    <DataGridTextColumn Binding="{Binding CategoryName}" Width="Auto" MinWidth="120">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CategoryName" Click="FilterButton_Click" Margin="0,0,4,0"/>
