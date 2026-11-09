@@ -237,7 +237,9 @@ internal static class DarlingMcpInstructions
         "list_query_tag_rules", "list_query_tags", "test_query_tag_rule", "unassign_query_tag", "update_query_tag", "update_query_tag_rule",
     };
 
-    private const string Preamble = """
+    /* A property, not a field: Text above is initialized first in textual order, and the settings paragraph it carries
+       is built from DarlingMcpWritePolicy.InvestigationTools at run time. */
+    private static string Preamble => """
         You are connected to a SQL Server performance monitoring tool via PerformanceMonitor Darling, the headless collector service.
 
         ## What this server can and cannot do
