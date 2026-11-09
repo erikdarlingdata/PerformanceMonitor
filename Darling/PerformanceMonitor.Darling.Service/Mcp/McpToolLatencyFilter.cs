@@ -141,9 +141,11 @@ public sealed class McpToolLatencyFilter
                or runs once and is stored. A hit skips admission. */
             /* #6800: a whole-fleet read of get_resource_use_by_tag (no server_name) over a window of 24 hours or more is cached for its own TTL. */
             var fleetRead = IsFleetRead(request);
-            if (_admission is { } admission && admission.IsCached(ReadSurface.Mcp, toolName, windowBand, fleetRead))
+            /* The one-server form of a held view (get_finops view=optimization) is kept for the view's own TTL from the moment it is stored. */
+            var (serverHeld, view) = ServerHeldReadOf(request);
+            if (_admission is { } admission && admission.IsCached(ReadSurface.Mcp, toolName, windowBand, fleetRead, serverHeld))
             {
-                return await ServeCachedAsync(admission, next, request, toolName, windowBand, fleetRead, readScope.Scope, caller, cancellationToken);
+                return await ServeCachedAsync(admission, next, request, toolName, windowBand, fleetRead, view, serverHeld, readScope.Scope, caller, cancellationToken);
             }
 
             CallToolResult answer;
@@ -270,6 +272,26 @@ public sealed class McpToolLatencyFilter
         }
     }
 
+    /// <summary><see cref="IsServerHeldRead(string, IDictionary{string, JsonElement}?)"/> for a request, with the <c>view</c> it read (null when
+    /// there is none, or it is not a string). Never throws; a call whose arguments cannot be read is not a held read.</summary>
+    private static (bool ServerHeld, string? View) ServerHeldReadOf(ModelContextProtocol.Server.RequestContext<CallToolRequestParams> request)
+    {
+        var arguments = request.Params?.Arguments;
+        var view = StringArgument(arguments, "view");
+        return (IsServerHeldRead(request.Params?.Name ?? string.Empty, arguments), view);
+    }
+
+    /// <summary>Whether a call is the one-server form of a view in <see cref="ReadAdmission.ServerHeldRoutes"/>: a string <c>server_name</c>
+    /// that is not blank and a string <c>view</c> the table names with the tool (<see cref="ReadAdmission.IsServerHeldRead"/>). An argument
+    /// of another kind is not a server name or a view, so the call is not held.</summary>
+    internal static bool IsServerHeldRead(string toolName, System.Collections.Generic.IDictionary<string, System.Text.Json.JsonElement>? arguments) =>
+        ReadAdmission.IsServerHeldRead(toolName, StringArgument(arguments, "server_name"), StringArgument(arguments, "view"));
+
+    private static string? StringArgument(System.Collections.Generic.IDictionary<string, System.Text.Json.JsonElement>? arguments, string name) =>
+        arguments is not null && arguments.TryGetValue(name, out var value) && value.ValueKind == System.Text.Json.JsonValueKind.String
+            ? value.GetString()
+            : null;
+
     /// <summary>#6800: <see cref="IsFleetRead(string, IDictionary{string, JsonElement}?, McpToolParameterTypes?)"/> for a request. Never
     /// throws; a call whose window it cannot read is not a fleet read.</summary>
     private bool IsFleetRead(ModelContextProtocol.Server.RequestContext<CallToolRequestParams> request)
@@ -314,16 +336,16 @@ public sealed class McpToolLatencyFilter
     /// once. Neither a hit nor a joined caller counts as a read in flight (round 2, L3).
     /// </summary>
     private async Task<CallToolResult> ServeCachedAsync(ReadAdmission admission, McpRequestHandler<CallToolRequestParams, CallToolResult> next,
-        RequestContext<CallToolRequestParams> request, string toolName, string windowBand, bool fleetRead, ReadScope scope, string caller,
-        CancellationToken cancellationToken)
+        RequestContext<CallToolRequestParams> request, string toolName, string windowBand, bool fleetRead, string? view, bool serverHeld,
+        ReadScope scope, string caller, CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
         var cache = admission.Cache;
         var gcf = (request.Services?.GetService(typeof(IGcfOutputFormat)) as IGcfOutputFormat)?.Enabled ?? GcfOutput.Enabled;
         var types = request.Services?.GetService(typeof(McpToolParameterTypes)) as McpToolParameterTypes;
-        var ttl = ReadResultCache.TtlFor(toolName, windowBand, fleetRead);
+        var ttl = ReadResultCache.TtlFor(toolName, windowBand, fleetRead, view, serverHeld);
         var key = ReadCacheKey.ForMcp(toolName, request.Params?.Arguments, types, gcf, cache.Generation, cache, ttl,
-            heldFromStore: ReadAdmission.FleetTtlApplies(toolName, fleetRead));
+            heldFromStore: ReadAdmission.FleetTtlApplies(toolName, fleetRead) || serverHeld);
         if (cache.TryGet(key, out var stored))
         {
             scope.Uncount();

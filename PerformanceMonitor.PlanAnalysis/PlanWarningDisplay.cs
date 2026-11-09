@@ -72,6 +72,27 @@ public static class PlanWarningDisplay
         : severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
 
     /// <summary>
+    /// #8447: what a statement's warnings are, everywhere the viewer counts or lists them (the root
+    /// operator's badge, the root tooltip and the Statements grid): the statement-level warnings, then
+    /// every operator's warnings in tree order, at every severity. A statement whose findings are all
+    /// statement-level, such as a memory grant warning, still counts them.
+    /// </summary>
+    public static List<PlanWarning> StatementWarnings(PlanStatement statement)
+    {
+        var all = new List<PlanWarning>(statement.PlanWarnings);
+        if (statement.RootNode != null)
+            AddOperatorWarnings(statement.RootNode, all);
+        return all;
+    }
+
+    private static void AddOperatorWarnings(PlanNode node, List<PlanWarning> warnings)
+    {
+        warnings.AddRange(node.Warnings);
+        foreach (var child in node.Children)
+            AddOperatorWarnings(child, warnings);
+    }
+
+    /// <summary>
     /// #4534: the text the viewer needs to turn a warning header into a link to the operator it came
     /// from. Null when <paramref name="originNodeIds"/> is empty — a finding with no known operator
     /// origin (for example one that happened before any row was read) gets no affordance, rather than
