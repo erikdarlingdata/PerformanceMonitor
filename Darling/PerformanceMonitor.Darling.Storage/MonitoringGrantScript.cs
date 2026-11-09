@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -651,10 +652,10 @@ public static class MonitoringGrantScript
             return null;
         }
 
-        var text = $"{count} online user database(s) cannot be entered by this login, so the per-database collectors skip them";
+        var text = $"{CountText.Plural(count, "online user database")} cannot be entered by this login, so the per-database collectors skip {(count == 1 ? "it" : "them")}";
         return awsRds
-            ? text + $": Amazon RDS has no CONNECT ANY DATABASE, so give {Quote(principal)} a user in each of them. The --grant-script --rds command prints the statement for every current database."
-            : text + $": give {Quote(principal)} a user in each of them, or grant CONNECT ANY DATABASE.";
+            ? text + $": Amazon RDS has no CONNECT ANY DATABASE, so give {Quote(principal)} a user in {(count == 1 ? "it" : "each of them")}. The --grant-script --rds command prints the statement for every current database."
+            : text + $": give {Quote(principal)} a user in {(count == 1 ? "it" : "each of them")}, or grant CONNECT ANY DATABASE.";
     }
 
     private static string Quote(string name) => "[" + name.Replace("]", "]]", StringComparison.Ordinal) + "]";

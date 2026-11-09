@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.PlanAnalysis;
 
@@ -1329,7 +1330,7 @@ public static partial class PlanAnalyzer
                     {
                         RuleNumber = 34,
                         WarningType = "Bare Scan",
-                        Message = $"{scanKind} reads the full table with no predicate, outputting {colCount} column(s): {Truncate(node.OutputColumns, 200)}. {indexAdvice} For analytical workloads, a columnstore index may be a better fit.",
+                        Message = $"{scanKind} reads the full table with no predicate, outputting {CountText.Plural(colCount, "column")}: {Truncate(node.OutputColumns, 200)}. {indexAdvice} For analytical workloads, a columnstore index may be a better fit.",
                         Severity = PlanWarningSeverity.Warning
                     });
                 }

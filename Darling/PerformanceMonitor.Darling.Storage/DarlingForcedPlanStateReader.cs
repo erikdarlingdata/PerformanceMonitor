@@ -385,12 +385,18 @@ LIMIT 50";
     {
         var ids = string.Join(", ", unknowns.Take(10).Select(u => u.PlanId.ToString(System.Globalization.CultureInfo.InvariantCulture)))
                   + (unknowns.Count > 10 ? ", ..." : "");
-        var text = $"Later plan(s) {ids} of the query ran after the force, and whether they are variants of the forced plan (the force running) or other plans (the force ignored) is not known: ";
+        var text = unknowns.Count == 1
+            ? $"Later plan {ids} of the query ran after the force, and whether it is a variant of the forced plan (the force running) or another plan (the force ignored) is not known: "
+            : $"Later plans {ids} of the query ran after the force, and whether they are variants of the forced plan (the force running) or other plans (the force ignored) is not known: ";
         var notCollected = unknowns.Count - notChecked;
         if (notCollected > 0)
-            text += $"{notCollected} of them have no plan XML in the store yet (the Query Store collector has not fetched it)";
+            text += unknowns.Count == 1
+                ? "it has no plan XML in the store yet (the Query Store collector has not fetched it)"
+                : $"{notCollected} of them {(notCollected == 1 ? "has" : "have")} no plan XML in the store yet (the Query Store collector has not fetched it)";
         if (notChecked > 0)
-            text += (notCollected > 0 ? "; " : "") + $"{notChecked} were not looked up because more than {MaxStoredPlanChecks} later plans ran in this read";
+            text += (notCollected > 0 ? "; " : "") + (unknowns.Count == 1
+                ? $"it was not looked up because more than {MaxStoredPlanChecks} later plans ran in this read"
+                : $"{notChecked} {(notChecked == 1 ? "was" : "were")} not looked up because more than {MaxStoredPlanChecks} later plans ran in this read");
         return text + ".";
     }
 

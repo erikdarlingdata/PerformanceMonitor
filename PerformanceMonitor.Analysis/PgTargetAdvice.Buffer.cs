@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -365,7 +366,7 @@ public static partial class PgTargetAdvice
 
         var resets = (KnobMeta(pressure, "db_reset_count") ?? 0) + (KnobMeta(pressure, "io_reset_count") ?? 0) + (KnobMeta(pressure, "bg_reset_count") ?? 0);
         if (resets > 0)
-            sb.Append("Statistics were reset ").Append(KnobNum(resets)).Append(" time(s) inside the window, so these totals are a floor. ");
+            sb.Append("Statistics were reset ").Append(CountText.Plural((long)resets, "time")).Append(" inside the window, so these totals are a floor. ");
 
         return sb;
     }
