@@ -349,7 +349,7 @@ LIMIT 5";
     /// </summary>
     internal const int ParameterSensitiveMaxOffenders = 5;
 
-    public const string ParameterSensitiveSql = @"
+    public static string ParameterSensitiveSql => @"
 WITH newest AS
 (
     -- Detector A's creation_time clock (#4821): creation_time is the monitored server's local wall clock and
@@ -431,11 +431,7 @@ offenders AS
     -- The reader makes the exact compiled-before-the-window test on the converted time and keeps the first five,
     -- so this read has no LIMIT.
     WHERE rn = 1
-    AND   min_worker_time >= 10000
-    AND   max_worker_time >= 250000
-    AND   execution_count >= 20
-    AND   creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'
-    AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
+" + ParameterSensitivitySignature.PredicateSql("creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'", "    ") + @"
 )
 SELECT
     o.database_name,
@@ -721,7 +717,7 @@ WHERE digest = ANY($1)";
         return text;
     }
 
-    public const string RegressedQueriesSql = RegressedQueriesHead + RegressedQueriesRawMiddle + RegressedQueriesTail;
+    public static string RegressedQueriesSql => RegressedQueriesHead + RegressedQueriesRawMiddle + RegressedQueriesTail;
 
     /// <summary>
     /// The regressed-queries read over the latest-snapshot interval table (#3953): <see cref="RegressedQueriesSql"/>
@@ -730,10 +726,10 @@ WHERE digest = ANY($1)";
     /// are shared constants, so the two cannot drift. It runs when the fact read the table this pass
     /// (<see cref="AnalysisContext.PlanRegressionReadsIntervalTable"/>), so it reproduces what the fact reported.
     /// </summary>
-    public const string RegressedQueriesTableSql = RegressedQueriesHead + RegressedQueriesTableMiddle + RegressedQueriesTail;
+    public static string RegressedQueriesTableSql => RegressedQueriesHead + RegressedQueriesTableMiddle + RegressedQueriesTail;
 
     /// <summary>The de-skew and PSP-signature CTEs, shared by both regressed-queries reads (#3953 split).</summary>
-    private const string RegressedQueriesHead = @"
+    private static string RegressedQueriesHead => @"
 WITH newest AS
 (
     -- The newest snapshot's zone id and offset from the SAME server_properties row (#4821), handed back on every
@@ -792,11 +788,7 @@ psp_signature AS
         AND   delta_execution_count > 0
     ) AS latest_cache, svr
     WHERE rn = 1
-    AND   min_worker_time >= 10000
-    AND   max_worker_time >= 250000
-    AND   execution_count >= 20
-    AND   creation_time - make_interval(mins => svr.offset_minutes) <= $3 + interval '1 hour'
-    AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
+" + ParameterSensitivitySignature.PredicateSql("creation_time - make_interval(mins => svr.offset_minutes) <= $3 + interval '1 hour'", "    ") + @"
     GROUP BY database_name, query_hash
 ),
 ";
@@ -1083,7 +1075,7 @@ LIMIT 5";
     /// table, where it drives a nested loop into <c>ux_plan_regression_daily</c>. NULL offenders are not supported (an empty
     /// list would read nothing): the caller runs <see cref="RegressedQueriesTableSql"/> then.</para>
     /// </summary>
-    public const string RegressedQueriesDailySql = RegressedQueriesHead + RegressedQueriesDailyMiddle + RegressedQueriesDailyTail;
+    public static string RegressedQueriesDailySql => RegressedQueriesHead + RegressedQueriesDailyMiddle + RegressedQueriesDailyTail;
 
     /// <summary>The daily twin's offender pairs and <c>plan_dedup</c> (#5794).</summary>
     private const string RegressedQueriesDailyMiddle = @"offender AS
