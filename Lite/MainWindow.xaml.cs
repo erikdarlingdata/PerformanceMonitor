@@ -2053,8 +2053,8 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog() == true && dialog.AddedCount > 0)
         {
             RefreshServerList();
-            var msg = $"Added {dialog.AddedCount} server(s)";
-            if (dialog.SkippedCount > 0) msg += $", skipped {dialog.SkippedCount} duplicate(s)";
+            var msg = $"Added {CountText.Plural(dialog.AddedCount, "server")}";
+            if (dialog.SkippedCount > 0) msg += $", skipped {CountText.Plural(dialog.SkippedCount, "duplicate")}";
             if (dialog.CollidedCount > 0) msg += $", {dialog.CollidedCount} collided";
             if (dialog.FailedCount > 0) msg += $", {dialog.FailedCount} failed";
             StatusText.Text = msg + ".";
@@ -2239,15 +2239,15 @@ public partial class MainWindow : Window
             int settingsCopied = SettingsImport.CopyMissing(
                 oldConfigDir, dialog.FolderName, App.ConfigDirectory, App.DataDirectory);
 
-            var message = $"Imported {imported} server connection(s).";
+            var message = $"Imported {CountText.Plural(imported, "server connection")}.";
             if (skipped > 0)
-                message += $"\nSkipped {skipped} duplicate(s) (already configured).";
+                message += $"\nSkipped {CountText.Plural(skipped, "duplicate")} (already configured).";
             if (collided > 0)
                 message += $"\n{collided} collided: not imported because the server's id matches a different server already configured (see the log).";
             if (profilesImported > 0)
-                message += $"\nImported {profilesImported} credential profile(s).";
+                message += $"\nImported {CountText.Plural(profilesImported, "credential profile")}.";
             if (settingsCopied > 0)
-                message += $"\nCopied {settingsCopied} settings file(s).";
+                message += $"\nCopied {CountText.Plural(settingsCopied, "settings file")}.";
             if (imported > 0)
                 message += "\n\nCredentials from the previous install are preserved.\nIf any connections fail to authenticate, re-enter the password in Manage Servers.";
             if (profilesImported > 0)

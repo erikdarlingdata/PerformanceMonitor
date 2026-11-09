@@ -121,8 +121,8 @@ public partial class ExcludedDatabasesDialog : Window
             StatusText.Text = _masterUnreachableFellBackToConnectedDb
                 ? "Server firewall blocks reading the full list from master (Azure database-level rule); showing only the connected database."
                 : _xeSessionsMode
-                    ? $"{liveDatabases.Count} database(s) on this server, {existingExclusions.Count} on the list (none = every database)."
-                    : $"{liveDatabases.Count} database(s) on this server, {existingExclusions.Count} currently excluded.";
+                    ? $"{CountText.Plural(liveDatabases.Count, "database")} on this server, {existingExclusions.Count} on the list (none = every database)."
+                    : $"{CountText.Plural(liveDatabases.Count, "database")} on this server, {existingExclusions.Count} currently excluded.";
         }
         catch (Exception ex)
         {

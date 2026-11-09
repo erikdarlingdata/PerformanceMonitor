@@ -116,7 +116,7 @@ public partial class InvestigationPracticePanel : UserControl
             PracticeScoresGrid.ItemsSource = (await _dataService.GetInvestigationPracticeScoresAsync(Days))
                 .Select(s => new PracticeScoreItem(s)).ToList();
             PracticeStatusText.Text = string.Create(CultureInfo.InvariantCulture,
-                $"{_cases.Count} judged case(s) in the last {Days} days. A newest corrected verdict is the answer; else right or partly right makes the report's verdict the answer (partly counts half); wrong with no correction has no answer.");
+                $"{CountText.Plural(_cases.Count, "judged case")} in the last {Days} days. A newest corrected verdict is the answer; else right or partly right makes the report's verdict the answer (partly counts half); wrong with no correction has no answer.");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

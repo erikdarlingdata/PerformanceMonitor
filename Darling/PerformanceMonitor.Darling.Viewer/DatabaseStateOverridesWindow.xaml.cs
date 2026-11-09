@@ -12,6 +12,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Collectors;
 
@@ -205,7 +206,7 @@ public partial class DatabaseStateOverridesWindow : Window
             StatesGrid.ItemsSource = _rows;
             var deviating = _rows.Count(r => !string.Equals(r.ExpectedState, DatabaseStateTokens.Ignore, StringComparison.Ordinal)
                 && !string.Equals(r.CurrentState, r.ExpectedState, StringComparison.Ordinal));
-            StatusText.Text = (gap ?? $"{_rows.Count} database(s); {deviating} currently deviating from expected.")
+            StatusText.Text = (gap ?? $"{CountText.Plural(_rows.Count, "database")}; {deviating} currently deviating from expected.")
                 + (_dataService.IsReadOnly ? "  (read-only seat — changes cannot be saved)" : "");
         }
         catch (Exception ex)

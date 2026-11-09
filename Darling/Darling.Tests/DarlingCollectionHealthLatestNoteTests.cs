@@ -58,7 +58,7 @@ public sealed class DarlingCollectionHealthLatestNoteTests
 
     /// <summary>The real probe-failure note for a count, from the shared driver — the text the defect rides on.</summary>
     private static string ProbeNote(int count) =>
-        string.Format(CultureInfo.InvariantCulture, EnumeratedCollectorDriver.ProbeFailureNoteFormat, count);
+        EnumeratedCollectorDriver.BuildNote(enumerationWasEmpty: false, probeFailureCount: count)!;
 
     [Fact]
     public async Task BothReaders_TakeTheNewestNoteAndError_NotTheLexicographicallyGreatest_AgainstDevPostgres()
