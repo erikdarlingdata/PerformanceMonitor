@@ -379,8 +379,16 @@ public sealed class PgOwnStatementRoleLiveTests
     private const int MaxEntriesTheFillerCanFill = 20_000;
 
     /// <summary>
+    /// The eviction passes from other sessions a fill carries on past. Each one frees five percent of the table, which the
+    /// fill then fills again; a fill that sees more than this is not going to reach one free slot on this cluster.
+    /// </summary>
+    private const int MaxPassesInsideTheFill = 5;
+
+    /// <summary>
     /// Fills <c>pg_stat_statements</c> until one slot is free, with a distinct statement shape per entry, each batch run
-    /// twice so that every filler is better used than a statement run once.
+    /// twice so that every filler is better used than a statement run once. A batch is judged by the entry count and the
+    /// module's eviction counter together: a pass inside the batch's window voids its count, and the fill carries on from
+    /// the count the pass left; a count that stands still with no pass is the module not tracking the session.
     /// </summary>
     private static Task FillToOneFreeSlotAsync(NpgsqlConnection target, CancellationToken ct) => FillToOneFreeSlotAsync(target, ct, afterEachBatch: null);
 
@@ -397,7 +405,22 @@ public sealed class PgOwnStatementRoleLiveTests
 
         var side = (int)Math.Ceiling(Math.Sqrt((max + 1) / 8.0)) + 1;
         var next = 0;
+        var passes = 0;
+
+        /* The fill's own reads are entries too, and a pass takes the least-used entries first. Run once or twice, the reads
+           would go before the fill's shapes, which run twice; each read would then make itself an entry again after the count
+           it took part in, and the next batch would run a shape or two past the table's width and bring on a pass of the
+           fill's own making, batch after batch. Run three times before the first batch, the reads outrank every shape the
+           fill adds and everything older in the table. */
+        for (var warm = 0; warm < 2; warm++)
+        {
+            await EntryCountAsync(target, ct);
+            await DeallocAsync(target, ct);
+        }
+
         var free = max - await EntryCountAsync(target, ct);
+        var deallocAtStart = await DeallocAsync(target, ct);
+        var dealloc = deallocAtStart;
         while (free > 1)
         {
             var size = Math.Min(free - 1, 400);
@@ -414,14 +437,25 @@ public sealed class PgOwnStatementRoleLiveTests
                 await afterEachBatch(max - free);
             }
 
-            /* A batch of new shapes that leaves the count where it was means the module is not tracking this session's
+            /* The count is read before the counter, so a pass that moved the count has moved the counter by the time it is
+               read. A pass inside the window takes entries, the batch's own among them, so the count says nothing about the
+               batch: the fill carries on from the count the pass left, for up to MaxPassesInsideTheFill passes. Without a
+               pass, a batch of new shapes that leaves the count where it was means the module is not tracking this session's
                statements (pg_stat_statements.track is none for the cluster or for this login), or that the batch's shapes
                were in the table already; the next batch would add nothing either, so the fill stops here instead of running
                until the job's timeout. */
             var afterBatch = max - await EntryCountAsync(target, ct);
-            if (afterBatch == free)
+            var deallocAfter = await DeallocAsync(target, ct);
+            if (deallocAfter != dealloc)
             {
-                Assert.Fail($"A batch of {size} new statement shapes left pg_stat_statements at {max - free} of {max} entries: the module is not tracking this session's statements, or the batch's shapes were already in the table.");
+                passes++;
+                Assert.True(passes <= MaxPassesInsideTheFill,
+                    $"{passes} eviction passes landed inside the fill's batches (dealloc {deallocAtStart} -> {deallocAfter}), and the table holds {max - afterBatch} of {max} entries after the last one: the fill is not reaching one free slot on this cluster.");
+                dealloc = deallocAfter;
+            }
+            else if (afterBatch == free)
+            {
+                Assert.Fail($"A batch of {size} new statement shapes left pg_stat_statements at {max - free} of {max} entries, with no eviction pass inside the batch (dealloc {dealloc}): the module is not tracking this session's statements, or the batch's shapes were already in the table.");
             }
 
             free = afterBatch;
