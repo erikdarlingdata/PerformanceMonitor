@@ -139,7 +139,8 @@
                             </StackPanel>
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
-                    <DataGridTextColumn Binding="{Binding MetricName}" Width="160">
+                    <!-- #8392: the column grows to the longest alert type on screen, so a long name reads whole instead of being cut at a fixed width. -->
+                    <DataGridTextColumn Binding="{Binding MetricName}" Width="Auto" MinWidth="160">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MetricName" Click="FilterButton_Click" Margin="0,0,4,0"/>
