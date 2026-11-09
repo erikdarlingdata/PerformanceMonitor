@@ -54,8 +54,9 @@ public partial class ViewerServerTab
         if (await TraceEnabledOrNullAsync(check) is bool traceEnabled)
         {
             LongQueriesDisabledWarning.Visibility = traceEnabled ? Visibility.Collapsed : Visibility.Visible;
-            /* Release walk V12a: the empty grid says why it is empty (the trace is opt-in and off), not the generic "No data". */
-            PerformanceMonitor.Ui.EmptyState.SetText(LongQueryCompletionsGrid, PerformanceMonitor.Ui.LongQueriesEmptyText.Text(traceEnabled));
+            /* The banner above the grid says the trace is off and where its switch is, so the grid's own empty text does not say it
+               again (#8307): with the trace on or off it reads as the grid of a trace with nothing in the window. */
+            PerformanceMonitor.Ui.EmptyState.SetText(LongQueryCompletionsGrid, PerformanceMonitor.Ui.LongQueriesEmptyText.Text(traceEnabled: true));
         }
     }
 
