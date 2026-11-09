@@ -86,6 +86,9 @@ public partial class FinOpsTab : UserControl
             if (_loads.Superseded(nameof(LoadIndexLockingGridAsync), gen)) return;
             ApplyLockingHeat(data);
             _indexLockingFilterMgr!.UpdateData(data);
+            /* The grid's columns are wider than its page, so while it holds no rows a horizontal scroll bar would scroll a header
+               row over nothing: the bar shows only while there are rows to scroll. */
+            IndexLockingDataGrid.HorizontalScrollBarVisibility = data.Count > 0 ? System.Windows.Controls.ScrollBarVisibility.Auto : System.Windows.Controls.ScrollBarVisibility.Hidden;
             NoIndexLockingMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             IndexLockingCountIndicator.Text = data.Count > 0 ? CountText.Plural(data.Count, "index", "indexes") : "";
 

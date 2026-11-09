@@ -8,9 +8,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
@@ -209,55 +212,70 @@ LEFT JOIN grants g ON true";
     }
 
     /// <summary>
-    /// Gets 7-day daily provisioning classification trend.
+    /// Gets 7-day daily provisioning classification trend. Each row is one day as <paramref name="dayZone"/> counts days (see
+    /// <see cref="DisplayDays"/>): the selected time display's zone from the tab, UTC when null. The Day the row carries is that
+    /// zone's calendar day, so its label reads in the same clock as every other time on the page.
     /// </summary>
-    public async Task<List<ProvisioningTrendRow>> GetProvisioningTrendAsync(int serverId)
+    public async Task<List<ProvisioningTrendRow>> GetProvisioningTrendAsync(int serverId, TimeZoneInfo? dayZone = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var cutoff = DateTime.UtcNow.AddDays(-7);
+        var nowUtc = DateTime.UtcNow;
+        var cutoff = nowUtc.AddDays(-7);
 
-        command.CommandText = @"
-WITH daily_cpu AS (
+        command.CommandText = $@"
+WITH days(day, start_utc, end_utc) AS (
+    VALUES {DayBucketValues(DisplayDays(cutoff, nowUtc, dayZone))}
+),
+daily_cpu AS (
     SELECT
-        CAST(collection_time AS DATE) AS day,
+        d.day,
         AVG(CAST(sqlserver_cpu_utilization AS DECIMAL(5,2))) AS avg_cpu_pct,
         MAX(sqlserver_cpu_utilization) AS max_cpu_pct,
         PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu_pct,
         COUNT(*) AS cpu_samples
     FROM v_cpu_utilization_stats
+    JOIN days d
+      ON collection_time >= d.start_utc
+     AND collection_time < d.end_utc
     WHERE server_id = $1
     AND   collection_time >= $2
-    GROUP BY CAST(collection_time AS DATE)
+    GROUP BY d.day
 ),
 daily_mem AS (
     SELECT
-        CAST(collection_time AS DATE) AS day,
+        d.day,
         AVG(total_server_memory_mb) AS avg_total_mb,
         AVG(buffer_pool_mb) AS avg_buffer_pool_mb,
         AVG(CAST(total_server_memory_mb AS DECIMAL(10,2)) / NULLIF(target_server_memory_mb, 0)) AS avg_memory_ratio,
         MAX(max_workers_count) AS max_workers_count,
         MAX(current_workers_count) AS current_workers_count
     FROM v_memory_stats
+    JOIN days d
+      ON collection_time >= d.start_utc
+     AND collection_time < d.end_utc
     WHERE server_id = $1
     AND   collection_time >= $2
-    GROUP BY CAST(collection_time AS DATE)
+    GROUP BY d.day
 ),
 /* Same pressure signals as the point-in-time read, per day, so a day cannot be classified by a rule the
    current verdict does not use (#2246). */
 daily_grants AS (
     SELECT
-        CAST(collection_time AS DATE) AS day,
+        d.day,
         MAX(waiter_count) AS max_grant_waiters,
         SUM(COALESCE(timeout_error_count_delta, 0)) AS grant_timeouts,
         SUM(COALESCE(forced_grant_count_delta, 0)) AS forced_grants,
         MAX(100.0 * granted_memory_mb / NULLIF(target_memory_mb, 0)) AS grant_utilization_pct
     FROM v_memory_grant_stats
+    JOIN days d
+      ON collection_time >= d.start_utc
+     AND collection_time < d.end_utc
     WHERE server_id = $1
     AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before the small-query row (id 1) was collected */
     AND   collection_time >= $2
-    GROUP BY CAST(collection_time AS DATE)
+    GROUP BY d.day
 )
 SELECT
     c.day,
@@ -346,18 +364,24 @@ ORDER BY c.day";
 
     /// <summary>
     /// Gets memory grant efficiency stats for the Optimization tab.
-    /// Shows pool-level grant vs used efficiency from resource semaphore snapshots.
+    /// Shows pool-level grant vs used efficiency from resource semaphore snapshots. Each row is one day as
+    /// <paramref name="dayZone"/> counts days (see <see cref="DisplayDays"/>): the selected time display's zone from the tab,
+    /// UTC when null.
     /// </summary>
-    public async Task<List<MemoryGrantEfficiencyRow>> GetMemoryGrantEfficiencyAsync(int serverId, int hoursBack = 24)
+    public async Task<List<MemoryGrantEfficiencyRow>> GetMemoryGrantEfficiencyAsync(int serverId, int hoursBack = 24, TimeZoneInfo? dayZone = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
+        var nowUtc = DateTime.UtcNow;
+        var cutoff = nowUtc.AddHours(-hoursBack);
 
-        command.CommandText = @"
+        command.CommandText = $@"
+WITH days(day, start_utc, end_utc) AS (
+    VALUES {DayBucketValues(DisplayDays(cutoff, nowUtc, dayZone))}
+)
 SELECT
-    CAST(collection_time AS DATE) AS day,
+    d.day,
     AVG(granted_memory_mb) AS avg_granted_mb,
     AVG(used_memory_mb) AS avg_used_mb,
     CAST(AVG(used_memory_mb) * 100.0 / NULLIF(AVG(granted_memory_mb), 0) AS DECIMAL(5,1)) AS efficiency_pct,
@@ -367,11 +391,14 @@ SELECT
     SUM(timeout_error_count_delta) AS timeout_errors,
     SUM(forced_grant_count_delta) AS forced_grants
 FROM v_memory_grant_stats
+JOIN days d
+  ON collection_time >= d.start_utc
+ AND collection_time < d.end_utc
 WHERE server_id = $1
 AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before the small-query row (id 1) was collected */
 AND   collection_time >= $2
-GROUP BY CAST(collection_time AS DATE)
-ORDER BY CAST(collection_time AS DATE)";
+GROUP BY d.day
+ORDER BY d.day";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });
@@ -395,4 +422,29 @@ ORDER BY CAST(collection_time AS DATE)";
         }
         return items;
     }
+
+    /// <summary>
+    /// The days of [<paramref name="fromUtc"/>, <paramref name="toUtc"/>] as <paramref name="zone"/> counts them: one row per
+    /// wall-clock day of the zone, with the UTC instants its midnights fall on. Null, like UTC, gives UTC days. Adjacent days share
+    /// a bound, so every instant lands in exactly one day, on the clock-change days too. The day reads above bucket by these rows,
+    /// so a row labelled "Sun 11/08" holds the selected display's Sunday rather than UTC's, which runs to 16:00 on the US west coast.
+    /// </summary>
+    internal static List<(DateTime Day, DateTime StartUtc, DateTime EndUtc)> DisplayDays(DateTime fromUtc, DateTime toUtc, TimeZoneInfo? zone)
+    {
+        zone ??= TimeZoneInfo.Utc;
+        var days = new List<(DateTime Day, DateTime StartUtc, DateTime EndUtc)>();
+        var last = DisplayZone.ToDisplay(fromUtc <= toUtc ? toUtc : fromUtc, zone).Date;
+        for (var day = DisplayZone.ToDisplay(fromUtc <= toUtc ? fromUtc : toUtc, zone).Date; day <= last; day = day.AddDays(1))
+        {
+            days.Add((day, DisplayZone.ToUtcBound(day, zone, BoundSide.From), DisplayZone.ToUtcBound(day.AddDays(1), zone, BoundSide.From)));
+        }
+        return days;
+    }
+
+    /// <summary>The rows of a <c>days(day, start_utc, end_utc)</c> VALUES list: literal dates and timestamps this class formats, never user text.</summary>
+    internal static string DayBucketValues(IEnumerable<(DateTime Day, DateTime StartUtc, DateTime EndUtc)> days) =>
+        string.Join(",\n           ", days.Select(d =>
+            $"(DATE '{d.Day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}', " +
+            $"TIMESTAMP '{d.StartUtc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)}', " +
+            $"TIMESTAMP '{d.EndUtc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)}')"));
 }
