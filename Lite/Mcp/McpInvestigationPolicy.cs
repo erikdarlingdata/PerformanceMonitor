@@ -45,6 +45,11 @@ internal static class McpInvestigationPolicy
     /// monitored servers, not the operator's settings) and carry neither the read-only nor the destructive hint.</summary>
     internal static IReadOnlySet<string> StateChangingTools => InvestigationTools;
 
+    /// <summary>The investigation reads Lite has: the shared <see cref="InvestigationToolNames.Reads"/> that <see cref="McpInvestigationTools"/>
+    /// declares. Served in every configuration; the instructions name them from here.</summary>
+    internal static readonly IReadOnlySet<string> ReadTools = new HashSet<string>(
+        InvestigationToolNames.Reads.Where(DeclaredTools.Contains), StringComparer.Ordinal);
+
     /// <summary>True for a tool this gate serves: a state-changing investigation tool. The reads are not investigation tools in this sense.</summary>
     internal static bool IsInvestigationTool(string toolName) => InvestigationTools.Contains(toolName);
 

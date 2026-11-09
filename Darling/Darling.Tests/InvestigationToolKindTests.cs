@@ -29,6 +29,23 @@ public sealed class InvestigationToolKindTests
         Assert.All(InvestigationToolNames.StateChanging, name => Assert.True(DarlingMcpWritePolicy.IsInvestigation(name), name));
     }
 
+    /// <summary>Every tool the investigation tool class declares, whatever its name, is placed on the shared list as a read or a state change,
+    /// so a tool added here fails until it is placed, as the Lite twin's declared-names fact does.</summary>
+    [Fact]
+    public void EveryDeclaredInvestigationTool_IsPlacedOnTheSharedList()
+    {
+        var declared = typeof(DarlingMcpInvestigationTools).GetMethods()
+            .Select(m => m.GetCustomAttributes(typeof(ModelContextProtocol.Server.McpServerToolAttribute), false)
+                .Cast<ModelContextProtocol.Server.McpServerToolAttribute>().SingleOrDefault()?.Name)
+            .OfType<string>()
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.NotEmpty(declared);
+        Assert.All(declared, name => Assert.True(InvestigationToolNames.IsPlaced(name), $"{name} is neither a shared read nor a shared state-changing tool; place it in InvestigationToolNames"));
+        Assert.Equal(DarlingMcpWritePolicy.InvestigationTools.Order(StringComparer.Ordinal), declared.Where(InvestigationToolNames.IsStateChanging));
+    }
+
     [Fact]
     public void EveryInvestigationNameOnTheReadOnlyList_IsASharedRead_AndEverySharedRead_IsOnIt()
     {
