@@ -77,6 +77,14 @@ public partial class MainWindow : Window
     /// </summary>
     private readonly OpenServerTabRegistry<TabItem> _openServerTabs = new();
 
+    /// <summary>The status bar's line for each top-level tab. A tab's load writes its own entry and the bar shows the selected tab's, so a
+    /// read that finishes for a tab that is not on screen (the Availability Groups probe behind a hidden tab, a server tab reloading
+    /// after Apply to All) does not replace the line of the tab the reader is looking at.</summary>
+    private readonly Dictionary<TabItem, string> _tabStatus = new();
+
+    /// <summary>Each open server tab's status writer, by server id, so closing the tab unsubscribes the same delegate.</summary>
+    private readonly Dictionary<int, Action<string>> _serverTabStatusWriters = new();
+
     /// <summary>The fleet: the authoritative full server set plus the filtered subset the sidebar shows.
     /// Consumers asking "what servers exist?" must read <c>_fleet.All</c>, never the bound list — see
     /// <see cref="FleetView"/> for why reading ItemsSource back is the bug this replaces.</summary>
@@ -207,6 +215,15 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        /* Each fleet tab's status line is kept for that tab and shown while it is the tab on screen. */
+        AlertsHistoryContent.StatusChanged += StatusWriterFor(AlertsTab);
+        JobHistoryContent.StatusChanged += StatusWriterFor(JobHistoryTabItem);
+        DatabaseProtectionContent.StatusChanged += StatusWriterFor(DatabaseProtectionTabItem);
+        FleetSweepsContent.StatusChanged += StatusWriterFor(FleetSweepsTabItem);
+        AgentAlertsContent.StatusChanged += StatusWriterFor(AgentAlertsTabItem);
+        IdentityCapacityContent.StatusChanged += StatusWriterFor(IdentityCapacityTabItem);
+        AvailabilityGroupsContent.StatusChanged += StatusWriterFor(AvailabilityGroupsTabItem);
+        FinOpsContent.StatusChanged += StatusWriterFor(FinOpsTab);
         /* #8221: a calm card's border is read from the theme when the card is bound, so a theme change binds the cards again. */
         ThemeManager.ThemeChanged += _ => { if (_overviewCards.Count > 0) ApplyOverviewCardFilter(); };
         _preferences = _preferencesStore.Load();
@@ -477,40 +494,32 @@ public partial class MainWindow : Window
         /* The Alerts tab is a self-loading control (all-servers by default); give it the store and let
            it surface load/dismiss/mute outcomes on the shared status bar. */
         AlertsHistoryContent.Initialize(_dataService);
-        AlertsHistoryContent.StatusChanged += OnServerTabStatusChanged;
         AlertsHistoryContent.FullChainOpener = FullChainOpenerFor;
         AlertsHistoryContent.DetailWindowSizeStore = new AlertDetailWindow.SettingsSizeStore(_appSettingsStore);
 
         /* The Job History tab is a self-loading all-servers control (retained SQL Agent job-run history);
            give it the store and surface its load outcomes on the shared status bar. */
         JobHistoryContent.Initialize(_dataService);
-        JobHistoryContent.StatusChanged += OnServerTabStatusChanged;
 
         /* Database Protection (#6873): a self-loading read-only control over the last backups and CHECKDB of one server. */
         DatabaseProtectionContent.Initialize(_dataService);
-        DatabaseProtectionContent.StatusChanged += OnServerTabStatusChanged;
 
         /* Fleet Sweeps (#6390): a self-loading read-only control over the fleet sweep engine's record. */
         FleetSweepsContent.Initialize(_dataService);
-        FleetSweepsContent.StatusChanged += OnServerTabStatusChanged;
 
         /* Agent Alerts (#6874): a self-loading control over the SQL Server Agent alert setup of one server; it loads on activation and its own Refresh. */
         AgentAlertsContent.Initialize(_dataService);
-        AgentAlertsContent.StatusChanged += OnServerTabStatusChanged;
         /* Identity Capacity (#6875): a self-loading read-only control over the identity column capacity scans. */
         IdentityCapacityContent.Initialize(_dataService);
-        IdentityCapacityContent.StatusChanged += OnServerTabStatusChanged;
 
         /* Availability Groups (#991): a self-loading fleet-wide control. Its TabItem ships Collapsed and is
            revealed only once a load finds AG rows, so an Always-On-less fleet never carries a dead tab. */
         AvailabilityGroupsContent.Initialize(_dataService);
-        AvailabilityGroupsContent.StatusChanged += OnServerTabStatusChanged;
 
         /* The FinOps tab is a self-loading cross-server aggregate control with its own server selector; give
            it the store, surface its load/refresh outcomes on the shared status bar, and route its query grids'
            "View Plan" requests into the standalone Plan Viewer surface (it has no per-server plan host). */
         FinOpsContent.Initialize(_dataService, _serverStore);
-        FinOpsContent.StatusChanged += OnServerTabStatusChanged;
         FinOpsContent.PlanRequested += OpenStoredPlanInPlanViewer;
 
         /* One-time import of any pre-Stage-3 viewer-servers.json definitions into the store, before the first
@@ -1080,6 +1089,8 @@ public partial class MainWindow : Window
             return;
         }
 
+        ShowSelectedTabStatus();
+
         /* The tab now on screen puts its own server's clock on the process-wide helper before anything renders, so a
            PostgreSQL tab does not format with the clock of the SQL Server tab that was open before it. */
         if (MainTabs.SelectedItem is TabItem { Content: ViewerServerTab activated })
@@ -1321,16 +1332,21 @@ public partial class MainWindow : Window
     }
 
     /// <summary>#6136: the status bar names the tab that was just refreshed. Alert History, Job History and the other tabs that set no
-    /// text of their own kept reading "overview - refreshed ..." from the last Overview load.</summary>
-    private void StampRefreshed(string tabName) => StatusText.Text = $"{tabName} — refreshed {ViewerTimeHelper.RefreshedStamp()}";
+    /// text of their own kept reading "overview - refreshed ..." from the last Overview load. The stamp is kept for the tab that was
+    /// refreshed, which may no longer be the one on screen by the time its read finishes.</summary>
+    private void StampRefreshed(TabItem tab, string tabName) => SetTabStatus(tab, $"{tabName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
 
     private async Task LoadVisibleTabAsync()
     {
+        /* The tab whose load this is, read once: the reader may have moved to another tab by the time the load finishes or fails, and
+           its stamp or its failure belongs to this one. */
+        var selected = MainTabs.SelectedItem as TabItem;
         try
         {
-            switch (MainTabs.SelectedItem)
+            switch (selected)
             {
                 case TabItem { Content: ViewerServerTab serverTab }:
+                    /* The tab writes its own line, "<display name> — refreshed …" or "refresh failed: …", through the writer wired in OpenServerTab. */
                     await serverTab.RefreshActiveInnerTabAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, OverviewTab):
@@ -1341,31 +1357,31 @@ public partial class MainWindow : Window
                     break;
                 case TabItem tab when ReferenceEquals(tab, AlertsTab):
                     await AlertsHistoryContent.RefreshAlertsAsync();
-                    StampRefreshed("alert history");
+                    StampRefreshed(tab, "alert history");
                     break;
                 case TabItem tab when ReferenceEquals(tab, JobHistoryTabItem):
                     await JobHistoryContent.RefreshJobsAsync();
-                    StampRefreshed("job history");
+                    StampRefreshed(tab, "job history");
                     break;
                 case TabItem tab when ReferenceEquals(tab, DatabaseProtectionTabItem):
                     await DatabaseProtectionContent.RefreshAsync();
-                    StampRefreshed("database protection");
+                    StampRefreshed(tab, "database protection");
                     break;
                 case TabItem tab when ReferenceEquals(tab, AgentAlertsTabItem):
                     await AgentAlertsContent.RefreshAsync();
-                    StampRefreshed("agent alerts");
+                    StampRefreshed(tab, "agent alerts");
                     break;
                 case TabItem tab when ReferenceEquals(tab, FleetSweepsTabItem):
                     await FleetSweepsContent.RefreshAsync();
-                    StampRefreshed("fleet sweeps");
+                    StampRefreshed(tab, "fleet sweeps");
                     break;
                 case TabItem tab when ReferenceEquals(tab, IdentityCapacityTabItem):
                     await IdentityCapacityContent.RefreshAsync();
-                    StampRefreshed("identity capacity");
+                    StampRefreshed(tab, "identity capacity");
                     break;
                 case TabItem tab when ReferenceEquals(tab, AvailabilityGroupsTabItem):
                     await RefreshAvailabilityGroupsAsync();
-                    StampRefreshed("availability groups");
+                    StampRefreshed(tab, "availability groups");
                     break;
                 case TabItem tab when ReferenceEquals(tab, FinOpsTab):
                     /* The picker lists the servers known when LoadServersAsync last ran; a server added since
@@ -1386,7 +1402,7 @@ public partial class MainWindow : Window
                         }
                     }
                     await FinOpsContent.RefreshActiveSubTabAsync();
-                    StampRefreshed("finops");
+                    StampRefreshed(tab, "finops");
                     break;
             }
         }
@@ -1394,7 +1410,7 @@ public partial class MainWindow : Window
         {
             /* #8133: a failed fleet read must not leave the Overview saying it is loading. */
             OverviewLoadingText.Visibility = Visibility.Collapsed;
-            StatusText.Text = $"refresh failed: {ex.Message}";
+            SetTabStatus(selected, $"refresh failed: {ex.Message}");
         }
     }
 
@@ -1420,7 +1436,6 @@ public partial class MainWindow : Window
         }
 
         var serverTab = new ViewerServerTab(_dataService, server, _preferences, _serverStore);
-        serverTab.StatusChanged += OnServerTabStatusChanged;
         serverTab.ApplyTimeRangeRequested += OnApplyTimeRangeToAllRequested;
         serverTab.DisplayModeChanged += OnDisplayModeChanged;
 
@@ -1429,6 +1444,9 @@ public partial class MainWindow : Window
             Header = CreateServerTabHeader(server),
             Content = serverTab
         };
+        var statusWriter = StatusWriterFor(tabItem);
+        serverTab.StatusChanged += statusWriter;
+        _serverTabStatusWriters[server.ServerId] = statusWriter;
 
         _openServerTabs.Add(server.ServerId, tabItem);
         MainTabs.Items.Add(tabItem);
@@ -1471,7 +1489,11 @@ public partial class MainWindow : Window
 
         if (tab.Content is ViewerServerTab serverTab)
         {
-            serverTab.StatusChanged -= OnServerTabStatusChanged;
+            if (_serverTabStatusWriters.Remove(serverId, out var statusWriter))
+            {
+                serverTab.StatusChanged -= statusWriter;
+            }
+
             serverTab.ApplyTimeRangeRequested -= OnApplyTimeRangeToAllRequested;
             serverTab.DisplayModeChanged -= OnDisplayModeChanged;
             /* One dispose path: tears down every chart hover helper the tab's partials own. */
@@ -1480,6 +1502,7 @@ public partial class MainWindow : Window
 
         MainTabs.Items.Remove(tab);
         _openServerTabs.Remove(serverId);
+        _tabStatus.Remove(tab);
         /* NOTE: the acknowledgement state is deliberately NOT dropped here — unlike Lite, the viewer's badge also
            lives on the always-present sidebar row, so an ack must survive a tab close. It is cleared only when the
            server is removed from the managed set (see ServerContextMenu_Remove_Click). */
@@ -1523,7 +1546,32 @@ public partial class MainWindow : Window
         return panel;
     }
 
-    private void OnServerTabStatusChanged(string message) => StatusText.Text = message;
+    /// <summary>A status line for the tab on screen.</summary>
+    private void OnServerTabStatusChanged(string message) => SetTabStatus(MainTabs.SelectedItem as TabItem, message);
+
+    /// <summary>A writer that keeps every line it is given as <paramref name="tab"/>'s status line.</summary>
+    private Action<string> StatusWriterFor(TabItem tab) => message => SetTabStatus(tab, message);
+
+    /// <summary>Keeps <paramref name="message"/> as <paramref name="tab"/>'s status line and shows it when that tab is the one on screen;
+    /// with no tab, the line shows at once.</summary>
+    private void SetTabStatus(TabItem? tab, string message)
+    {
+        if (tab is null)
+        {
+            StatusText.Text = message;
+            return;
+        }
+
+        _tabStatus[tab] = message;
+        if (ReferenceEquals(MainTabs.SelectedItem, tab))
+        {
+            StatusText.Text = message;
+        }
+    }
+
+    /// <summary>Shows the selected tab's own status line; a tab that has none yet shows an empty bar until its load stamps it.</summary>
+    private void ShowSelectedTabStatus() =>
+        StatusText.Text = MainTabs.SelectedItem is TabItem tab && _tabStatus.TryGetValue(tab, out var line) ? line : "";
 
     /// <summary>
     /// "Apply to All" from one server tab's toolbar: copy its held range (a rolling length as it is; a fixed range
@@ -1829,7 +1877,7 @@ public partial class MainWindow : Window
         _overviewRegisteredCount = list.Count;
         ApplyFleetRollup(OverviewCardView.BuildRollup(cards, totals, list.Count, OverviewSearchBox?.Text));
 
-        StatusText.Text = $"overview — refreshed {ViewerTimeHelper.RefreshedStamp()}";
+        SetTabStatus(OverviewTab, $"overview — refreshed {ViewerTimeHelper.RefreshedStamp()}");
     }
 
     /// <summary>
@@ -2101,7 +2149,7 @@ public partial class MainWindow : Window
         /* #6135: an offline server's findings are the last it collected; say so beside the time they came from. */
         RecommendationsStatusText.Text = RecommendationsViewModel.WithOfflineNote(
             RecommendationsStatusText.Text, server.CardStatus == ServerCollectionStatus.Offline);
-        StatusText.Text = $"{server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}";
+        SetTabStatus(RecommendationsTab, $"{server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
     }
 
     /// <summary>Swaps the visible content region to match the view-model's state (mirrors Lite's ApplyViewModel).</summary>

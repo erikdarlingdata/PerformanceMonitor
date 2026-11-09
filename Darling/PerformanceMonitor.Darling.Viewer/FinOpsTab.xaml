@@ -469,6 +469,7 @@
                                         </DataGrid>
                                     </ui:ChartPanel>
                                     <ui:ChartPanel Grid.Column="1" x:Name="FinOpsTopAvgCard" Title="Top Databases by Avg CPU / Execution" Subtitle="The databases that cost the most CPU per execution" Margin="4,0,0,0">
+                                        <Grid>
                                         <DataGrid x:Name="FinOpsTopAvgGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}">
                                             <DataGrid.Columns>
                                                 <DataGridTextColumn Header="Database" Binding="{Binding DatabaseDisplay}" SortMemberPath="DatabaseName" Width="*"/>
@@ -477,6 +478,28 @@
                                                 <DataGridTextColumn Header="Execs" Binding="{Binding ExecutionCount, StringFormat=N0}" Width="Auto" MinWidth="70" ElementStyle="{StaticResource NumericCell}"/>
                                             </DataGrid.Columns>
                                         </DataGrid>
+                                            <!-- Both cards read the same trailing 24 hours; a database gets a Total row from CPU or file I/O alone and an Avg row only
+                                                 when it recorded an execution, so an empty Avg card beside a filled Total card means no database recorded one.
+                                                 The cell is as tall as the taller card, so the sentence anchors below the grid's column headers (36 px clears
+                                                 them, as EmptyState's clear-of-baseline offset does) and sizes the cell to hold itself. -->
+                                            <TextBlock x:Name="FinOpsTopAvgNoDataMessage" Text="{x:Static ui:FinOpsEmptyText.TopAvgCpuPerExecution}" Margin="12,36,12,8">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock" BasedOn="{StaticResource EmptyHint}">
+                                                        <Setter Property="VerticalAlignment" Value="Top"/>
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                        <Style.Triggers>
+                                                            <MultiDataTrigger>
+                                                                <MultiDataTrigger.Conditions>
+                                                                    <Condition Binding="{Binding HasItems, ElementName=FinOpsTopAvgGrid}" Value="False"/>
+                                                                    <Condition Binding="{Binding HasItems, ElementName=FinOpsTopTotalGrid}" Value="True"/>
+                                                                </MultiDataTrigger.Conditions>
+                                                                <Setter Property="Visibility" Value="Visible"/>
+                                                            </MultiDataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </Grid>
                                     </ui:ChartPanel>
                                 </Grid>
                                 <ui:ChartPanel x:Name="FinOpsDbSizeChartGroup" Grid.Row="1" Title="Database Sizes" Subtitle="Allocated against used" Margin="10,8,10,10">

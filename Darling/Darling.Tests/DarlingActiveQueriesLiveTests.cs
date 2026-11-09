@@ -30,7 +30,8 @@ public sealed class DarlingActiveQueriesLiveTests
     {
         SessionId = 57,
         DatabaseName = "AdventureWorks",
-        ElapsedTimeFormatted = "00 00:00:12.345",
+        /* A day count of one: the Viewer's row drops a zero day count for display (ElapsedTimeText), so the round trip is read on a value it keeps whole. */
+        ElapsedTimeFormatted = "01 00:00:12.345",
         QueryText = "SELECT * FROM dbo.Orders WHERE CustomerId = @c",
         QueryPlan = null,                                  /* no estimated plan captured */
         LiveQueryPlan = "<ShowPlanXML>live</ShowPlanXML>", /* but a live plan was */
@@ -102,7 +103,7 @@ public sealed class DarlingActiveQueriesLiveTests
 
         Assert.Equal(57, row.SessionId);
         Assert.Equal("AdventureWorks", row.DatabaseName);
-        Assert.Equal("00 00:00:12.345", row.ElapsedTimeFormatted);
+        Assert.Equal("01 00:00:12.345", row.ElapsedTimeFormatted);
         Assert.Equal("SELECT * FROM dbo.Orders WHERE CustomerId = @c", row.QueryText);
         Assert.Null(row.QueryPlan);
         Assert.False(row.HasQueryPlan);

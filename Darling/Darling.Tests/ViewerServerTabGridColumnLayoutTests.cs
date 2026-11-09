@@ -85,7 +85,15 @@ public sealed class ViewerServerTabGridColumnLayoutTests
                 new DarlingServer(1, "grid-layout-test", "grid-layout-test", true, null));
             /* Switching to a tab would start that tab's load against a server that is not there: the refresh loop bounces instead. */
             typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
-            return body(tab);
+            try
+            {
+                return body(tab);
+            }
+            finally
+            {
+                /* The tab is never shown, so no window's Closed stops its auto-refresh timer (#8367); dispose it here. */
+                tab.Dispose();
+            }
         }));
 
     private static T WithTheme<T>(Func<T> body)

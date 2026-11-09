@@ -95,7 +95,7 @@ internal static class DiagnosticsBundle
         "DarlingConfig.PlanXmlCompression",
         "DarlingConfig.MaxConcurrentSweeps",
         "DarlingConfig.CollectSchemaChangeEvents",
-        "DarlingConfig.RawChunkIntervalReconcileEnabled",
+        "DarlingConfig.RawChunkIntervalReconcileEnabled", "DarlingConfig.DailySummaryWarmerEnabled",
         "DarlingConfig.ProcedureStatsPlanCycleInterval",
         "DarlingConfig.XeRingBufferMaxEvents",
         "DarlingConfig.Alerts",

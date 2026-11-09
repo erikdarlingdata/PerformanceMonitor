@@ -335,12 +335,13 @@ VALUES ($1, 702, 'S702', $2, 1, 1, TRUE, 'tray')";
     public void EveryBannerSite_FeedsThePickersDataStart()
     {
         /* The call sites of ApplyWindowFloorToBanner outside its definition, by file. A new site must either feed its own
-           picker (the Job History tab's onFloor) or be added here with the reason it does not. The server tab's sites do not
-           feed: its picker's note names the server's oldest data (ServerTab.OldestRetainedUtc), which a window-floor probe,
-           bounded to the window it was asked about, cannot give. */
+           note (the Overview lanes' onStartChosen) or be added here with the reason it does not. No site feeds a picker: a
+           picker's note names the oldest data the store holds for its tab's scope (ServerTab.OldestRetainedUtc, the Job History
+           tab's LocalDataService.GetOldestJobHistoryAsync), which a window-floor probe, bounded to the window it was asked about,
+           cannot give. */
         var expected = new[]
         {
-            ("Controls/JobHistoryTab.xaml.cs", 1, "onFloor?.Invoke(floor)"),                       /* the tab's own picker */
+            ("Controls/JobHistoryTab.xaml.cs", 1, null),                                           /* the tab's picker: see above */
             ("Controls/LiteBlockingLaneDataStart.cs", 1, "onStartChosen?.Invoke(start)"),          /* Overview lanes' own note */
             ("Controls/ServerTab.BlockingChartsDataStart.cs", 1, null),                            /* the server tab: see above */
             ("Controls/ServerTab.Refresh.cs", 1, null),                                            /* the server tab: see above */
@@ -366,6 +367,11 @@ VALUES ($1, 702, 'S702', $2, 1, 1, TRUE, 'tray')";
                 Assert.Contains(feed, File.ReadAllText(full), StringComparison.Ordinal);
             }
         }
+
+        /* The Job History tab's picker takes its note from the tab's own oldest-retained read, never from the probe's floor. */
+        var jobHistory = LiteFile(Path.Combine("Controls", "JobHistoryTab.xaml.cs"));
+        Assert.Contains("GetOldestJobHistoryAsync(", jobHistory, StringComparison.Ordinal);
+        Assert.DoesNotContain("onFloor", jobHistory, StringComparison.Ordinal);
 
         /* No banner site writes the server tab's picker note directly. */
         var refresh = LiteFile(Path.Combine("Controls", "ServerTab.Refresh.cs"));

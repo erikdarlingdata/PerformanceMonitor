@@ -361,21 +361,32 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// Fills in the engine edition when the connection check could not read it (<see cref="ResolveEngineEditionAsync"/>).
-    /// Awaited before every tab load, so the Azure SQL Database texts never depend on that one check, and a no-op once
-    /// the edition is known.
+    /// Fills in the engine edition when the connection check could not read it (<see cref="ResolveEngineEditionAsync"/>), then the
+    /// server's major version, and words the plan-correction grids once both are known. Awaited before every tab load, so the Azure SQL
+    /// Database texts never depend on that one check, and a no-op once both facts are known.
     /// </summary>
     private async System.Threading.Tasks.Task RefreshEngineEditionAsync()
     {
-        if (_engineEdition != CollectorEngineCapability.UnknownEngineEdition)
+        var knownEdition = _engineEdition;
+        var knownVersion = _sqlMajorVersion;
+
+        if (_engineEdition == CollectorEngineCapability.UnknownEngineEdition)
         {
-            return;
+            _engineEdition = await ResolveEngineEditionAsync(_engineEdition, () => Task.Run(() => _dataService.GetSqlEngineEditionAsync(_serverId)));
+
+            /* The constructor decided the msdb warning from the connection check's edition, which was unknown. */
+            RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _awsRdsKind);
         }
 
-        _engineEdition = await ResolveEngineEditionAsync(_engineEdition, () => Task.Run(() => _dataService.GetSqlEngineEditionAsync(_serverId)));
+        /* The version is the other engine fact the plan-correction grids word themselves by, read from the same stored row. The grids
+           are worded after both reads: an Azure SQL Database or Managed Instance stores product version 12.0.x, so a tab opened while
+           its connection check failed would otherwise take the version alone for SQL Server 2014, and nothing re-words the grids later. */
+        await RefreshSqlMajorVersionAsync();
 
-        /* The constructor decided the msdb warning from the connection check's edition, which was unknown. */
-        RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _awsRdsKind);
+        if (_engineEdition != knownEdition || _sqlMajorVersion != knownVersion)
+        {
+            ApplyPlanCorrectionEmptyTexts(PlanCorrectionTarget());
+        }
     }
 
     /// <summary>Reads the tab now showing. Returns the Overview lane reads that failed, named for the status line, and otherwise null.</summary>
@@ -1257,7 +1268,7 @@ public partial class ServerTab : UserControl
             if (data.Count == 0)
                 BlockingSlicer.ShowEmpty("No blocked process reports in the selected time window.");
             else
-                BlockingSlicer.LoadData(data, "Blocking Events", slicerStart, slicerEnd);
+                BlockingSlicer.LoadData(data, "Blocking Events", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
         }
         catch (Exception ex)
         {

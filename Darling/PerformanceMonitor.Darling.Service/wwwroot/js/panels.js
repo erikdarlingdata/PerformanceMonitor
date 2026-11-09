@@ -230,7 +230,9 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
        (#2780). Shared with the server-tab composites so the whole page degrades the same way. A window refusal
        only reaches it now when the one retry above could not settle it. */
     /* #7257: the "pick a shorter range" notice gets no Retry button, since the same range gives the same notice. */
-    mount(body, onRetry && !isWindowTooWide(res.message) ? [readErrorStrip(res.message), retryButton(onRetry)] : readErrorStrip(res.message));
+    /* #8323: the engine's own text, when the answer put a plain sentence in front of it, sits behind "More detail". */
+    const detail = res.detail ? disclosure("More detail", res.detail, { title: "What the store said, in full" }) : null;
+    mount(body, onRetry && !isWindowTooWide(res.message) ? [readErrorStrip(res.message), detail, retryButton(onRetry)] : [readErrorStrip(res.message), detail]);
     return;
   }
   const kept = keptWindowStrip(res);

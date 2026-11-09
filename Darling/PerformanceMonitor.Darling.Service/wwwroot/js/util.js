@@ -1918,7 +1918,11 @@ async function classifyResponse(resp) {
       : noMessageText(resp);
     /* #6800: a read refused busy (429) carries the seconds its Retry-After names, for retryOnceWhenBusy. */
     const retryAfterSeconds = resp.status === 429 ? retryAfterSecondsOf(resp.retryAfter !== undefined ? resp.retryAfter : retryAfterOf(resp)) : null;
-    return retryAfterSeconds === null ? { kind: "error", message: msg, status: resp.status } : { kind: "error", message: msg, status: resp.status, retryAfterSeconds };
+    const result = retryAfterSeconds === null ? { kind: "error", message: msg, status: resp.status } : { kind: "error", message: msg, status: resp.status, retryAfterSeconds };
+    /* #8323: an answer that put a plain sentence in front of the engine's own text (a composed cell the store stopped at its
+       statement timeout) carries that text as `detail`; the panel shows it behind "More detail". */
+    if (body && typeof body.detail === "string" && body.detail) result.detail = body.detail;
+    return result;
   }
 
   /* The envelope is exactly {status, message[, hints]}: a top-level string status AND string message.

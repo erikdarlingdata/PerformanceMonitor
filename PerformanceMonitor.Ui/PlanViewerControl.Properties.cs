@@ -344,7 +344,7 @@ public partial class PlanViewerControl
         // === Estimated Rows Section ===
         AddPropertySection("Estimated Rows");
         var estExecs = EstimatedExecutions(node);
-        AddPropertyRow("Est. Executions", $"{estExecs:N0}");
+        AddPropertyRow("Est. Executions", MetricFormatter.FormatEstimatedExecutions(estExecs));
         AddPropertyRow("Est. Rows Per Exec", $"{node.EstimateRows:N1}");
         AddPropertyRow("Est. Rows All Execs", $"{node.EstimateRows * estExecs:N1}");
         if (node.EstimatedRowsRead > 0)
@@ -1740,6 +1740,7 @@ public partial class PlanViewerControl
     {
         InsightsPanel.Visibility = Visibility.Visible;
         InsightsHeader.Text = "  Plan Insights";
+        FitInsightsToHeight();
     }
 
     #endregion

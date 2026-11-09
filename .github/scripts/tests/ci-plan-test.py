@@ -261,7 +261,7 @@ check("classes: docs + one test class: areas", r["areas"], "classes")
 check("classes: docs + one test class: scope", (r["darling_scope"], r["lite_scope"]), ("classes", "none"))
 check("classes: docs + one test class: the class", r["darling_classes"], "D1")
 check("classes: docs + one test class: build and legs", (r["build"], r["legs"], r["legs_json"]), ("true", "1", "[1]"))
-check("classes: a file with two classes", cc([DT + "D3Tests.cs"])["darling_classes"], "D3,D4")
+check("classes: a file with two classes, then the Darling Guard class (#8355)", cc([DT + "D3Tests.cs"])["darling_classes"], "D3,D4,D1")
 check("classes: a file with two classes runs one leg", cc([DT + "D3Tests.cs"])["legs"], "1")
 r = cc(["README.md"] + [DT + f"B{i}Tests.cs" for i in range(14)], big_cc)
 check("classes: docs + 14 test classes: scope", (r["areas"], r["darling_scope"]), ("classes", "classes"))
@@ -306,7 +306,7 @@ with tempfile.TemporaryDirectory() as hroot:
     check("helper file: only the test class is a test", (h_row["tests"], h_row["safe"]), (["WithHelperTests"], True))
     h_cat = {**catalog, "files": h_tbl}
     r = run(["README.md", DT + "WithHelperTests.cs"], cat=h_cat)
-    check("helper file: the picks name only the test class", (r["areas"], r["darling_classes"]), ("classes", "WithHelperTests"))
+    check("helper file: the picks name only the test class, then the Guard class", (r["areas"], r["darling_classes"]), ("classes", "WithHelperTests,D1"))
 
 # The real file table: a class file maps to its classes, a helper and a missing map do not narrow.
 real_cat = cp.load_catalog()
@@ -326,7 +326,8 @@ check("draft: product file + changed test file: areas", r.get("areas"), "classes
 check("draft: product file + changed test file: scope", (r.get("darling_scope"), r.get("lite_scope")), ("classes", "none"))
 check("draft: product file + changed test file: the class and the Guard classes", r.get("darling_classes"), "D3,D4,D1")
 check("draft: product file + changed test file: minutes and legs", (r.get("test_minutes"), r.get("legs")), ("3.0", "1"))
-check("draft: the why line names the rule", "a draft runs only its own test classes and the Guard classes" in r.get("why", ""), True)
+check("draft: the why line names the rule",
+      "a draft runs only its own test classes and the Stage=Guard classes of each suite in its scope" in r.get("why", ""), True)
 r = draft_run([SERVICE])
 check("draft: product file only: Guard classes only", (r.get("areas"), r.get("darling_scope"), r.get("darling_classes")), ("classes", "classes", "D1"))
 check("draft: product file only: no Lite", (r.get("lite_scope"), r.get("lite_classes"), r.get("build")), ("none", "", "true"))
@@ -339,6 +340,68 @@ r = draft_run([LITE_SRC])
 check("draft: a Lite-only product file: Darling Guard, no Lite", (r.get("areas"), r.get("darling_classes"), r.get("lite_scope")), ("classes", "D1", "none"))
 r = draft_run([LITE_SRC, LT + "L1Tests.cs"])
 check("draft: a Lite product file + Lite test: both", (r.get("darling_classes"), r.get("lite_classes")), ("D1", "L1"))
+# #8355: a draft runs the Lite Stage=Guard classes that hold a test whenever its Lite scope is not none, as it runs Darling's.
+# LG1 and LG2 are Lite Guard classes with tests; LGHelper carries the trait and holds no test, so it is never named.
+lg_cls = {"darling": d_cls, "lite": {**l_cls, "LG1": {"Stage=Guard"}, "LG2": {"Stage=Guard"}, "LGHelper": {"Stage=Guard", cs.NO_TESTS_TRAIT}}}
+lg_cat = {**cc_cat, "classes": lg_cls, "lite_weights": {**cc_cat["lite_weights"], "LG1": 60, "LG2": 60}}
+r = draft_run([LITE_SRC, LT + "L1Tests.cs"], cat=lg_cat)
+check("draft lite guard: a Lite product file + Lite test: its class, then every Lite Guard class that holds a test", r.get("lite_classes"), "L1,LG1,LG2")
+check("draft lite guard: the Darling side is as before", (r.get("darling_scope"), r.get("darling_classes")), ("classes", "D1"))
+r = draft_run([SERVICE, LITE_SRC, DT + "D3Tests.cs", LT + "L2Tests.cs"], cat=lg_cat)
+check("draft lite guard: both suites", (r.get("darling_classes"), r.get("lite_classes")), ("D3,D4,D1", "L2,LG1,LG2"))
+r = draft_run([LITE_SRC], cat=lg_cat)
+check("draft lite guard: a Lite product file with no changed test file runs the Guard classes of both suites",
+      (r.get("darling_classes"), r.get("lite_scope"), r.get("lite_classes")), ("D1", "classes", "LG1,LG2"))
+r = draft_run([SERVICE], cat=lg_cat)
+check("draft lite guard: a Darling file that Lite classes read (Lite scope reads) runs the Lite Guard classes",
+      (r.get("darling_classes"), r.get("lite_scope"), r.get("lite_classes")), ("D1", "classes", "LG1,LG2"))
+r = draft_run(["Darling/X.cs"], cat=lg_cat)
+check("draft lite guard: a Lite scope of none picks no Lite class", (r.get("darling_classes"), r.get("lite_scope"), r.get("lite_classes")), ("D1", "none", ""))
+check("draft lite guard: the why line names both suites' Guard classes",
+      "a draft runs only its own test classes and the Stage=Guard classes of each suite in its scope" in r.get("why", ""), True)
+lg_files = {**cc_files, LT + "LG1Tests.cs": {"suite": "lite", "classes": ["LG1"], "tests": ["LG1"], "safe": True}}
+r = draft_run([LITE_SRC, LT + "LG1Tests.cs"], cat={**lg_cat, "files": lg_files})
+check("draft lite guard: a changed Lite Guard class is picked once", r.get("lite_classes"), "LG1,LG2")
+# #7744: a Guard class the test host does not list never reaches a plan, in either suite.
+r = cp.plan("pull_request", "dev", "feature/x", [], [LITE_SRC, LT + "L1Tests.cs"], rules, {**lg_cat, "listed": lambda suite, name: name not in ("LG2", "D1")}, draft=True)
+check("draft lite guard: a Guard class the host does not list is dropped, in either suite",
+      (r.get("darling_scope"), r.get("darling_classes"), r.get("lite_classes")), ("none", "", "L1,LG1"))
+# #8355: a test-only change (rule 6) runs the changed classes with the Stage=Guard classes of each suite in its scope, on a draft and
+# on a ready pull request alike. Most Guard classes scan the test sources, so a change to a test file is one that can trip them.
+# Rule 6 is already narrow, so the Guard classes only add to it; documentation alone stays docs-only.
+for flag in (True, False):
+    r = draft_run(["README.md", LT + "L1Tests.cs"], draft=flag, cat=lg_cat)
+    check(f"test-only guard (draft={flag}): a Lite test file lists its class, then every Lite Guard class that holds a test",
+          (r.get("areas"), r.get("darling_scope"), r.get("darling_classes"), r.get("lite_classes")), ("classes", "none", "", "L1,LG1,LG2"))
+    r = draft_run([DT + "D3Tests.cs"], draft=flag, cat=lg_cat)
+    check(f"test-only guard (draft={flag}): a Darling test file lists its classes, then every Darling Guard class, and the Lite Guard "
+          "classes of Lite's reads scope",
+          (r.get("areas"), r.get("darling_classes"), r.get("lite_scope"), r.get("lite_classes")), ("classes", "D3,D4,D1", "classes", "LG1,LG2"))
+    check(f"test-only guard (draft={flag}): the why line names the rule",
+          "only documentation and test classes changed, so those classes run with the Stage=Guard classes of each suite in its scope"
+          in r.get("why", ""), True)
+    r = draft_run(["README.md"], draft=flag, cat=lg_cat)
+    check(f"test-only guard (draft={flag}): documentation only lists no class",
+          (r.get("areas"), r.get("darling_classes"), r.get("lite_classes")), ("docs-only", "", ""))
+r = cp.plan("pull_request", "dev", "feature/x", [], [LT + "L1Tests.cs"], rules, {**lg_cat, "listed": lambda suite, name: name != "LG2"})
+check("test-only guard: a Guard class the host does not list is dropped", r.get("lite_classes"), "L1,LG1")
+r = draft_run([LT + "L1Tests.cs", DT + "D1Tests.cs"], cat=lg_cat)
+check("test-only guard: a changed Guard class is listed once", (r.get("darling_classes"), r.get("lite_classes")), ("D1", "L1,LG1,LG2"))
+# The Lite Guard classes join a selection that is already narrow and never narrow a draft on their own: a draft that changes only a
+# Lite file no test class or Darling class answers for (a manifest, a config file the app reads at run time) runs the Lite suite in
+# full, as it does when it is ready for review.
+for lone in ("Lite/app.manifest", "Lite/config/collection_schedule.json"):
+    r = draft_run([lone], cat=lg_cat)
+    ready = draft_run([lone], draft=False, cat=lg_cat)
+    check(f"draft lite guard: {lone} alone runs the Lite suite in full",
+          (r.get("areas"), r.get("darling_scope"), r.get("lite_scope"), r.get("lite_classes")), ("lite", "none", "full", ""))
+    check(f"draft lite guard: {lone} alone: the areas, scopes and legs of a ready pull request",
+          (r.get("areas"), r.get("darling_scope"), r.get("lite_scope"), r.get("legs")),
+          (ready.get("areas"), ready.get("darling_scope"), ready.get("lite_scope"), ready.get("legs")))
+    check(f"draft lite guard: {lone} alone: the why line says no class is selected", "no class is selected" in r.get("why", ""), True)
+r = draft_run(["Lite/app.manifest", LT + "L1Tests.cs"], cat=lg_cat)
+check("draft lite guard: the same file with a changed Lite test file is narrow, and the Lite Guard classes join",
+      (r.get("areas"), r.get("darling_scope"), r.get("lite_classes")), ("classes", "none", "L1,LG1,LG2"))
 # A changed test file that is not safe: the whole pull request runs as it does today, and the why line says so.
 r = draft_run([SERVICE, DT + "Helpers.cs"])
 check("draft: an unsafe test file: full", (r.get("areas"), r.get("darling_scope")), ("darling", "full"))
@@ -356,7 +419,7 @@ check("ready: the why line has no draft rule", "draft runs only" in draft_run([S
 for flag in (True, False):
     check(f"draft={flag}: docs-only", draft_run(["README.md"], draft=flag).get("areas"), "docs-only")
     r = draft_run(["README.md", DT + "D3Tests.cs"], draft=flag)
-    check(f"draft={flag}: test-only has no Guard classes", (r.get("areas"), r.get("darling_classes")), ("classes", "D3,D4"))
+    check(f"draft={flag}: test-only runs its classes and the Darling Guard class (#8355)", (r.get("areas"), r.get("darling_classes")), ("classes", "D3,D4,D1"))
     check(f"draft={flag}: a dev push is every area", draft_run([SERVICE], draft=flag, event="push").get("darling_scope"), "full")
     check(f"draft={flag}: a base other than dev is every area",
           draft_run([SERVICE], draft=flag, base="main").get("areas"), "all")
@@ -368,7 +431,10 @@ check("draft: parse_bool", [cp.parse_bool(x) for x in ("true", "True", "false", 
 tbl = real_cat["files"]
 one = next(f for f, e in sorted(tbl.items()) if e["suite"] == "darling" and e["safe"] and len(e["classes"]) == 1)
 r = cp.plan("pull_request", "dev", "x", [], ["README.md", one], live_rules := cs.Rules(), real_cat)
-check("real table: one class file narrows", (r["areas"], r["darling_classes"]), ("classes", tbl[one]["classes"][0]))
+real_guard = sorted(c for c, t in real_cat["classes"]["darling"].items() if "Stage=Guard" in t and cs.NO_TESTS_TRAIT not in t)
+check("real table: one class file narrows to its class and the Darling Guard classes (#8355)",
+      (r["areas"], r["darling_classes"].split(",")[0], sorted(set(r["darling_classes"].split(",")) - {tbl[one]["classes"][0]})),
+      ("classes", tbl[one]["classes"][0], [c for c in real_guard if c != tbl[one]["classes"][0]]))
 check("real table: every row has a class", all(e["classes"] for e in tbl.values()), True)
 no_test = {(s, c) for s, m in real_cat["classes"].items() for c, t in m.items() if cs.NO_TESTS_TRAIT in t}
 check("real table: no picked name is a class without tests",
@@ -556,7 +622,7 @@ check("map: a mapped pull request is not the full suite", ready_run([SERVICE]).g
 check("map: a base other than dev is FULL", ready_run([SERVICE], base="main").get("areas"), "all")
 check("map: docs-only stays docs-only", ready_run(["README.md"]).get("areas"), "docs-only")
 r = ready_run(["README.md", DT + "D3Tests.cs"])
-check("map: test-only stays test-only (no Guard class)", (r.get("areas"), r.get("darling_classes")), ("classes", "D3,D4"))
+check("map: test-only stays test-only, its classes and the Guard class, not the map's (#8355)", (r.get("areas"), r.get("darling_classes")), ("classes", "D3,D4,D1"))
 r = ready_run([SERVICE, "no-such-area/odd.bin"])
 check("map: a path no area knows is every area", r.get("areas"), "all")
 
