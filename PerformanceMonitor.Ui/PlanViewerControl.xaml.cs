@@ -407,6 +407,13 @@ public partial class PlanViewerControl : UserControl
         PlanScrollViewer.Visibility = Visibility.Collapsed;
         InsightsPanel.Visibility = Visibility.Collapsed;
         CloseStatementsPanel();
+        /* The list behind the closed panel, its count and the toolbar button that reopens it belong to the plan that is
+           going (#8446). CloseStatementsPanel keeps them, because the toggle hides the panel for a plan that stays on
+           screen; here the next plan populates and shows its own, or has none. */
+        StatementsGrid.ItemsSource = null;
+        StatementsHeader.Text = "Statements";
+        StatementsButton.Visibility = Visibility.Collapsed;
+        StatementsButtonSeparator.Visibility = Visibility.Collapsed;
         CostText.Text = "";
         CostText.Visibility = Visibility.Collapsed;
         ClosePropertiesPanel();

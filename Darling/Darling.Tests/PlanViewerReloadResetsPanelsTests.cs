@@ -55,6 +55,9 @@ public sealed class PlanViewerReloadResetsPanelsTests
 
                 Assert.Equal(Visibility.Collapsed, Panel(control, "StatementsPanel").Visibility);
                 Assert.Equal(0, ((ColumnDefinition)control.FindName("StatementsColumn")).Width.Value);
+                /* The first plan's list is gone with its panel: no toolbar button to reopen it, and no rows behind it. */
+                Assert.Equal(Visibility.Collapsed, Panel(control, "StatementsButton").Visibility);
+                Assert.Empty(((DataGrid)control.FindName("StatementsGrid")).Items);
                 Assert.Equal(Visibility.Collapsed, Panel(control, "PropertiesPanel").Visibility);
                 Assert.Equal(0, ((ColumnDefinition)control.FindName("PropertiesColumn")).Width.Value);
                 Assert.Equal(Visibility.Visible, Panel(control, "PlanScrollViewer").Visibility);
@@ -93,7 +96,9 @@ public sealed class PlanViewerReloadResetsPanelsTests
                 LayOut(host);
 
                 Assert.Equal(Visibility.Visible, Panel(control, "StatementsPanel").Visibility);
+                Assert.Equal(Visibility.Visible, Panel(control, "StatementsButton").Visibility);
                 Assert.Equal(3, ((DataGrid)control.FindName("StatementsGrid")).Items.Count);
+                Assert.Equal("Statements (3)", ((TextBlock)control.FindName("StatementsHeader")).Text);
                 Assert.Equal(Visibility.Collapsed, Panel(control, "PropertiesPanel").Visibility);
                 Assert.Equal(0, ((ColumnDefinition)control.FindName("PropertiesColumn")).Width.Value);
             }
@@ -126,6 +131,8 @@ public sealed class PlanViewerReloadResetsPanelsTests
                 Assert.Equal(Visibility.Visible, Panel(control, "EmptyState").Visibility);
                 Assert.Equal(Visibility.Collapsed, Panel(control, "PlanScrollViewer").Visibility);
                 Assert.Equal(Visibility.Collapsed, Panel(control, "StatementsPanel").Visibility);
+                Assert.Equal(Visibility.Collapsed, Panel(control, "StatementsButton").Visibility);
+                Assert.Empty(((DataGrid)control.FindName("StatementsGrid")).Items);
                 Assert.Equal(Visibility.Collapsed, Panel(control, "PropertiesPanel").Visibility);
                 Assert.Empty(OperatorBorders(control));
             }
