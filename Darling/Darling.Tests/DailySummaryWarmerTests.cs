@@ -20,9 +20,10 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #8370: the daily-summary warmer's schedule, driven by a fake clock and a recording delay rather than real time. It warms
-/// every server once after the service starts, again at each UTC day boundary plus the cache's closed grace (when the
-/// blocks it built stop being served), backs off after a failed or refused pass, skips its pass while nothing reads the
-/// cache, and stops at once when the service shuts down.
+/// every server once after the service starts, again one minute after each UTC day boundary (00:01, when the Overview's
+/// 31-days-ending-today key moves to the new day), runs the new day's pass within that minute when a pass straddles
+/// midnight, backs off after a failed or refused pass, skips its pass while nothing reads the cache, and stops at once
+/// when the service shuts down.
 /// </summary>
 public sealed class DailySummaryWarmerTests
 {
@@ -220,12 +221,40 @@ public sealed class DailySummaryWarmerTests
         return days;
     }
 
+    [Fact]
+    public async Task RunAsync_WhenAPassStraddlesMidnight_RunsTheNewDaysPassWithinTheMargin_NotADayLater()
+    {
+        /* The start delay puts the pass at 23:59; the second server's read runs it past midnight, so that server is warmed
+           under the new day's key and the first is not. */
+        var harness = new Harness(new DateTime(2026, 11, 8, 23, 57, 0, DateTimeKind.Utc)) { StopAfterDelays = 3 };
+        harness.WarmOverride = (serverId, _, _) =>
+        {
+            if (serverId == 2)
+            {
+                harness.Advance(TimeSpan.FromSeconds(90));
+            }
+
+            return Task.CompletedTask;
+        };
+
+        await Warmers.RunAsync(harness.Build(TwoServers), harness.Cts.Token);
+
+        var midnight = new DateTime(2026, 11, 9, 0, 0, 0, DateTimeKind.Utc);
+        Assert.Equal(midnight.AddSeconds(30), harness.Warmed[1].At);
+        Assert.True(harness.Delays[1] <= Warmers.PassMargin,
+            $"the pass after the straddle waits {harness.Delays[1]}: the servers warmed before midnight sit under the old day's key until then");
+        Assert.Equal([midnight.Add(Warmers.PassMargin), midnight.Add(Warmers.PassMargin)], harness.Warmed.Skip(2).Select(w => w.At).ToArray());
+        Assert.Equal(TimeSpan.FromDays(1), harness.Delays[2]);
+    }
+
     /// <summary>A fake clock, a recording delay that advances it, and a warm callback that records each call.</summary>
     private sealed class Harness
     {
         public Harness(DateTime now) => Now = now;
 
         public DateTime Now { get; private set; }
+
+        public void Advance(TimeSpan by) => Now += by;
         public List<TimeSpan> Delays { get; } = new();
         public List<(int ServerId, string Name, DateTime At)> Warmed { get; } = new();
         public CancellationTokenSource Cts { get; } = new();
