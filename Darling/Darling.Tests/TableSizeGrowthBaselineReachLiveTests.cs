@@ -59,7 +59,8 @@ public sealed class TableSizeGrowthBaselineReachLiveTests
 
             /* Snapshots for the last five days and from 30 days back to 84; nothing in between. TableA grows 3 MB a
                day from 100 MB at the earliest snapshot; Young was created 20 days ago, so it is in no snapshot older
-               than that. Both cutoffs resolve to the 30-day-old snapshot. */
+               than that. No snapshot lies within a day of the 7-day cutoff, so that baseline is null; the 30-day-old
+               snapshot is two hours before the 30-day cutoff and is the 30-day baseline. */
             await SeedAsync(connection, ct, latest, Enumerable.Range(0, 85).Where(age => age < 5 || age >= 30));
 
             using (var doc = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, ServerName, Db, ct)))
@@ -68,13 +69,14 @@ public sealed class TableSizeGrowthBaselineReachLiveTests
                 Assert.False(history.GetProperty("covers_7d").GetBoolean());
                 Assert.True(history.GetProperty("covers_30d").GetBoolean());
                 Assert.Equal(84, history.GetProperty("history_days_available").GetInt32());
-                /* The two figures were read from one snapshot, and the reply says so. */
-                Assert.Equal(latest.AddDays(-30).ToString("o"), BaselineSnapshot(history, "baseline_7d_snapshot"));
+                /* The 7-day baseline is nothing, not the 30-day snapshot under another name, and the reply says so. */
+                Assert.Null(BaselineSnapshot(history, "baseline_7d_snapshot"));
                 Assert.Equal(latest.AddDays(-30).ToString("o"), BaselineSnapshot(history, "baseline_30d_snapshot"));
                 var note = history.GetProperty("note").GetString();
                 Assert.NotNull(note);
-                Assert.Contains(latest.AddDays(-30).ToString("o"), note, StringComparison.Ordinal);
-                Assert.Contains("growth_7d_mb", note, StringComparison.Ordinal);
+                Assert.Contains("84 days of index snapshots", note, StringComparison.Ordinal);
+                Assert.Contains("no snapshot lies within a day of 7 days ago", note, StringComparison.Ordinal);
+                Assert.Contains("growth_7d_mb is null", note, StringComparison.Ordinal);
 
                 var a = Table(doc, "TableA");
                 Assert.Equal(JsonValueKind.Null, a.GetProperty("growth_7d_mb").ValueKind);

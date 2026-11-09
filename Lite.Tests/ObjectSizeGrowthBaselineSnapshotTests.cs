@@ -85,9 +85,11 @@ public sealed class ObjectSizeGrowthBaselineSnapshotTests : IClassFixture<Shared
     }
 
     [Fact]
-    public async Task AGapBetweenTheRecentSnapshotsAndTheRest_NamesTheOneSnapshotBothCutoffsResolvedTo()
+    public async Task AGapBetweenTheRecentSnapshotsAndTheRest_LeavesThe7DayBaselineNull_AndNamesThe30DayOne()
     {
-        /* The last five days and from 30 days back; nothing between, so both cutoffs resolve to the 30-day-old snapshot. */
+        /* The last five days and from 30 days back; nothing between. No snapshot lies within a day of the 7-day cutoff, so that
+           baseline is null rather than the 30-day-old snapshot under another name; the 30-day-old snapshot is two hours before its
+           cutoff and is the 30-day baseline. */
         var latest = Truncate(DateTime.UtcNow.AddHours(-2));
         foreach (var age in Enumerable.Range(0, 35).Where(age => age < 5 || age >= 30))
             await SeedTableAsync("Hist", "TableA", latest.AddDays(-age), 100m + 3m * (34 - age));
@@ -96,13 +98,81 @@ public sealed class ObjectSizeGrowthBaselineSnapshotTests : IClassFixture<Shared
         var history = doc.RootElement.GetProperty("history");
         Assert.False(history.GetProperty("covers_7d").GetBoolean());
         Assert.True(history.GetProperty("covers_30d").GetBoolean());
-        Assert.Equal(latest.AddDays(-30).ToString("o"), BaselineSnapshot(history, "baseline_7d_snapshot"));
+        Assert.Null(BaselineSnapshot(history, "baseline_7d_snapshot"));
         Assert.Equal(latest.AddDays(-30).ToString("o"), BaselineSnapshot(history, "baseline_30d_snapshot"));
-        Assert.Contains(latest.AddDays(-30).ToString("o"), history.GetProperty("note").GetString(), StringComparison.Ordinal);
+        Assert.Contains("no snapshot lies within a day of 7 days ago", history.GetProperty("note").GetString(), StringComparison.Ordinal);
 
         var a = Assert.Single(doc.RootElement.GetProperty("tables").EnumerateArray());
         Assert.Equal(JsonValueKind.Null, a.GetProperty("growth_7d_mb").ValueKind);
         Assert.Equal(90, a.GetProperty("growth_30d_mb").GetDecimal());
+    }
+
+    [Fact]
+    public async Task AMissedRunAtEachMark_TakesTheSnapshotADayInsideIt_AndTheFigureStands()
+    {
+        /* Daily snapshots two hours before the read's time of day, none 7 or 30 days old: the snapshot six days before the latest is
+           22 hours after the 7-day cutoff and the eight-day-old one 26 hours before, so the nearer is the baseline; the same at 30. */
+        var latest = Truncate(DateTime.UtcNow.AddHours(-2));
+        foreach (var age in Enumerable.Range(0, 41).Where(age => age != 7 && age != 30))
+            await SeedTableAsync("Hist", "TableA", latest.AddDays(-age), 100m + 3m * (40 - age));
+
+        using var doc = JsonDocument.Parse(await McpObjectStatsTools.GetTableIndexSizes(_dataService, _serverManager, ServerName));
+        var history = doc.RootElement.GetProperty("history");
+        Assert.True(history.GetProperty("covers_7d").GetBoolean());
+        Assert.True(history.GetProperty("covers_30d").GetBoolean());
+        Assert.Equal(latest.AddDays(-6).ToString("o"), BaselineSnapshot(history, "baseline_7d_snapshot"));
+        Assert.Equal(latest.AddDays(-29).ToString("o"), BaselineSnapshot(history, "baseline_30d_snapshot"));
+        Assert.Equal(JsonValueKind.Null, history.GetProperty("note").ValueKind);
+
+        var a = Assert.Single(doc.RootElement.GetProperty("tables").EnumerateArray());
+        Assert.Equal(18, a.GetProperty("growth_7d_mb").GetDecimal());
+        Assert.Equal(87, a.GetProperty("growth_30d_mb").GetDecimal());
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(-1)]
+    public async Task ARunAMinuteEitherSideOfTheCutoff_IsTheBaselineEitherWay(int jitterMinutes)
+    {
+        /* The 7-day run's stamp lands a minute after or a minute before the cutoff (the read's clock, seven days back): the
+           figure is the same 21 MB either way, never the eight-day figure because the stamp fell on the far side. */
+        var latest = Truncate(DateTime.UtcNow.AddHours(-2));
+        var atTheMark = latest.AddHours(2).AddDays(-7).AddMinutes(jitterMinutes);
+        foreach (var age in Enumerable.Range(0, 41))
+            await SeedTableAsync("Hist", "TableA", age == 7 ? atTheMark : latest.AddDays(-age), 100m + 3m * (40 - age));
+
+        using var doc = JsonDocument.Parse(await McpObjectStatsTools.GetTableIndexSizes(_dataService, _serverManager, ServerName));
+        var history = doc.RootElement.GetProperty("history");
+        Assert.True(history.GetProperty("covers_7d").GetBoolean());
+        Assert.Equal(atTheMark.ToString("o"), BaselineSnapshot(history, "baseline_7d_snapshot"));
+        Assert.Equal(latest.AddDays(-30).ToString("o"), BaselineSnapshot(history, "baseline_30d_snapshot"));
+
+        var a = Assert.Single(doc.RootElement.GetProperty("tables").EnumerateArray());
+        Assert.Equal(21, a.GetProperty("growth_7d_mb").GetDecimal());
+        Assert.Equal(90, a.GetProperty("growth_30d_mb").GetDecimal());
+    }
+
+    [Fact]
+    public async Task AGapWiderThanADayOnBothSidesOfTheCutoff_RefusesTheFigure_AndSaysNoSnapshotLiesWithinADay()
+    {
+        var latest = Truncate(DateTime.UtcNow.AddHours(-2));
+        foreach (var age in Enumerable.Range(0, 41).Where(age => age <= 4 || age >= 10))
+            await SeedTableAsync("Hist", "TableA", latest.AddDays(-age), 100m + 3m * (40 - age));
+
+        using var doc = JsonDocument.Parse(await McpObjectStatsTools.GetTableIndexSizes(_dataService, _serverManager, ServerName));
+        var history = doc.RootElement.GetProperty("history");
+        Assert.False(history.GetProperty("covers_7d").GetBoolean());
+        Assert.True(history.GetProperty("covers_30d").GetBoolean());
+        Assert.Null(BaselineSnapshot(history, "baseline_7d_snapshot"));
+        Assert.Equal(latest.AddDays(-30).ToString("o"), BaselineSnapshot(history, "baseline_30d_snapshot"));
+        var note = history.GetProperty("note").GetString()!;
+        Assert.Contains("40 days of index snapshots", note, StringComparison.Ordinal);
+        Assert.Contains("no snapshot lies within a day of 7 days ago", note, StringComparison.Ordinal);
+
+        var a = Assert.Single(doc.RootElement.GetProperty("tables").EnumerateArray());
+        Assert.Equal(JsonValueKind.Null, a.GetProperty("growth_7d_mb").ValueKind);
+        Assert.Equal(90, a.GetProperty("growth_30d_mb").GetDecimal());
+        Assert.Contains("no snapshot lies within a day of 7 days ago", a.GetProperty("growth_note").GetString(), StringComparison.Ordinal);
     }
 
     [Fact]

@@ -76,8 +76,38 @@ public sealed class ObjectSizeGrowthBaselineReachTests
         Assert.DoesNotContain("no snapshot 7+ days old exists", note, StringComparison.Ordinal);
 
         var history = McpObjectStatsTools.HistoryNote(row)!;
-        Assert.Contains(gap.ToString("o"), history, StringComparison.Ordinal);
+        Assert.Contains($"the snapshot nearest 7 days ago is from {gap:o}", history, StringComparison.Ordinal);
         Assert.Contains("outside the 6 to 8 days a 7-day figure may span", history, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AGapWiderThanADayOnBothSidesOfTheCutoff_SaysNoSnapshotLiesWithinADay_NotThatNoneIsThatOld()
+    {
+        var row = Row(current: 352, at7d: null, at30d: 262, snapshot7d: null, snapshot30d: Latest.AddDays(-30), daysOfData: 40);
+
+        Assert.Null(row.Growth7dMb);
+        Assert.Equal(90m, row.Growth30dMb);
+
+        var note = McpObjectStatsTools.GrowthNote(row)!;
+        Assert.Contains("no snapshot lies within a day of 7 days ago", note, StringComparison.Ordinal);
+        Assert.Contains("so growth_7d_mb is null", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("7+ days old", note, StringComparison.Ordinal);
+
+        var history = McpObjectStatsTools.HistoryNote(row)!;
+        Assert.Contains("40 days of index snapshots", history, StringComparison.Ordinal);
+        Assert.Contains("no snapshot lies within a day of 7 days ago", history, StringComparison.Ordinal);
+        Assert.DoesNotContain("do not exist", history, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AStoreYoungerThanTheWindows_KeepsTheNoSnapshotThatOldWording()
+    {
+        var row = Row(current: 160, at7d: null, at30d: null, snapshot7d: null, snapshot30d: null, daysOfData: 3);
+
+        var note = McpObjectStatsTools.GrowthNote(row)!;
+        Assert.Contains("no snapshot 7+ days old exists, so growth_7d_mb is null", note, StringComparison.Ordinal);
+        Assert.Contains("no snapshot 30+ days old exists, so growth_30d_mb and growth_pct_30d are null", note, StringComparison.Ordinal);
+        Assert.Contains("3 days of index snapshots", McpObjectStatsTools.HistoryNote(row), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -90,16 +120,27 @@ public sealed class ObjectSizeGrowthBaselineReachTests
         Assert.Null(McpObjectStatsTools.GrowthNote(row));
     }
 
+    /* The span is judged to the nearest whole day, so a minute of drift either side of the 6- and 8-day edges a missed
+       daily run lands on cannot flip the figure (Darling's twin pins the same table). */
     [Theory]
     [InlineData(7, 6, true)]
+    [InlineData(7, 6 - 1.0 / 1440, true)]
+    [InlineData(7, 6 + 1.0 / 1440, true)]
     [InlineData(7, 8, true)]
-    [InlineData(7, 8 + 1.0 / 1440, false)]
-    [InlineData(7, 6 - 1.0 / 1440, false)]
-    [InlineData(30, 29, true)]
-    [InlineData(30, 31, true)]
-    [InlineData(30, 31 + 1.0 / 1440, false)]
-    [InlineData(30, 29 - 1.0 / 1440, false)]
-    public void AFigureStands_OnlyWhenItsSpanIsWithinADayOfTheWindow(int window, double spanDays, bool stands)
+    [InlineData(7, 8 - 1.0 / 1440, true)]
+    [InlineData(7, 8 + 1.0 / 1440, true)]
+    [InlineData(7, 5.5, true)]
+    [InlineData(7, 5.5 - 1.0 / 1440, false)]
+    [InlineData(7, 8.5 - 1.0 / 1440, true)]
+    [InlineData(7, 8.5, false)]
+    [InlineData(7, 2, false)]
+    [InlineData(30, 29 - 1.0 / 1440, true)]
+    [InlineData(30, 31 + 1.0 / 1440, true)]
+    [InlineData(30, 28.5, true)]
+    [InlineData(30, 28.5 - 1.0 / 1440, false)]
+    [InlineData(30, 31.5 - 1.0 / 1440, true)]
+    [InlineData(30, 31.5, false)]
+    public void AFigureStands_OnlyWhenItsSpanIsWithinADayOfTheWindow_ToTheNearestDay(int window, double spanDays, bool stands)
     {
         var snapshot = Latest.AddDays(-spanDays);
         var row = window == 7

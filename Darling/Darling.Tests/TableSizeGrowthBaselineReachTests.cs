@@ -85,7 +85,7 @@ public sealed class TableSizeGrowthBaselineReachTests
         Assert.DoesNotContain("no snapshot 7+ days old exists", note, StringComparison.Ordinal);
 
         var history = DarlingMcpObjectStatsTools.HistoryNote(row)!;
-        Assert.Contains(gap.ToString("o"), history, StringComparison.Ordinal);
+        Assert.Contains($"the snapshot nearest 7 days ago is from {gap:o}", history, StringComparison.Ordinal);
         Assert.Contains("30 days before the latest snapshot", history, StringComparison.Ordinal);
         Assert.Contains("outside the 6 to 8 days a 7-day figure may span", history, StringComparison.Ordinal);
     }
@@ -111,16 +111,28 @@ public sealed class TableSizeGrowthBaselineReachTests
         Assert.Null(DarlingMcpObjectStatsTools.GrowthNote(row));
     }
 
+    /* A daily collector's snapshots sit a whole number of days apart, give or take the seconds its runs start early or late,
+       so the span is judged to the nearest whole day: 6, 7 or 8 days for a 7-day figure, 29, 30 or 31 for a 30-day one. A
+       minute of drift either side of the 6- and 8-day edges a missed run lands on cannot flip the figure. */
     [Theory]
     [InlineData(7, 6, true)]
+    [InlineData(7, 6 - 1.0 / 1440, true)]
+    [InlineData(7, 6 + 1.0 / 1440, true)]
     [InlineData(7, 8, true)]
-    [InlineData(7, 8 + 1.0 / 1440, false)]
-    [InlineData(7, 6 - 1.0 / 1440, false)]
-    [InlineData(30, 29, true)]
-    [InlineData(30, 31, true)]
-    [InlineData(30, 31 + 1.0 / 1440, false)]
-    [InlineData(30, 29 - 1.0 / 1440, false)]
-    public void AFigureStands_OnlyWhenItsSpanIsWithinADayOfTheWindow(int window, double spanDays, bool stands)
+    [InlineData(7, 8 - 1.0 / 1440, true)]
+    [InlineData(7, 8 + 1.0 / 1440, true)]
+    [InlineData(7, 5.5, true)]
+    [InlineData(7, 5.5 - 1.0 / 1440, false)]
+    [InlineData(7, 8.5 - 1.0 / 1440, true)]
+    [InlineData(7, 8.5, false)]
+    [InlineData(7, 2, false)]
+    [InlineData(30, 29 - 1.0 / 1440, true)]
+    [InlineData(30, 31 + 1.0 / 1440, true)]
+    [InlineData(30, 28.5, true)]
+    [InlineData(30, 28.5 - 1.0 / 1440, false)]
+    [InlineData(30, 31.5 - 1.0 / 1440, true)]
+    [InlineData(30, 31.5, false)]
+    public void AFigureStands_OnlyWhenItsSpanIsWithinADayOfTheWindow_ToTheNearestDay(int window, double spanDays, bool stands)
     {
         var snapshot = Latest.AddDays(-spanDays);
         var row = window == 7
@@ -171,5 +183,28 @@ public sealed class TableSizeGrowthBaselineReachTests
         var note = DarlingMcpObjectStatsTools.GrowthNote(row)!;
         Assert.Contains("no snapshot 7+ days old exists, so growth_7d_mb is null", note, StringComparison.Ordinal);
         Assert.Contains("no snapshot 30+ days old exists, so growth_30d_mb and growth_pct_30d are null", note, StringComparison.Ordinal);
+        Assert.Contains("3 days of index snapshots", DarlingMcpObjectStatsTools.HistoryNote(row), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AGapWiderThanADayOnBothSidesOfTheCutoff_SaysNoSnapshotLiesWithinADay_NotThatNoneIsThatOld()
+    {
+        /* The store holds 40 days of snapshots, so snapshots older than 7 days exist; none lies within a day of the 7-day
+           cutoff, so the 7-day baseline is null. The 30-day baseline is in reach. */
+        var row = Row(current: 352, at7d: null, at30d: 262, snapshot7d: null, snapshot30d: Latest.AddDays(-30), daysOfData: 40);
+
+        Assert.Null(row.Growth7dMb);
+        Assert.Equal(90, row.Growth30dMb);
+
+        var note = DarlingMcpObjectStatsTools.GrowthNote(row)!;
+        Assert.Contains("no snapshot lies within a day of 7 days ago", note, StringComparison.Ordinal);
+        Assert.Contains("so growth_7d_mb is null", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("7+ days old", note, StringComparison.Ordinal);
+
+        var history = DarlingMcpObjectStatsTools.HistoryNote(row)!;
+        Assert.Contains("40 days of index snapshots", history, StringComparison.Ordinal);
+        Assert.Contains("no snapshot lies within a day of 7 days ago", history, StringComparison.Ordinal);
+        Assert.Contains("growth_7d_mb is null", history, StringComparison.Ordinal);
+        Assert.DoesNotContain("do not exist", history, StringComparison.Ordinal);
     }
 }
