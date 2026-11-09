@@ -24,7 +24,8 @@ namespace PerformanceMonitor.Ui;
 /// a browser, or an RDP / locked-desktop session. That is a routine transient condition, so a bare call
 /// takes the whole app down for no good reason (reads: #2833; writes: #4582). This wraps each read/write
 /// in a short bounded retry and returns failure on persistent inability to open instead of throwing,
-/// letting callers show a graceful notice (button paths) or simply no-op (Ctrl+V paths).
+/// letting each caller choose: the paste buttons and the standalone plan viewer's Ctrl+V show a notice, and the
+/// plan viewer control's own Ctrl+V does nothing.
 ///
 /// <para><b>The worst case is seconds, not milliseconds (#4624).</b> Every retry attempt calls straight
 /// into a WPF <see cref="Clipboard"/> method, and WPF runs its own internal OLE retry loop before that call
