@@ -21,7 +21,9 @@ namespace Darling.Tests;
 /// <summary>
 /// #8185: an operator runs once, plus once per rebind and once per rewind, and every surface of the shared plan viewer counts it that
 /// way. The Properties panel's Est. Executions and Est. Rows All Execs, the arrow tooltip's Estimated Number of Rows for All Executions
-/// and the one helper behind them agree on an inner-side spool with 10 rebinds and 990 rewinds: 1,001 executions. The control is built
+/// and the one helper behind them agree on an inner-side spool with 10 rebinds and 990 rewinds: 1,001 executions. #8380: the count
+/// prints with the decimal it has, so a seek rebound 10.5 times reads 11.5 executions beside its 115.0 rows for all executions, never a
+/// rounded 12 that a reader multiplies into 120; a whole count such as 1,001 prints with no decimal. The control is built
 /// on the shared STA thread and its private builders are reached by reflection, as <see cref="PlanViewerRuntimeSummaryNestingTests"/>
 /// reaches its card; nothing reads source text (#5833).
 /// </summary>
@@ -40,6 +42,18 @@ public sealed class PlanViewerEstimatedExecutionsTests
         EstimateRewinds = 990,
     };
 
+    /* An inner-side seek with the fractional rebind estimate the optimizer routinely produces: 10 rows per run, rebound 10.5 times and
+       never rewound, so 11.5 runs and 115 rows in all. */
+    private static PlanNode FractionallyReboundSeek() => new()
+    {
+        NodeId = 9,
+        PhysicalOp = "Index Seek",
+        LogicalOp = "Index Seek",
+        EstimateRows = 10,
+        EstimateRebinds = 10.5,
+        EstimateRewinds = 0,
+    };
+
     [Fact]
     public void ThePropertiesPanel_CountsRewindsAsExecutions_AndMultipliesRowsByThem()
     {
@@ -50,8 +64,24 @@ public sealed class PlanViewerEstimatedExecutionsTests
             return PropertyRows(control);
         });
 
-        Assert.Equal(1001.0.ToString("N0", CultureInfo.CurrentCulture), rows["Est. Executions"]);
+        Assert.Equal(1001.0.ToString("#,##0.#", CultureInfo.CurrentCulture), rows["Est. Executions"]);
         Assert.Equal(10010.0.ToString("N1", CultureInfo.CurrentCulture), rows["Est. Rows All Execs"]);
+    }
+
+    [Fact]
+    public void ThePropertiesPanel_PrintsAFractionalExecutionCountWithItsDecimal_SoItsThreeRowsAgree()
+    {
+        var rows = StaTestThread.Run(() =>
+        {
+            var control = new PlanViewerControl();
+            ShowProperties(control, FractionallyReboundSeek());
+            return PropertyRows(control);
+        });
+
+        Assert.Equal(11.5.ToString("#,##0.#", CultureInfo.CurrentCulture), rows["Est. Executions"]);
+        Assert.Equal(10.0.ToString("N1", CultureInfo.CurrentCulture), rows["Est. Rows Per Exec"]);
+        Assert.Equal(115.0.ToString("N1", CultureInfo.CurrentCulture), rows["Est. Rows All Execs"]);
+        Assert.Equal(Number(rows["Est. Rows All Execs"]), Number(rows["Est. Rows Per Exec"]) * Number(rows["Est. Executions"]));
     }
 
     [Fact]
