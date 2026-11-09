@@ -18,8 +18,9 @@ namespace Darling.Tests;
 /// #8381. The scan rules' row floors (#7891) apply only to a figure the plan carries, and a figure the plan
 /// does not carry is not zero. Rule 34 "Bare Scan" judges an estimated plan on TableCardinality, so a plan
 /// without the attribute is judged on the scan's cost share alone. Rule 11 "Scan With Predicate" judges an
-/// actual plan on ActualRowsRead; when the plan has none, the table's cardinality stands in, and when it
-/// carries neither there is no floor.
+/// actual plan on ActualRowsRead; when the plan has none, the table's cardinality stands in, scaled by the
+/// scan's executions because the cardinality is a per-execution figure and the rows read are a total, and
+/// when it carries neither there is no floor.
 /// </summary>
 public sealed class PlanSync8381AbsentFigureTests
 {
@@ -73,6 +74,15 @@ public sealed class PlanSync8381AbsentFigureTests
         Assert.Empty(WarningsOfType(xml, "Scan With Predicate"));
     }
 
+    /// <summary>The stand-in is scaled by the executions: a 5,000 row table scanned 100,000 times on the inner side
+    /// of a join is 500,000,000 rows read, however few each execution kept.</summary>
+    [Fact]
+    public void ScanWithPredicate_NoRowsRead_FiveThousandRowTable_HundredThousandExecutions_Warns()
+    {
+        var xml = ActualPlanWithoutRowsRead(tableCardinality: 5_000, rowsReturned: 100_000, executions: 100_000);
+        Assert.Single(WarningsOfType(xml, "Scan With Predicate"));
+    }
+
     /// <summary>Neither figure: the plan gives nothing to put a floor on, so the scan is reported.</summary>
     [Fact]
     public void ScanWithPredicate_NoRowsRead_NoTableCardinality_Warns()
@@ -94,10 +104,10 @@ public sealed class PlanSync8381AbsentFigureTests
 
     /// <summary>A statement whose only operator is a predicate scan of dbo.t with run-time counters that carry
     /// no ActualRowsRead, and no QueryTimeStats on the statement. The scan is the whole statement's cost.</summary>
-    private static string ActualPlanWithoutRowsRead(double? tableCardinality, long rowsReturned)
+    private static string ActualPlanWithoutRowsRead(double? tableCardinality, long rowsReturned, long executions = 1)
     {
         var runtime =
-            $"<RunTimeInformation><RunTimeCountersPerThread Thread=\"0\" ActualRows=\"{rowsReturned}\" ActualExecutions=\"1\" " +
+            $"<RunTimeInformation><RunTimeCountersPerThread Thread=\"0\" ActualRows=\"{rowsReturned}\" ActualExecutions=\"{executions}\" " +
             "ActualElapsedms=\"5\" ActualCPUms=\"5\" ActualLogicalReads=\"100\" /></RunTimeInformation>";
         var scan = Scan(estimateRows: rowsReturned, tableCardinality, scanCost: 1.0, runtime, Predicate);
         return Head + Statement(scan, statementCost: 1.0, queryTimeStats: "") + Tail;
