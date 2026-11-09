@@ -35,6 +35,34 @@ public sealed class McpReadToolNoteTextTests
         Assert.Contains("counting_since", AlertReadFailureCounter.WindowNote, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The finding beside that note, for a server whose newest failing read carries an elapsed: the sentence that reads the
+    /// elapsed against the deadline and the one that says what a failed read is NOT both keep their clauses and carry no U+2014.
+    /// </summary>
+    [Fact]
+    public void TheAlertReadHealthFinding_CarriesNoEmDash()
+    {
+        var counter = new AlertReadFailureCounter(() => new DateTime(2026, 8, 23, 10, 0, 0, DateTimeKind.Utc));
+        counter.RecordPass("101");
+        counter.RecordReadFailure("101", "deadlocks", 10_004);
+
+        var finding = AlertReadFailureCounter.FormatFinding(counter.ReadFor("101"))!;
+        Assert.Contains("ran 10004 ms before it failed", finding, StringComparison.Ordinal);
+        Assert.Contains("not a single bounded read at all: some entries cover a whole alert pass", finding, StringComparison.Ordinal);
+        Assert.Contains("not judged on for that pass, not a fired alert that was lost", finding, StringComparison.Ordinal);
+        Assert.DoesNotContain('—', finding);
+    }
+
+    /// <summary>get_finops' index-analysis notes (the short-uptime caveat and the dedupe-only notice): same surface, same rule.</summary>
+    [Fact]
+    public void TheFinOpsIndexAnalysisNotes_CarryNoEmDash()
+    {
+        Assert.StartsWith("Server uptime is under 14 days: index usage data may be incomplete", DarlingMcpFinOpsTools.IndexAnalysisUptimeNote, StringComparison.Ordinal);
+        Assert.StartsWith("Dedupe-only mode is in effect: unused indexes were NOT flagged", DarlingMcpFinOpsTools.IndexAnalysisDedupeNote, StringComparison.Ordinal);
+        Assert.DoesNotContain('—', DarlingMcpFinOpsTools.IndexAnalysisUptimeNote);
+        Assert.DoesNotContain('—', DarlingMcpFinOpsTools.IndexAnalysisDedupeNote);
+    }
+
     [Theory]
     [InlineData(1, false, 300)]
     [InlineData(10, true, 300)]
