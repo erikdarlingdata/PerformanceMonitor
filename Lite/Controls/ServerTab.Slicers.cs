@@ -154,7 +154,7 @@ public partial class ServerTab : UserControl
             if (data.Count == 0)
                 QueryStatsSlicer.ShowEmpty("No query statistics in the selected time window.");
             else
-                QueryStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
+                QueryStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
             UpdateQueryStatsEmptyMessage();
         }
         catch (Exception ex)
@@ -199,7 +199,7 @@ public partial class ServerTab : UserControl
             if (data.Count == 0)
                 QueryStoreSlicer.ShowEmpty("No Query Store data in the selected time window.");
             else
-                QueryStoreSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
+                QueryStoreSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
         }
         catch (Exception ex)
         {
@@ -241,7 +241,7 @@ public partial class ServerTab : UserControl
             if (data.Count == 0)
                 ProcStatsSlicer.ShowEmpty("No procedure statistics in the selected time window.");
             else
-                ProcStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
+                ProcStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
         }
         catch (Exception ex)
         {

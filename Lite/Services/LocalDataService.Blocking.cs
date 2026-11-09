@@ -1133,7 +1133,8 @@ ORDER BY bucket";
     }
 
     /// <summary>
-    /// Gets hourly-bucketed metrics from deadlocks for the time-range slicer.
+    /// Gets bucketed metrics from deadlocks for the time-range slicer, at the width <see cref="SlicerBuckets"/> picks for the window:
+    /// a minute over a short window, an hour over a day.
     /// </summary>
     public async Task<List<TimeSliceBucket>> GetDeadlockSlicerDataAsync(
         int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null)
@@ -1141,19 +1142,23 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+        var bucketMinutes = SlicerBuckets.MinutesFor(startTime, endTime);
+        /* $4 is the bucket width in minutes, on the grid every width of SlicerBuckets divides. */
+        var bucket = $"time_bucket(to_minutes(CAST($4 AS INTEGER)), deadlock_time, {TrendBuckets.OriginSql})";
 
         command.CommandText = @"
 SELECT
-    date_trunc('hour', deadlock_time) AS bucket,
+    " + bucket + @" AS bucket,
     " + StoredEventCopies.DeadlockDistinctCount + @" AS deadlock_count
 FROM v_deadlocks AS dl
 WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
-GROUP BY date_trunc('hour', deadlock_time)
+GROUP BY " + bucket + @"
 ORDER BY bucket";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
         var items = new List<TimeSliceBucket>();
         using var reader = await command.ExecuteReaderAsync();
