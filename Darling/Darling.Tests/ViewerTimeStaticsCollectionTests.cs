@@ -115,7 +115,7 @@ public sealed class ViewerTimeStaticsCollectionTests
             var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
             var added = new List<ResourceDictionary>
             {
-                new() { Source = new Uri("pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/Dark.xaml") },
+                new() { Source = new Uri("pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml") },
                 new() { Source = ThemeManager.SharedStylesUri },
             };
             foreach (var dictionary in added)
