@@ -23,6 +23,9 @@ public static class InAppMessage
     /// <summary>The window before it is shown, so a test can lay it out and read it.</summary>
     public static Window Build(Window? owner, string title, string text)
     {
+        /* The owner is taken only while it is still shown. A confirmation that arrives after an await (a test send) may find its window
+           closed meanwhile, and a closed window cannot own another; the message then stands on its own, centred on the screen. */
+        var shownOwner = owner is { IsLoaded: true } && PresentationSource.FromVisual(owner) is not null ? owner : null;
         var body = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, MaxWidth = 440, Margin = new Thickness(0, 0, 0, 16) };
         body.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundBrush");
 
@@ -39,12 +42,12 @@ public static class InAppMessage
             SizeToContent = SizeToContent.WidthAndHeight,
             ResizeMode = ResizeMode.NoResize,
             ShowInTaskbar = false,
-            WindowStartupLocation = owner is null ? WindowStartupLocation.CenterScreen : WindowStartupLocation.CenterOwner,
+            WindowStartupLocation = shownOwner is null ? WindowStartupLocation.CenterScreen : WindowStartupLocation.CenterOwner,
         };
-        if (owner is not null)
+        if (shownOwner is not null)
         {
-            window.Owner = owner;
-            window.Icon = owner.Icon;
+            window.Owner = shownOwner;
+            window.Icon = shownOwner.Icon;
         }
         window.SetResourceReference(Control.BackgroundProperty, "BackgroundBrush");
         /* The button is the dialog's cancel button, so a click, Enter or Escape closes the dialog through DialogResult. */

@@ -248,7 +248,7 @@ public sealed class DarlingMcpForcedPlanTools
         "Status words: empty (databases were captured and none has a hint), unavailable (no capture in the window: the collector has not run in it, or Query Store is a readable secondary in every database), " +
         "precondition (no capture and Query Store is off or in error in every database in scope; the message says what to run), not_collected (the server is older than SQL Server 2022, which has no hints view, or is not a SQL Server). " +
         "query_store_hints lists FAILING hints first, at most limit (default and most 200) per call: when has_more is true, call again with offset = next_offset. query_id and database_name narrow the read itself, so a hint is found even on a server with more hints than one read holds (2000). " +
-        "total_hints and failing_hints count every hint in the newest captures (and captures[].hint_count every hint of that database); hints_returned is how many the read holds, at most 2000, failing ones first, and read_capped is true when the rest are not listed (truncated is then true too, with has_more false once the list's end is reached).")]
+        "total_hints and failing_hints count every hint in the newest captures (and captures[].hint_count every hint of that database); hints_returned is how many this page lists, at most limit. The read behind the pages holds at most 2000, failing ones first, and read_capped is true when the rest are not listed (truncated is then true too, with has_more false once the list's end is reached).")]
     public static async Task<string> GetQueryStoreHints(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -338,7 +338,7 @@ public sealed class DarlingMcpForcedPlanTools
                 ["truncation_note"] = notice.TruncationNote,
                 ["total_hints"] = read.TotalHints,
                 ["failing_hints"] = read.FailingHints,
-                ["hints_returned"] = read.Hints.Count,
+                ["hints_returned"] = listed.Count,
                 ["read_capped"] = readCapped,
                 ["offset"] = offset,
                 ["limit"] = limit,
