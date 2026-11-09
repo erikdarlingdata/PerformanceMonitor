@@ -18,8 +18,10 @@ internal static class McpInstructions
     /// </summary>
     public static string Text => Head + "\n\n" + CatalogCensus + Tail;
 
-    /// <summary>The census of the whole catalog, as <see cref="Text"/> carries it.</summary>
-    private const string CatalogCensus = "113 tools (99 by default; `mcp_allow_writes` adds the twelve write tools, `mcp_allow_investigations` the two claim and report tools)";
+    /// <summary>The census of the whole catalog, as <see cref="Text"/> carries it. The count the investigations setting adds is the
+    /// size of <see cref="McpInvestigationPolicy.InvestigationTools"/>, so it follows the set (#8463).</summary>
+    private static string CatalogCensus =>
+        $"113 tools (99 by default; `{McpWritePolicy.WritesSetting}` adds the twelve write tools, `{McpInvestigationPolicy.InvestigationsSetting}` the {McpInvestigationPolicy.InvestigationTools.Count} claim and report tools)";
 
     /// <summary>
     /// #5789: the instructions THIS server sends. The census counts <paramref name="served"/> (the tools left after
@@ -115,16 +117,19 @@ internal static class McpInstructions
     private static string InvestigationSection => InvestigationReads + InvestigationClaimFlow;
 
     /// <summary>The reads sentence names the investigation reads Lite has from the shared kind list (<see cref="McpInvestigationPolicy.ReadTools"/>),
-    /// so it stays right when a read is added or a name moves between the two kinds.</summary>
+    /// so it stays right when a read is added or a name moves between the two kinds. The gate sentence states the rule
+    /// <see cref="McpHostService.DecideServing"/> enforces for the tools that claim and report (#8463): the setting on, the writes
+    /// setting off, a usable token (<see cref="McpTokenStore.TokenRequirement"/>, the words the start log uses) and the loopback
+    /// opt-out off, so a refused client knows what to ask for.</summary>
     private static string InvestigationReads =>
         "\n\n### Investigation requests\n\n"
         + string.Join(" and ", McpInvestigationPolicy.ReadTools.Order(StringComparer.Ordinal).Select(name => "`" + name + "`"))
-        + " are reads, served in every configuration (no open request: an empty list). The claim and report tools need `mcp_allow_investigations` true and `mcp_allow_writes` false in settings.json (both on: off). A route set to Investigate (`agent_level` 1) opens or joins a request for its alerts. `mcp_data_detail` masks briefs and reports too.";
+        + $" are reads, served in every configuration (none open: an empty list). The claim and report tools need `{McpInvestigationPolicy.InvestigationsSetting}` true, `{McpWritePolicy.WritesSetting}` false and {McpTokenStore.TokenRequirement} (both on, or `{McpSettings.AllowTokenlessLoopbackSetting}` on: off). An Investigate route (`agent_level` 1) opens or joins a request for its alerts. `mcp_data_detail` masks briefs and reports too.";
 
     private const string InvestigationClaimFlow = """
 
 
-        Flow: `list_investigation_requests` -> `claim_investigation_request` (brief, `claim_id`, lease; resend it to renew) -> the calls the brief names -> `submit_investigation_report` (verdict, root cause, evidence, summary). `get_investigation_reports` reads reports back: an agent's claim, not a finding. Any client with the MCP token can claim and report. Level 1 proposes no action.
+        Flow: `list_investigation_requests` -> `claim_investigation_request` (brief, `claim_id`, lease; resend it to renew) -> the calls the brief names -> `submit_investigation_report` (verdict, root cause, evidence, summary). `get_investigation_reports` reads reports back: an agent's claim, not a finding. Level 1 proposes no action.
         """;
 
     private const string TailAfterInvestigations = """
