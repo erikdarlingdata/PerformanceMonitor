@@ -19,8 +19,9 @@ namespace Darling.Tests;
 /// <see cref="PgDrillDownCollector.TopCpuQueriesSql"/> and <see cref="PgDrillDownCollector.BadActorDetailSql"/> are
 /// (<c>DrillDownSqlTests</c> holds them to it) and that Lite's two drill-down methods hand DuckDB when they run (Lite's
 /// <c>DrillDownDopProvenanceParityTests</c> watches them). This class pins what the text Darling runs must carry: the
-/// per-plan provenance shape rather than the old hash-folded <c>MAX(max_dop)</c>, and readers on both sides that
-/// project an unknown DOP as null, never 0.
+/// per-plan provenance shape rather than the old hash-folded <c>MAX(max_dop)</c>, and no zero stand-in for an unknown
+/// DOP. That the readers keep that null is observed on the running collectors, in <c>DrillDownDopProvenanceLiveTests</c>
+/// here and in Lite's parity class.
 ///
 /// <para><b>Why one text and not two independent pins.</b> #2705 fixed Darling's stale-max_dop cross-check and closed
 /// without a record that Lite had a twin; #2999 is what that cost. The two drill-down reads were already
@@ -64,24 +65,23 @@ public sealed class DrillDownDopProvenanceParityTests
         Assert.DoesNotContain("MAX(max_dop) AS max_dop", sql, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void NeitherSku_CoercesAnUnknownDopToZero()
+    [Theory]
+    [InlineData(nameof(PgDrillDownCollector.TopCpuQueriesSql))]
+    [InlineData(nameof(PgDrillDownCollector.BadActorDetailSql))]
+    public void TheText_LeavesAnUnknownDopNull_ForTheReaderToKeepNull(string name)
     {
-        /* The DMV never reports 0 — a serial plan is 1 — so `IsDBNull ? 0` on a DOP ordinal was "no reading"
-           rendered as a degree of parallelism. Both readers must project null and hand the four provenance
-           values to the shared note composer. Scoped to the two files' max_dop reads: the other drill-downs'
-           zero-coercions (counts, sums) are legitimately 0-when-absent. */
-        foreach (var source in new[]
-        {
-            RepoFile.ReadRepoFile("Lite", "Analysis", "DrillDownCollector.Queries.cs"),
-            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgDrillDownCollector.Queries.cs"),
-        })
-        {
-            Assert.DoesNotMatch(new Regex(@"max_dop\s*=\s*reader\.IsDBNull\(\d+\)\s*\?\s*0\b"), source);
-            Assert.Matches(new Regex(@"var maxDop = reader\.IsDBNull\(4\) \? \(int\?\)null"), source);
-            Assert.Matches(new Regex(@"var maxDop = reader\.IsDBNull\(10\) \? \(int\?\)null"), source);
-            Assert.Contains("dop_note = QueryDopProvenance.Note(maxDop, maxDopAnyPlan, maxDopAnyPlanLastSeen, planCount)", source, StringComparison.Ordinal);
-        }
+        /* The DMV never reports 0 — a serial plan is 1 — so a 0 on a DOP column is "no reading" rendered as a
+           degree of parallelism. The text's part of that rule: the DOP projections are the bare per-plan readings
+           and their maximum, with no zero stand-in folded in anywhere the text names max_dop. The readers' part,
+           that the null arrives as null on every DOP field and the note is composed from the four provenance
+           values, is observed on the running collectors: DrillDownDopProvenanceLiveTests for Darling and Lite's
+           DrillDownDopProvenanceParityTests for Lite. */
+        var sql = Lf(DarlingText(name));
+
+        Assert.Contains("MAX(CASE WHEN newest_rn = 1 THEN max_dop END) AS max_dop", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(max_dop) OVER (PARTITION BY database_name, query_hash) AS max_dop_any_plan", sql, StringComparison.Ordinal);
+        Assert.DoesNotMatch(new Regex(@"(COALESCE|IFNULL|NVL)\s*\([^)]*max_dop", RegexOptions.IgnoreCase), sql);
+        Assert.DoesNotMatch(new Regex(@"max_dop[^,\n]*,\s*0\s*\)"), sql);
     }
 
     private static string Lf(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);

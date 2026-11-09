@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Analysis;
@@ -25,7 +27,7 @@ namespace Lite.Tests;
 /// <c>DrillDownSqlTests</c> holds its constants to it, and this class watches what Lite's two drill-down methods hand
 /// DuckDB when they run and holds that to it, so a method that runs a copy of its own, however close, fails here. It also
 /// owns Lite's own census: the text carries the per-plan provenance shape rather than the old hash-folded
-/// <c>MAX(max_dop)</c>, and an unknown DOP is projected as null rather than 0.
+/// <c>MAX(max_dop)</c>, and a row with no DOP reading comes out of both running readers as null, never 0.
 ///
 /// <para><b>Why not read Darling's SQL from here.</b> The <c>lite</c> filter does not reach
 /// <c>Darling/PerformanceMonitor.Darling.Analysis</c>, and <c>CrossAppGuardCiGateTests</c> fails any Lite
@@ -36,7 +38,7 @@ public sealed class DrillDownDopProvenanceParityTests : IClassFixture<SharedDuck
 {
     private const int ServerId = 84700;
     private const string ServerName = "DrillDownSqlSrv";
-    private const string LiteFile = "Lite/Analysis/DrillDownCollector.Queries.cs";
+    private const string Hash = "0x8470HASH";
 
     private static readonly DateTime WindowEnd = new(2026, 8, 18, 14, 30, 0, DateTimeKind.Unspecified);
     private static readonly DateTime WindowStart = WindowEnd.AddHours(-4);
@@ -58,7 +60,7 @@ public sealed class DrillDownDopProvenanceParityTests : IClassFixture<SharedDuck
 
     [Theory]
     [InlineData("CPU_SQL_PERCENT", "top_cpu_queries", nameof(DrillDownSql.TopCpuQueries))]
-    [InlineData("BAD_ACTOR_0x8470HASH", "bad_actor_query", nameof(DrillDownSql.BadActorDetail))]
+    [InlineData("BAD_ACTOR_" + Hash, "bad_actor_query", nameof(DrillDownSql.BadActorDetail))]
     public async Task TheDrillDown_RunsTheCommonText_AsTheArchivePlanRewritesIt(string factKey, string drillDown, string constant)
     {
         /* What the method hands DuckDB, taken at the moment it runs. The archive plan may swap v_query_stats for the
@@ -117,17 +119,62 @@ public sealed class DrillDownDopProvenanceParityTests : IClassFixture<SharedDuck
         Assert.DoesNotContain("MAX(max_dop) AS max_dop", sql, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void Lite_DoesNotCoerceAnUnknownDopToZero()
+    [Theory]
+    [InlineData("CPU_SQL_PERCENT", "top_cpu_queries")]
+    [InlineData("BAD_ACTOR_" + Hash, "bad_actor_query")]
+    public async Task AnUnknownDop_ArrivesAsNull_NotZero_FromBothDrillDowns(string factKey, string drillDown)
     {
-        /* The DMV never reports 0 — a serial plan is 1 — so `IsDBNull ? 0` on a DOP ordinal was "no reading"
-           rendered as a degree of parallelism. Scoped to this file's max_dop reads: the other drill-downs'
-           zero-coercions (counts, sums) are legitimately 0-when-absent. */
-        var source = ParitySource.ReadFile(LiteFile);
-        Assert.DoesNotMatch(new Regex(@"max_dop\s*=\s*reader\.IsDBNull\(\d+\)\s*\?\s*0\b"), source);
-        Assert.Matches(new Regex(@"var maxDop = reader\.IsDBNull\(4\) \? \(int\?\)null"), source);
-        Assert.Matches(new Regex(@"var maxDop = reader\.IsDBNull\(10\) \? \(int\?\)null"), source);
-        Assert.Contains("dop_note = QueryDopProvenance.Note(maxDop, maxDopAnyPlan, maxDopAnyPlanLastSeen, planCount)", source, StringComparison.Ordinal);
+        /* The DMV never reports 0 — a serial plan is 1 — so a 0 on a DOP field is "no reading" rendered as a
+           degree of parallelism. One row inside the window with no max_dop: each reader projects null on every
+           DOP field, and the note composed from those four values is null too, nothing invented from nothing. */
+        await SeedRowWithoutDopAsync();
+
+        var finding = NewFinding(factKey);
+        await new DrillDownCollector(_duckDb).EnrichFindingsAsync([finding], Context());
+
+        Assert.NotNull(finding.DrillDown);
+        Assert.True(finding.DrillDown.TryGetValue(drillDown, out var raw), $"{drillDown} was not collected");
+        var section = JsonSerializer.SerializeToElement(raw);
+        var row = section.ValueKind == JsonValueKind.Array ? Assert.Single(section.EnumerateArray()) : section;
+
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("max_dop").ValueKind);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("max_dop_any_plan").ValueKind);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("max_dop_any_plan_last_seen").ValueKind);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("dop_note").ValueKind);
+    }
+
+    private static AnalysisFinding NewFinding(string factKey) => new()
+    {
+        RootFactKey = factKey,
+        StoryPath = factKey,
+        /* #3859: the collector matches on PathKeys, not on a split of the rendered path. */
+        PathKeys = [factKey],
+        /* Past the 0.5 display gate — below it the expensive drill-downs are skipped wholesale. */
+        Severity = 1.0,
+    };
+
+    /// <summary>One query_stats row for the server, inside the window, spending CPU, with no max_dop reading.</summary>
+    private async Task SeedRowWithoutDopAsync()
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash,
+     creation_time, max_dop, min_dop, delta_execution_count, delta_worker_time, delta_spills, query_text)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, 10, 400000, 0, $9)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = 1L });
+        cmd.Parameters.Add(new DuckDBParameter { Value = WindowEnd.AddMinutes(-30) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = "DrillDownSqlDb" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = Hash });
+        cmd.Parameters.Add(new DuckDBParameter { Value = "0x8470PLAN" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = WindowEnd.AddDays(-1) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = "SELECT /* no DOP reading */ 1" });
+        await cmd.ExecuteNonQueryAsync();
     }
 
     private static AnalysisContext Context() => new()
