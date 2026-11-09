@@ -224,7 +224,7 @@ public sealed class DarlingConfig
     /// built. Set false to stop the passes, for example while a store maintenance window overlaps the boundary pass; the
     /// first visitor of each server then pays the cold read, as before the warmer existed. A file-only knob like
     /// <see cref="RawChunkIntervalReconcileEnabled"/> (not seeded into the control-plane store, unlike
-    /// <see cref="QueryStoreBackfillEnabled"/>), read before every pass.
+    /// <see cref="QueryStoreBackfillEnabled"/>), so an edit takes effect on the next restart.
     /// </summary>
     [JsonPropertyName("dailySummaryWarmerEnabled")]
     public bool DailySummaryWarmerEnabled { get; set; } = true;

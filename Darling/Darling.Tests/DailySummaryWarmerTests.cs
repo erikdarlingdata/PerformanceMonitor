@@ -227,10 +227,12 @@ public sealed class DailySummaryWarmerTests
         /* The start delay puts the pass at 23:59; the second server's read runs it past midnight, so that server is warmed
            under the new day's key and the first is not. */
         var harness = new Harness(new DateTime(2026, 11, 8, 23, 57, 0, DateTimeKind.Utc)) { StopAfterDelays = 3 };
+        var straddled = false;
         harness.WarmOverride = (serverId, _, _) =>
         {
-            if (serverId == 2)
+            if (serverId == 2 && !straddled)
             {
+                straddled = true;
                 harness.Advance(TimeSpan.FromSeconds(90));
             }
 

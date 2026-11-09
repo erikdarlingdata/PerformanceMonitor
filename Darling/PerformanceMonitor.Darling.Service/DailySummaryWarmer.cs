@@ -33,8 +33,10 @@ namespace PerformanceMonitor.Darling.Service;
 /// day before sits under yesterday's key until it expires and serves nobody; the pass at 00:01 builds the new day's
 /// block while <see cref="DailySummaryRangeCache{TRow}.OpenStartUtc"/> is still yesterday, so it holds the days before
 /// yesterday, a visitor before 02:00 hits with a one-day tail read, and a visitor after 02:00 hits with a two-day tail
-/// read that also grows the block. A pass with a failed server, or one the heavy-read gate refused, is tried again
-/// after <see cref="RetryDelayFor"/>, never later than the next boundary. No pass runs while the service is paused,
+/// read that also grows the block. A pass that straddles midnight is followed by the new day's pass at its 00:01, or at
+/// once, because the servers it warmed before midnight hold a block under the old day's key. A pass with a failed
+/// server, or one the heavy-read gate refused, is tried again after <see cref="RetryDelayFor"/>, never later than the
+/// next due pass. No pass runs while the service is paused,
 /// while a materialization repair is rebuilding the rollups, while neither the web host nor the MCP host is on (nothing
 /// reads the block then), or while <c>dailySummaryWarmerEnabled</c> is off in the config file.</para>
 ///
@@ -155,6 +157,7 @@ public sealed class DailySummaryWarmer
                 continue;
             }
 
+            var passDay = now.Date;
             DailySummaryWarmPass pass;
             try
             {
@@ -165,17 +168,21 @@ public sealed class DailySummaryWarmer
                 return;
             }
 
+            /* A pass that straddles UTC midnight warmed its earlier servers under the old day's key (WarmAsync reads the
+               day per server), where their block serves nobody. The new day's own pass is then due at its 00:01, at
+               once if that has already gone by, not a day later. */
             now = _clock();
-            var untilBoundary = NextPassUtc(now) - now;
+            var dueUtc = now.Date > passDay ? now.Date.Add(PassMargin) : NextPassUtc(now);
+            var untilDue = dueUtc > now ? dueUtc - now : TimeSpan.Zero;
             if (pass.Complete)
             {
                 consecutiveFailures = 0;
-                delay = untilBoundary;
+                delay = untilDue;
             }
             else
             {
                 consecutiveFailures++;
-                delay = Min(RetryDelayFor(consecutiveFailures), untilBoundary);
+                delay = Min(RetryDelayFor(consecutiveFailures), untilDue);
             }
         }
     }
