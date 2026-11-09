@@ -400,6 +400,8 @@ SELECT -($6 + g), $1, $2, $3, $4, $6 + g, $6 + g, 'OPTION (MAXDOP 1)', 0, 'USER'
             /* hints_returned counts the page, which is the default limit here, not the 2000 the read holds. */
             Assert.Equal(DarlingMcpForcedPlanTools.MaxListed, root.GetProperty("hints_returned").GetInt32());
             Assert.Equal(root.GetProperty("query_store_hints").GetArrayLength(), root.GetProperty("hints_returned").GetInt32());
+            /* The read itself fills to its cap: the page note names the 2000 it holds, so a smaller read would not pass as a capped one. */
+            Assert.Contains("Listed 200 of 2000 hints", root.GetProperty("page_note").GetString(), StringComparison.Ordinal);
             Assert.Equal(wholeSet, root.GetProperty("total_hints").GetInt32());
             Assert.Equal(1, root.GetProperty("failing_hints").GetInt32());
             Assert.Contains("2000", root.GetProperty("page_note").GetString(), StringComparison.Ordinal);
