@@ -106,6 +106,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                COUNT(*) OVER () AS pairs
         FROM pairs AS p
         JOIN servers AS s ON s.server_id = p.server_id
+        WHERE ($6::integer[] IS NULL OR p.server_id = ANY($6))
         ORDER BY p.cpu_us DESC, s.server_name, p.database_name
         LIMIT $5
         """;
