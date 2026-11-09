@@ -2085,7 +2085,25 @@ ORDER BY server_name";
                 }
             }
 
-            return CollectorFleetLiveness.Build(collector, hours_back, windowStart, windowEnd, servers, runs);
+            /* #8361: the scheduler does not run query_store_hints on a server whose every Query Store database is a readable
+               secondary, so such a server has no run in the window. Asked of the store for each server with no run, under the gate's
+               own judgment, so it is listed under not_applicable with the readable-secondary sentence, the way an engine gap is,
+               instead of beside servers whose service is down. */
+            Dictionary<int, string>? noRunReasons = null;
+            if (string.Equals(collector, DarlingGatedCollectorRows.QueryStoreSecondaryCollector, StringComparison.Ordinal))
+            {
+                var ran = runs.Select(r => r.ServerId).ToHashSet();
+                foreach (var server in servers.Where(s => !ran.Contains(s.ServerId)))
+                {
+                    var reason = await DarlingGatedCollectorRows.QueryStoreSecondaryMessageAsync(postgres, server.ServerId, server.DisplayName ?? server.ServerName, cancellationToken);
+                    if (reason is not null)
+                    {
+                        (noRunReasons ??= new Dictionary<int, string>())[server.ServerId] = reason;
+                    }
+                }
+            }
+
+            return CollectorFleetLiveness.Build(collector, hours_back, windowStart, windowEnd, servers, runs, noRunReasons);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
