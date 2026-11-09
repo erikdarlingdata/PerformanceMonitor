@@ -21,7 +21,7 @@ namespace PerformanceMonitor.PlanAnalysis;
 public static class PlanWarningDisplay
 {
     /// <summary>
-    /// The warning's display header: "⚠ {type}{source tag}{legacy tag} — up to {N}% benefit" when
+    /// The warning's display header: "⚠ {type}{source tag}{legacy tag}: up to {N}% benefit" when
     /// <see cref="PlanWarning.MaxBenefitPercent"/> has a value, or just "⚠ {type}{source tag}{legacy tag}"
     /// when it's null (not quantifiable). Matches PerformanceStudio's plan-warning and
     /// node-warning header text exactly, including the " [legacy]" tag (#4566), ported from
@@ -33,7 +33,7 @@ public static class PlanWarningDisplay
         var sourceTag = WarningSourceTag(warning);
         var legacyTag = warning.IsLegacy ? " [legacy]" : "";
         return warning.MaxBenefitPercent.HasValue
-            ? $"\u26A0 {warning.WarningType}{sourceTag}{legacyTag} \u2014 up to {FormatBenefitPercent(warning.MaxBenefitPercent.Value)}% benefit"
+            ? $"\u26A0 {warning.WarningType}{sourceTag}{legacyTag}: up to {FormatBenefitPercent(warning.MaxBenefitPercent.Value)}% benefit"
             : $"\u26A0 {warning.WarningType}{sourceTag}{legacyTag}";
     }
 
@@ -86,7 +86,7 @@ public static class PlanWarningDisplay
 
         var tooltip = originNodeIds.Count == 1
             ? $"Go to operator (Node {originNodeIds[0]})"
-            : $"Go to Node {originNodeIds[0]} \u2014 also from {string.Join(", ", originNodeIds.Skip(1).Select(id => "Node " + id))}";
+            : $"Go to Node {originNodeIds[0]}, also from {string.Join(", ", originNodeIds.Skip(1).Select(id => "Node " + id))}";
 
         return ("  \u2192", tooltip);
     }

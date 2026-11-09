@@ -43,6 +43,6 @@ public sealed class PlanViewerOriginNavigationTests
 
         Assert.NotNull(nav);
         Assert.Equal("  \u2192", nav!.Value.Suffix);
-        Assert.Equal("Go to Node 7 \u2014 also from Node 9, Node 12", nav.Value.Tooltip);
+        Assert.Equal("Go to Node 7, also from Node 9, Node 12", nav.Value.Tooltip);
     }
 }

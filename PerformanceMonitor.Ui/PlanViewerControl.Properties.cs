@@ -1405,7 +1405,7 @@ public partial class PlanViewerControl
             if (runtimeCol >= 0)
             {
                 var tooltip = row.Sniffed
-                    ? "Runtime value differs from compiled — possible parameter sniffing"
+                    ? "Runtime value differs from compiled: possible parameter sniffing"
                     : null;
                 AddParamCell(grid, rowIndex, runtimeCol, row.RuntimeText, row.Sniffed ? sniffedBrush : valueBrush, tooltip: tooltip);
             }
@@ -1528,7 +1528,7 @@ public partial class PlanViewerControl
                 Margin = new Thickness(0, 2, 10, 2),
                 Background = Brushes.Transparent
             };
-            nameText.ToolTip = $"{w.WaitType} \u2014 {category} wait";
+            nameText.ToolTip = $"{w.WaitType}: {category} wait";
             Grid.SetRow(nameText, i);
             Grid.SetColumn(nameText, 0);
             grid.Children.Add(nameText);

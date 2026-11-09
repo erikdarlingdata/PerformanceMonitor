@@ -91,7 +91,7 @@ public static partial class ParameterCard
             if (unresolvedVariables.Count > 0)
             {
                 annotations.Add(new ParameterCardAnnotation(
-                    $"Local variables detected ({string.Join(", ", unresolvedVariables)}) \u2014 values not captured in plan XML",
+                    $"Local variables detected ({string.Join(", ", unresolvedVariables)}): values not captured in plan XML",
                     ParameterCardAnnotationTone.Warning));
             }
             return annotations;
@@ -113,21 +113,21 @@ public static partial class ParameterCard
 
             annotations.Add(hasOptimizeForUnknown
                 ? new ParameterCardAnnotation(
-                    "OPTIMIZE FOR UNKNOWN \u2014 optimizer used average density estimates instead of sniffed values",
+                    "OPTIMIZE FOR UNKNOWN: optimizer used average density estimates instead of sniffed values",
                     ParameterCardAnnotationTone.Accent)
                 : hasRecompile
                     ? new ParameterCardAnnotation(
-                        "OPTION(RECOMPILE) \u2014 parameter values embedded as literals, not sniffed",
+                        "OPTION(RECOMPILE): parameter values embedded as literals, not sniffed",
                         ParameterCardAnnotationTone.Warning)
                     : new ParameterCardAnnotation(
-                        "Parameter values not captured in the plan \u2014 no compiled values, so the values the optimizer sniffed are not known",
+                        "Parameter values not captured in the plan: no compiled values, so the values the optimizer sniffed are not known",
                         ParameterCardAnnotationTone.Warning));
         }
 
         if (unresolvedVariables.Count > 0)
         {
             annotations.Add(new ParameterCardAnnotation(
-                $"Unresolved variables: {string.Join(", ", unresolvedVariables)} \u2014 not in parameter list",
+                $"Unresolved variables: {string.Join(", ", unresolvedVariables)}, not in parameter list",
                 ParameterCardAnnotationTone.Warning));
         }
 
