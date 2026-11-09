@@ -54,6 +54,74 @@ public sealed class McpReadToolNoteTextTests
         Assert.Contains("extension this collector reads is not installed on this target", explanation, StringComparison.Ordinal);
         Assert.DoesNotContain('\u2014', explanation);
     }
+
+    /// <summary>
+    /// The sentence for the rows the reply lists as not collected names its own count: one row "says why", and two or more rows
+    /// "each" say why, so the parenthetical never points a plural count at a single row.
+    /// </summary>
+    [Theory]
+    [InlineData(1, "(the row says why)", "(each row says why)")]
+    [InlineData(2, "(each row says why)", "(the row says why)")]
+    [InlineData(3, "(each row says why)", "(the row says why)")]
+    public void TheNotCollectedRowsSentence_AgreesItsParentheticalWithTheCount(int notCollectedCount, string expected, string notExpected)
+    {
+        var note = CollectorDetailNote.Build(compactCount: 3, shownCount: 4, partialCount: 1, notCollectedCount);
+        Assert.Contains($"{CountText.Plural(notCollectedCount, "more row")} below", note, StringComparison.Ordinal);
+        Assert.Contains(expected, note, StringComparison.Ordinal);
+        Assert.DoesNotContain(notExpected, note, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The alert-read note's list of fleet-scoped reads names the two #3826 self-alerts and then says which two they are. Without a
+    /// dash, that appositive has to sit in parentheses: a comma would make the two reads look like further list members.
+    /// </summary>
+    [Fact]
+    public void TheFleetScopedReadsList_KeepsTheTwoSelfAlertsAsOneAppositive()
+    {
+        Assert.DoesNotContain('\u2014', AlertReadFailureCounter.FleetScopedReads);
+        Assert.Contains(
+            "the two informational store self-alerts #3826 added (the plan dimension's TOAST slack read and the "
+            + "store checkpointer pressure read behind the WAL levers), and the store settings self-alert's",
+            AlertReadFailureCounter.FleetScopedReads,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Every other collector fault sentence that is written to <c>collection_log.error_message</c>, and so reaches
+    /// <c>get_collection_health</c>'s <c>last_error</c> and <c>get_collection_log</c>'s <c>error_message</c>: the pg_read_file
+    /// grant pair, the plain grant, the missing log file, the missing source object with its per-database caution, and the
+    /// unsupported source. Each keeps the clause the issue cares about and carries no U+2014.
+    /// </summary>
+    [Theory]
+    [InlineData("42501", "pg_deadlocks", "appdb", "this collector reads the server log with pg_read_file(), which pg_monitor does NOT cover")]
+    [InlineData("42501", "pg_deadlocks", "appdb", "the one this collector connects to: issued in a DIFFERENT database on the same cluster, they change nothing here")]
+    [InlineData("42501", "pg_wait_stats", "appdb", "the monitoring login lacks a grant this source needs")]
+    [InlineData("58P01", "pg_log_events", "appdb", "58P01 is a missing FILE, not a missing grant, and no GRANT changes it (a denial is 42501 and gets different advice)")]
+    [InlineData("42P01", "pg_not_a_catalog_collector", "appdb", "which is the one this collector connects to: an extension installed in a DIFFERENT database on the same cluster is invisible from here")]
+    [InlineData("0A000", "pg_wait_stats", "appdb", "this source is unsupported or disabled on this server")]
+    public void EveryOtherCollectorFaultSentence_CarriesNoEmDash(string sqlState, string collectorName, string connectedDatabase, string keeps)
+    {
+        var fault = new PostgresException("boom", "ERROR", "ERROR", sqlState);
+        var (_, explanation) = DarlingWorker.PostgresFaultOutcome(fault, collectorName, connectedDatabase);
+        Assert.Contains(keeps, explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain('\u2014', explanation);
+    }
+
+    /// <summary>
+    /// The three timeout sentences: cancelled by the server's statement_timeout, cut off by this service's own command deadline,
+    /// and a 57014 whose wording proves neither. Same surface, same rule.
+    /// </summary>
+    [Theory]
+    [InlineData((int)PostgresCancelSource.TargetStatementTimeout, "canceling statement due to statement timeout", "(SQLSTATE 57014): the target's own statement_timeout expired")]
+    [InlineData((int)PostgresCancelSource.OurCommandDeadline, null, "hit its CLIENT-SIDE command deadline after 300,000 ms: its command timeout expired")]
+    [InlineData((int)PostgresCancelSource.Unproven, "canceling statement due to user request", "not its statement_timeout wording, so do not change statement_timeout on the target")]
+    public void EveryTimeoutExplanation_CarriesNoEmDash(int source, string? serverText, string keeps)
+    {
+        var explanation = DarlingWorker.PostgresTimeoutExplanation(
+            "pg_index_bloat", "appdb", elapsedMs: 300_000, origin: new CollectorFaultCancelOrigin((PostgresCancelSource)source, serverText));
+        Assert.Contains(keeps, explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain('\u2014', explanation);
+    }
 }
 
 /// <summary>

@@ -580,12 +580,12 @@ public class PostgresFaultOutcomeTests
         Assert.Equal(CollectorRuntimePrecondition.DegradedStatus, status);
 
         Assert.Equal(
-            CompanionMissingMessage + " (SQLSTATE 42P01) — the missing object is pg_stat_statements_info, "
+            CompanionMissingMessage + " (SQLSTATE 42P01): the missing object is pg_stat_statements_info, "
             + "which is NOT the pg_stat_statements extension's base object. pg_extension has NO row for "
             + "pg_stat_statements in database 'appdb': the extension was never created there, so it is not "
             + "present at any version and there is nothing for ALTER EXTENSION pg_stat_statements UPDATE to "
-            + "update. This target is Aurora, where this collector's source is aurora_stat_statements() — "
-            + "which needs no extension — so the collector is not waiting on one: running CREATE EXTENSION "
+            + "update. This target is Aurora, where this collector's source is aurora_stat_statements() "
+            + "(which needs no extension), so the collector is not waiting on one: running CREATE EXTENSION "
             + "pg_stat_statements in database 'appdb' is OPTIONAL, and what it buys is pg_stat_statements_info "
             + "and nothing else. This is NOT a missing grant, and no GRANT will change it. Recorded as a "
             + "non-fatal skip rather than an error so it does not fill the log every cycle; the collector "
@@ -616,12 +616,12 @@ public class PostgresFaultOutcomeTests
             isAurora: false);
 
         Assert.Equal(
-            CompanionMissingMessage + " (SQLSTATE 42P01) — the missing object is pg_stat_statements_info, "
+            CompanionMissingMessage + " (SQLSTATE 42P01): the missing object is pg_stat_statements_info, "
             + "which is NOT the pg_stat_statements extension's base object. pg_extension has NO row for "
             + "pg_stat_statements in database 'appdb': the extension was never created there, so it is not "
             + "present at any version and there is nothing for ALTER EXTENSION pg_stat_statements UPDATE to "
             + "update. The remedy is CREATE EXTENSION pg_stat_statements in database 'appdb', and "
-            + "pg_stat_statements has to be in shared_preload_libraries before that does anything — a "
+            + "pg_stat_statements has to be in shared_preload_libraries before that does anything: a "
             + "parameter-group change and a restart. This is NOT a missing grant, and no GRANT will change it. "
             + "Recorded as a non-fatal skip rather than an error so it does not fill the log every cycle; the "
             + "collector retries every cycle.",
@@ -649,12 +649,12 @@ public class PostgresFaultOutcomeTests
             isAurora: true);
 
         Assert.Equal(
-            CompanionMissingMessage + " (SQLSTATE 42P01) — the missing object is pg_stat_statements_info, "
-            + "which is NOT the pg_stat_statements extension's base object: that resolved, so the extension IS "
+            CompanionMissingMessage + " (SQLSTATE 42P01): the missing object is pg_stat_statements_info, "
+            + "which is NOT the pg_stat_statements extension's base object. That resolved, so the extension IS "
             + "installed in database 'appdb' and this is not the extension missing. pg_extension says it is at "
-            + "catalog version 1.8, below the 1.9 whose update script creates pg_stat_statements_info — an "
+            + "catalog version 1.8, below the 1.9 whose update script creates pg_stat_statements_info: an "
             + "engine upgraded in place or restored keeps the version the extension was created at until "
-            + "someone runs ALTER EXTENSION pg_stat_statements UPDATE in database 'appdb' — a statement, "
+            + "someone runs ALTER EXTENSION pg_stat_statements UPDATE in database 'appdb', a statement, "
             + "with no restart and no shared_preload_libraries change; RDS and Aurora do not run it for you. "
             + "This is NOT a missing grant, and no GRANT will change it. Recorded as a non-fatal skip rather "
             + "than an error so it does not fill the log every cycle; the collector retries every cycle.",
@@ -683,8 +683,8 @@ public class PostgresFaultOutcomeTests
             isAurora: true);
 
         Assert.Equal(
-            CompanionMissingMessage + " (SQLSTATE 42P01) — the missing object is pg_stat_statements_info, "
-            + "which is NOT the pg_stat_statements extension's base object: that resolved, so the extension IS "
+            CompanionMissingMessage + " (SQLSTATE 42P01): the missing object is pg_stat_statements_info, "
+            + "which is NOT the pg_stat_statements extension's base object. That resolved, so the extension IS "
             + "installed in database 'appdb' and this is not the extension missing. pg_extension says it is at "
             + $"catalog version {extversion}, which already carries pg_stat_statements_info (1.9 and later), so "
             + "no ALTER EXTENSION pg_stat_statements UPDATE is owed and it would change nothing. The object is "
