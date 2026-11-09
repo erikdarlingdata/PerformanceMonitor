@@ -787,8 +787,11 @@ public class ServerSummaryItem
         CollectionFreshness is ServerFreshness.Stale or ServerFreshness.Offline or ServerFreshness.NeverCollected;
 
     /* Color coding. A CPU row with no shown figure (stale, #7196, or never measured) is the card's unknown grey, the one
-       StatusBrush's fallback uses, never the Healthy green (#3635): Darling bands the same case Unknown. */
-    public SolidColorBrush CpuBrush => MakeBrush(CpuIsCritical ? "#E57373" : CpuIsElevated ? "#FFB74D" : ShownCpuPercentForAlert is null ? "#888888" : "#81C784");
+       StatusBrush's fallback uses, never the Healthy green (#3635): Darling bands the same case Unknown. #8465: an offline card's
+       CPU row reads "--" too, and takes the same grey whatever its last reading was, as Blocking and Deadlocks do. The reading
+       stays inside CpuFreshnessBound for at least fifteen minutes after a server goes dark, so without this arm the "--" and its
+       dot were painted in the colour of a figure the card no longer shows. */
+    public SolidColorBrush CpuBrush => IsOffline ? MakeBrush("#888888") : MakeBrush(CpuIsCritical ? "#E57373" : CpuIsElevated ? "#FFB74D" : ShownCpuPercentForAlert is null ? "#888888" : "#81C784");
     /* #8304: on a dark server the Blocking and Deadlocks rows read "--", so their dots take the same unknown grey as a CPU row
        with no shown figure; the gates below are read only for a reachable server, by the brush and the reason alike. */
     public SolidColorBrush BlockingBrush => IsOffline ? MakeBrush("#888888") : MakeBrush(BlockingIsElevated ? "#FFB74D" : "#81C784");
