@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 
 namespace PerformanceMonitor.Ui;
 
@@ -42,11 +43,19 @@ public static class RollingUnitRule
         if (spec.Span.Ticks % unit.Ticks != 0)
         {
             var whole = TimeSpan.FromTicks((spec.Span.Ticks / unit.Ticks + 1) * unit.Ticks);
-            return "This read takes whole " + name + "s; try " + TimeRangeSpec.FormatLength(whole) + ".";
+            return "This read takes whole " + name + "s; try " + HintLength(whole) + ".";
         }
 
         return null;
     }
+
+    /// <summary>The rounded-up length as the one token the picker parses back to exactly that length: a whole number of days
+    /// as days ("2d"), anything else as hours ("26h"). <see cref="TimeRangeSpec.FormatLength"/> floors a day or more to whole
+    /// days, so it would word 26 hours as "1d", a hint shorter than what was typed.</summary>
+    private static string HintLength(TimeSpan whole) =>
+        whole.Ticks % Day.Ticks == 0
+            ? TimeRangeSpec.FormatLength(whole)
+            : (whole.Ticks / Hour.Ticks).ToString(CultureInfo.InvariantCulture) + "h";
 
     /// <summary>True when a read in whole <paramref name="unit"/>s can honor <paramref name="spec"/>.</summary>
     public static bool Admits(TimeRangeSpec spec, TimeSpan unit) => Refusal(spec, unit) is null;

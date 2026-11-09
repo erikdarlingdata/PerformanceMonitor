@@ -123,132 +123,120 @@ public partial class PlanViewerControl
         }
 
         // === Operator Details Section ===
-        var hasOperatorDetails = !string.IsNullOrEmpty(node.OrderBy)
-            || !string.IsNullOrEmpty(node.TopExpression)
-            || !string.IsNullOrEmpty(node.GroupBy)
-            || !string.IsNullOrEmpty(node.PartitionColumns)
-            || !string.IsNullOrEmpty(node.HashKeys)
-            || !string.IsNullOrEmpty(node.SegmentColumn)
-            || !string.IsNullOrEmpty(node.DefinedValues)
-            || !string.IsNullOrEmpty(node.OuterReferences)
-            || !string.IsNullOrEmpty(node.InnerSideJoinColumns)
-            || !string.IsNullOrEmpty(node.OuterSideJoinColumns)
-            || !string.IsNullOrEmpty(node.ActionColumn)
-            || node.ManyToMany || node.PhysicalOp == "Merge Join" || node.BitmapCreator
-            || node.SortDistinct || node.StartupExpression
-            || node.NLOptimized || node.WithOrderedPrefetch || node.WithUnorderedPrefetch
-            || node.WithTies || node.Remoting || node.LocalParallelism
-            || node.SpoolStack || node.DMLRequestSort || node.NonClusteredIndexCount > 0
-            || !string.IsNullOrEmpty(node.OffsetExpression) || node.TopRows > 0
-            || !string.IsNullOrEmpty(node.ConstantScanValues)
-            || !string.IsNullOrEmpty(node.UdxUsedColumns);
-
-        if (hasOperatorDetails)
+        // #8456: the section opens for every operator and is removed when no row went into it, so a row added below
+        // cannot miss a gate. The rows alone decide whether the section is shown and copied.
+        var sectionPanelBefore = _currentPropertySection;
+        var sectionBefore = _currentSection;
+        AddPropertySection("Operator Details");
+        if (!string.IsNullOrEmpty(node.OrderBy))
+            AddPropertyRow("Order By", node.OrderBy, isCode: true);
+        if (!string.IsNullOrEmpty(node.TopExpression))
         {
-            AddPropertySection("Operator Details");
-            if (!string.IsNullOrEmpty(node.OrderBy))
-                AddPropertyRow("Order By", node.OrderBy, isCode: true);
-            if (!string.IsNullOrEmpty(node.TopExpression))
-            {
-                var topText = node.TopExpression;
-                if (node.IsPercent) topText += " PERCENT";
-                if (node.WithTies) topText += " WITH TIES";
-                AddPropertyRow("Top", topText);
-            }
-            if (node.SortDistinct)
-                AddPropertyRow("Distinct Sort", "True");
-            if (node.StartupExpression)
-                AddPropertyRow("Startup Expression", "True");
-            if (node.NLOptimized)
-                AddPropertyRow("Optimized", "True");
-            if (node.WithOrderedPrefetch)
-                AddPropertyRow("Ordered Prefetch", "True");
-            if (node.WithUnorderedPrefetch)
-                AddPropertyRow("Unordered Prefetch", "True");
-            if (node.BitmapCreator)
-                AddPropertyRow("Bitmap Creator", "True");
-            if (node.Remoting)
-                AddPropertyRow("Remoting", "True");
-            if (node.LocalParallelism)
-                AddPropertyRow("Local Parallelism", "True");
-            if (!string.IsNullOrEmpty(node.GroupBy))
-                AddPropertyRow("Group By", node.GroupBy, isCode: true);
-            if (!string.IsNullOrEmpty(node.PartitionColumns))
-                AddPropertyRow("Partition Columns", node.PartitionColumns, isCode: true);
-            if (!string.IsNullOrEmpty(node.HashKeys))
-                AddPropertyRow("Hash Keys", node.HashKeys, isCode: true);
-            if (!string.IsNullOrEmpty(node.OffsetExpression))
-                AddPropertyRow("Offset", node.OffsetExpression);
-            if (node.TopRows > 0)
-                AddPropertyRow("Rows", $"{node.TopRows}");
-            if (node.SpoolStack)
-                AddPropertyRow("Stack Spool", "True");
-            if (node.PrimaryNodeId > 0)
-                AddPropertyRow("Primary Node Id", $"{node.PrimaryNodeId}");
-            if (node.DMLRequestSort)
-                AddPropertyRow("DML Request Sort", "True");
-            if (node.NonClusteredIndexCount > 0)
-            {
-                AddPropertyRow("NC Indexes Maintained", $"{node.NonClusteredIndexCount}");
-                foreach (var ixName in node.NonClusteredIndexNames)
-                    AddPropertyRow("", ixName, isCode: true);
-            }
-            if (!string.IsNullOrEmpty(node.ActionColumn))
-                AddPropertyRow("Action Column", node.ActionColumn, isCode: true);
-            if (!string.IsNullOrEmpty(node.SegmentColumn))
-                AddPropertyRow("Segment Column", node.SegmentColumn, isCode: true);
-            if (!string.IsNullOrEmpty(node.DefinedValues))
-                AddPropertyRow("Defined Values", node.DefinedValues, isCode: true);
-            if (!string.IsNullOrEmpty(node.OuterReferences))
-                AddPropertyRow("Outer References", node.OuterReferences, isCode: true);
-            if (!string.IsNullOrEmpty(node.InnerSideJoinColumns))
-                AddPropertyRow("Inner Join Cols", node.InnerSideJoinColumns, isCode: true);
-            if (!string.IsNullOrEmpty(node.OuterSideJoinColumns))
-                AddPropertyRow("Outer Join Cols", node.OuterSideJoinColumns, isCode: true);
-            if (node.PhysicalOp == "Merge Join")
-                AddPropertyRow("Many to Many", node.ManyToMany ? "Yes" : "No");
-            else if (node.ManyToMany)
-                AddPropertyRow("Many to Many", "Yes");
-            if (!string.IsNullOrEmpty(node.ConstantScanValues))
-                AddPropertyRow("Values", node.ConstantScanValues, isCode: true);
-            if (!string.IsNullOrEmpty(node.UdxUsedColumns))
-                AddPropertyRow("UDX Columns", node.UdxUsedColumns, isCode: true);
-            if (node.RowCount)
-                AddPropertyRow("Row Count", "True");
-            if (node.ForceSeekColumnCount > 0)
-                AddPropertyRow("ForceSeek Columns", $"{node.ForceSeekColumnCount}");
-            if (!string.IsNullOrEmpty(node.PartitionId))
-                AddPropertyRow("Partition Id", node.PartitionId, isCode: true);
-            if (node.IsStarJoin)
-                AddPropertyRow("Star Join Root", "True");
-            if (!string.IsNullOrEmpty(node.StarJoinOperationType))
-                AddPropertyRow("Star Join Type", node.StarJoinOperationType);
-            if (!string.IsNullOrEmpty(node.ProbeColumn))
-                AddPropertyRow("Probe Column", node.ProbeColumn, isCode: true);
-            if (node.InRow)
-                AddPropertyRow("In-Row", "True");
-            if (node.ComputeSequence)
-                AddPropertyRow("Compute Sequence", "True");
-            if (node.RollupHighestLevel > 0)
-                AddPropertyRow("Rollup Highest Level", $"{node.RollupHighestLevel}");
-            if (node.RollupLevels.Count > 0)
-                AddPropertyRow("Rollup Levels", string.Join(", ", node.RollupLevels));
-            if (!string.IsNullOrEmpty(node.TvfParameters))
-                AddPropertyRow("TVF Parameters", node.TvfParameters, isCode: true);
-            if (!string.IsNullOrEmpty(node.OriginalActionColumn))
-                AddPropertyRow("Original Action Col", node.OriginalActionColumn, isCode: true);
-            if (!string.IsNullOrEmpty(node.TieColumns))
-                AddPropertyRow("WITH TIES Columns", node.TieColumns, isCode: true);
-            if (!string.IsNullOrEmpty(node.UdxName))
-                AddPropertyRow("UDX Name", node.UdxName);
-            if (node.GroupExecuted)
-                AddPropertyRow("Group Executed", "True");
-            if (node.RemoteDataAccess)
-                AddPropertyRow("Remote Data Access", "True");
-            if (node.OptimizedHalloweenProtectionUsed)
-                AddPropertyRow("Halloween Protection", "True");
-            if (node.StatsCollectionId > 0)
-                AddPropertyRow("Stats Collection Id", $"{node.StatsCollectionId}");
+            var topText = node.TopExpression;
+            if (node.IsPercent) topText += " PERCENT";
+            if (node.WithTies) topText += " WITH TIES";
+            AddPropertyRow("Top", topText);
+        }
+        if (node.SortDistinct)
+            AddPropertyRow("Distinct Sort", "True");
+        if (node.StartupExpression)
+            AddPropertyRow("Startup Expression", "True");
+        if (node.NLOptimized)
+            AddPropertyRow("Optimized", "True");
+        if (node.WithOrderedPrefetch)
+            AddPropertyRow("Ordered Prefetch", "True");
+        if (node.WithUnorderedPrefetch)
+            AddPropertyRow("Unordered Prefetch", "True");
+        if (node.BitmapCreator)
+            AddPropertyRow("Bitmap Creator", "True");
+        if (node.Remoting)
+            AddPropertyRow("Remoting", "True");
+        if (node.LocalParallelism)
+            AddPropertyRow("Local Parallelism", "True");
+        if (!string.IsNullOrEmpty(node.GroupBy))
+            AddPropertyRow("Group By", node.GroupBy, isCode: true);
+        if (!string.IsNullOrEmpty(node.PartitionColumns))
+            AddPropertyRow("Partition Columns", node.PartitionColumns, isCode: true);
+        if (!string.IsNullOrEmpty(node.HashKeys))
+            AddPropertyRow("Hash Keys", node.HashKeys, isCode: true);
+        if (!string.IsNullOrEmpty(node.OffsetExpression))
+            AddPropertyRow("Offset", node.OffsetExpression);
+        if (node.TopRows > 0)
+            AddPropertyRow("Rows", $"{node.TopRows}");
+        if (node.SpoolStack)
+            AddPropertyRow("Stack Spool", "True");
+        if (node.PrimaryNodeId > 0)
+            AddPropertyRow("Primary Node Id", $"{node.PrimaryNodeId}");
+        if (node.DMLRequestSort)
+            AddPropertyRow("DML Request Sort", "True");
+        if (node.NonClusteredIndexCount > 0)
+        {
+            AddPropertyRow("NC Indexes Maintained", $"{node.NonClusteredIndexCount}");
+            foreach (var ixName in node.NonClusteredIndexNames)
+                AddPropertyRow("", ixName, isCode: true);
+        }
+        if (!string.IsNullOrEmpty(node.ActionColumn))
+            AddPropertyRow("Action Column", node.ActionColumn, isCode: true);
+        if (!string.IsNullOrEmpty(node.SegmentColumn))
+            AddPropertyRow("Segment Column", node.SegmentColumn, isCode: true);
+        if (!string.IsNullOrEmpty(node.DefinedValues))
+            AddPropertyRow("Defined Values", node.DefinedValues, isCode: true);
+        if (!string.IsNullOrEmpty(node.OuterReferences))
+            AddPropertyRow("Outer References", node.OuterReferences, isCode: true);
+        if (!string.IsNullOrEmpty(node.InnerSideJoinColumns))
+            AddPropertyRow("Inner Join Cols", node.InnerSideJoinColumns, isCode: true);
+        if (!string.IsNullOrEmpty(node.OuterSideJoinColumns))
+            AddPropertyRow("Outer Join Cols", node.OuterSideJoinColumns, isCode: true);
+        if (node.PhysicalOp == "Merge Join")
+            AddPropertyRow("Many to Many", node.ManyToMany ? "Yes" : "No");
+        else if (node.ManyToMany)
+            AddPropertyRow("Many to Many", "Yes");
+        if (!string.IsNullOrEmpty(node.ConstantScanValues))
+            AddPropertyRow("Values", node.ConstantScanValues, isCode: true);
+        if (!string.IsNullOrEmpty(node.UdxUsedColumns))
+            AddPropertyRow("UDX Columns", node.UdxUsedColumns, isCode: true);
+        if (node.RowCount)
+            AddPropertyRow("Row Count", "True");
+        if (node.ForceSeekColumnCount > 0)
+            AddPropertyRow("ForceSeek Columns", $"{node.ForceSeekColumnCount}");
+        if (!string.IsNullOrEmpty(node.PartitionId))
+            AddPropertyRow("Partition Id", node.PartitionId, isCode: true);
+        if (node.IsStarJoin)
+            AddPropertyRow("Star Join Root", "True");
+        if (!string.IsNullOrEmpty(node.StarJoinOperationType))
+            AddPropertyRow("Star Join Type", node.StarJoinOperationType);
+        if (!string.IsNullOrEmpty(node.ProbeColumn))
+            AddPropertyRow("Probe Column", node.ProbeColumn, isCode: true);
+        if (node.InRow)
+            AddPropertyRow("In-Row", "True");
+        if (node.ComputeSequence)
+            AddPropertyRow("Compute Sequence", "True");
+        if (node.RollupHighestLevel > 0)
+            AddPropertyRow("Rollup Highest Level", $"{node.RollupHighestLevel}");
+        if (node.RollupLevels.Count > 0)
+            AddPropertyRow("Rollup Levels", string.Join(", ", node.RollupLevels));
+        if (!string.IsNullOrEmpty(node.TvfParameters))
+            AddPropertyRow("TVF Parameters", node.TvfParameters, isCode: true);
+        if (!string.IsNullOrEmpty(node.OriginalActionColumn))
+            AddPropertyRow("Original Action Col", node.OriginalActionColumn, isCode: true);
+        if (!string.IsNullOrEmpty(node.TieColumns))
+            AddPropertyRow("WITH TIES Columns", node.TieColumns, isCode: true);
+        if (!string.IsNullOrEmpty(node.UdxName))
+            AddPropertyRow("UDX Name", node.UdxName);
+        if (node.GroupExecuted)
+            AddPropertyRow("Group Executed", "True");
+        if (node.RemoteDataAccess)
+            AddPropertyRow("Remote Data Access", "True");
+        if (node.OptimizedHalloweenProtectionUsed)
+            AddPropertyRow("Halloween Protection", "True");
+        if (node.StatsCollectionId > 0)
+            AddPropertyRow("Stats Collection Id", $"{node.StatsCollectionId}");
+        if (_currentSection!.Rows.Count == 0)
+        {
+            PropertiesContent.Children.Remove(_currentSection.Expander);
+            _propertySections.Remove(_currentSection);
+            _currentPropertySection = sectionPanelBefore;
+            _currentSection = sectionBefore;
         }
 
         // === Scalar UDFs ===
@@ -909,7 +897,7 @@ public partial class PlanViewerControl
                         Margin = new Thickness(16, 2, 0, 0)
                     });
                 }
-                PropertiesContent.Children.Add(warnPanel);
+                (_currentPropertySection ?? PropertiesContent).Children.Add(warnPanel);
                 RegisterBuiltWarningRow(opWarnHeaderText, w.Message, warnPanel);
             }
         }
@@ -1152,9 +1140,9 @@ public partial class PlanViewerControl
     }
 
     /// <summary>
-    /// Wraps a warning panel built directly under <see cref="PropertiesContent"/> (the plan-level
-    /// and per-operator warning lists, which are prose panels rather than label/value grids) as a
-    /// filterable, copyable row on the section most recently opened by <see cref="AddPropertySection"/>.
+    /// Wraps a warning panel built in the body of the section most recently opened by <see cref="AddPropertySection"/>
+    /// (the plan-level and per-operator warning lists, which are prose panels rather than label/value grids) as a
+    /// filterable, copyable row on that section.
     /// </summary>
     private void RegisterBuiltWarningRow(string header, string body, FrameworkElement panel)
     {
