@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// no horizontal scroll bar while it holds no rows; Job History trims Job and Step; the Wait Stats picker trims a long wait type and
 /// never scrolls sideways at a 900x600 window. Lite's twin is GridCellsTrimOrFitTests in Lite.Tests.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerGridCellsTrimOrFitTests
 {
     private const int MaximizedTabWidth = 1270;

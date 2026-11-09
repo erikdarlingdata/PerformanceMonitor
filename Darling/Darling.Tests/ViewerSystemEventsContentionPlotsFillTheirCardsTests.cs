@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// the group, so the two counter charts share a group with each other and not with the two legend charts. Lite's twin is
 /// SystemEventsContentionPlotsFillTheirCardsTests in Lite.Tests.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerSystemEventsContentionPlotsFillTheirCardsTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
