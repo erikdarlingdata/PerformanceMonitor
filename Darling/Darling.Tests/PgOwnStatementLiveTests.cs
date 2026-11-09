@@ -50,7 +50,15 @@ public sealed class PgOwnStatementLiveTests
     internal static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
-    public async Task TheMarker_SurvivesInPgStatStatements_OnTheProviderCommand_AndOnEveryStatementOfABatch()
+    public Task TheMarker_SurvivesInPgStatStatements_OnTheProviderCommand_AndOnEveryStatementOfABatch()
+        => MarkerChecksAsync(forcePass: false);
+
+    /// <summary>The same run with an eviction pass forced between its statements and its first read: the pass is named, and the reads look at entries the statements made.</summary>
+    [Fact]
+    public Task TheMarker_SurvivesInPgStatStatements_OnTheProviderCommand_AndOnEveryStatementOfABatch_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => MarkerChecksAsync(forcePass: true);
+
+    private async Task MarkerChecksAsync(bool forcePass)
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the own-statement tests.");
@@ -63,7 +71,7 @@ public sealed class PgOwnStatementLiveTests
         var bodySucceeded = false;
         try
         {
-            await RunMarkerChecksAsync(scratch.ConnectionString, ct);
+            await RunMarkerChecksAsync(scratch.ConnectionString, ct, forcePass);
             bodySucceeded = true;
         }
         finally
@@ -80,7 +88,15 @@ public sealed class PgOwnStatementLiveTests
     /// an unmarked connector copy would leave the standing per-pass read counted as the application's (#7567 round 6).
     /// </summary>
     [Fact]
-    public async Task TheConnectorsSchemaRead_RunningBeforeThePerPassRead_StillLeavesTheSharedEntryMarked_AndTheFetchLearnsItAsTheServices()
+    public Task TheConnectorsSchemaRead_RunningBeforeThePerPassRead_StillLeavesTheSharedEntryMarked_AndTheFetchLearnsItAsTheServices()
+        => ConnectorsSchemaReadAsync(forcePass: false);
+
+    /// <summary>The same run with an eviction pass forced between its statements and its first read: the pass is named, and the reads look at entries the statements made.</summary>
+    [Fact]
+    public Task TheConnectorsSchemaRead_RunningBeforeThePerPassRead_StillLeavesTheSharedEntryMarked_AndTheFetchLearnsItAsTheServices_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => ConnectorsSchemaReadAsync(forcePass: true);
+
+    private async Task ConnectorsSchemaReadAsync(bool forcePass)
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the own-statement tests.");
@@ -104,62 +120,68 @@ public sealed class PgOwnStatementLiveTests
                 Assert.Skip("pg_stat_statements is not available on this server: " + ex.Message);
             }
 
-            /* The connector first, the way a service start runs it, then the per-pass read of a collector that reads Aurora functions. */
-            await DarlingServerConnector.ResolveAuroraFunctionSchemaAsync(connection, "aurora_version", ct);
-            var context = new CollectorContext
+            var bracket = await PgStatementTable.RunAsync(connection, ct, async pass =>
             {
-                ServerId = ServerId,
-                ServerName = ServerName,
-                CollectionTime = DateTime.UtcNow,
-                Deltas = new CollectorDeltaCalculator(),
-                Target = new CollectorTargetInfo
+                /* The connector first, the way a service start runs it, then the per-pass read of a collector that reads Aurora functions. */
+                await DarlingServerConnector.ResolveAuroraFunctionSchemaAsync(connection, "aurora_version", ct);
+                var context = new CollectorContext
                 {
-                    Engine = CollectorTargetEngine.PostgreSql,
-                    PostgresMajorVersion = connection.PostgreSqlVersion.Major,
-                    IsAurora = true,
-                },
-            };
-            Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
-                context, PgWaitStatsCollector.Instance, connection, null, ct));
+                    ServerId = ServerId,
+                    ServerName = ServerName,
+                    CollectionTime = DateTime.UtcNow,
+                    Deltas = new CollectorDeltaCalculator(),
+                    Target = new CollectorTargetInfo
+                    {
+                        Engine = CollectorTargetEngine.PostgreSql,
+                        PostgresMajorVersion = connection.PostgreSqlVersion.Major,
+                        IsAurora = true,
+                    },
+                };
+                Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
+                    context, PgWaitStatsCollector.Instance, connection, null, ct));
 
-            var entries = new List<(string Text, long QueryId, long DbId)>();
-            await using (var read = new NpgsqlCommand(
-                "SELECT query, queryid, dbid::bigint FROM pg_stat_statements WHERE " + OwnDatabase + " AND query LIKE '%pg\\_catalog.pg\\_extension AS e%'", connection))
-            await using (var reader = await read.ExecuteReaderAsync(ct))
-            {
-                while (await reader.ReadAsync(ct))
+                await pass.BeforeReadAsync(ct);
+
+                var entries = new List<(string Text, long QueryId, long DbId)>();
+                await using (var read = new NpgsqlCommand(
+                    "SELECT query, queryid, dbid::bigint FROM pg_stat_statements WHERE " + OwnDatabase + " AND query LIKE '%pg\\_catalog.pg\\_extension AS e%'", connection))
+                await using (var reader = await read.ExecuteReaderAsync(ct))
                 {
-                    entries.Add((reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2)));
+                    while (await reader.ReadAsync(ct))
+                    {
+                        entries.Add((reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2)));
+                    }
                 }
-            }
 
-            var (stored, ownQueryId, ownDbId) = Assert.Single(entries);
-            Assert.True(PgOwnStatement.IsOwn(stored), stored);
+                var (stored, ownQueryId, ownDbId) = Assert.Single(entries);
+                Assert.True(PgOwnStatement.IsOwn(stored), stored);
 
-            /* And the hourly fetch learns it as the service's: a non-NULL own_entries for the shared queryid. The fetch reads
-               the cluster-wide pg_stat_statements, and other classes run the extension-schema read in their own databases
-               with their own texts, so the row is found by this database's queryid, never as the first row whose text
-               carries the fragment, and its own_entries must name this database. */
-            context.PgExtensionSchemas = new Dictionary<string, string>(StringComparer.Ordinal) { ["pg_stat_statements"] = "public" };
-            await using var fetch = new NpgsqlCommand(
-                PgOwnStatement.Mark(PgStatementText.FetchSqlFor(false, connection.PostgreSqlVersion.Major, context)), connection);
-            fetch.Parameters.AddWithValue(10_000);
-            await using var fetched = await fetch.ExecuteReaderAsync(ct);
-            string? ownEntries = null;
-            var found = false;
-            while (await fetched.ReadAsync(ct))
-            {
-                if (!fetched.IsDBNull(0) && fetched.GetInt64(0) == ownQueryId)
+                /* And the hourly fetch learns it as the service's: a non-NULL own_entries for the shared queryid. The fetch reads
+                   the cluster-wide pg_stat_statements, and other classes run the extension-schema read in their own databases
+                   with their own texts, so the row is found by this database's queryid, never as the first row whose text
+                   carries the fragment, and its own_entries must name this database. */
+                context.PgExtensionSchemas = new Dictionary<string, string>(StringComparer.Ordinal) { ["pg_stat_statements"] = "public" };
+                await using var fetch = new NpgsqlCommand(
+                    PgOwnStatement.Mark(PgStatementText.FetchSqlFor(false, connection.PostgreSqlVersion.Major, context)), connection);
+                fetch.Parameters.AddWithValue(10_000);
+                await using var fetched = await fetch.ExecuteReaderAsync(ct);
+                string? ownEntries = null;
+                var found = false;
+                while (await fetched.ReadAsync(ct))
                 {
-                    found = true;
-                    ownEntries = fetched.IsDBNull(2) ? null : fetched.GetString(2);
-                    break;
+                    if (!fetched.IsDBNull(0) && fetched.GetInt64(0) == ownQueryId)
+                    {
+                        found = true;
+                        ownEntries = fetched.IsDBNull(2) ? null : fetched.GetString(2);
+                        break;
+                    }
                 }
-            }
 
-            Assert.True(found);
-            Assert.NotNull(ownEntries);
-            Assert.Contains(JsonDocument.Parse(ownEntries).RootElement.EnumerateArray(), e => e.GetProperty("d").GetInt64() == ownDbId);
+                Assert.True(found);
+                Assert.NotNull(ownEntries);
+                Assert.Contains(JsonDocument.Parse(ownEntries).RootElement.EnumerateArray(), e => e.GetProperty("d").GetInt64() == ownDbId);
+            }, forcePass);
+            PgStatementTable.AssertNoPassInside(bracket);
             bodySucceeded = true;
         }
         finally
@@ -169,7 +191,7 @@ public sealed class PgOwnStatementLiveTests
         }
     }
 
-    private static async Task RunMarkerChecksAsync(string connectionString, CancellationToken ct)
+    private static async Task RunMarkerChecksAsync(string connectionString, CancellationToken ct, bool forcePass)
     {
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);
@@ -184,130 +206,136 @@ public sealed class PgOwnStatementLiveTests
             Assert.Skip("pg_stat_statements is not preloaded on this server: " + ex.Message);
         }
 
-        /* First, so the check that a new target connection runs is the call that creates its pg_stat_statements entry: the entry keeps the text of the call that made it. */
-        var pinned = new NpgsqlConnectionStringBuilder(connectionString)
+        var bracket = await PgStatementTable.RunAsync(connection, ct, async pass =>
         {
-            Options = MonitoredServerConnection.PinnedSearchPathOption,
-            ApplicationName = "pm7567-r7-pinned",
-        };
-        await using (var pinnedConnection = PostgresTargetProvider.CreatePinnedConnection(pinned.ConnectionString))
-        {
-            await pinnedConnection.OpenAsync(ct);
-        }
-
-        /* The provider's own command: a single statement, with the trailing semicolon a collector may carry. */
-        var query = new CollectorQuery("SELECT 7567 + 1 AS pm7567_single;");
-        await using (var command = PostgresTargetProvider.Instance.CreateCommand(query, connection, 30))
-        {
-            await command.ExecuteNonQueryAsync(ct);
-        }
-
-        /* A batch the way the wait sampler sends one: every statement is stored on its own row. */
-        var batch = PgOwnStatement.MarkBatch(new[]
-        {
-            "SELECT 7567 + 2 AS pm7567_first, 1 AS a",
-            "SELECT pg_sleep(0.01)",
-            "SELECT pg_stat_clear_snapshot()",
-            "SELECT 7567 + 3 AS pm7567_last, 1 AS a, 2 AS b",
-        });
-        await using (var batchCommand = new NpgsqlCommand(batch, connection))
-        {
-            await batchCommand.ExecuteNonQueryAsync(ct);
-        }
-
-        /* A named parameter, the way ResolvePgExtensionSchemasAsync binds @functions: Npgsql rewrites it to $1 before the server sees it. */
-        await using (var named = new NpgsqlCommand(
-            PgOwnStatement.Mark("SELECT @functions::text AS pm7567_named"), connection))
-        {
-            named.Parameters.AddWithValue("functions", "x");
-            await named.ExecuteNonQueryAsync(ct);
-        }
-
-        /* The connect-time probes (round 4): ProbeAuroraAsync resolves the extension schemas through the SAME statement the per-pass
-           read sends, and runs first after a service start or a pg_stat_statements_reset(), so an unmarked copy there would
-           create the shared entry and keep the unmarked text. Both statements of the Aurora probe are marked too. */
-        await DarlingServerConnector.ProbeAuroraAsync(connection, ct);
-
-        /* The control: the same shape with no marker, which must read as the application's. */
-        await using (var plain = new NpgsqlCommand("SELECT 7567 + 4 AS pm7567_plain, 1 AS a, 2 AS b, 3 AS c", connection))
-        {
-            await plain.ExecuteNonQueryAsync(ct);
-        }
-
-        var stored = new Dictionary<string, string>(StringComparer.Ordinal);
-        await using (var read = new NpgsqlCommand(
-            "SELECT query FROM pg_stat_statements WHERE " + OwnDatabase + " AND (query LIKE '%pm7567\\_%' OR query LIKE '%pg\\_stat\\_clear\\_snapshot%' OR query LIKE '%pg\\_sleep(%' "
-            + "OR query LIKE '%pg\\_catalog.pg\\_extension AS e%' OR query LIKE '%aurora\\_probe%' OR query LIKE 'SELECT pg\\_catalog.current\\_setting(%')",
-            connection))
-        await using (var reader = await read.ExecuteReaderAsync(ct))
-        {
-            while (await reader.ReadAsync(ct))
+            /* First, so the check that a new target connection runs is the call that creates its pg_stat_statements entry: the entry keeps the text of the call that made it. */
+            var pinned = new NpgsqlConnectionStringBuilder(connectionString)
             {
-                var text = reader.GetString(0);
-                stored[text] = text;
-            }
-        }
-
-        string Stored(string needle) => Assert.Single(stored.Values, t => t.Contains(needle, StringComparison.Ordinal));
-
-        Assert.True(PgOwnStatement.IsOwn(Stored("pm7567_single")), Stored("pm7567_single"));
-        Assert.True(PgOwnStatement.IsOwn(Stored("pm7567_first")), Stored("pm7567_first"));
-        Assert.True(PgOwnStatement.IsOwn(Stored("pm7567_last")), Stored("pm7567_last"));
-        Assert.True(PgOwnStatement.IsOwn(Stored("pm7567_named")), Stored("pm7567_named"));
-        Assert.True(PgOwnStatement.IsOwn(Stored("pg_sleep(")), Stored("pg_sleep("));
-        Assert.True(PgOwnStatement.IsOwn(Stored("pg_stat_clear_snapshot")), Stored("pg_stat_clear_snapshot"));
-        Assert.True(PgOwnStatement.IsOwn(Stored("pg_catalog.pg_extension AS e")), Stored("pg_catalog.pg_extension AS e"));
-        Assert.True(PgOwnStatement.IsOwn(Stored("aurora_probe")), Stored("aurora_probe"));
-        Assert.True(PgOwnStatement.IsOwn(Stored("SELECT pg_catalog.current_setting($1, $2)")), Stored("SELECT pg_catalog.current_setting($1, $2)"));
-        Assert.False(PgOwnStatement.IsOwn(Stored("pm7567_plain")), Stored("pm7567_plain"));
-
-        /* The SQL predicate the readers use agrees with the C# one on the stored text. */
-        await using var predicate = new NpgsqlCommand(
-            "SELECT " + PgOwnStatement.IsOwnSql("query") + " FROM pg_stat_statements WHERE " + OwnDatabase + " AND query LIKE '%pm7567\\_single%'", connection);
-        Assert.True((bool)(await predicate.ExecuteScalarAsync(ct))!);
-
-        /* Round 7: the commands that build their own SQL and skip the provider. The zone read is a two-statement batch, and
-           pg_stat_statements stores each statement on its own, so BOTH must end with the marker; the capability probes and the
-           per-connection search_path check run on a target too. Each goes through its real code path, not a copy of its SQL. */
-        PgLogNamedZone.ForgetZoneNames();
-        var zonePairs = new[] { new PgLogZonePair("2026-03-01 12:00:00", "UTC") };
-        Assert.NotNull(await PgLogNamedZone.ResolveAsync(connection, "UTC", zonePairs, 30, ct));
-        /* The second read of a setting already found to be a named zone sends the other form of the batch. */
-        Assert.NotNull(await PgLogNamedZone.ResolveAsync(connection, "UTC", zonePairs, 30, ct));
-        PgFileSettingsCapability.Reset();
-        PgLogFormatCapability.Reset();
-        PgReadBinaryFileCapability.Reset();
-        await PgFileSettingsCapability.IsReadableAsync(connection, "pm7567-r7", ct);
-        await PgLogFormatCapability.IsCsvlogEnabledAsync(connection, "pm7567-r7", ct);
-        await PgReadBinaryFileCapability.IsGrantedAsync(connection, "pm7567-r7", ct);
-
-        var texts = new List<string>();
-        await using (var readAll = new NpgsqlCommand("SELECT query FROM pg_stat_statements WHERE " + OwnDatabase, connection))
-        await using (var readerAll = await readAll.ExecuteReaderAsync(ct))
-        {
-            while (await readerAll.ReadAsync(ct))
+                Options = MonitoredServerConnection.PinnedSearchPathOption,
+                ApplicationName = "pm7567-r7-pinned",
+            };
+            await using (var pinnedConnection = PostgresTargetProvider.CreatePinnedConnection(pinned.ConnectionString))
             {
-                texts.Add(readerAll.GetString(0));
+                await pinnedConnection.OpenAsync(ct);
             }
-        }
 
-        void AssertMarked(string what, string needle)
-        {
-            var found = texts.Where(t => t.Contains(needle, StringComparison.Ordinal)).ToList();
-            Assert.True(found.Count > 0, what + " was not stored: " + needle);
-            foreach (var text in found)
+            /* The provider's own command: a single statement, with the trailing semicolon a collector may carry. */
+            var query = new CollectorQuery("SELECT 7567 + 1 AS pm7567_single;");
+            await using (var command = PostgresTargetProvider.Instance.CreateCommand(query, connection, 30))
             {
-                Assert.True(PgOwnStatement.IsOwn(text), what + " is stored without the marker: " + text);
+                await command.ExecuteNonQueryAsync(ct);
             }
-        }
 
-        AssertMarked("the zone lookup (statement one)", "FROM pg_catalog.pg_timezone_names");
-        AssertMarked("the zone match (statement two)", "GROUP BY m.stamp, m.zone");
-        AssertMarked("the known-zone set (statement one, later reads)", "set_config($2, $1, $3)");
-        AssertMarked("the pg_file_settings probe", "has_table_privilege(");
-        AssertMarked("the log format probe", "string_to_array(");
-        AssertMarked("the pg_read_binary_file probe", "has_function_privilege(current_user, $3, $4)");
-        AssertMarked("the search_path check", "SELECT pg_catalog.current_setting($1)");
+            /* A batch the way the wait sampler sends one: every statement is stored on its own row. */
+            var batch = PgOwnStatement.MarkBatch(new[]
+            {
+                "SELECT 7567 + 2 AS pm7567_first, 1 AS a",
+                "SELECT pg_sleep(0.01)",
+                "SELECT pg_stat_clear_snapshot()",
+                "SELECT 7567 + 3 AS pm7567_last, 1 AS a, 2 AS b",
+            });
+            await using (var batchCommand = new NpgsqlCommand(batch, connection))
+            {
+                await batchCommand.ExecuteNonQueryAsync(ct);
+            }
+
+            /* A named parameter, the way ResolvePgExtensionSchemasAsync binds @functions: Npgsql rewrites it to $1 before the server sees it. */
+            await using (var named = new NpgsqlCommand(
+                PgOwnStatement.Mark("SELECT @functions::text AS pm7567_named"), connection))
+            {
+                named.Parameters.AddWithValue("functions", "x");
+                await named.ExecuteNonQueryAsync(ct);
+            }
+
+            /* The connect-time probes (round 4): ProbeAuroraAsync resolves the extension schemas through the SAME statement the per-pass
+               read sends, and runs first after a service start or a pg_stat_statements_reset(), so an unmarked copy there would
+               create the shared entry and keep the unmarked text. Both statements of the Aurora probe are marked too. */
+            await DarlingServerConnector.ProbeAuroraAsync(connection, ct);
+
+            /* The control: the same shape with no marker, which must read as the application's. */
+            await using (var plain = new NpgsqlCommand("SELECT 7567 + 4 AS pm7567_plain, 1 AS a, 2 AS b, 3 AS c", connection))
+            {
+                await plain.ExecuteNonQueryAsync(ct);
+            }
+
+            await pass.BeforeReadAsync(ct);
+
+            var stored = new Dictionary<string, string>(StringComparer.Ordinal);
+            await using (var read = new NpgsqlCommand(
+                "SELECT query FROM pg_stat_statements WHERE " + OwnDatabase + " AND (query LIKE '%pm7567\\_%' OR query LIKE '%pg\\_stat\\_clear\\_snapshot%' OR query LIKE '%pg\\_sleep(%' "
+                + "OR query LIKE '%pg\\_catalog.pg\\_extension AS e%' OR query LIKE '%aurora\\_probe%' OR query LIKE 'SELECT pg\\_catalog.current\\_setting(%')",
+                connection))
+            await using (var reader = await read.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                    var text = reader.GetString(0);
+                    stored[text] = text;
+                }
+            }
+
+            string Stored(string needle) => Assert.Single(stored.Values, t => t.Contains(needle, StringComparison.Ordinal));
+
+            Assert.True(PgOwnStatement.IsOwn(Stored("pm7567_single")), Stored("pm7567_single"));
+            Assert.True(PgOwnStatement.IsOwn(Stored("pm7567_first")), Stored("pm7567_first"));
+            Assert.True(PgOwnStatement.IsOwn(Stored("pm7567_last")), Stored("pm7567_last"));
+            Assert.True(PgOwnStatement.IsOwn(Stored("pm7567_named")), Stored("pm7567_named"));
+            Assert.True(PgOwnStatement.IsOwn(Stored("pg_sleep(")), Stored("pg_sleep("));
+            Assert.True(PgOwnStatement.IsOwn(Stored("pg_stat_clear_snapshot")), Stored("pg_stat_clear_snapshot"));
+            Assert.True(PgOwnStatement.IsOwn(Stored("pg_catalog.pg_extension AS e")), Stored("pg_catalog.pg_extension AS e"));
+            Assert.True(PgOwnStatement.IsOwn(Stored("aurora_probe")), Stored("aurora_probe"));
+            Assert.True(PgOwnStatement.IsOwn(Stored("SELECT pg_catalog.current_setting($1, $2)")), Stored("SELECT pg_catalog.current_setting($1, $2)"));
+            Assert.False(PgOwnStatement.IsOwn(Stored("pm7567_plain")), Stored("pm7567_plain"));
+
+            /* The SQL predicate the readers use agrees with the C# one on the stored text. */
+            await using var predicate = new NpgsqlCommand(
+                "SELECT " + PgOwnStatement.IsOwnSql("query") + " FROM pg_stat_statements WHERE " + OwnDatabase + " AND query LIKE '%pm7567\\_single%'", connection);
+            Assert.True((bool)(await predicate.ExecuteScalarAsync(ct))!);
+
+            /* Round 7: the commands that build their own SQL and skip the provider. The zone read is a two-statement batch, and
+               pg_stat_statements stores each statement on its own, so BOTH must end with the marker; the capability probes and the
+               per-connection search_path check run on a target too. Each goes through its real code path, not a copy of its SQL. */
+            PgLogNamedZone.ForgetZoneNames();
+            var zonePairs = new[] { new PgLogZonePair("2026-03-01 12:00:00", "UTC") };
+            Assert.NotNull(await PgLogNamedZone.ResolveAsync(connection, "UTC", zonePairs, 30, ct));
+            /* The second read of a setting already found to be a named zone sends the other form of the batch. */
+            Assert.NotNull(await PgLogNamedZone.ResolveAsync(connection, "UTC", zonePairs, 30, ct));
+            PgFileSettingsCapability.Reset();
+            PgLogFormatCapability.Reset();
+            PgReadBinaryFileCapability.Reset();
+            await PgFileSettingsCapability.IsReadableAsync(connection, "pm7567-r7", ct);
+            await PgLogFormatCapability.IsCsvlogEnabledAsync(connection, "pm7567-r7", ct);
+            await PgReadBinaryFileCapability.IsGrantedAsync(connection, "pm7567-r7", ct);
+
+            var texts = new List<string>();
+            await using (var readAll = new NpgsqlCommand("SELECT query FROM pg_stat_statements WHERE " + OwnDatabase, connection))
+            await using (var readerAll = await readAll.ExecuteReaderAsync(ct))
+            {
+                while (await readerAll.ReadAsync(ct))
+                {
+                    texts.Add(readerAll.GetString(0));
+                }
+            }
+
+            void AssertMarked(string what, string needle)
+            {
+                var found = texts.Where(t => t.Contains(needle, StringComparison.Ordinal)).ToList();
+                Assert.True(found.Count > 0, what + " was not stored: " + needle);
+                foreach (var text in found)
+                {
+                    Assert.True(PgOwnStatement.IsOwn(text), what + " is stored without the marker: " + text);
+                }
+            }
+
+            AssertMarked("the zone lookup (statement one)", "FROM pg_catalog.pg_timezone_names");
+            AssertMarked("the zone match (statement two)", "GROUP BY m.stamp, m.zone");
+            AssertMarked("the known-zone set (statement one, later reads)", "set_config($2, $1, $3)");
+            AssertMarked("the pg_file_settings probe", "has_table_privilege(");
+            AssertMarked("the log format probe", "string_to_array(");
+            AssertMarked("the pg_read_binary_file probe", "has_function_privilege(current_user, $3, $4)");
+            AssertMarked("the search_path check", "SELECT pg_catalog.current_setting($1)");
+        }, forcePass);
+        PgStatementTable.AssertNoPassInside(bracket);
     }
 
     [Fact]

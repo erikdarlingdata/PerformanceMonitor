@@ -107,7 +107,15 @@ public sealed class PgCollectorSearchPathLiveTests
     [InlineData("database")]
     [InlineData("role")]
     [InlineData("role in database")]
-    public async Task CollectorsOnADatabaseWithItsOwnSearchPath_ReturnRows_AndNeverRunItsObjects(string setting)
+    public Task CollectorsOnADatabaseWithItsOwnSearchPath_ReturnRows_AndNeverRunItsObjects(string setting)
+        => CollectorsOnADatabaseAsync(setting, forcePass: false);
+
+    /// <summary>The same run with an eviction pass forced between its statements and its first read: the pass is named, and the reads look at entries the statements made.</summary>
+    [Fact]
+    public Task CollectorsOnADatabaseWithItsOwnSearchPath_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => CollectorsOnADatabaseAsync("database", forcePass: true);
+
+    private async Task CollectorsOnADatabaseAsync(string setting, bool forcePass)
     {
         var adminConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrWhiteSpace(adminConnectionString),
@@ -155,27 +163,38 @@ public sealed class PgCollectorSearchPathLiveTests
                 store, new CollectorDeltaCalculator(), NullLogger<DarlingCollectorRunner>.Instance,
                 databaseScope: (_, _) => new[] { Database });
 
-            var counts = new Dictionary<string, int>(StringComparer.Ordinal)
+            Dictionary<string, int> counts = null!;
+            /* The bracket's own statements run with the search_path pinned, the way the collectors' do: the database's
+               search_path leads to the look-alike operators, and the count of their calls below must stay at zero. */
+            await using var bracketConnection = new NpgsqlConnection(
+                new NpgsqlConnectionStringBuilder(adminConnectionString!) { Database = Database, Options = "-c search_path=pg_catalog,pg_temp" }.ConnectionString);
+            await bracketConnection.OpenAsync(ct);
+            var bracket = await PgStatementTable.RunAsync(bracketConnection, ct, async pass =>
             {
-                /* Per-database collectors, read here from the configured database (the owned one). */
-                ["pg_index_usage_stats"] = (await runner.FetchRowsAsync(PgIndexUsageStatsCollector.Instance, runtime, 60, ct)).Count,
-                ["pg_autovacuum_stats"] = (await runner.FetchRowsAsync(PgAutovacuumStatsCollector.Instance, runtime, 60, ct)).Count,
-                ["pg_table_bloat_stats"] = (await runner.FetchRowsAsync(PgTableBloatStatsCollector.Instance, runtime, 60, ct)).Count,
-                ["pg_index_bloat"] = (await runner.FetchRowsAsync(PgIndexBloatCollector.Instance, runtime, 60, ct)).Count,
-                ["pg_column_stats"] = (await runner.FetchRowsAsync(PgColumnStatsCollector.Instance, runtime, 60, ct)).Count,
-                ["pg_extension_availability"] = (await runner.FetchRowsAsync(PgExtensionAvailabilityCollector.Instance, runtime, 60, ct)).Count,
-                /* Server-wide collectors, read from the configured database. */
-                ["pg_database_stats"] = (await runner.FetchRowsAsync(PgDatabaseStatsCollector.Instance, runtime, 60, ct)).Count,
-                ["pg_database_size_stats"] = (await runner.FetchRowsAsync(PgDatabaseSizeStatsCollector.Instance, runtime, 60, ct)).Count,
-                ["pg_wraparound_stats"] = (await runner.FetchRowsAsync(PgWraparoundStatsCollector.Instance, runtime, 60, ct)).Count,
-                ["pg_server_config"] = (await runner.FetchRowsAsync(PgServerConfigCollector.Instance, runtime, 60, ct)).Count,
-                /* Extensions created in a schema whose name needs quoting: named by that schema. */
-                ["pg_buffer_usage"] = (await runner.FetchRowsAsync(PgBufferUsageCollector.Instance, runtime, 60, ct)).Count,
-                ["pg_statement_stats"] = (await runner.FetchRowsAsync(PgStatementStatsCollector.Instance, runtime, 60, ct)).Count,
-                /* The scheduled path: per database (the query rebuilt on each database's connection), then server-scoped. */
-                ["run: pg_index_usage_stats"] = (await runner.RunAsync(PgIndexUsageStatsCollector.Instance, runtime, ct)).Rows,
-                ["run: pg_buffer_usage"] = (await runner.RunAsync(PgBufferUsageCollector.Instance, runtime, ct)).Rows,
-            };
+                await pass.BeforeReadAsync(ct);
+                counts = new Dictionary<string, int>(StringComparer.Ordinal)
+                {
+                    /* Per-database collectors, read here from the configured database (the owned one). */
+                    ["pg_index_usage_stats"] = (await runner.FetchRowsAsync(PgIndexUsageStatsCollector.Instance, runtime, 60, ct)).Count,
+                    ["pg_autovacuum_stats"] = (await runner.FetchRowsAsync(PgAutovacuumStatsCollector.Instance, runtime, 60, ct)).Count,
+                    ["pg_table_bloat_stats"] = (await runner.FetchRowsAsync(PgTableBloatStatsCollector.Instance, runtime, 60, ct)).Count,
+                    ["pg_index_bloat"] = (await runner.FetchRowsAsync(PgIndexBloatCollector.Instance, runtime, 60, ct)).Count,
+                    ["pg_column_stats"] = (await runner.FetchRowsAsync(PgColumnStatsCollector.Instance, runtime, 60, ct)).Count,
+                    ["pg_extension_availability"] = (await runner.FetchRowsAsync(PgExtensionAvailabilityCollector.Instance, runtime, 60, ct)).Count,
+                    /* Server-wide collectors, read from the configured database. */
+                    ["pg_database_stats"] = (await runner.FetchRowsAsync(PgDatabaseStatsCollector.Instance, runtime, 60, ct)).Count,
+                    ["pg_database_size_stats"] = (await runner.FetchRowsAsync(PgDatabaseSizeStatsCollector.Instance, runtime, 60, ct)).Count,
+                    ["pg_wraparound_stats"] = (await runner.FetchRowsAsync(PgWraparoundStatsCollector.Instance, runtime, 60, ct)).Count,
+                    ["pg_server_config"] = (await runner.FetchRowsAsync(PgServerConfigCollector.Instance, runtime, 60, ct)).Count,
+                    /* Extensions created in a schema whose name needs quoting: named by that schema. */
+                    ["pg_buffer_usage"] = (await runner.FetchRowsAsync(PgBufferUsageCollector.Instance, runtime, 60, ct)).Count,
+                    ["pg_statement_stats"] = (await runner.FetchRowsAsync(PgStatementStatsCollector.Instance, runtime, 60, ct)).Count,
+                    /* The scheduled path: per database (the query rebuilt on each database's connection), then server-scoped. */
+                    ["run: pg_index_usage_stats"] = (await runner.RunAsync(PgIndexUsageStatsCollector.Instance, runtime, ct)).Rows,
+                    ["run: pg_buffer_usage"] = (await runner.RunAsync(PgBufferUsageCollector.Instance, runtime, ct)).Rows,
+                };
+            }, forcePass);
+            PgStatementTable.AssertNoPassInside(bracket);
 
             foreach (var (collector, count) in counts)
             {

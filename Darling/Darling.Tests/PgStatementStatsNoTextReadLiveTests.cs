@@ -37,7 +37,15 @@ public sealed class PgStatementStatsNoTextReadLiveTests
     private const int ServerId = -778301;
 
     [Fact]
-    public async Task TheStockRead_CallsTheFunctionWithShowtextOff_AndReturnsTheViewsEntries()
+    public Task TheStockRead_CallsTheFunctionWithShowtextOff_AndReturnsTheViewsEntries()
+        => StockReadAsync(forcePass: false);
+
+    /// <summary>The same run with an eviction pass forced between its statements and its first read: the pass is named, and the reads look at entries the statements made.</summary>
+    [Fact]
+    public Task TheStockRead_CallsTheFunctionWithShowtextOff_AndReturnsTheViewsEntries_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => StockReadAsync(forcePass: true);
+
+    private async Task StockReadAsync(bool forcePass)
     {
         var adminConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrWhiteSpace(adminConnectionString),
@@ -88,24 +96,30 @@ public sealed class PgStatementStatsNoTextReadLiveTests
         {
             before = await StatsResetEpochAsync(connection, ct);
 
-            /* A statement of this database's own, so the collector has at least one entry to return for it. */
-            for (var run = 0; run < 3; run++)
+            var bracket = await PgStatementTable.RunAsync(connection, ct, async pass =>
             {
-                await ExecAsync(target.ConnectionString, "SELECT 778300 + 1 AS pm7783_no_text_read", ct);
-            }
+                /* A statement of this database's own, so the collector has at least one entry to return for it. */
+                for (var run = 0; run < 3; run++)
+                {
+                    await ExecAsync(target.ConnectionString, "SELECT 778300 + 1 AS pm7783_no_text_read", ct);
+                }
 
-            List<PgStatementStatsCollector.Row> rows;
-            await using (var command = new NpgsqlCommand(shipped, connection))
-            await using (var reader = await command.ExecuteReaderAsync(ct))
-            {
-                rows = await PgStatementStatsCollector.Instance.ReadAsync(reader, context, ct);
-            }
+                await pass.BeforeReadAsync(ct);
 
-            ofTarget = rows.Where(r => r.DatabaseId == targetOid).ToList();
+                List<PgStatementStatsCollector.Row> rows;
+                await using (var command = new NpgsqlCommand(shipped, connection))
+                await using (var reader = await command.ExecuteReaderAsync(ct))
+                {
+                    rows = await PgStatementStatsCollector.Instance.ReadAsync(reader, context, ct);
+                }
 
-            /* The view, read after the collector: entries are only ever added or evicted under pressure, so every key the
-               collector returned for this database is still in the view. The same keys from a text-free read and the view. */
-            viewKeys = await ViewKeysAsync(connection, context.PgExtensionSchema("pg_stat_statements"), targetOid, ct);
+                ofTarget = rows.Where(r => r.DatabaseId == targetOid).ToList();
+
+                /* The view, read after the collector: entries are only ever added or evicted under pressure, so every key the
+                   collector returned for this database is still in the view. The same keys from a text-free read and the view. */
+                viewKeys = await ViewKeysAsync(connection, context.PgExtensionSchema("pg_stat_statements"), targetOid, ct);
+            }, forcePass && attempt == 0);
+            PgStatementTable.AssertNoPassInside(bracket);
             after = await StatsResetEpochAsync(connection, ct);
             if (before == after)
             {

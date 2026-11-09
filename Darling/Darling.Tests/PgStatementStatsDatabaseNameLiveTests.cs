@@ -32,7 +32,15 @@ public sealed class PgStatementStatsDatabaseNameLiveTests
     private const int ServerId = -773101;
 
     [Fact]
-    public async Task TheCollectorNamesEachStatementsOwnDatabase_NotTheOtherOne_AndNeverNull()
+    public Task TheCollectorNamesEachStatementsOwnDatabase_NotTheOtherOne_AndNeverNull()
+        => CollectorNamesAsync(forcePass: false);
+
+    /// <summary>The same run with an eviction pass forced between its statements and its first read: the pass is named, and the reads look at entries the statements made.</summary>
+    [Fact]
+    public Task TheCollectorNamesEachStatementsOwnDatabase_NotTheOtherOne_AndNeverNull_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => CollectorNamesAsync(forcePass: true);
+
+    private async Task CollectorNamesAsync(bool forcePass)
     {
         var adminConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrWhiteSpace(adminConnectionString),
@@ -47,14 +55,6 @@ public sealed class PgStatementStatsDatabaseNameLiveTests
         /* pg_stat_statements is cluster-wide: the view in the target database lists the entries of every database. */
         await ExecAsync(target.ConnectionString, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements", ct);
 
-        /* The same statement text in two databases: one queryid, two dbids. */
-        foreach (var database in new[] { first, second })
-        {
-            for (var run = 0; run < 3; run++)
-            {
-                await ExecAsync(database.ConnectionString, "SELECT 773100 + 1 AS pm7731_database_name", ct);
-            }
-        }
 
         var firstOid = await DatabaseOidAsync(target.ConnectionString, first.DatabaseName, ct);
         var secondOid = await DatabaseOidAsync(target.ConnectionString, second.DatabaseName, ct);
@@ -76,12 +76,26 @@ public sealed class PgStatementStatsDatabaseNameLiveTests
 
         var before = await ReadDatabaseNamesAsync(connection, ct);
 
-        List<PgStatementStatsCollector.Row> rows;
-        await using (var command = new NpgsqlCommand(PgStatementStatsCollector.Instance.BuildQuery(context).Text, connection))
-        await using (var reader = await command.ExecuteReaderAsync(ct))
+        List<PgStatementStatsCollector.Row> rows = null!;
+        var bracket = await PgStatementTable.RunAsync(connection, ct, async pass =>
         {
-            rows = await PgStatementStatsCollector.Instance.ReadAsync(reader, context, ct);
-        }
+            /* The same statement text in two databases: one queryid, two dbids. */
+            foreach (var database in new[] { first, second })
+            {
+                for (var run = 0; run < 3; run++)
+                {
+                    await ExecAsync(database.ConnectionString, "SELECT 773100 + 1 AS pm7731_database_name", ct);
+                }
+            }
+
+            await pass.BeforeReadAsync(ct);
+            await using (var command = new NpgsqlCommand(PgStatementStatsCollector.Instance.BuildQuery(context).Text, connection))
+            await using (var reader = await command.ExecuteReaderAsync(ct))
+            {
+                rows = await PgStatementStatsCollector.Instance.ReadAsync(reader, context, ct);
+            }
+        }, forcePass);
+        PgStatementTable.AssertNoPassInside(bracket);
 
         var after = await ReadDatabaseNamesAsync(connection, ct);
 
