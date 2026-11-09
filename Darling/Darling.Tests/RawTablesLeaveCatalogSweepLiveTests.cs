@@ -235,10 +235,10 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
-        /* This rig's template1 (and so every scratch database created from it) may already carry the
-           timescaledb extension row. The probe this pin exists to test decides the skip on pg_extension
-           alone, so \"plain PostgreSQL\" here must mean the extension really is absent, or the probe would
-           see it and skip the raw relation — the opposite of what this pin means to prove. */
+        /* This rig's template1 (and so a scratch database created from it) may carry the timescaledb
+           extension row. The sweep decides the skip on the hypertable catalog, so a plain raw table is
+           purged whether or not the row is there; dropping it keeps this store free of the extension, so
+           the pin is about a store without TimescaleDB at all. */
         await using (var dropExtension = new NpgsqlCommand("DROP EXTENSION IF EXISTS timescaledb", connection) { CommandTimeout = SetupTimeoutSeconds })
         {
             await dropExtension.ExecuteNonQueryAsync(ct);
