@@ -968,6 +968,12 @@ internal static class ComposePanelRunner
         return names.Count == 0 ? null : names;
     }
 
+    /// <summary>#8323: the server scope a run of <paramref name="body"/> reads, by the run's own rule
+    /// (<see cref="ParseServerScope"/> over the body's <c>server</c> and bound <c>values</c>): null for the whole fleet, else the
+    /// named servers. For a caller that describes the run rather than runs it, such as the statement-timeout answer.</summary>
+    internal static IReadOnlyList<string>? ServerScopeOf(JsonObject body) =>
+        ParseServerScope(body, ParseRunValues(body["values"]));
+
     /// <summary>Adds a server name to the scope, treating null/empty and the literal "All" as "no scope" (fleet).</summary>
     private static void AddServer(List<string> names, string? name)
     {

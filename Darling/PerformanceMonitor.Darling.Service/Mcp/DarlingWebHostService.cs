@@ -801,6 +801,11 @@ public sealed class DarlingWebHostService : BackgroundService
                certificate that names this host is not mismatched even with no iPAddress SAN. */
             var publicBaseUrlHost = TriageLink.TryGetHost(web.PublicBaseUrl);
 
+            /* #8323: the same setting's scheme and host, for the opener policy's trust decision
+               (DarlingWebSecurityHeaders.IsTrustworthyOrigin): behind a proxy that rewrites Host, it is the one thing
+               that says what origin a browser on the LAN actually has. */
+            var publicOrigin = DarlingWebSecurityHeaders.ParsePublicOrigin(web.PublicBaseUrl);
+
             /* TLS for the network listener (#2562). Resolved HERE rather than in the pure ResolveBind ladder for
                the same reason the token is: loading a certificate reads files and a clock, and the ladder is
                kept free of both. It also means a certificate failure degrades to loopback-only after a Critical line
@@ -1106,7 +1111,7 @@ public sealed class DarlingWebHostService : BackgroundService
                was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
                ResolveHostGuardListenIp (the one rule both hosts share) with the final mode: a start that fell back to
                loopback-only admits loopback names only, whatever it parsed. */
-            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpTokens: mcpTokens, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource, webTokens: webTokens);
+            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpTokens: mcpTokens, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource, webTokens: webTokens, publicOrigin: publicOrigin);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -1316,6 +1321,11 @@ public sealed class DarlingWebHostService : BackgroundService
     /// passes the raw host (<c>Uri.Host</c>, in whichever spelling the operator wrote); the guard converts its own
     /// copy once to the decoded form <c>HttpRequest.Host</c> gives the middleware, so a punycode and a Unicode
     /// spelling both admit the punycode Host a browser sends.</param>
+    /// <param name="publicOrigin">#8323: <c>web.publicBaseUrl</c>'s scheme and host, or null when unset/unparseable
+    /// (<see cref="DarlingWebSecurityHeaders.ParsePublicOrigin"/>). The opener policy is sent only when this origin and
+    /// the request's own are both trustworthy (<see cref="DarlingWebSecurityHeaders.IsTrustworthyOrigin(HttpRequest, Uri?)"/>),
+    /// so a browser behind a proxy that rewrites <c>Host</c> to this service's loopback address is judged by the name it
+    /// actually uses.</param>
     /// <param name="requireTokenWhenLoopbackOnly">#5288: keeps the token-to-cookie gate on a loopback-only server. The
     /// host passes true when network mode was configured and its token resolved, and the start then fell back to
     /// loopback-only (a refused TLS certificate): the operator's config said every client presents the token, so a
@@ -1363,7 +1373,8 @@ public sealed class DarlingWebHostService : BackgroundService
         bool allowWindowsAuthOverUnverifiedTls = false,
         DarlingFrontDoorWebProxy? frontDoorProxy = null,
         NpgsqlDataSource? composeReadPostgres = null,
-        DarlingWebTokenSet? webTokens = null)
+        DarlingWebTokenSet? webTokens = null,
+        Uri? publicOrigin = null)
     {
         /* A caller that does not say whether the token is under the length floor gets the same answer the start path
            computes: a short shared token serves reads only. Without this a forgotten argument meant writes. */
@@ -1426,7 +1437,14 @@ public sealed class DarlingWebHostService : BackgroundService
            or sign-in page. It registers its stamp with OnStarting and decides nothing about the request, so
            it adds no surface ahead of the Host guard; a class middleware, so the Host guard stays the first
            app.Use lambda. */
-        app.UseMiddleware<DarlingWebSecurityHeaders>(sendHsts);
+        if (publicOrigin is null)
+        {
+            app.UseMiddleware<DarlingWebSecurityHeaders>(sendHsts);
+        }
+        else
+        {
+            app.UseMiddleware<DarlingWebSecurityHeaders>(sendHsts, publicOrigin);
+        }
 
         app.UseResponseCompression();
 
