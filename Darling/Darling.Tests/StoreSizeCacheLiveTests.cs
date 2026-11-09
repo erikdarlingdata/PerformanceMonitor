@@ -78,10 +78,6 @@ public sealed class StoreSizeCacheLiveTests
             await oidConn.OpenAsync(ct);
             using var oidCmd = new NpgsqlCommand("SELECT oid FROM pg_database WHERE datname = current_database()", oidConn);
             dbId = (uint)(await oidCmd.ExecuteScalarAsync(ct))!;
-
-            using var resetCmd = new NpgsqlCommand("SELECT pg_stat_statements_reset(0, $1, 0)", oidConn);
-            resetCmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
-            await resetCmd.ExecuteNonQueryAsync(ct);
         }
 
         await using var table = new NpgsqlConnection(scratch.ConnectionString);
@@ -91,29 +87,40 @@ public sealed class StoreSizeCacheLiveTests
         ViewerDataService? service = null;
         try
         {
-            service = new ViewerDataService(scratch.ConnectionString);
-
-            var first = await service.GetStoreSizeBytesAsync(ct);
-            var second = await service.GetStoreSizeBytesAsync(ct);
-            Assert.Equal(first, second);
-
-            if (forcePass)
+            /* The whole window, from the counter's reset to the count, runs under PgStatementTable: the view is cluster-wide,
+               and an eviction pass from another session between the refreshes and the count takes the one pg_database_size
+               entry (run once, the least-used kind there is), which a run the pass landed in is voided and run again for. Each
+               run starts a service of its own, since a reading is cached on the instance for StoreSizeCacheLifetime. */
+            var run = await PgStatementTable.RunAsync(table, ct, async pass =>
             {
-                await PgStatementTable.ForcePassAsync(table, ct);
-            }
+                if (service is not null)
+                {
+                    await service.DisposeAsync();
+                }
 
-            long calls;
-            await using (var countConn = new NpgsqlConnection(scratch.ConnectionString))
-            {
-                await countConn.OpenAsync(ct);
-                using var countCmd = new NpgsqlCommand(
-                    "SELECT COALESCE(SUM(calls), 0)::bigint FROM pg_stat_statements WHERE dbid = $1 AND query LIKE '%pg_database_size%current_database%'",
-                    countConn);
-                countCmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
-                calls = (long)(await countCmd.ExecuteScalarAsync(ct))!;
-            }
+                await ResetStatementCountAsync(table, dbId, ct);
+                service = new ViewerDataService(scratch.ConnectionString);
 
-            Assert.Equal(1, calls);
+                var first = await service.GetStoreSizeBytesAsync(ct);
+                var second = await service.GetStoreSizeBytesAsync(ct);
+                Assert.Equal(first, second);
+
+                await pass.BeforeReadAsync(ct);
+
+                long calls;
+                await using (var countConn = new NpgsqlConnection(scratch.ConnectionString))
+                {
+                    await countConn.OpenAsync(ct);
+                    using var countCmd = new NpgsqlCommand(
+                        "SELECT COALESCE(SUM(calls), 0)::bigint FROM pg_stat_statements WHERE dbid = $1 AND query LIKE '%pg_database_size%current_database%'",
+                        countConn);
+                    countCmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
+                    calls = (long)(await countCmd.ExecuteScalarAsync(ct))!;
+                }
+
+                Assert.Equal(1, calls);
+            }, forcePass);
+            PgStatementTable.AssertNoPassInside(run);
 
             bodySucceeded = true;
         }
@@ -126,5 +133,13 @@ public sealed class StoreSizeCacheLiveTests
 
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
         }
+    }
+
+    /// <summary>Clears the module's counters for this database, so the counts that follow are of this run's statements alone.</summary>
+    private static async Task ResetStatementCountAsync(NpgsqlConnection connection, long dbId, System.Threading.CancellationToken ct)
+    {
+        await using var reset = new NpgsqlCommand("SELECT pg_stat_statements_reset(0, $1, 0)", connection);
+        reset.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
+        await reset.ExecuteNonQueryAsync(ct);
     }
 }

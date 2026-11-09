@@ -381,6 +381,14 @@ public sealed class ViewerQueryTabLoadTests
         return dbId;
     }
 
+    /// <summary>Clears the module's counters for this database, so the counts that follow are of this run's statements alone.</summary>
+    private static async Task ResetStatementCountAsync(NpgsqlConnection connection, long dbId, CancellationToken ct)
+    {
+        await using var reset = new NpgsqlCommand("SELECT pg_stat_statements_reset(0, $1, 0)", connection);
+        reset.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
+        await reset.ExecuteNonQueryAsync(ct);
+    }
+
     private static async Task<long> CountCallsAsync(string connectionString, long dbId, string likePattern, CancellationToken ct)
     {
         await using var conn = new NpgsqlConnection(connectionString);
@@ -420,29 +428,34 @@ FROM generate_series(1, 30) q", setup);
         }
 
         var dbId = await StartStatementCountingAsync(scratch.ConnectionString, ct);
+        await using var table = new NpgsqlConnection(scratch.ConnectionString);
+        await table.OpenAsync(ct);
         var bodySucceeded = false;
         await using var service = new ViewerDataService(scratch.ConnectionString);
         try
         {
-            var databases = Enumerable.Range(1, 31).Select(q => "db" + (q % 3)).ToArray();
-            var hashes = Enumerable.Range(1, 31).Select(q => "0xH" + q).ToArray();
-            var texts = await service.ReadHourlyQueryTextsAsync(7001, databases, hashes, ct);
-
-            Assert.Equal(31, texts.Length);
-            Assert.Equal("SELECT 1", texts[0]);
-            Assert.Equal("SELECT 30", texts[29]);
-            Assert.Equal("", texts[6]);   /* q = 7 has no text anywhere */
-            Assert.Equal("", texts[30]);  /* q = 31 has no row at all */
-
-            if (forcePass)
+            /* The whole window, from the counter's reset to the count, runs under PgStatementTable: the view is cluster-wide,
+               and an eviction pass from another session between the lookup and the count takes the one statement's entry (run
+               once, the least-used kind there is), which a run the pass landed in is voided and run again for. */
+            var run = await PgStatementTable.RunAsync(table, ct, async pass =>
             {
-                await using var table = new NpgsqlConnection(scratch.ConnectionString);
-                await table.OpenAsync(ct);
-                await PgStatementTable.ForcePassAsync(table, ct);
-            }
+                await ResetStatementCountAsync(table, dbId, ct);
+                var databases = Enumerable.Range(1, 31).Select(q => "db" + (q % 3)).ToArray();
+                var hashes = Enumerable.Range(1, 31).Select(q => "0xH" + q).ToArray();
+                var texts = await service.ReadHourlyQueryTextsAsync(7001, databases, hashes, ct);
 
-            var calls = await CountCallsAsync(scratch.ConnectionString, dbId, "%v_query_stats%", ct);
-            Assert.True(calls == 1, $"31 rows' text must take ONE store call, not one each; saw {calls}");
+                Assert.Equal(31, texts.Length);
+                Assert.Equal("SELECT 1", texts[0]);
+                Assert.Equal("SELECT 30", texts[29]);
+                Assert.Equal("", texts[6]);   /* q = 7 has no text anywhere */
+                Assert.Equal("", texts[30]);  /* q = 31 has no row at all */
+
+                await pass.BeforeReadAsync(ct);
+
+                var calls = await CountCallsAsync(scratch.ConnectionString, dbId, "%v_query_stats%", ct);
+                Assert.True(calls == 1, $"31 rows' text must take ONE store call, not one each; saw {calls}");
+            }, forcePass);
+            PgStatementTable.AssertNoPassInside(run);
             bodySucceeded = true;
         }
         finally
@@ -546,25 +559,40 @@ FROM (VALUES
         }
 
         var dbId = await StartStatementCountingAsync(scratch.ConnectionString, ct);
+        await using var table = new NpgsqlConnection(scratch.ConnectionString);
+        await table.OpenAsync(ct);
         var bodySucceeded = false;
-        await using var service = new ViewerDataService(scratch.ConnectionString);
+        ViewerDataService? service = null;
         try
         {
-            var size = await service.GetStoreSizeBytesAsync(ct);
-            Assert.True(size > 0, "a store with no recorded size reads its live size");
-            if (forcePass)
+            /* The same bracket as the text lookup's, around the size read and its count. Each run starts a service of its own,
+               since a reading is cached on the instance for StoreSizeCacheLifetime. */
+            var run = await PgStatementTable.RunAsync(table, ct, async pass =>
             {
-                await using var table = new NpgsqlConnection(scratch.ConnectionString);
-                await table.OpenAsync(ct);
-                await PgStatementTable.ForcePassAsync(table, ct);
-            }
+                if (service is not null)
+                {
+                    await service.DisposeAsync();
+                }
 
-            var live = await CountCallsAsync(scratch.ConnectionString, dbId, "%pg_database_size%current_database%", ct);
-            Assert.True(live == 1, $"one live directory walk expected; saw {live}");
+                await ResetStatementCountAsync(table, dbId, ct);
+                service = new ViewerDataService(scratch.ConnectionString);
+                var size = await service.GetStoreSizeBytesAsync(ct);
+                Assert.True(size > 0, "a store with no recorded size reads its live size");
+                await pass.BeforeReadAsync(ct);
+
+                var live = await CountCallsAsync(scratch.ConnectionString, dbId, "%pg_database_size%current_database%", ct);
+                Assert.True(live == 1, $"one live directory walk expected; saw {live}");
+            }, forcePass);
+            PgStatementTable.AssertNoPassInside(run);
             bodySucceeded = true;
         }
         finally
         {
+            if (service is not null)
+            {
+                await service.DisposeAsync();
+            }
+
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
         }
     }

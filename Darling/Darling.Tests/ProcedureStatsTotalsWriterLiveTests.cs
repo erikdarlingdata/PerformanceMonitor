@@ -934,21 +934,26 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
                 Convert.ToInt64(await ScalarAsync(rig.Connection,
                     "SELECT COALESCE(SUM(calls), 0)::bigint FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND query LIKE '" + like + "'", ct));
 
-            await ExecAsync(rig.Connection, "SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)", ct);
-
-            /* The server's first batch (no totals row, so no anchor) and a second one (an anchor, an empty range between it and the batch). */
-            Assert.Equal(1, await rig.WriteAsync(T0, new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10, 1, 60) }, ct));
-            Assert.Equal(1, await rig.WriteAsync(T0.AddMinutes(1), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 11, 1, 60) }, ct));
-
-            if (forcePass)
+            /* The whole window, from the counter's reset to the last count, runs under PgStatementTable: the view is
+               cluster-wide, and an eviction pass from another session between the batches and the counts takes the entries
+               run once or twice first, the anchor probe's among them, which a run the pass landed in is voided and run
+               again for. A second run writes the same two batches again, which recompute the same rows and totals. */
+            var run = await PgStatementTable.RunAsync(rig.Connection, ct, async pass =>
             {
-                await PgStatementTable.ForcePassAsync(rig.Connection, ct);
-            }
+                await ExecAsync(rig.Connection, "SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)", ct);
 
-            Assert.Equal(2L, await CallsAsync("%a.anchor IS NOT NULL%"));
-            Assert.Equal(0L, await CallsAsync("%pst_gap%"));
-            Assert.Equal(0L, await CallsAsync("%set_config(%"));
-            Assert.Equal(0L, await CallsAsync("%s.collection_time > $3%"));
+                /* The server's first batch (no totals row, so no anchor) and a second one (an anchor, an empty range between it and the batch). */
+                Assert.Equal(1, await rig.WriteAsync(T0, new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10, 1, 60) }, ct));
+                Assert.Equal(1, await rig.WriteAsync(T0.AddMinutes(1), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 11, 1, 60) }, ct));
+
+                await pass.BeforeReadAsync(ct);
+
+                Assert.Equal(2L, await CallsAsync("%a.anchor IS NOT NULL%"));
+                Assert.Equal(0L, await CallsAsync("%pst_gap%"));
+                Assert.Equal(0L, await CallsAsync("%set_config(%"));
+                Assert.Equal(0L, await CallsAsync("%s.collection_time > $3%"));
+            }, forcePass);
+            PgStatementTable.AssertNoPassInside(run);
 
             bodySucceeded = true;
         }

@@ -293,35 +293,42 @@ public sealed class PgLogNamedZoneTests
         }
 
         var before = await SessionZoneAsync();
-        PgLogNamedZone.ForgetZoneNames();
 
-        /* The case a log setting may be spelled in: the name is looked up case-insensitively, once. */
-        for (var read = 0; read < 3; read++)
+        /* The whole window, from the baseline to the last count, runs under PgStatementTable: the view is cluster-wide, and an
+           eviction pass from another session between a lookup and a count takes the scan's entry (run once, the least-used
+           kind there is), which a run the pass landed in is voided and run again for. Each run forgets the names first, so
+           its lookups scan again, and reads its own baseline. */
+        var run = await PgStatementTable.RunAsync(counter, ct, async pass =>
         {
-            var zones = await PgLogNamedZone.ResolveAsync(connection, "america/los_angeles", pairs, 30, ct);
-            Assert.NotNull(zones);
-            Assert.True(zones!.TryGet("2026-07-04 12:00:00", "PDT", out var utc));
-            Assert.Equal(expected, utc);
-        }
+            PgLogNamedZone.ForgetZoneNames();
+            baseline = ZoneScans();
 
-        if (forcePass)
-        {
-            await PgStatementTable.ForcePassAsync(counter, ct);
-        }
+            /* The case a log setting may be spelled in: the name is looked up case-insensitively, once. */
+            for (var read = 0; read < 3; read++)
+            {
+                var zones = await PgLogNamedZone.ResolveAsync(connection, "america/los_angeles", pairs, 30, ct);
+                Assert.NotNull(zones);
+                Assert.True(zones!.TryGet("2026-07-04 12:00:00", "PDT", out var utc));
+                Assert.Equal(expected, utc);
+            }
 
-        Assert.Equal(baseline + 1, ZoneScans());
+            await pass.BeforeReadAsync(ct);
 
-        foreach (var notNamed in new[] { "-03", "Mars/Olympus_Mons" })
-        {
-            var scansBefore = ZoneScans();
-            Assert.Null(await PgLogNamedZone.ResolveAsync(connection, notNamed, pairs, 30, ct));
+            Assert.Equal(baseline + 1, ZoneScans());
 
-            /* The repeat is answered from what the first found: no statement reaches the target, so a connection that
-               was never opened is not even noticed. */
-            await using var unopened = new NpgsqlConnection(connection.ConnectionString);
-            Assert.Null(await PgLogNamedZone.ResolveAsync(unopened, notNamed, pairs, 30, ct));
-            Assert.Equal(scansBefore + 1, ZoneScans());
-        }
+            foreach (var notNamed in new[] { "-03", "Mars/Olympus_Mons" })
+            {
+                var scansBefore = ZoneScans();
+                Assert.Null(await PgLogNamedZone.ResolveAsync(connection, notNamed, pairs, 30, ct));
+
+                /* The repeat is answered from what the first found: no statement reaches the target, so a connection that
+                   was never opened is not even noticed. */
+                await using var unopened = new NpgsqlConnection(connection.ConnectionString);
+                Assert.Null(await PgLogNamedZone.ResolveAsync(unopened, notNamed, pairs, 30, ct));
+                Assert.Equal(scansBefore + 1, ZoneScans());
+            }
+        }, forcePass);
+        PgStatementTable.AssertNoPassInside(run);
 
         Assert.Equal(before, await SessionZoneAsync());
     }

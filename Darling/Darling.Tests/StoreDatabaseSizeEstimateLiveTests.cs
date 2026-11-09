@@ -135,65 +135,78 @@ public sealed class StoreDatabaseSizeEstimateLiveTests
                 dbId = (uint)(await oidCmd.ExecuteScalarAsync(ct))!;
             }
 
-            await using (var resetCmd = new NpgsqlCommand("SELECT pg_stat_statements_reset(0, $1, 0)", connection))
+            /* The whole window, from the counter's reset to the daily sweep's count, runs under PgStatementTable: the view is
+               cluster-wide, and an eviction pass from another session between a sweep and a count takes the one
+               pg_database_size entry (run once, the least-used kind there is), which a run the pass landed in is voided and
+               run again for. A run starts from a store with no recorded row and without the catch-all checks' relations, so
+               its first sweep is the exact one and the checks create their relations whichever run it is. */
+            var run = await PgStatementTable.RunAsync(connection, ct, async pass =>
             {
-                resetCmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
-                await resetCmd.ExecuteNonQueryAsync(ct);
-            }
+                await using (var clear = new NpgsqlCommand(
+                    "DELETE FROM collect.store_metrics; DROP TABLE IF EXISTS " + CatchAllEstimateChecks.SeedTable + "; DROP TABLE IF EXISTS " + CatchAllEstimateChecks.GrowerTable,
+                    connection))
+                {
+                    await clear.ExecuteNonQueryAsync(ct);
+                }
 
-            var first = DateTime.UtcNow;
-            await StoreSelfMetrics.SweepAsync(connection, timescale, first, null, null, null, ct);
-            var firstRow = await ReadStoreRowAsync(connection, first, ct);
-            Assert.False(firstRow.SizeEstimated, "the first sweep of a store has no exact row in the last 23 hours, so it is exact");
-            Assert.True(firstRow.TotalBytes > 0);
-            if (forcePass)
-            {
-                await PgStatementTable.ForcePassAsync(connection, ct);
-            }
+                await using (var resetCmd = new NpgsqlCommand("SELECT pg_stat_statements_reset(0, $1, 0)", connection))
+                {
+                    resetCmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
+                    await resetCmd.ExecuteNonQueryAsync(ct);
+                }
 
-            var callsAfterFirst = await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct);
-            Assert.True(callsAfterFirst >= 1, "the exact sweep calls pg_database_size");
+                var first = DateTime.UtcNow;
+                await StoreSelfMetrics.SweepAsync(connection, timescale, first, null, null, null, ct);
+                var firstRow = await ReadStoreRowAsync(connection, first, ct);
+                Assert.False(firstRow.SizeEstimated, "the first sweep of a store has no exact row in the last 23 hours, so it is exact");
+                Assert.True(firstRow.TotalBytes > 0);
+                await pass.BeforeReadAsync(ct);
 
-            /* An hour later: the estimate, and no pg_database_size call. The count is read again right before the sweep, so
-               the comparison covers exactly the sweep's own window. */
-            var callsBeforeHourly = await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct);
-            var hourly = first.AddHours(1);
-            await StoreSelfMetrics.SweepAsync(connection, timescale, hourly, null, null, null, ct);
-            var hourlyRow = await ReadStoreRowAsync(connection, hourly, ct);
-            Assert.True(hourlyRow.SizeEstimated, "a sweep an hour after an exact one writes the catalog estimate");
-            Assert.True(hourlyRow.TotalBytes > 0);
-            Assert.Equal(callsBeforeHourly, await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct));
+                var callsAfterFirst = await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct);
+                Assert.True(callsAfterFirst >= 1, "the exact sweep calls pg_database_size");
 
-            /* Sane range: the estimate lags the files a little (relpages is the last vacuum's count, and the free-space
-               and visibility forks are not counted) but is the same order as the exact size. */
-            var ratio = (double)hourlyRow.TotalBytes!.Value / firstRow.TotalBytes!.Value;
-            TestContext.Current.SendDiagnosticMessage($"#6245 estimate {hourlyRow.TotalBytes} bytes vs exact {firstRow.TotalBytes} bytes (ratio {ratio:F3}, timescale {timescale})");
-            Assert.InRange(ratio, 0.5, 1.1);
+                /* An hour later: the estimate, and no pg_database_size call. The count is read again right before the sweep, so
+                   the comparison covers exactly the sweep's own window. */
+                var callsBeforeHourly = await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct);
+                var hourly = first.AddHours(1);
+                await StoreSelfMetrics.SweepAsync(connection, timescale, hourly, null, null, null, ct);
+                var hourlyRow = await ReadStoreRowAsync(connection, hourly, ct);
+                Assert.True(hourlyRow.SizeEstimated, "a sweep an hour after an exact one writes the catalog estimate");
+                Assert.True(hourlyRow.TotalBytes > 0);
+                Assert.Equal(callsBeforeHourly, await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct));
 
-            /* The newest recorded figure says it is an estimate to the readers that show it. */
-            await using (var stored = new NpgsqlCommand(StoreSelfMetrics.LatestStoreSizeWithTimeSql, connection))
-            await using (var storedReader = await stored.ExecuteReaderAsync(ct))
-            {
-                Assert.True(await storedReader.ReadAsync(ct));
-                Assert.Equal(hourlyRow.TotalBytes, storedReader.GetInt64(0));
-                Assert.True(storedReader.GetBoolean(2));
-            }
+                /* Sane range: the estimate lags the files a little (relpages is the last vacuum's count, and the free-space
+                   and visibility forks are not counted) but is the same order as the exact size. */
+                var ratio = (double)hourlyRow.TotalBytes!.Value / firstRow.TotalBytes!.Value;
+                TestContext.Current.SendDiagnosticMessage($"#6245 estimate {hourlyRow.TotalBytes} bytes vs exact {firstRow.TotalBytes} bytes (ratio {ratio:F3}, timescale {timescale})");
+                Assert.InRange(ratio, 0.5, 1.1);
 
-            /* #6971: the two catch-all rows follow the same split on both store shapes (the plain shape runs the plain twin
-               of the estimate statement): exact on the first sweep, estimated an hour later, and the estimate counts a relation
-               that is mostly TOAST, with its TOAST table and indexes. */
-            await CatchAllEstimateChecks.AssertHourlyRowsAgainstExactAsync(connection, first, hourly, ct);
-            await CatchAllEstimateChecks.AssertEstimateCountsTheToastedRelationAsync(connection, timescale, hourly, ct);
+                /* The newest recorded figure says it is an estimate to the readers that show it. */
+                await using (var stored = new NpgsqlCommand(StoreSelfMetrics.LatestStoreSizeWithTimeSql, connection))
+                await using (var storedReader = await stored.ExecuteReaderAsync(ct))
+                {
+                    Assert.True(await storedReader.ReadAsync(ct));
+                    Assert.Equal(hourlyRow.TotalBytes, storedReader.GetInt64(0));
+                    Assert.True(storedReader.GetBoolean(2));
+                }
 
-            /* 24 hours after the first: no exact row in the last 23 hours, so exact again, with one more call. */
-            var daily = first.AddHours(24);
-            await StoreSelfMetrics.SweepAsync(connection, timescale, daily, null, null, null, ct);
-            var dailyRow = await ReadStoreRowAsync(connection, daily, ct);
-            Assert.False(dailyRow.SizeEstimated, "the daily sweep writes the exact figure");
-            Assert.True(dailyRow.TotalBytes > 0);
-            Assert.True(await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct) > callsAfterFirst,
-                "the daily sweep calls pg_database_size again");
-            await CatchAllEstimateChecks.AssertDailyRowsAreExactAsync(connection, daily, ct);
+                /* #6971: the two catch-all rows follow the same split on both store shapes (the plain shape runs the plain twin
+                   of the estimate statement): exact on the first sweep, estimated an hour later, and the estimate counts a relation
+                   that is mostly TOAST, with its TOAST table and indexes. */
+                await CatchAllEstimateChecks.AssertHourlyRowsAgainstExactAsync(connection, first, hourly, ct);
+                await CatchAllEstimateChecks.AssertEstimateCountsTheToastedRelationAsync(connection, timescale, hourly, ct);
+
+                /* 24 hours after the first: no exact row in the last 23 hours, so exact again, with one more call. */
+                var daily = first.AddHours(24);
+                await StoreSelfMetrics.SweepAsync(connection, timescale, daily, null, null, null, ct);
+                var dailyRow = await ReadStoreRowAsync(connection, daily, ct);
+                Assert.False(dailyRow.SizeEstimated, "the daily sweep writes the exact figure");
+                Assert.True(dailyRow.TotalBytes > 0);
+                Assert.True(await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct) > callsAfterFirst,
+                    "the daily sweep calls pg_database_size again");
+                await CatchAllEstimateChecks.AssertDailyRowsAreExactAsync(connection, daily, ct);
+            }, forcePass);
+            PgStatementTable.AssertNoPassInside(run);
 
             bodySucceeded = true;
         }
@@ -252,37 +265,44 @@ public sealed class StoreDatabaseSizeEstimateLiveTests
                 dbId = (uint)(await oidCmd.ExecuteScalarAsync(ct))!;
             }
 
-            await using (var resetCmd = new NpgsqlCommand("SELECT pg_stat_statements_reset(0, $1, 0)", connection))
+            /* The same bracket as the sweep test's, around the sweep, the other callers and every count. */
+            var run = await PgStatementTable.RunAsync(connection, ct, async pass =>
             {
-                resetCmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
-                await resetCmd.ExecuteNonQueryAsync(ct);
-            }
+                await using (var clear = new NpgsqlCommand("DELETE FROM collect.store_metrics", connection))
+                {
+                    await clear.ExecuteNonQueryAsync(ct);
+                }
 
-            await StoreSelfMetrics.SweepAsync(connection, false, DateTime.UtcNow, null, null, null, ct);
-            if (forcePass)
-            {
-                await PgStatementTable.ForcePassAsync(connection, ct);
-            }
+                await using (var resetCmd = new NpgsqlCommand("SELECT pg_stat_statements_reset(0, $1, 0)", connection))
+                {
+                    resetCmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
+                    await resetCmd.ExecuteNonQueryAsync(ct);
+                }
 
-            var sweepBefore = await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct);
-            var anyBefore = await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct, sweepStatementOnly: false);
-            Assert.Equal(1, sweepBefore);
+                await StoreSelfMetrics.SweepAsync(connection, false, DateTime.UtcNow, null, null, null, ct);
+                await pass.BeforeReadAsync(ct);
 
-            /* Two other callers, each on its own connection, between the two reads: one spelled as an operator would spell
-               it, one as a scheduled job would. */
-            foreach (var statement in new[] { "SELECT pg_database_size(current_database())", "SELECT pg_database_size(current_database()) AS size_bytes" })
-            {
-                await using var other = new NpgsqlConnection(scratch.ConnectionString);
-                await other.OpenAsync(ct);
-                await using var size = new NpgsqlCommand(statement, other);
-                await size.ExecuteScalarAsync(ct);
-            }
+                var sweepBefore = await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct);
+                var anyBefore = await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct, sweepStatementOnly: false);
+                Assert.Equal(1, sweepBefore);
 
-            /* The unscoped count moves with every caller on the database, these two and any other in the window, so it is
-               held to have moved at all. The sweep-scoped count is what the hourly assertion reads, and it does not move. */
-            var anyAfter = await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct, sweepStatementOnly: false);
-            Assert.True(anyAfter >= anyBefore + 1, $"the unscoped count was {anyBefore} before the other callers and {anyAfter} after");
-            Assert.Equal(sweepBefore, await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct));
+                /* Two other callers, each on its own connection, between the two reads: one spelled as an operator would spell
+                   it, one as a scheduled job would. */
+                foreach (var statement in new[] { "SELECT pg_database_size(current_database())", "SELECT pg_database_size(current_database()) AS size_bytes" })
+                {
+                    await using var other = new NpgsqlConnection(scratch.ConnectionString);
+                    await other.OpenAsync(ct);
+                    await using var size = new NpgsqlCommand(statement, other);
+                    await size.ExecuteScalarAsync(ct);
+                }
+
+                /* The unscoped count moves with every caller on the database, these two and any other in the window, so it is
+                   held to have moved at all. The sweep-scoped count is what the hourly assertion reads, and it does not move. */
+                var anyAfter = await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct, sweepStatementOnly: false);
+                Assert.True(anyAfter >= anyBefore + 1, $"the unscoped count was {anyBefore} before the other callers and {anyAfter} after");
+                Assert.Equal(sweepBefore, await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct));
+            }, forcePass);
+            PgStatementTable.AssertNoPassInside(run);
 
             bodySucceeded = true;
         }
