@@ -198,7 +198,9 @@ public sealed class ServerTabStripFitTests
             using var duckDb = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
             return StaTestThread.Run(() => WithTheme(theme, () =>
             {
-                var w = NewWindow(dir);
+                /* The window reads the app's three store paths when it is built; point them at the test's folder, and put them back before it is deleted. */
+                using var paths = new AppPathsScope(dir);
+                var w = NewWindow();
                 try
                 {
                     return body(w, HostTab(w, duckDb));
@@ -215,14 +217,8 @@ public sealed class ServerTabStripFitTests
         }
     }
 
-    private static LiteMainWindow NewWindow(string dir)
+    private static LiteMainWindow NewWindow()
     {
-        /* The window reads these three paths when it is built; point them at a folder of the test's own. */
-        foreach (var (name, value) in new[] { ("DatabasePath", Path.Combine(dir, "monitor.duckdb")), ("ConfigDirectory", dir), ("SharedConfigDirectory", dir) })
-        {
-            typeof(PerformanceMonitorLite.App).GetProperty(name, BindingFlags.Static | BindingFlags.Public)!.SetValue(null, value);
-        }
-
         var w = new LiteMainWindow();
         var root = (UIElement)w.Content;
         w.Content = null;

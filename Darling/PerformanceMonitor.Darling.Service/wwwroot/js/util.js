@@ -1836,6 +1836,13 @@ export function busyRetryStrip(seconds) {
   return strip;
 }
 
+/** #8417: the timer the Retry-After wait of retryOnceWhenBusy runs on. The page's own setTimeout and clearTimeout; a test harness puts
+ *  its own in their place and advances the wait itself, so nothing in a test waits on wall-clock time. */
+export const busyRetryClock = {
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (timer) => clearTimeout(timer),
+};
+
 /**
  * #6800: runs `read`, and when the service refuses it busy (429) calls `onBusy(seconds)`, waits the Retry-After the reply named and
  * runs it once more. The second answer is the caller's, whatever it is, so a second refusal shows as the error it is. An abort of
@@ -1855,13 +1862,13 @@ export async function retryOnceWhenBusy(read, onBusy, signal) {
   try {
     waited = await new Promise((resolve) => {
       let onAbort = null;
-      const timer = setTimeout(() => {
+      const timer = busyRetryClock.setTimeout(() => {
         if (signal && onAbort) signal.removeEventListener("abort", onAbort);
         resolve(true);
       }, seconds * 1000);
       if (signal) {
         onAbort = () => {
-          clearTimeout(timer);
+          busyRetryClock.clearTimeout(timer);
           resolve(false);
         };
         signal.addEventListener("abort", onAbort, { once: true });

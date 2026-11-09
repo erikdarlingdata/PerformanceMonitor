@@ -65,7 +65,7 @@ public sealed class DarlingMcpFleetSweepTools
         "pre-computed, plus its would-have-paged ledger when one was taken), and the watch-item worklist with " +
         "its hysteresis position; pass sweep_id (as a STRING - the ids are too large for a JSON number to " +
         "round-trip) to fetch one sweep in full instead. SIZE: the newest sweep's document ships once, under latest; " +
-        "its timeline entry keeps the row counts (report.fleet.bands, report.watch, report.would_have_paged) and says " +
+        "its timeline entry keeps the row counts (report.fleet.bands, report.watch with carried as a count, report.would_have_paged) and says " +
         "report_under: latest. The reply is cut to the shared 32 KB response budget in two steps - the timeline loses " +
         "its oldest sweeps first (the newest entry always rides), then the worklist loses items by standing (carried " +
         "before open, oldest first, so the open items and the newest survive; the items kept ride in the worklist's " +
@@ -176,9 +176,11 @@ public sealed class DarlingMcpFleetSweepTools
             /* #8318: the newest sweep's document ships once. latest carries it in full, with its verdicts, so the
                timeline entry for the same sweep keeps its header facts and a slim report holding exactly the fields
                the sweep rows draw from (fleet.bands, watch, and would_have_paged when the sweep ran muted), equal to
-               latest's, and names latest with report_under. Older entries keep their documents. The Viewer's and the
-               web feed's entry shape (BuildRunNode) is unchanged; ViewerFleetSweepsReadTests compares this reply's
-               newest entry with its document taken from latest, field for field. */
+               latest's except that watch.carried is the carried items' COUNT where latest's is their list (the rows
+               read opened and closed; the carried items ride once, under latest and in watch_items), and names latest
+               with report_under. Older entries keep their documents. The Viewer's and the web feed's entry shape
+               (BuildRunNode) is unchanged; ViewerFleetSweepsReadTests compares this reply's newest entry with its
+               document taken from latest, field for field. */
             var latestId = latestNode["sweep_id"]?.GetValue<string>();
             foreach (var entry in entries.OfType<JsonObject>())
             {
@@ -197,7 +199,13 @@ public sealed class DarlingMcpFleetSweepTools
 
                     if (full["watch"] is JsonNode watch)
                     {
-                        slim["watch"] = watch.DeepClone();
+                        var slimWatch = watch.DeepClone();
+                        if (slimWatch is JsonObject watchObject && watchObject["carried"] is JsonArray carried)
+                        {
+                            watchObject["carried"] = carried.Count;
+                        }
+
+                        slim["watch"] = slimWatch;
                     }
 
                     if (full["would_have_paged"] is JsonNode wouldHavePaged)

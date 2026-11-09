@@ -1157,4 +1157,67 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
             await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
         }
     }
+    /// <summary>
+    /// L5, plain raw tables in a database that carries the extension row: a store the service runs without TimescaleDB can still
+    /// hold <c>timescaledb</c> in <c>pg_extension</c> (a database created from a template that carries it does, and the TimescaleDB
+    /// image installs the extension into <c>template1</c>), while its raw tables are plain tables that were never converted. The
+    /// gated raw purge owns raw HYPERTABLES, whose chunks it drops; a plain table has no chunks, so the sweep's DELETE is the only
+    /// purge those rows ever get. The sweep therefore purges the raw rows past the horizon, and the totals follow the raw floor as
+    /// on any plain store, whichever way the worker's <c>timescaleAvailable</c> latch reads: true, as the service passes it once
+    /// its setup block has created the extension and found the row, or false, in the window after a failed setup block. A sweep
+    /// that left the raw table to the gated purge on the extension row alone, or held it behind the rollup coverage gate and
+    /// <c>drop_chunks</c> as if it were a hypertable, would hold both tables' rows past the horizon for good.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TheRealRetentionSweep_OnPlainRawTablesInADatabaseWithTheExtensionRow_PurgesTheRawRowsAndTheirTotals(bool timescaleAvailable)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var serverId = timescaleAvailable ? -945322 : -945321;
+
+        await using var rig = await Rig.OpenAsync(serverId, timescaleAvailable ? "ProcTotalsPurgeExtRowOn" : "ProcTotalsPurgeExtRow", ct, plainStore: true);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* The extension row alone, created AFTER the migration so the raw tables stay plain: the shape of a database cloned from a template that carries the extension. */
+            var extensionPresent = await LiveTimescaleProbe.TryEnableAsync(rig.Scratch.ConnectionString, ct);
+            Assert.SkipWhen(!extensionPresent, "This cluster cannot load the timescaledb library.");
+            Assert.False((bool)(await ScalarAsync(rig.Connection, "SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name = 'procedure_stats')", ct))!,
+                "the raw table stays a plain table: only the extension row is present");
+
+            var now = NowToTheSecond();
+            foreach (var age in new[] { 60, 45, 1 })
+            {
+                Assert.Equal(1, await rig.WriteAsync(now.AddDays(-age), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10 + age, 1, 60) }, ct));
+            }
+
+            Assert.Equal(3L, await RawRowsAsync(rig.Connection, ct));
+            Assert.Equal(3L, (await TotalsAsync(rig.Connection, ct)).Totals);
+
+            var logger = new CapturingLogger();
+            await DarlingRetention.PurgeAsync(rig.DataSource, timescaleAvailable, logger, ct, retentionDaysFor: static _ => 40);
+
+            var rawWarnings = logger.Entries
+                .Where(static entry => entry.Level == Microsoft.Extensions.Logging.LogLevel.Warning && entry.Message.Contains("procedure_stats", StringComparison.Ordinal))
+                .Select(static entry => entry.Message)
+                .ToList();
+            Assert.True(rawWarnings.Count == 0, "no warning names the raw table or its totals: " + string.Join(" | ", rawWarnings));
+            Assert.Equal(1L, await RawRowsAsync(rig.Connection, ct));
+            var (count, oldest) = await TotalsAsync(rig.Connection, ct);
+            Assert.Equal(1L, count);
+            Assert.True(oldest > now.AddDays(-2), "only the recent collection's totals row is left");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(rig.Scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    private static async Task<long> RawRowsAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        Convert.ToInt64(await ScalarAsync(connection, "SELECT count(*) FROM collect.procedure_stats", ct));
 }
