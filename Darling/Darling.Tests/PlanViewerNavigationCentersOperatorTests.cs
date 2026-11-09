@@ -42,7 +42,7 @@ public sealed class PlanViewerNavigationCentersOperatorTests
     {
         StaTestThread.Run(async () =>
         {
-            var control = new PlanViewerControl();
+            var control = NewControl();
             try
             {
                 var host = Host(control);
@@ -72,7 +72,7 @@ public sealed class PlanViewerNavigationCentersOperatorTests
     {
         StaTestThread.Run(async () =>
         {
-            var control = new PlanViewerControl();
+            var control = NewControl();
             try
             {
                 var host = Host(control);
@@ -110,7 +110,7 @@ public sealed class PlanViewerNavigationCentersOperatorTests
     {
         StaTestThread.Run(() =>
         {
-            var control = new PlanViewerControl();
+            var control = NewControl();
             try
             {
                 var setZoom = typeof(PlanViewerControl).GetMethod("SetZoom", Instance);
@@ -131,7 +131,7 @@ public sealed class PlanViewerNavigationCentersOperatorTests
     {
         StaTestThread.Run(async () =>
         {
-            var control = new PlanViewerControl();
+            var control = NewControl();
             try
             {
                 var host = Host(control);
@@ -252,4 +252,16 @@ public sealed class PlanViewerNavigationCentersOperatorTests
 
     private static string RelOp(int nodeId, string op, string rows, string cost, string operatorElement) =>
         $"<RelOp NodeId=\"{nodeId}\" PhysicalOp=\"{op}\" LogicalOp=\"{op}\" EstimateRows=\"{rows}\" EstimateIO=\"0\" EstimateCPU=\"0.0001\" AvgRowSize=\"9\" EstimatedTotalSubtreeCost=\"{cost}\" Parallel=\"0\" EstimateRebinds=\"0\" EstimateRewinds=\"0\" EstimatedExecutionMode=\"Row\"><OutputList/>{operatorElement}</RelOp>";
+
+    /// <summary>A plan viewer carrying the Viewer's Dark theme in its own resources, so its brushes resolve without
+    /// touching the application-scope theme.</summary>
+    private static PlanViewerControl NewControl()
+    {
+        var control = new PlanViewerControl();
+        control.Resources.MergedDictionaries.Add(new ResourceDictionary
+        {
+            Source = new Uri("pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml"),
+        });
+        return control;
+    }
 }
