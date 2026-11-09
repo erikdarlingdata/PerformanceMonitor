@@ -248,7 +248,7 @@ public partial class DatabaseStateOverridesWindow : Window
         {
             if (IsLoaded)
             {
-                StatusText.Text = StoreBusyReport.Report("DatabaseStates", $"Reset {row.DatabaseName} to current", ex, $"resetting {row.DatabaseName}");
+                StatusText.Text = StoreBusyReport.Report("DatabaseStates", $"Reset {row.DatabaseName} to last known state", ex, $"resetting {row.DatabaseName}");
             }
         }
         catch (Exception ex)
