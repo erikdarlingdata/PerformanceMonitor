@@ -107,6 +107,8 @@ public partial class AvailabilityGroupsTab : UserControl
             var digest = AgTopology.ComputeDigest(groups);
             if (_lastDigest == digest)
             {
+                /* Nothing to rebind; the line stands again, so a failure reported since the last render does not outlive the read that recovered. */
+                StatusChanged?.Invoke(StatusLine(groups.Count));
                 return;
             }
 
@@ -139,10 +141,13 @@ public partial class AvailabilityGroupsTab : UserControl
         AgCards.Visibility = groups.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
         SummaryText.Text = BuildSummary(groups);
 
-        StatusChanged?.Invoke(groups.Count == 0
-            ? "No Availability Groups observed."
-            : $"Availability Groups: {SummaryText.Text}");
+        StatusChanged?.Invoke(StatusLine(groups.Count));
     }
+
+    /// <summary>The tab's status line for a loaded topology: the summary, or that none was observed.</summary>
+    private string StatusLine(int groupCount) => groupCount == 0
+        ? "No Availability Groups observed."
+        : $"Availability Groups: {SummaryText.Text}";
 
     /// <summary>
     /// The counts, and why there are two of them: an AG whose replicas are all monitored produces one CARD per

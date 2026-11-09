@@ -1331,11 +1331,6 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>#6136: the status bar names the tab that was just refreshed. Alert History, Job History and the other tabs that set no
-    /// text of their own kept reading "overview - refreshed ..." from the last Overview load. The stamp is kept for the tab that was
-    /// refreshed, which may no longer be the one on screen by the time its read finishes.</summary>
-    private void StampRefreshed(TabItem tab, string tabName) => SetTabStatus(tab, $"{tabName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
-
     private async Task LoadVisibleTabAsync()
     {
         /* The tab whose load this is, read once: the reader may have moved to another tab by the time the load finishes or fails, and
@@ -1355,33 +1350,29 @@ public partial class MainWindow : Window
                 case TabItem tab when ReferenceEquals(tab, RecommendationsTab):
                     await LoadRecommendationsAsync();
                     break;
+                /* Each fleet tab below writes its own line through the writer wired to it in the constructor: "<tab> — refreshed …" when
+                   its load finishes, or its failure line when a read fails. Its refresh returns normally either way, so nothing here
+                   writes after it. */
                 case TabItem tab when ReferenceEquals(tab, AlertsTab):
                     await AlertsHistoryContent.RefreshAlertsAsync();
-                    StampRefreshed(tab, "alert history");
                     break;
                 case TabItem tab when ReferenceEquals(tab, JobHistoryTabItem):
                     await JobHistoryContent.RefreshJobsAsync();
-                    StampRefreshed(tab, "job history");
                     break;
                 case TabItem tab when ReferenceEquals(tab, DatabaseProtectionTabItem):
                     await DatabaseProtectionContent.RefreshAsync();
-                    StampRefreshed(tab, "database protection");
                     break;
                 case TabItem tab when ReferenceEquals(tab, AgentAlertsTabItem):
                     await AgentAlertsContent.RefreshAsync();
-                    StampRefreshed(tab, "agent alerts");
                     break;
                 case TabItem tab when ReferenceEquals(tab, FleetSweepsTabItem):
                     await FleetSweepsContent.RefreshAsync();
-                    StampRefreshed(tab, "fleet sweeps");
                     break;
                 case TabItem tab when ReferenceEquals(tab, IdentityCapacityTabItem):
                     await IdentityCapacityContent.RefreshAsync();
-                    StampRefreshed(tab, "identity capacity");
                     break;
                 case TabItem tab when ReferenceEquals(tab, AvailabilityGroupsTabItem):
                     await RefreshAvailabilityGroupsAsync();
-                    StampRefreshed(tab, "availability groups");
                     break;
                 case TabItem tab when ReferenceEquals(tab, FinOpsTab):
                     /* The picker lists the servers known when LoadServersAsync last ran; a server added since
@@ -1402,7 +1393,6 @@ public partial class MainWindow : Window
                         }
                     }
                     await FinOpsContent.RefreshActiveSubTabAsync();
-                    StampRefreshed(tab, "finops");
                     break;
             }
         }
