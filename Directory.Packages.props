@@ -48,7 +48,7 @@
     <!-- #6480: the Darling MSI (Darling/msi). The WixToolset.Sdk version is in the wixproj's Sdk attribute and moves with this one. -->
     <PackageVersion Include="WixToolset.Util.wixext" Version="5.0.2" />
     <PackageVersion Include="WixToolset.UI.wixext" Version="5.0.2" />
-    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.1" />
     <PackageVersion Include="xunit.v3" Version="4.0.3" />
     <!-- The exporter tests only: xunit.v3 with Microsoft.Testing.Platform off, so the .NET 10 SDK accepts a VSTest-style `dotnet test`. -->
     <PackageVersion Include="xunit.v3.mtp-off" Version="4.0.3" />
