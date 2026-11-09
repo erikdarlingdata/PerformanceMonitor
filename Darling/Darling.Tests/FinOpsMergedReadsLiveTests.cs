@@ -392,7 +392,7 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
                 oldSeriesCmd.Parameters.AddWithValue(topN);
                 var oldSamples = await ReadSamplesAsync(oldSeriesCmd, ct);
 
-                var (newObjects, newSamples) = await viewer.GetObjectGrowthHeatmapDataAsync(ServerId, GrowthDb, daysBack: 30, topN: topN, ct);
+                var (newObjects, newSamples) = await viewer.GetObjectGrowthHeatmapDataAsync(ServerId, GrowthDb, TimeZoneInfo.Utc, daysBack: 30, topN: topN, ct);
 
                 Assert.Equal(2, oldObjects.Count);
                 Assert.Equal(oldObjects, newObjects.Select(o => (o.SchemaName, o.TableName, o.CurrentReservedMb, o.CurrentUsedMb, o.TotalRows, o.IndexCount, o.Growth30dMb!.Value)).ToList());
@@ -414,7 +414,7 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
                 Assert.Empty(oldEmptyObjects);
             }
 
-            var (emptyObjects, emptySamples) = await viewer.GetObjectGrowthHeatmapDataAsync(ServerId, StoppedDb, daysBack: 30, topN: topN, ct);
+            var (emptyObjects, emptySamples) = await viewer.GetObjectGrowthHeatmapDataAsync(ServerId, StoppedDb, TimeZoneInfo.Utc, daysBack: 30, topN: topN, ct);
             Assert.Empty(emptyObjects);
             Assert.Empty(emptySamples);
 

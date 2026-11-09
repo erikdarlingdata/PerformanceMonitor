@@ -495,14 +495,17 @@ ORDER BY lower(database_name), database_name";
     /// Data for the per-database object-growth heatmap drill (#1138 §3A): the top-N objects in a single
     /// database ranked by reserved-MB growth over the window, plus their daily reserved-MB series for the
     /// heatmap. Two-step + DB-scoped for perf — the series only touches the ranked top-N. Returns the ranked
-    /// summary rows (companion grid) and the long-form samples (pivoted to a matrix by FinOpsHeatmapBuilder).
+    /// summary rows (companion grid) and the long-form samples (pivoted to a matrix by FinOpsHeatmapBuilder). Each sample's Day
+    /// is one day as <paramref name="dayZone"/> counts days (see <see cref="DisplayDays"/>): the selected time display's zone from
+    /// the tab, UTC when null, so the heatmap's columns read in the same clock as every other time on the page.
     /// </summary>
     public async Task<(List<ObjectSizeGrowthRow> Objects, List<FinOpsObjectDaySample> Samples)> GetObjectGrowthHeatmapDataAsync(
-        int serverId, string databaseName, int daysBack = 30, int topN = 20)
+        int serverId, string databaseName, int daysBack = 30, int topN = 20, TimeZoneInfo? dayZone = null)
     {
         using var connection = await OpenConnectionAsync();
 
-        var windowStart = DateTime.UtcNow.AddDays(-daysBack);
+        var nowUtc = DateTime.UtcNow;
+        var windowStart = nowUtc.AddDays(-daysBack);
 
         var objects = new List<ObjectSizeGrowthRow>();
         var samples = new List<FinOpsObjectDaySample>();
@@ -602,16 +605,22 @@ ranked AS (
     LEFT JOIN earliest e ON e.schema_name = l.schema_name AND e.table_name = l.table_name
     ORDER BY growth_mb DESC NULLS LAST, l.schema_name, l.table_name
     LIMIT {topN}
+),
+days(day, start_utc, end_utc) AS (
+    VALUES {DayBucketValues(DisplayDays(windowStart, nowUtc, dayZone))}
 )
 SELECT
     ios.schema_name,
     ios.table_name,
-    date_trunc('day', ios.collection_time) AS the_day,
+    d.day AS the_day,
     SUM(ios.reserved_mb) AS reserved_mb
 FROM v_index_object_stats ios
 JOIN ranked r ON r.schema_name = ios.schema_name AND r.table_name = ios.table_name
+JOIN days d
+  ON ios.collection_time >= d.start_utc
+ AND ios.collection_time < d.end_utc
 WHERE ios.server_id = $1 AND ios.database_name = $2 AND ios.collection_time >= $3
-GROUP BY ios.schema_name, ios.table_name, date_trunc('day', ios.collection_time)
+GROUP BY ios.schema_name, ios.table_name, d.day
 ORDER BY ios.schema_name, ios.table_name, the_day";
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
             command.Parameters.Add(new DuckDBParameter { Value = databaseName });
