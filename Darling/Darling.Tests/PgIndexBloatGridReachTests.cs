@@ -354,9 +354,9 @@ public sealed class PgIndexBloatGridReachTests
             var prose = page.Composition;
 
             Assert.Contains(
-                N(answerlessInGrid) + " index(es) with NO answer", prose, StringComparison.Ordinal);
+                N(answerlessInGrid) + (answerlessInGrid == 1 ? " index" : " indexes") + " with NO answer", prose, StringComparison.Ordinal);
             Assert.Contains(
-                N(answeredInGrid) + " answered index(es) behind them", prose, StringComparison.Ordinal);
+                N(answeredInGrid) + (answeredInGrid == 1 ? " answered index" : " answered indexes") + " behind them", prose, StringComparison.Ordinal);
 
             /* CLOSED: no other number may appear. Each permitted figure is either a count of the grid, a
                count of a READ that the sentence labels as one, or the cap the grid was given.

@@ -39,7 +39,7 @@ public sealed class NoDatabaseAccessNoteTests
         var note = EnumeratedCollectorDriver.BuildNote(false, new[] { NoAccess("Sales"), NoAccess("Billing") }, awsRds: false);
 
         Assert.NotNull(note);
-        Assert.Contains("2 online user database(s)", note);
+        Assert.Contains("2 online user databases", note);
         Assert.Contains("Sales, Billing", note);
         Assert.Contains("no user in", note);
         Assert.Contains("nothing was collected", note);
@@ -53,7 +53,7 @@ public sealed class NoDatabaseAccessNoteTests
 
         Assert.NotNull(note);
         Assert.Contains("give the monitoring login a user in each of them", note);
-        Assert.Contains("1 online user database(s)", note);
+        Assert.Contains("1 online user database", note);
     }
 
     [Fact]
@@ -62,7 +62,7 @@ public sealed class NoDatabaseAccessNoteTests
         var failures = Enumerable.Range(1, 12).Select(i => NoAccess("Db" + i)).ToList();
         var note = EnumeratedCollectorDriver.BuildNote(false, failures, awsRds: false)!;
 
-        Assert.Contains("12 online user database(s)", note);
+        Assert.Contains("12 online user databases", note);
         Assert.Contains("Db10", note);
         Assert.DoesNotContain("Db11,", note);
         Assert.Contains("and 2 more", note);
@@ -74,8 +74,8 @@ public sealed class NoDatabaseAccessNoteTests
         var note = EnumeratedCollectorDriver.BuildNote(
             false, new[] { NoAccess("Sales"), new EnumerationProbeFailure("Mid", "database is restoring") }, awsRds: false)!;
 
-        Assert.Contains("1 item(s) failed their enumeration probe", note);
-        Assert.Contains("1 online user database(s)", note);
+        Assert.Contains("1 item failed the enumeration probe", note);
+        Assert.Contains("1 online user database", note);
     }
 
     [Fact]
@@ -105,7 +105,7 @@ public sealed class NoDatabaseAccessNoteTests
         cycle.Add(new ProbeFailureOutcome(new[] { NoAccess("A") }, null));
         cycle.Add(new ProbeFailureOutcome(new[] { NoAccess("B") }, null));
 
-        Assert.Contains("2 online user database(s)", cycle.Note);
+        Assert.Contains("2 online user databases", cycle.Note);
         Assert.Contains("A, B", cycle.Note);
     }
 
@@ -136,7 +136,7 @@ public sealed class NoDatabaseAccessNoteTests
         Assert.Null(MonitoringGrantScript.DescribeNoUserDatabases(0, "pm", awsRds: true));
 
         var box = MonitoringGrantScript.DescribeNoUserDatabases(3, "pm", awsRds: false)!;
-        Assert.Contains("3 online user database(s)", box);
+        Assert.Contains("3 online user databases", box);
         Assert.Contains("give [pm] a user in each of them", box);
         Assert.Contains("CONNECT ANY DATABASE", box);
 

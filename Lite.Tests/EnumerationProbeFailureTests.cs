@@ -106,7 +106,7 @@ public class EnumerationProbeFailureTests
 
         Assert.NotNull(outcome.Note);
         Assert.DoesNotContain(EnumeratedCollectorDriver.EmptyEnumerationMessage, outcome.Note);
-        Assert.Contains("2 item(s) failed their enumeration probe", outcome.Note);
+        Assert.Contains("2 items failed the enumeration probe", outcome.Note);
     }
 
     [Fact]
@@ -124,7 +124,7 @@ public class EnumerationProbeFailureTests
         Assert.Empty(outcome.Items);
         Assert.NotNull(outcome.Note);
         Assert.StartsWith(EnumeratedCollectorDriver.EmptyEnumerationMessage, outcome.Note);
-        Assert.Contains("3 item(s) failed their enumeration probe", outcome.Note);
+        Assert.Contains("3 items failed the enumeration probe", outcome.Note);
     }
 
     [Fact]
@@ -149,7 +149,7 @@ public class EnumerationProbeFailureTests
            text goes to the log, capped. */
         var note = EnumeratedCollectorDriver.BuildNote(enumerationWasEmpty: false, probeFailureCount: 250);
 
-        Assert.Equal("250 item(s) failed their enumeration probe - see the app log for the per-item errors", note);
+        Assert.Equal("250 items failed the enumeration probe - see the app log for the per-item errors", note);
     }
 
     [Fact]
@@ -201,7 +201,7 @@ public class EnumerationProbeFailureTests
         var failure = Assert.Single(outcome.ProbeFailures);
         Assert.Equal(EnumeratedCollectorDriver.ContractViolationItem, failure.Item);
         Assert.Equal(EnumeratedCollectorDriver.ContractViolationError, failure.Error);
-        Assert.Contains("1 item(s) failed their enumeration probe", outcome.Note);
+        Assert.Contains("1 item failed the enumeration probe", outcome.Note);
     }
 
     [Fact]
@@ -335,7 +335,7 @@ public class EnumerationProbeFailureTests
                 DatabaseScopedConfigCollector.Instance, new ServerConnection { ServerName = "s", DisplayName = "s" }, failures);
 
             var info = Assert.Single(log, l => l.Level == LogLevel.Information);
-            Assert.Contains("12 online user database(s) not collected", info.Message, StringComparison.Ordinal);
+            Assert.Contains("12 online user databases not collected", info.Message, StringComparison.Ordinal);
             Assert.Contains("db09", info.Message, StringComparison.Ordinal);
             Assert.DoesNotContain("db10", info.Message, StringComparison.Ordinal);
             Assert.Contains("and 2 more", info.Message, StringComparison.Ordinal);

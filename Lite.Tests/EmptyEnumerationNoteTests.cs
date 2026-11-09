@@ -63,7 +63,7 @@ public class EmptyEnumerationNoteTests
         /* Via the shared driver, never a copy of the text — a literal here is exactly the drift this
            fix exists to prevent. */
         Assert.DoesNotContain("\"enumeration yielded 0 items", source);
-        Assert.DoesNotContain("failed their enumeration probe", source);
+        Assert.DoesNotContain("failed the enumeration probe", source);
     }
 
     [Fact]
