@@ -113,20 +113,22 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// Hourly deadlock-count buckets for the slicer — Lite's <c>GetDeadlockSlicerDataAsync</c> ported.
+    /// Deadlock-count buckets for the slicer — Lite's <c>GetDeadlockSlicerDataAsync</c> ported, at the width
+    /// <see cref="SlicerBuckets"/> picks for the window ($5 minutes, on the grid every width of it divides: a minute
+    /// over a short window, an hour over a day).
     /// $1 server_id, $2 window start, $3 window end (naive UTC). Windows and buckets on <c>deadlock_time</c>.
     /// $4 is the <see cref="EventWindowFloor"/> for $2 (no upper bound).
     /// </summary>
-    public const string DeadlockSlicerSql = """
+    public const string DeadlockSlicerSql = $"""
         SELECT
-            date_trunc('hour', deadlock_time) AS bucket,
+            date_bin(CAST($5 AS integer) * INTERVAL '1 minute', deadlock_time, {TrendBucketSql.OriginSql}) AS bucket,
             COUNT(*) AS deadlock_count
         FROM v_deadlocks
         WHERE server_id = $1
         AND   deadlock_time >= $2
         AND   deadlock_time <= $3
         AND   collection_time >= $4
-        GROUP BY date_trunc('hour', deadlock_time)
+        GROUP BY 1
         ORDER BY bucket
         """;
 
@@ -139,6 +141,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = SlicerBuckets.MinutesFor(startUtc, endUtc) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

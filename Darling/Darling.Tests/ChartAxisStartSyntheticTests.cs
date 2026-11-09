@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// Blocking tab's charts, whose zero baselines and padded series reach back to the picked start. Each of them left the axis at the
 /// picked start (a full day for a server with three hours of history) before the baselines stopped counting.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ChartAxisStartSyntheticTests
 {
     private static readonly string[] LaneNames = ["CpuChart", "WaitStatsChart", "BlockingChart", "MemoryChart", "FileIoChart"];

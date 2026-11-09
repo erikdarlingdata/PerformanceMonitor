@@ -110,7 +110,8 @@ VALUES
         await using var postgres = NpgsqlDataSource.Create(ReadConnectionString(scratch));
 
         var census = await DarlingOversizedPlanBacklogReader.GetCollectorCensusAsync(postgres, null, ct);
-        var servers = await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(postgres, null, ct);
+        /* The fixture's stamps are fixed dates, so the day the three last-day counts cover is fixed too; nothing here reads them. */
+        var servers = await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(postgres, null, new DateTime(2026, 9, 13, 0, 0, 0, DateTimeKind.Unspecified), ct);
 
         Assert.Equal(
             new[] { OversizedPlanBacklog.ProcedureStatsCollectorName, OversizedPlanBacklog.QueryStatsCollectorName },
@@ -205,7 +206,7 @@ VALUES
             claimed.OrderBy(h => h, StringComparer.Ordinal).ToArray());
 
         /* Server scoping narrows BOTH grains, rather than filtering only the listing. */
-        var scoped = await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(postgres, RegisteredServerId, ct);
+        var scoped = await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(postgres, RegisteredServerId, new DateTime(2026, 9, 13, 0, 0, 0, DateTimeKind.Unspecified), ct);
         Assert.Equal(RegisteredServerId, scoped.Single().ServerId);
         Assert.Equal(
             5L,

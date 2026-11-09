@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// Viewer server tab and FinOps tab are built off screen; every chart is found by walking the tree and read from the rendered control
 /// (the card's Title, the plot's left axis title), so a new chart is checked with no change here.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerChartCardsTests
 {
     private static readonly BindingFlags Instance = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;

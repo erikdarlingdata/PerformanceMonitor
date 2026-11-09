@@ -14,6 +14,7 @@ using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Data;
 using System.Windows.Media;
 using System.Windows.Shapes;
 using PerformanceMonitor.Darling.Viewer;
@@ -25,10 +26,13 @@ namespace Darling.Tests;
 /// <summary>
 /// The Viewer's dialogs, rendered with its Dark theme: the column filter popup names a column by its header; the Edit Server
 /// dialog heads itself Edit; Credential Profiles with no profiles says so inside its grid; Database State Overrides calls its state
-/// column the last known state; the Analysis card's heading is sized and placed like the Delivery card's and its note points at
-/// the Delivery tab; Manage Servers shows every column at its default size; and, from the theme, a disabled PasswordBox keeps
-/// a disabled TextBox's fill while a chosen radio button marks itself with the accent.
+/// column the last known state and its reset button names that column; Manage Mute Rules keeps its empty-grid message on one line
+/// at the window's own size; the Analysis, Alert Muting and Triage Defaults card headings are sized and placed like the Delivery card's, the
+/// Analysis description sits under its heading as the Teams description does, and the Analysis note points at the Delivery tab;
+/// Manage Servers shows every column at its default size; and, from the theme, a disabled PasswordBox keeps a disabled TextBox's
+/// fill while a chosen radio button marks itself with the accent.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerDialogsWalkTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
@@ -126,6 +130,91 @@ public sealed class ViewerDialogsWalkTests
 
         Assert.Equal(delivery.FontSize, analysis.FontSize);
         Assert.Equal(delivery.Item2, analysis.Item2);
+    }
+
+    [Fact]
+    public void TheAlertMutingHeading_IsSizedAndPlacedLikeTheDeliveryCardHeading()
+    {
+        var (muting, delivery) = WithSettings(window =>
+        {
+            var deliveryHeading = TextBlocks(SelectTab(window, "DeliveryTab")).First(t => t.Text == "Delivery");
+            var deliveryAt = HeadingPlacement(deliveryHeading);
+
+            var mutingHeading = TextBlocks(SelectTab(window, "MutingTriageTab")).Single(t => t.Text == "Alert Muting");
+            return (HeadingPlacement(mutingHeading), deliveryAt);
+        });
+
+        Assert.True(muting == delivery, $"Alert Muting is {Describe(muting)}; the Delivery card's heading is {Describe(delivery)}");
+    }
+
+    [Fact]
+    public void TheTriageDefaultsHeading_IsSizedAndPlacedLikeTheDeliveryCardHeading()
+    {
+        var (triage, delivery) = WithSettings(window =>
+        {
+            var deliveryHeading = TextBlocks(SelectTab(window, "DeliveryTab")).First(t => t.Text == "Delivery");
+            var deliveryAt = HeadingPlacement(deliveryHeading);
+
+            var triageHeading = TextBlocks(SelectTab(window, "MutingTriageTab")).Single(t => t.Text == "Triage Defaults");
+            return (HeadingPlacement(triageHeading), deliveryAt);
+        });
+
+        Assert.True(triage == delivery, $"Triage Defaults is {Describe(triage)}; the Delivery card's heading is {Describe(delivery)}");
+    }
+
+    [Fact]
+    public void TheAutomatedAnalysisDescription_SitsUnderItsHeading_AsTheTeamsDescriptionDoes()
+    {
+        var (analysis, teams) = WithSettings(window =>
+        {
+            var delivery = SelectTab(window, "DeliveryTab");
+            var teamsAt = DescriptionPlacement(
+                TextBlocks(delivery).Single(t => t.Text == "Microsoft Teams Notifications"),
+                TextBlocks(delivery).Single(t => t.Text.StartsWith("Send alert notifications to a Teams channel", StringComparison.Ordinal)));
+
+            var analysisTab = SelectTab(window, "AnalysisReportsTab");
+            var analysisAt = DescriptionPlacement(
+                TextBlocks(analysisTab).Single(t => t.Text == "Automated Analysis"),
+                TextBlocks(analysisTab).Single(t => t.Text.StartsWith("Periodically run the triage engine", StringComparison.Ordinal)));
+            return (analysisAt, teamsAt);
+        });
+
+        Assert.True(analysis == teams, $"the Analysis description sits {Describe(analysis)}; the Teams description sits {Describe(teams)}");
+    }
+
+    [Fact]
+    public void DatabaseStateOverrides_ResetButton_NamesTheColumnItCopiesFrom()
+    {
+        var (column, button) = StaTestThread.Run(() => WithTheme(() =>
+        {
+            var window = new DatabaseStateOverridesWindow(new ViewerDataService(NoStore), Array.Empty<DarlingServer>());
+            var root = LayOutUnshown(window);
+            var stateColumn = ((DataGrid)window.FindName("StatesGrid")).Columns.OfType<DataGridBoundColumn>()
+                .Single(c => c.Binding is Binding b && b.Path.Path == "CurrentState");
+            var reset = ClippedTextProbe.Descendants(root).OfType<Button>()
+                .Single(b => b.Content is string s && s.StartsWith("Reset Selected", StringComparison.Ordinal));
+            return ((string)stateColumn.Header, (string)reset.Content);
+        }));
+
+        Assert.EndsWith(column, button, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MuteRules_WithNoRules_KeepsItsMessageOnOneLine_AtTheWindowsOwnSize()
+    {
+        var (lines, needed, room) = StaTestThread.Run(() => WithTheme(() =>
+        {
+            /* Laid out unshown: shown, the window's Loaded reads the store, and a failed read opens a message box. */
+            var window = new MuteRulesWindow(new ViewerDataService(NoStore));
+            var message = (TextBlock)window.FindName("NoRulesMessage");
+            message.Visibility = Visibility.Visible;
+            LayOutUnshown(window);
+            var oneLine = new TextBlock { Text = message.Text, FontFamily = message.FontFamily, FontSize = message.FontSize, FontStyle = message.FontStyle, FontWeight = message.FontWeight, FontStretch = message.FontStretch };
+            oneLine.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            return ((int)Math.Round(message.ActualHeight / oneLine.DesiredSize.Height), oneLine.DesiredSize.Width, ((FrameworkElement)VisualTreeHelper.GetParent(message)).ActualWidth);
+        }));
+
+        Assert.True(lines == 1, $"the empty-grid message wraps onto {lines} lines: it needs {needed:F0} px on one line and its grid gives {room:F0}");
     }
 
     [Fact]
@@ -227,6 +316,38 @@ public sealed class ViewerDialogsWalkTests
     private static IEnumerable<TextBlock> TextBlocks(DependencyObject root) => ClippedTextProbe.Descendants(root).OfType<TextBlock>();
 
     private static double LeftIn(FrameworkElement element, Visual ancestor) => element.TransformToAncestor(ancestor).Transform(new Point(0, 0)).X;
+
+    private static double TopIn(FrameworkElement element, Visual ancestor) => element.TransformToAncestor(ancestor).Transform(new Point(0, 0)).Y;
+
+    /// <summary>A card heading's font size and where it sits in its card: its left and top offsets from the card's edge.</summary>
+    private static (double FontSize, double Left, double Top) HeadingPlacement(TextBlock heading)
+    {
+        var card = CardOf(heading);
+        return (heading.FontSize, Math.Round(LeftIn(heading, card), 1), Math.Round(TopIn(heading, card), 1));
+    }
+
+    private static string Describe((double FontSize, double Left, double Top) at) => $"{at.FontSize} px at ({at.Left}, {at.Top}) in its card";
+
+    /// <summary>Where a card's description sits against its heading: its left offset from the card's edge, and the gap below the heading.</summary>
+    private static (double Left, double Gap) DescriptionPlacement(TextBlock heading, TextBlock description)
+    {
+        var card = CardOf(heading);
+        var gap = TopIn(description, card) - (TopIn(heading, card) + heading.ActualHeight);
+        return (Math.Round(LeftIn(description, card), 1), Math.Round(gap, 1));
+    }
+
+    private static string Describe((double Left, double Gap) at) => $"{at.Left} px in from the card's edge, {at.Gap} px below the heading";
+
+    /// <summary>Lays out a window's content at the window's own size without showing it, so its Loaded never fires.</summary>
+    private static FrameworkElement LayOutUnshown(Window window)
+    {
+        var root = (FrameworkElement)window.Content;
+        var size = new Size(window.Width, window.Height);
+        root.Measure(size);
+        root.Arrange(new Rect(size));
+        root.UpdateLayout();
+        return root;
+    }
 
     private static Border CardOf(DependencyObject element)
     {

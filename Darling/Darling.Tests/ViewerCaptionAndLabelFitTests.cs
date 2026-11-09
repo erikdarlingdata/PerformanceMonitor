@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// duration. Each element is laid out at the width it gets on a 1366 screen and checked: wrapping text keeps all of its text, a label
 /// shows in full, and the label and duration keep a gap.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerCaptionAndLabelFitTests
 {
     private const double ScreenWidth = 1366;

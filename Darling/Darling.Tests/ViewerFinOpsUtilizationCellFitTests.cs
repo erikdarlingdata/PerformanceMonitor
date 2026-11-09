@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// it, given rows with nine- to twelve-digit counts, and laid out at 1280 px: every numeric cell's realized TextBlock must have the room
 /// its whole formatted value needs. Lite's twin is FinOpsUtilizationCellFitTests in Lite.Tests.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerFinOpsUtilizationCellFitTests
 {
     /// <summary>WPF formats a binding's StringFormat in the element's language, en-US unless an app overrides it, not the thread culture.</summary>

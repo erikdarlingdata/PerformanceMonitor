@@ -23,6 +23,7 @@ namespace PerformanceMonitorLite.Tests;
 /// Agent Job alert offers the Job Name box the engine's check reads; and a name only the Darling service raises is not offered
 /// in Lite, where a rule for it could never match.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class MuteRuleReviewRound1Tests
 {
     private static readonly DateTime Now = new(2026, 11, 8, 12, 0, 0, DateTimeKind.Utc);

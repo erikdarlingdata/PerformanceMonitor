@@ -32,6 +32,7 @@ namespace Darling.Tests;
 /// real tab on the shared STA thread with the theme and the shared styles merged, shows it at the width a tab has beside the sidebar
 /// of a 1280x800 and a 900x600 window, and reads the realized result. With REFRESH_SHOTS_DIR set, each screen is saved as a PNG.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerPanelCardsTests
 {
     private const string ViewerPack = "pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/";

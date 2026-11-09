@@ -436,7 +436,7 @@ public partial class ViewerServerTab
         if (data.Count == 0)
             DeadlockSlicer.ShowEmpty("No deadlocks in the selected time window.");
         else
-            DeadlockSlicer.LoadData(data, "Deadlocks", startUtc, endUtc);
+            DeadlockSlicer.LoadData(data, "Deadlocks", startUtc, endUtc, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(startUtc, endUtc));
     }
 
     /// <summary>The slicer sends UTC bounds; the viewer's reads take naive UTC directly (no clock shift).</summary>

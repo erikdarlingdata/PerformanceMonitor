@@ -1029,7 +1029,7 @@ public sealed partial class ViewerDataService
                (the same clock as collection_time), so this is a placement fix and not a timezone trade.
                Legacy rows have no interval start and keep collection_time placement, so a window spanning
                the upgrade renders correctly on both sides and the lag disappears as those rows age out. */
-            date_trunc('hour', COALESCE(interval_start_time_utc, collection_time)) AS bucket,
+            date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), {{TrendBucketSql.OriginSql}}) AS bucket,
             COUNT(DISTINCT query_id) AS query_count,
             COALESCE(SUM(CAST(avg_cpu_time_us AS double precision) * execution_count), 0) / 1000.0 AS total_cpu_ms,
             COALESCE(SUM(CAST(avg_duration_us AS double precision) * execution_count), 0) / 1000.0 AS total_duration_ms,
@@ -1038,11 +1038,11 @@ public sealed partial class ViewerDataService
             COALESCE(SUM(CAST(avg_physical_io_reads AS double precision) * execution_count), 0) AS total_physical_reads
         FROM deduped
         WHERE rn = 1
-        GROUP BY date_trunc('hour', COALESCE(interval_start_time_utc, collection_time))
+        GROUP BY 1
         ORDER BY bucket
         """;
 
-    /// <summary>Hourly Query Store slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>].</summary>
+    /// <summary>Query Store slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>], at the width <see cref="SlicerBuckets"/> picks for it ($5 minutes).</summary>
     public async Task<List<TimeSliceBucket>> GetQueryStoreSlicerDataAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null,
         CancellationToken cancellationToken = default)
