@@ -267,8 +267,7 @@ public static class DailySummaryRangeCache
     /// <summary>#8451: the <c>storeKey</c> the service passes for a read through <paramref name="postgres"/>: the store it
     /// reaches (host, port and database), so two data sources over one store share its blocks. The service holds three
     /// per store, the worker's, the web host's and the MCP host's, each with its own login, application name and pool,
-    /// and the daily-summary warmer builds a block through the worker's while a visitor reads through the web host's. A
-    /// key that compared the data sources themselves left every warmed block under a key no visitor looked up. The
+    /// and the daily-summary warmer builds a block through the worker's while a visitor reads through the web host's. The
     /// login, application name, pool size and the rest of the string are not part of the key: every login reads the same
     /// rows. A string that names no database reaches the login's own, as the server does. Parsed once per data source.</summary>
     public static object StoreKeyFor(NpgsqlDataSource postgres)
