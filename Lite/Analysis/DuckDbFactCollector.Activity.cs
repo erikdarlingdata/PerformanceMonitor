@@ -37,6 +37,10 @@ public partial class DuckDbFactCollector
             await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
+            /* #8403: every row of the window counts, including a row whose execution delta is 0 while its CPU and reads
+               deltas are not. The store holds such rows, and the BAD_ACTOR drill-down and the totals already sum them, so
+               the fact sums the same rows and the finding's headline average and the drill-down beside it describe the
+               same work. The execution bar in HAVING still gates on the execution sum, and the ordering guards its divisor. */
             cmd.CommandText = @"
 SELECT
     database_name,
@@ -62,7 +66,6 @@ FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-AND   delta_execution_count > 0
 GROUP BY database_name, query_hash
 HAVING SUM(delta_execution_count) >= 100
 ORDER BY SUM(delta_worker_time)::DOUBLE PRECISION / GREATEST(SUM(delta_execution_count), 1) *

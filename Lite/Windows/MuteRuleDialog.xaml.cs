@@ -221,8 +221,23 @@ public partial class MuteRuleDialog : Window
         JobNameLabel.Visibility = JobNamePatternBox.Visibility = showJobName ? Visibility.Visible : Visibility.Collapsed;
         ClientAppLabel.Visibility = ClientAppPatternBox.Visibility = showClientApp ? Visibility.Visible : Visibility.Collapsed;
 
+        /* A box whose row partner is hidden takes the whole row: the two columns are for two boxes side by side, and a box left alone
+           in one of them is half the dialog wide and cuts the value it opened with. */
+        PlaceRow(DatabaseLabel, DatabasePatternBox, WaitTypeLabel, WaitTypePatternBox, showDatabase && showWaitType);
+        PlaceRow(QueryTextLabel, QueryTextPatternBox, JobNameLabel, JobNamePatternBox, showQueryText && showJobName);
+
         PatternFieldsGrid.Visibility = (showDatabase || showWaitType || showQueryText || showJobName || showClientApp)
             ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>Lays a row's two boxes out side by side when <paramref name="both"/> show; otherwise the one that shows spans the row from its left edge.</summary>
+    private static void PlaceRow(UIElement leftLabel, UIElement leftBox, UIElement rightLabel, UIElement rightBox, bool both)
+    {
+        foreach (var element in new[] { leftLabel, leftBox, rightLabel, rightBox })
+        {
+            Grid.SetColumn(element, both && (element == rightLabel || element == rightBox) ? 2 : 0);
+            Grid.SetColumnSpan(element, both ? 1 : 3);
+        }
     }
 
     private void ApplyDefaultExpiration()
