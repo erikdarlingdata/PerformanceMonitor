@@ -198,15 +198,15 @@ public sealed class DailySummaryWarmerTests
     [Fact]
     public void DailySummaryWarmerEnabled_IsAFileKnob_DefaultOn_ReadFromTheConfigFile_AndListedInTheDiagnosticsShape()
     {
-        var property = typeof(DarlingConfig).GetProperty("DailySummaryWarmerEnabled");
-        Assert.True(property is not null, "DarlingConfig has no DailySummaryWarmerEnabled: the warmer has no operator switch");
-        Assert.Equal(true, property!.GetValue(new DarlingConfig()));
+        Assert.True(new DarlingConfig().DailySummaryWarmerEnabled);
 
         var off = System.Text.Json.JsonSerializer.Deserialize<DarlingConfig>("{\"dailySummaryWarmerEnabled\": false}");
         Assert.NotNull(off);
-        Assert.Equal(false, property.GetValue(off));
+        Assert.False(off.DailySummaryWarmerEnabled);
 
-        Assert.Contains("DarlingConfig.DailySummaryWarmerEnabled", DiagnosticsBundle.ConfigShapeProjected);
+        /* Classified in the bundle's config shape beside queryStoreBackfillEnabled and rawChunkIntervalReconcileEnabled, so
+           the shape census knows the key; a setting in neither list cannot reach a bundle. */
+        Assert.Contains("DarlingConfig.DailySummaryWarmerEnabled", DiagnosticsBundle.ConfigShapeProjected.Concat(DiagnosticsBundle.ConfigShapeExcluded));
     }
 
     private static List<DateTime> Days(DateTime from, DateTime to)

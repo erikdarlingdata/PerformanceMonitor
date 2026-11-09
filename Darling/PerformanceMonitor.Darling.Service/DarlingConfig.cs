@@ -218,6 +218,18 @@ public sealed class DarlingConfig
     public bool RawChunkIntervalReconcileEnabled { get; set; } = true;
 
     /// <summary>
+    /// Whether the daily-summary warmer runs at all (#8370). Default TRUE. The warmer builds each SQL Server target's
+    /// closed-day <c>get_daily_summary_range</c> block two minutes after the service starts and again just after each
+    /// UTC day boundary, one server at a time under the long-read limit, so a server's first Overview visitor finds it
+    /// built. Set false to stop the passes, for example while a store maintenance window overlaps the boundary pass; the
+    /// first visitor of each server then pays the cold read, as before the warmer existed. A file-only knob like
+    /// <see cref="RawChunkIntervalReconcileEnabled"/> (not seeded into the control-plane store, unlike
+    /// <see cref="QueryStoreBackfillEnabled"/>), read before every pass.
+    /// </summary>
+    [JsonPropertyName("dailySummaryWarmerEnabled")]
+    public bool DailySummaryWarmerEnabled { get; set; } = true;
+
+    /// <summary>
     /// Whether the service builds a <c>pg_trgm</c> GIN index on the plan-cache text (<c>collect.query_text_dim.query_text</c>, #7674).
     /// Default FALSE: on a store the size of the largest field store the index is 3.1 GB (52% of the table), a build takes about 17
     /// minutes and it adds about 0.5 ms to each written row. When true the service creates the <c>pg_trgm</c> extension if the store

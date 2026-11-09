@@ -1151,11 +1151,12 @@ public sealed partial class DarlingWorker
         var backfillLoop = RunQueryStoreBackfillLoopAsync(queryStoreBackfill, servers, () => config.QueryStoreBackfillEnabled, stoppingToken);
 
         /* #8370: the daily-summary warmer builds each SQL Server target's closed-day block (the Overview's 31-day
-           get_daily_summary_range read) two minutes after start and again after each UTC day boundary plus the cache's
-           grace, one server at a time under the read-admission gate, so a server's first visitor after a start or a new
-           day finds it built rather than paying the cold read of thirty compressed days. It idles while the service is
-           paused, while a materialization-hole repair is rebuilding the rollups, and while neither host that reads the
-           block is on. Awaited with the other loops at shutdown. */
+           get_daily_summary_range read) two minutes after start and again just after each UTC day boundary, when the
+           Overview's key moves to the new day, one server at a time under the read-admission gate, so a server's first
+           visitor after a start or on a new day finds it built rather than paying the cold read of thirty compressed
+           days. It idles while dailySummaryWarmerEnabled is off in the config file, while the service is paused, while a
+           materialization-hole repair is rebuilding the rollups, and while neither host that reads the block is on.
+           Awaited with the other loops at shutdown. */
         var dailySummaryWarmer = new DailySummaryWarmer(
             servers: () =>
             {
@@ -1168,7 +1169,7 @@ public sealed partial class DarlingWorker
                 }
             },
             warm: (serverId, name, token) => DailySummaryWarmer.WarmAsync(postgres, serverId, name, _registryState, _logger, token),
-            enabled: () => ShouldRunCollection(_paused) && !_materializationHoleRepairRunning && (config.Web.Enabled || config.Mcp.Enabled),
+            enabled: () => config.DailySummaryWarmerEnabled && ShouldRunCollection(_paused) && !_materializationHoleRepairRunning && (config.Web.Enabled || config.Mcp.Enabled),
             readAdmission: _readAdmission,
             logger: _logger);
         var dailySummaryWarmLoop = dailySummaryWarmer.RunAsync(stoppingToken);

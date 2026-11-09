@@ -28,11 +28,15 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>wait_stats</c>: 7 to 13 seconds on a large store, against under a second from the block.
 ///
 /// <para><b>Schedule.</b> One pass <see cref="StartDelay"/> after the service starts, so the collectors' first connects
-/// and the start-up repairs go first, then one pass at each boundary (<see cref="NextPassUtc"/>), when the blocks the
-/// previous pass built stop being served. A pass with a failed server, or one the heavy-read gate refused, is tried
-/// again after <see cref="RetryDelayFor"/>, never later than the next boundary. No pass runs while the service is
-/// paused, while a materialization repair is rebuilding the rollups, or while neither the web host nor the MCP host is
-/// on, because then nothing reads the block.</para>
+/// and the start-up repairs go first, then one pass just after each UTC day boundary (<see cref="NextPassUtc"/>), when
+/// the Overview's 31-days-ending-today key moves to the new day. The cache key carries the range, so a block built the
+/// day before sits under yesterday's key until it expires and serves nobody; the pass at 00:01 builds the new day's
+/// block while <see cref="DailySummaryRangeCache{TRow}.OpenStartUtc"/> is still yesterday, so it holds the days before
+/// yesterday, a visitor before 02:00 hits with a one-day tail read, and a visitor after 02:00 hits with a two-day tail
+/// read that also grows the block. A pass with a failed server, or one the heavy-read gate refused, is tried again
+/// after <see cref="RetryDelayFor"/>, never later than the next boundary. No pass runs while the service is paused,
+/// while a materialization repair is rebuilding the rollups, while neither the web host nor the MCP host is on (nothing
+/// reads the block then), or while <c>dailySummaryWarmerEnabled</c> is off in the config file.</para>
 ///
 /// <para><b>Load.</b> One server at a time, each read under the read-admission gate (<see cref="ReadAdmission"/>) as the
 /// <c>7d+</c> web read it stands in for, so it takes one of <c>reads.maxHeavyReads</c> slots and queues behind a
@@ -50,7 +54,7 @@ public sealed class DailySummaryWarmer
     /// <summary>How long after the service starts the first pass runs.</summary>
     internal static readonly TimeSpan StartDelay = TimeSpan.FromMinutes(2);
 
-    /// <summary>Added to a block's expiry so the pass lands after it, never a clock tick before.</summary>
+    /// <summary>Added to the day boundary so the pass lands after the Overview's key has moved, never a clock tick before.</summary>
     internal static readonly TimeSpan PassMargin = TimeSpan.FromMinutes(1);
 
     /// <summary>The wait after a failed or refused pass, doubled per consecutive failure up to <see cref="MaxRetryDelay"/>;
@@ -91,10 +95,9 @@ public sealed class DailySummaryWarmer
         _delay = delay ?? (static (span, ct) => Task.Delay(span, ct));
     }
 
-    /// <summary>When the blocks built at <paramref name="nowUtc"/> stop being served, plus <see cref="PassMargin"/>: the
-    /// next UTC day boundary plus the cache's closed grace, the same arithmetic as the cache's own block expiry.</summary>
-    internal static DateTime NextPassUtc(DateTime nowUtc) =>
-        nowUtc.Date.AddDays(1).Add(DailySummaryRangeCache<DarlingHealthReader.DailySummaryReadRow>.ClosedGrace).Add(PassMargin);
+    /// <summary>The next UTC day boundary after <paramref name="nowUtc"/> plus <see cref="PassMargin"/>: the first
+    /// moment the new day's Overview key is in use, so the block built then serves every visitor of that day.</summary>
+    internal static DateTime NextPassUtc(DateTime nowUtc) => nowUtc.Date.AddDays(1).Add(PassMargin);
 
     /// <summary><see cref="RetryDelay"/> doubled per consecutive incomplete pass, capped at <see cref="MaxRetryDelay"/>.</summary>
     internal static TimeSpan RetryDelayFor(int consecutiveFailures)
