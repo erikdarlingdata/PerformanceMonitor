@@ -219,14 +219,37 @@ LEFT JOIN grants g ON true";
     public async Task<List<ProvisioningTrendRow>> GetProvisioningTrendAsync(int serverId, TimeZoneInfo? dayZone = null)
     {
         using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
 
         var nowUtc = DateTime.UtcNow;
         var cutoff = nowUtc.AddDays(-7);
 
+        /* The window's newest CPU sample, read first so the days table runs through it (#8503): the collector can stamp a sample after
+           this read took its clock, and a sample at or after the last day's end would otherwise match no day and leave the table. The
+           trend's rows come from the CPU samples, so with none in the window there is no row to return. */
+        DateTime? latestTime;
+        using (var newestCommand = connection.CreateCommand())
+        {
+            newestCommand.CommandText = @"
+SELECT MAX(collection_time)
+FROM v_cpu_utilization_stats
+WHERE server_id = $1
+AND   collection_time >= $2";
+            newestCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
+            newestCommand.Parameters.Add(new DuckDBParameter { Value = cutoff });
+            latestTime = await newestCommand.ExecuteScalarAsync() is DateTime latest ? latest : null;
+        }
+
+        if (latestTime is not DateTime newest)
+        {
+            return [];
+        }
+
+        var daysEnd = newest > nowUtc ? newest : nowUtc;
+
+        using var command = connection.CreateCommand();
         command.CommandText = $@"
 WITH days(day, start_utc, end_utc) AS (
-    VALUES {DayBucketValues(DisplayDays(cutoff, nowUtc, dayZone))}
+    VALUES {DayBucketValues(DisplayDays(cutoff, daysEnd, dayZone))}
 ),
 daily_cpu AS (
     SELECT
@@ -371,14 +394,36 @@ ORDER BY c.day";
     public async Task<List<MemoryGrantEfficiencyRow>> GetMemoryGrantEfficiencyAsync(int serverId, int hoursBack = 24, TimeZoneInfo? dayZone = null)
     {
         using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
 
         var nowUtc = DateTime.UtcNow;
         var cutoff = nowUtc.AddHours(-hoursBack);
 
+        /* The window's newest grant sample, read first so the days table runs through it (#8503), as the provisioning trend does. */
+        DateTime? latestTime;
+        using (var newestCommand = connection.CreateCommand())
+        {
+            newestCommand.CommandText = @"
+SELECT MAX(collection_time)
+FROM v_memory_grant_stats
+WHERE server_id = $1
+AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before the small-query row (id 1) was collected */
+AND   collection_time >= $2";
+            newestCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
+            newestCommand.Parameters.Add(new DuckDBParameter { Value = cutoff });
+            latestTime = await newestCommand.ExecuteScalarAsync() is DateTime latest ? latest : null;
+        }
+
+        if (latestTime is not DateTime newest)
+        {
+            return [];
+        }
+
+        var daysEnd = newest > nowUtc ? newest : nowUtc;
+
+        using var command = connection.CreateCommand();
         command.CommandText = $@"
 WITH days(day, start_utc, end_utc) AS (
-    VALUES {DayBucketValues(DisplayDays(cutoff, nowUtc, dayZone))}
+    VALUES {DayBucketValues(DisplayDays(cutoff, daysEnd, dayZone))}
 )
 SELECT
     d.day,
