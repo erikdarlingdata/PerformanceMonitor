@@ -58,7 +58,7 @@ public sealed class ViewerSmallLayoutDefectsTests
                 };
                 watch.ItemsSource = new List<FleetSweepWatchRow>
                 {
-                    new("server-01", "cpu", "open", LongPosition, FleetStamp, FleetStamp, "CPU over 90% on 3 of the last 3 sweeps", "evidence")
+                    new("srv-a", "cpu", "open", LongPosition, FleetStamp, FleetStamp, "CPU over 90% on 3 of the last 3 sweeps", "evidence")
                     {
                         FirstSeenUtc = new DateTime(2026, 11, 8, 18, 33, 5, DateTimeKind.Utc),
                         LastSeenUtc = new DateTime(2026, 11, 8, 18, 33, 5, DateTimeKind.Utc),
@@ -190,7 +190,7 @@ public sealed class ViewerSmallLayoutDefectsTests
                 var grid = (DataGrid)tab.FindName("JobHistoryDataGrid");
                 grid.ItemsSource = new List<ViewerJobHistoryRow>
                 {
-                    new() { ServerId = 1, ServerName = "server-01", JobName = "nightly maintenance", CategoryName = "[Uncategorized (Local)]", RunStatusDesc = "Succeeded", Message = "The job succeeded." },
+                    new() { ServerId = 1, ServerName = "srv-a", JobName = "nightly maintenance", CategoryName = "[Uncategorized (Local)]", RunStatusDesc = "Succeeded", Message = "The job succeeded." },
                 };
                 ClippedTextProbe.Settle(window);
                 return ClippedCells(grid, "job history");
