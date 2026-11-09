@@ -22,7 +22,9 @@ namespace Darling.Tests;
 /// #8379: each fleet tab owns its status line. A fleet tab's refresh catches its own read failure and raises its failure line through
 /// its status event, so the bar must still read that line once the refresh returns, not "&lt;tab&gt; — refreshed …" written over it by the
 /// window. The real main window is built on the shared STA thread with the Dark theme and hosted at 1000x700, inside a 1024x768 screen;
-/// a store at a closed local port makes every read fail without a server.
+/// a store at a closed local port makes every read fail without a server. The theme is in the application resources only while the window
+/// is constructed and is the host window's own after that, so the classes that run beside this one see it for as short a time as the
+/// window's XAML allows.
 /// </summary>
 [Collection("viewer-time-statics")]
 public sealed class ViewerFleetTabStatusLinesTests
@@ -56,44 +58,41 @@ public sealed class ViewerFleetTabStatusLinesTests
         var findings = new List<string>();
         StaTestThread.Run(async () =>
         {
-            await WithThemeAsync(async () =>
+            var w = Shell();
+            var host = Host(w, 1000, 700);
+            try
             {
-                var w = Shell();
-                var host = Host(w, 1000, 700);
-                try
+                var tabs = (TabControl)w.FindName("MainTabs");
+                var tab = (TabItem)w.FindName(tabName);
+                var status = (TextBlock)w.FindName("StatusText");
+                ((UIElement)w.FindName("EmptyStatePanel")).Visibility = Visibility.Collapsed;
+                tabs.Visibility = Visibility.Visible;
+                tab.Visibility = Visibility.Visible;
+
+                /* The tab is selected with no store, so nothing loads yet; then the store arrives, wired to the tab the way the
+                   window wires it when it connects, and the window's refresh of the selected tab runs the tab's read, which fails. */
+                var service = new ViewerDataService(ClosedStore);
+                GiveStore(w.FindName(contentName), service);
+                tabs.SelectedItem = tab;
+                ClippedTextProbe.Settle(host);
+                typeof(MainWindow).GetField("_dataService", Instance)!.SetValue(w, service);
+                await (Task)typeof(MainWindow).GetMethod("RefreshVisibleAsync", Instance)!.Invoke(w, null)!;
+                ClippedTextProbe.Settle(host);
+
+                if (!status.Text.StartsWith(failurePrefix, StringComparison.Ordinal))
                 {
-                    var tabs = (TabControl)w.FindName("MainTabs");
-                    var tab = (TabItem)w.FindName(tabName);
-                    var status = (TextBlock)w.FindName("StatusText");
-                    ((UIElement)w.FindName("EmptyStatePanel")).Visibility = Visibility.Collapsed;
-                    tabs.Visibility = Visibility.Visible;
-                    tab.Visibility = Visibility.Visible;
-
-                    /* The tab is selected with no store, so nothing loads yet; then the store arrives, wired to the tab the way the
-                       window wires it when it connects, and the window's refresh of the selected tab runs the tab's read, which fails. */
-                    var service = new ViewerDataService(ClosedStore);
-                    GiveStore(w.FindName(contentName), service);
-                    tabs.SelectedItem = tab;
-                    ClippedTextProbe.Settle(host);
-                    typeof(MainWindow).GetField("_dataService", Instance)!.SetValue(w, service);
-                    await (Task)typeof(MainWindow).GetMethod("RefreshVisibleAsync", Instance)!.Invoke(w, null)!;
-                    ClippedTextProbe.Settle(host);
-
-                    if (!status.Text.StartsWith(failurePrefix, StringComparison.Ordinal))
-                    {
-                        findings.Add($"with {tabName} on screen after its read failed the status bar reads \"{status.Text}\", not \"{failurePrefix}…\"");
-                    }
-
-                    if (status.Text.Contains("— refreshed", StringComparison.Ordinal))
-                    {
-                        findings.Add($"with {tabName} on screen after its read failed the status bar says the tab is refreshed: \"{status.Text}\"");
-                    }
+                    findings.Add($"with {tabName} on screen after its read failed the status bar reads \"{status.Text}\", not \"{failurePrefix}…\"");
                 }
-                finally
+
+                if (status.Text.Contains("— refreshed", StringComparison.Ordinal))
                 {
-                    host.Close();
+                    findings.Add($"with {tabName} on screen after its read failed the status bar says the tab is refreshed: \"{status.Text}\"");
                 }
-            });
+            }
+            finally
+            {
+                host.Close();
+            }
         });
 
         Assert.True(findings.Count == 0, string.Join(Environment.NewLine, findings));
@@ -136,16 +135,22 @@ public sealed class ViewerFleetTabStatusLinesTests
         }
     }
 
-    /// <summary>The main window, built and never shown; its constructor seeds the process-wide display mode from the app settings, which is put back.</summary>
+    /// <summary>The main window, built and never shown. Its XAML asks for theme styles by StaticResource (NumericCell among them), so the Dark
+    /// theme sits in the application resources for the construction only and is taken out again in a finally; the host window then carries
+    /// its own copy for layout. The constructor also seeds the process-wide display mode from the app settings, which is put back.</summary>
     private static MainWindow Shell()
     {
         var mode = ViewerTimeHelper.CurrentDisplayMode;
+        var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        var theme = Theme();
+        app.Resources.MergedDictionaries.Add(theme);
         try
         {
             return new MainWindow();
         }
         finally
         {
+            app.Resources.MergedDictionaries.Remove(theme);
             ViewerTimeHelper.CurrentDisplayMode = mode;
         }
     }
@@ -156,31 +161,13 @@ public sealed class ViewerFleetTabStatusLinesTests
         var root = (UIElement)w.Content;
         w.Content = null;
         var host = new Window { Content = root, Width = width, Height = height, Left = 0, Top = 0, WindowStartupLocation = WindowStartupLocation.Manual, ShowInTaskbar = false };
+        host.Resources.MergedDictionaries.Add(Theme());
         StaTestThread.ShowOffScreen(host);
         ClippedTextProbe.Settle(host);
         return host;
     }
 
-    private static async Task WithThemeAsync(Func<Task> body)
-    {
-        var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-        ResourceDictionary? added = null;
-        if (!app.Resources.Contains("BackgroundLightBrush"))
-        {
-            added = new ResourceDictionary { Source = new Uri(ThemeUri) };
-            app.Resources.MergedDictionaries.Add(added);
-        }
-
-        try
-        {
-            await body();
-        }
-        finally
-        {
-            if (added is not null)
-            {
-                app.Resources.MergedDictionaries.Remove(added);
-            }
-        }
-    }
+    /// <summary>A copy of the Dark theme for one host window's own resources, or for the application resources during a construction. Other test
+    /// classes read the application resources at the same time, and a card bound while a theme sat there would take that theme's border brush.</summary>
+    private static ResourceDictionary Theme() => new() { Source = new Uri(ThemeUri) };
 }
