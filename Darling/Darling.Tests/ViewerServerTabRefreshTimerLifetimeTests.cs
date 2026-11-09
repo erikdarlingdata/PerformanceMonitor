@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
 using PerformanceMonitor.Darling.Viewer;
@@ -74,6 +75,31 @@ public sealed class ViewerServerTabRefreshTimerLifetimeTests
         Assert.True(seen.runningAfterReturn, "the auto-refresh timer is not running after switching back to the tab");
         Assert.False(seen.runningAfterClose, "the auto-refresh timer is still running after the window closed");
     }
+
+    [Fact]
+    public void Dispose_LetsGoOfTheHostWindow()
+    {
+        var seen = StaTestThread.Run(() => ViewerPageLayoutProbe.WithTheme("DarkTheme", () =>
+        {
+            var tab = NewTab();
+            var timer = TimerOf(tab);
+            var window = ViewerPageLayoutProbe.Open(tab, 1000, 700);
+            var hookedWhileShown = HostWindowOf(tab) is not null;
+            tab.Dispose();
+            var hookedAfterDispose = HostWindowOf(tab) is not null;
+            /* A timer started again after Dispose shows whether the window's Closed still reaches the tab. */
+            timer.Start();
+            window.Close();
+            return (hookedWhileShown, hookedAfterDispose, runningAfterClose: timer.IsEnabled);
+        }));
+
+        Assert.True(seen.hookedWhileShown, "the shown tab did not hook its window");
+        Assert.False(seen.hookedAfterDispose, "Dispose left the tab hooked to its window's Closed event, which keeps a closed tab alive for the window's life");
+        Assert.True(seen.runningAfterClose, "the window's Closed event still reached the tab after Dispose");
+    }
+
+    private static Window? HostWindowOf(ViewerServerTab tab) =>
+        (typeof(ViewerServerTab).GetField("_hostWindow", ViewerPageLayoutProbe.Instance) ?? throw new Xunit.Sdk.XunitException("ViewerServerTab has no _hostWindow field")).GetValue(tab) as Window;
 
     private static DispatcherTimer TimerOf(ViewerServerTab tab) =>
         typeof(ViewerServerTab).GetField("_autoRefreshTimer", ViewerPageLayoutProbe.Instance)?.GetValue(tab) as DispatcherTimer

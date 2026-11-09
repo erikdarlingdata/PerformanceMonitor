@@ -9,6 +9,7 @@
 using System;
 using System.IO;
 using System.Reflection;
+using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
 using PerformanceMonitorLite.Controls;
@@ -80,6 +81,30 @@ public sealed class ServerTabRefreshTimerLifetimeTests
         Assert.True(seen.runningAfterReturn, "the auto-refresh timer is not running after switching back to the tab");
         Assert.False(seen.runningAfterClose, "the auto-refresh timer is still running after the window closed");
     }
+
+    [Fact]
+    public void StopRefresh_LetsGoOfTheHostWindow()
+    {
+        var seen = WithTab(tab =>
+        {
+            var timer = TimerOf(tab);
+            var window = PageLayoutProbe.Open(tab, 1000, 700);
+            var hookedWhileShown = HostWindowOf(tab) is not null;
+            tab.StopRefresh();
+            var hookedAfterStop = HostWindowOf(tab) is not null;
+            /* A timer started again after StopRefresh shows whether the window's Closed still reaches the tab. */
+            timer.Start();
+            window.Close();
+            return (hookedWhileShown, hookedAfterStop, runningAfterClose: timer.IsEnabled);
+        });
+
+        Assert.True(seen.hookedWhileShown, "the shown tab did not hook its window");
+        Assert.False(seen.hookedAfterStop, "StopRefresh left the tab hooked to its window's Closed event, which keeps a closed tab alive for the window's life");
+        Assert.True(seen.runningAfterClose, "the window's Closed event still reached the tab after StopRefresh");
+    }
+
+    private static Window? HostWindowOf(ServerTab tab) =>
+        (typeof(ServerTab).GetField("_hostWindow", Instance) ?? throw new Xunit.Sdk.XunitException("ServerTab has no _hostWindow field")).GetValue(tab) as Window;
 
     private static DispatcherTimer TimerOf(ServerTab tab) =>
         typeof(ServerTab).GetField("_refreshTimer", Instance)?.GetValue(tab) as DispatcherTimer
