@@ -101,8 +101,16 @@ public sealed class ApplicationThemeGuardTests
             /* The holder swaps the theme on the STA thread, says so, and keeps the swap open until this thread has bound a card. */
             var holder = Task.Run(() =>
             {
-                StaTestThread.Run(() => ThemeManager.Apply("Light"));
-                swapped.Set();
+                try
+                {
+                    StaTestThread.Run(() => ThemeManager.Apply("Light"));
+                }
+                finally
+                {
+                    /* Set even when the swap throws, so this thread's wait ends and the holder's failure comes back through the await. */
+                    swapped.Set();
+                }
+
                 release.Wait();
                 StaTestThread.Run(() => ThemeManager.Apply("Dark"));
             });
@@ -168,7 +176,8 @@ public sealed class ApplicationThemeGuardTests
     [Theory]
     [InlineData("Test collection for Darling.Tests.SomeRenderTests", false, false)]
     [InlineData("live-postgres", false, false)]
-    [InlineData("application-theme", false, true)]
+    [InlineData("application-theme", true, true)]
+    [InlineData("application-theme", false, false)]
     [InlineData("viewer-time-statics", true, true)]
     [InlineData("credential-manager", true, true)]
     public void TheVerdict_FailsAWriterOnlyFromACollectionThatRunsBesideOthers(string collection, bool runsAlone, bool allowed)

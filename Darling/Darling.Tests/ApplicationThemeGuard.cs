@@ -30,9 +30,10 @@ using Xunit.v3;
 /// <para>This attribute, applied to the whole assembly, keeps new writers in. <see cref="ApplicationThemeGuard"/> records every theme
 /// change against the test that made it, through <see cref="ThemeManager.ThemeChanged"/> and the application's merged-dictionary
 /// collection, whichever thread the change ran on (the STA host runs a body under the calling test's context). After each test the
-/// recorded changes are judged against the test's collection: inside <c>application-theme</c>, or inside any collection whose definition
-/// sets <c>DisableParallelization = true</c>, a change is allowed; anywhere else the test fails and the message names the class and the
-/// change. The judgement runs after the test body and its own cleanup, so a writer that restores the theme in a <c>finally</c> has done so
+/// recorded changes are judged against the test's collection: inside a collection whose definition sets <c>DisableParallelization = true</c>,
+/// as <c>application-theme</c>'s does, a change is allowed; anywhere else the test fails and the message names the class and the change.
+/// A change is attributed to the test current on the thread that makes it, so one made where no test is current, in a class or collection
+/// fixture, a module initializer, a <c>DispatcherTimer</c> tick between bodies or the theme overrides-file watcher, is not recorded. The judgement runs after the test body and its own cleanup, so a writer that restores the theme in a <c>finally</c> has done so
 /// before it is failed.</para>
 /// </summary>
 [AttributeUsage(AttributeTargets.Assembly | AttributeTargets.Class | AttributeTargets.Method, AllowMultiple = false, Inherited = true)]
@@ -144,11 +145,12 @@ internal static class ApplicationThemeGuard
 
     /// <summary>
     /// The failure text for a test that made <paramref name="changes"/> from the collection named, or null when the changes are allowed:
-    /// none were made, the collection is <see cref="CollectionName"/>, or its definition disables parallelization so it already runs alone.
+    /// none were made, or the collection's definition disables parallelization so it runs alone. The name is not consulted, so a
+    /// collection called <see cref="CollectionName"/> whose definition lost that flag fails its writers like any other.
     /// </summary>
     internal static string? Verdict(string collectionDisplayName, bool collectionRunsAlone, string testClassName, IReadOnlyList<string> changes)
     {
-        if (changes.Count == 0 || collectionRunsAlone || string.Equals(collectionDisplayName, CollectionName, StringComparison.Ordinal))
+        if (changes.Count == 0 || collectionRunsAlone)
         {
             return null;
         }
