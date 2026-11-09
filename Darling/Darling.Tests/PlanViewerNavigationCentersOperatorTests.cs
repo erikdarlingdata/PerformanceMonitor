@@ -201,7 +201,7 @@ public sealed class PlanViewerNavigationCentersOperatorTests
     /// <summary>The CI screen is 1024x768, so the size comes from an explicitly sized host, not from a Window.</summary>
     private static Border Host(PlanViewerControl control)
     {
-        var host = new Border { Width = 900, Height = 480, Child = control };
+        var host = new Border { Width = 900, Height = 300, Child = control };
         LayOut(host);
         return host;
     }
