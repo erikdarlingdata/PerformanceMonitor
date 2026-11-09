@@ -47,10 +47,14 @@ public sealed class PerEventMaxDefaultTests
         }
     }
 
-    /// <summary>The collection leaves the statics at their shipped values between tests, so this reads the initializer.</summary>
+    /// <summary>
+    /// The initializer's value, as <see cref="ShippedAlertStatics"/> recorded it when the assembly loaded, before any
+    /// test could write the static. The static itself is not read here: the other classes in this collection reset it
+    /// to the constant, so its value after one of them ran would prove nothing about the initializer.
+    /// </summary>
     [Fact]
     public void TheShippedDefault_IsTheSharedConstant() =>
-        Assert.Equal(AlertDefaults.PerEventMax, App.AlertPerEventMaxPerCycle);
+        Assert.Equal(AlertDefaults.PerEventMax, ShippedAlertStatics.AlertPerEventMaxPerCycle);
 
     [Fact]
     public void AFileThatSetTheCap_KeepsItsValue_AcrossTheDefaultChange() =>
