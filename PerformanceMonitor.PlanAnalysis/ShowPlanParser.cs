@@ -588,7 +588,8 @@ public static class ShowPlanParser
     {
         stmt.StatementOptmLevel = stmtEl.Attribute("StatementOptmLevel")?.Value;
         stmt.StatementOptmEarlyAbortReason = stmtEl.Attribute("StatementOptmEarlyAbortReason")?.Value;
-        stmt.StatementParameterizationType = (int)ParseDouble(stmtEl.Attribute("StatementParameterizationType")?.Value);
+        var parameterizationType = stmtEl.Attribute("StatementParameterizationType")?.Value;
+        stmt.StatementParameterizationType = parameterizationType is null ? null : (int)ParseDouble(parameterizationType);
         stmt.StatementSqlHandle = stmtEl.Attribute("StatementSqlHandle")?.Value;
         stmt.DatabaseContextSettingsId = ParseLong(stmtEl.Attribute("DatabaseContextSettingsId")?.Value);
         stmt.ParentObjectId = (int)ParseDouble(stmtEl.Attribute("ParentObjectId")?.Value);

@@ -578,14 +578,11 @@ public static partial class ReproScriptBuilder
         var unresolved = new List<string>();
         var extractedNames = new HashSet<string>(parameters.Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
 
-        /* Find all @variable references in the query text */
-        var matches = PlanRegex.Matches(AtVariableRegExp(), queryText, "unresolved variables in the script");
+        /* The @variable references in the query's code: a name inside a literal or a comment is not one. */
         var seenVars = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (Match match in matches)
+        foreach (var varName in VariableReferenceScanner.Scan(queryText))
         {
-            var varName = match.Value;
-
             /* Skip if already seen or if it's in the extracted parameters */
             if (seenVars.Contains(varName) || extractedNames.Contains(varName))
             {
@@ -609,9 +606,6 @@ public static partial class ReproScriptBuilder
 
         return unresolved;
     }
-
-    [GeneratedRegex(@"@\w+", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
-    private static partial Regex AtVariableRegExp();
 
     /// <summary>
     /// Matches a control character or a Unicode line/paragraph separator. A database

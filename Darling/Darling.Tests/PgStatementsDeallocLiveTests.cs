@@ -20,8 +20,11 @@ using Xunit;
 
 namespace Darling.Tests;
 
-/* #1776 own-store: this fact mints its own scratch database through ScratchPostgres and never touches another
-   test's rows, so it is deliberately NOT [Collection("live-postgres")]. */
+/* pg-cluster-roles, not live-postgres and not the parallel own-store shape: the first fact fills pg_stat_statements until
+   the module runs an eviction pass, on purpose. The hash table is cluster-wide, and in the parallel collections the other
+   sessions' entries run once are what that pass takes first; a full reset elsewhere moves this fact's counter too (#4981).
+   The collection runs alone, after the parallel collections, so the fill takes nobody's entries and nothing moves the
+   counter under the bracket. The facts still mint their own scratch databases through ScratchPostgres. */
 
 /// <summary>
 /// #4677 against a real PostgreSQL: the collector's statement carries <c>pg_stat_statements_info.dealloc</c> at
@@ -29,6 +32,7 @@ namespace Darling.Tests;
 /// the eviction passes the store recorded. Needs a server with <c>pg_stat_statements</c> in
 /// <c>shared_preload_libraries</c>.
 /// </summary>
+[Collection("pg-cluster-roles")]
 public sealed class PgStatementsDeallocLiveTests
 {
     private const string ServerName = "pg-evictions-e2e";
