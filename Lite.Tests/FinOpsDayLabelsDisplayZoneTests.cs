@@ -57,13 +57,15 @@ public sealed class FinOpsDayLabelsDisplayZoneTests : IDisposable
     private static ServerClock Pacific() => ServerClock.Resolve("Pacific Standard Time", -480);
 
     /// <summary>
-    /// An instant inside the last 24 hours (so both day reads hold it) whose UTC date and Pacific date differ: a UTC hour before
-    /// 07:00, which is the evening before on the west coast in summer and in winter.
+    /// 03:00 UTC today once that hour has passed, else 03:00 UTC yesterday: an instant inside the last 24 hours (so both day reads
+    /// hold it) whose UTC date and Pacific date differ, since 03:00 UTC is the evening before on the west coast in summer and in
+    /// winter. The second seed, a minute later, shares its day in both clocks whatever the wall clock reads, so each read returns
+    /// one row; an instant taken from the wall clock could straddle a Pacific midnight with its neighbour.
     /// </summary>
     private static DateTime SampleUtc(DateTime nowUtc)
     {
-        var t = new DateTime(nowUtc.Year, nowUtc.Month, nowUtc.Day, nowUtc.Hour, nowUtc.Minute, 0, DateTimeKind.Unspecified).AddHours(-1);
-        return t.Hour < 7 ? t : t.Date.AddHours(3);
+        var today = new DateTime(nowUtc.Year, nowUtc.Month, nowUtc.Day, 3, 0, 0, DateTimeKind.Unspecified);
+        return nowUtc.Hour >= 3 ? today : today.AddDays(-1);
     }
 
     [Fact]
