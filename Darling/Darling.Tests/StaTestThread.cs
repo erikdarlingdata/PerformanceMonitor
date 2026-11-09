@@ -48,6 +48,13 @@ using Xunit;
 /// to the leg's log.
 /// </para>
 /// <para>
+/// <b>The Application (#8433).</b> The same start-up creates the process's one <see cref="Application"/>, on this thread, before the first body,
+/// and <see cref="ApplicationThemeGuard"/> watches its merged dictionaries from then on. A body's <c>Application.Current ?? new Application { ... }</c>
+/// therefore always finds it, and a theme dictionary any body merges, even one it removes again before returning, is recorded against that body's
+/// test. A first body that created the <see cref="Application"/> itself would merge before the collection could be watched, and a merge it removed
+/// again before returning would leave nothing to see.
+/// </para>
+/// <para>
 /// <b>Where it stuck (#6216).</b> .NET Core cannot capture another thread's stack, so the timeout message carries what can be read from
 /// outside: the last step the body named with <see cref="Step"/>, how many dispatcher operations ran (a loop that never settles starts
 /// them without end; one that never finishes leaves one running; a pump waiting on a frame starts none), and the thread's state and CPU
@@ -63,7 +70,7 @@ using Xunit;
 /// </summary>
 internal static class StaTestThread
 {
-    private static readonly StaHost s_host = new();
+    private static readonly StaHost s_host = new() { CreatesApplication = true };
 
     /// <summary>How long a body (and its drain) may take before the calling test fails. Settable so a test can shorten it.</summary>
     internal static TimeSpan HangGuard { get => s_host.HangGuard; set => s_host.HangGuard = value; }
@@ -285,6 +292,14 @@ internal sealed class StaHost
     internal TimeSpan StartUpGuard { get; set; } = TimeSpan.FromSeconds(180);
 
     /// <summary>
+    /// #8433: whether this host's start-up creates the process's <see cref="Application"/> on its own thread, ahead of the first body, so the theme
+    /// guard can watch the application's merged dictionaries before any body merges. True for the suites' shared host. False for a host a test makes
+    /// for itself: its thread is shut down when the test ends, and an <see cref="Application"/> whose dispatcher has ended would still be
+    /// <see cref="Application.Current"/> for the rest of the process, with every window the shared thread makes after that outside its window list.
+    /// </summary>
+    internal bool CreatesApplication { get; init; }
+
+    /// <summary>
     /// #7600: when given, the start-up does not return until this is set, after its window has shown and closed, so a host test can make the start-up
     /// overrun <see cref="StartUpGuard"/> for certain. The engine's own cost cannot be relied on for that: in a process where an earlier host has loaded
     /// it, the window shows and closes in 0 ms, inside even a 1 ms guard. Null for the suites' shared host.
@@ -434,7 +449,8 @@ internal sealed class StaHost
             var engineLoadedAtStart = StaThreadProbe.RenderEngineLoaded();
             _step = "(the body named no step)";
             Interlocked.Exchange(ref _stepTick, began);
-            /* #8395: a theme change inside the body is recorded against the calling test; a body that creates the Application merged before it could be watched. */
+            /* #8395: a theme change inside the body is recorded against the calling test. The shared host's start-up created the Application
+               (#8433), so the hook exists before the first body; the count after the body covers a host that leaves the body to create it. */
             var applicationExistedBefore = Application.Current is not null;
             ApplicationThemeGuard.Observe();
             var finished = dispatcher.InvokeAsync(() => Job(body, e => error = e)).Task.Unwrap();
@@ -761,6 +777,9 @@ internal sealed class StaHost
     /// the five stalled ones, the thread waiting in <c>wpfgfx_cor3!MilComposition_SyncFlush</c> for the render thread) and every later WPF test was fast.
     /// Showing and closing one window makes the first MediaContext, loads the engine, starts its render thread and makes the first composition round
     /// trip, so that cost is paid once per process, here, before any body, and never inside a test's hang guard. The duration goes to the leg's log.
+    /// <para>#8433: the suites' shared host also creates the process's <see cref="Application"/> here, on this thread, with the shutdown mode every
+    /// body's own <c>new Application</c> sets, and hands it to <see cref="ApplicationThemeGuard"/>, so the guard watches its merged dictionaries before
+    /// the first body can merge into them. The window shown next is the application's first and main window until it closes.</para>
     /// </summary>
     private void StartRenderEngine()
     {
@@ -769,6 +788,12 @@ internal sealed class StaHost
         Step("starting WPF's render engine: showing and closing one window before the first test body");
         try
         {
+            if (CreatesApplication)
+            {
+                _ = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+                ApplicationThemeGuard.Observe();
+            }
+
             var window = new Window { Width = 50, Height = 50 };
             StaTestThread.ShowOffScreen(window);
             window.Close();
