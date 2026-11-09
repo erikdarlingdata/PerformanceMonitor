@@ -8,6 +8,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -180,7 +181,7 @@ ORDER BY
 
         var text = string.Create(
             CultureInfo.InvariantCulture,
-            $"{databases.Count} online user database(s) not collected: the monitoring login has no user in {named}, so nothing was collected from them");
+            $"{CountText.Plural(databases.Count, "online user database")} not collected: the monitoring login has no user in {named}, so nothing was collected from {(databases.Count == 1 ? "it" : "them")}");
 
         return awsRds
             ? text + ". Amazon RDS has no CONNECT ANY DATABASE, so give the monitoring login a user in each of them"

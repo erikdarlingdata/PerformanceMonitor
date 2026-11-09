@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -329,7 +330,7 @@ public static partial class PgTargetAdvice
         if (candidates > 0)
         {
             inv.Append(CultureInfo.InvariantCulture,
-                $" {candidates:0} statement(s) changed plan in this window and were judged against their own hour-of-week per-call history");
+                $" {CountText.Plural((long)candidates, "statement")} changed plan in this window and {(candidates == 1 ? "was" : "were")} judged against {(candidates == 1 ? "its" : "their")} own hour-of-week per-call history");
             if (fired > 1)
                 inv.Append(CultureInfo.InvariantCulture, $"; {fired:0} were beyond it and this is the furthest.");
             else

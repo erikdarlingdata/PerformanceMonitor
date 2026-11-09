@@ -234,7 +234,7 @@ public partial class SettingsWindow : Window
         }
 
         var result = MessageBox.Show(
-            $"Remove custom schedules from {customCount} server(s) and revert them to the default schedule?\n\nThis cannot be undone.",
+            $"Remove custom schedules from {CountText.Plural(customCount, "server")} and revert {(customCount == 1 ? "it" : "them")} to the default schedule?\n\nThis cannot be undone.",
             "Apply Default to All",
             MessageBoxButton.YesNo,
             MessageBoxImage.Warning);

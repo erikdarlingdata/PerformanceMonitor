@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -101,8 +102,8 @@ public readonly record struct PgIndexBloatGridPage<TRow>(
     public string Composition =>
         string.Create(
             CultureInfo.InvariantCulture,
-            $"THIS GRID holds {AnswerlessShown:N0} index(es) with NO answer, listed first, and "
-            + $"{AnsweredShown:N0} answered index(es) behind them ranked by reclaimable bytes. Those are "
+            $"THIS GRID holds {CountText.Plural(AnswerlessShown, "index", "indexes")} with NO answer, listed first, and "
+            + $"{CountText.Plural(AnsweredShown, "answered index", "answered indexes")} behind them ranked by reclaimable bytes. Those are "
             + $"counts of the grid and not of the server - the census above is the population, and this "
             + $"grid is two capped reads of it.")
         + (TheLeadWasTruncatedForTheAnswers
@@ -110,7 +111,7 @@ public readonly record struct PgIndexBloatGridPage<TRow>(
                 CultureInfo.InvariantCulture,
                 $"  The answerless block is CUT at {AnswerlessShown:N0} of the "
                 + $"{AnswerlessShown + AnswerlessNotShown:N0} this read returned, because the answered "
-                + $"ranking behind it took {AnsweredShown:N0} of the {GridLimit:N0} row(s). A SHARE of "
+                + $"ranking behind it took {AnsweredShown:N0} of the {CountText.Plural(GridLimit, "row")}. A SHARE of "
                 + $"every grid is reserved for that ranking, or the answerless rows fill the grid at "
                 + $"their own population size - they sort first by design - and no answer appears at any "
                 + $"row cap.")
@@ -118,7 +119,7 @@ public readonly record struct PgIndexBloatGridPage<TRow>(
         + (AnsweredNotShown > 0
             ? string.Create(
                 CultureInfo.InvariantCulture,
-                $"  {AnsweredNotShown:N0} further answered index(es) this read returned rank below the "
+                $"  {CountText.Plural(AnsweredNotShown, "further answered index", "further answered indexes")} this read returned {(AnsweredNotShown == 1 ? "ranks" : "rank")} below the "
                 + $"ones shown and are not in the grid.")
             : string.Empty);
 }

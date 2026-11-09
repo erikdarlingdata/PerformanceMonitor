@@ -1,4 +1,5 @@
 using System.Globalization;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -39,8 +40,8 @@ public static class PgStatementEvictionNote
         }
 
         var current = info.MaxEntries is { } max ? ", currently " + max.ToString(CultureInfo.InvariantCulture) : "";
-        return "pg_stat_statements evicted entries " + passes.ToString(CultureInfo.InvariantCulture)
-             + " time(s) in this window (each pass drops about 5% of pg_stat_statements.max" + current
+        return "pg_stat_statements evicted entries " + CountText.Plural(passes, "time")
+             + " in this window (each pass drops about 5% of pg_stat_statements.max" + current
              + "), so a rarely-run statement may be missing and a statement re-admitted after an eviction counts only from then: "
              + "the totals here can under-report. Raising pg_stat_statements.max (a postmaster setting, restart required) reduces this.";
     }

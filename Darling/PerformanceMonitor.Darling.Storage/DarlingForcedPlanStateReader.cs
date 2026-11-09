@@ -385,7 +385,9 @@ LIMIT 50";
     {
         var ids = string.Join(", ", unknowns.Take(10).Select(u => u.PlanId.ToString(System.Globalization.CultureInfo.InvariantCulture)))
                   + (unknowns.Count > 10 ? ", ..." : "");
-        var text = $"Later plan(s) {ids} of the query ran after the force, and whether they are variants of the forced plan (the force running) or other plans (the force ignored) is not known: ";
+        var text = unknowns.Count == 1
+            ? $"Later plan {ids} of the query ran after the force, and whether it is a variant of the forced plan (the force running) or another plan (the force ignored) is not known: "
+            : $"Later plans {ids} of the query ran after the force, and whether they are variants of the forced plan (the force running) or other plans (the force ignored) is not known: ";
         var notCollected = unknowns.Count - notChecked;
         if (notCollected > 0)
             text += $"{notCollected} of them have no plan XML in the store yet (the Query Store collector has not fetched it)";

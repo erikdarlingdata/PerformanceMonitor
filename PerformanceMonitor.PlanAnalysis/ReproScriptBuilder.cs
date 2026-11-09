@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.PlanAnalysis;
 
@@ -120,7 +121,7 @@ public static partial class ReproScriptBuilder
         var droppedCount = parameters.Count - validParameters.Count;
         if (droppedCount > 0)
         {
-            warnings.Add($"{droppedCount} parameter(s) omitted: the plan's parameter name or data type was not a valid T-SQL identifier. Declare them manually before executing.");
+            warnings.Add($"{CountText.Plural(droppedCount, "parameter")} omitted: the plan's parameter name or data type was not a valid T-SQL identifier. Declare {(droppedCount == 1 ? "it" : "them")} manually before executing.");
         }
 
         if (conflictingNames.Count > 0)

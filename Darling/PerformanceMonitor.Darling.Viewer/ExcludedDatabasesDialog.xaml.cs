@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -123,7 +124,7 @@ public partial class ExcludedDatabasesDialog : Window
         DatabasesItemsControl.ItemsSource = _items;
 
         StatusText.Text = collectedCount > 0
-            ? $"{collectedCount} collected database(s), {existing.Count} currently excluded."
+            ? $"{CountText.Plural(collectedCount, "collected database")}, {existing.Count} currently excluded."
             : $"No collected databases for this server yet — add names to exclude. {existing.Count} currently excluded.";
     }
 

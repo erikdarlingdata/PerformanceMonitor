@@ -621,7 +621,7 @@ internal static class McpHelpers
     /// </summary>
     public static string SnapshotsWithoutDeltaMessage(string serverName, int hoursBack, long snapshots, DateTime? newestMeasuredDeltaAt, DateTime windowEnd)
     {
-        var message = $"{serverName} stored {snapshots} query_stats snapshot(s) in the last {hoursBack} hour(s), but none carries a measured delta, so no CPU can be attributed to a query in this window. "
+        var message = $"{serverName} stored {CountText.Plural(snapshots, "query_stats snapshot")} in the last {CountText.Plural(hoursBack, "hour")}, but none carries a measured delta, so no CPU can be attributed to a query in this window. "
             + "A CPU figure is the change in a plan's counters between two snapshots of the same plan; a plan sighted once, or sighted again with unmoved counters, stores zero deltas and is left out of the ranking. "
             + "This is not a collection gap, and collection health showing stored rows is consistent with it.";
         if (newestMeasuredDeltaAt is { } newest)

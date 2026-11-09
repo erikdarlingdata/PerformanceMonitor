@@ -1148,7 +1148,7 @@ public partial class App : Application
         }
 
         MessageBox.Show(
-            $"{s_badSettingValues.Count} setting(s) in settings.json could not be read and are at their " +
+            $"{CountText.Plural(s_badSettingValues.Count, "setting")} in settings.json could not be read and {(s_badSettingValues.Count == 1 ? "is at its" : "are at their")} " +
             "defaults for this session. Everything else in the file loaded normally.\n\n" +
             $"{Path.Combine(ConfigDirectory, "settings.json")}\n\n" +
             string.Join("\n", s_badSettingValues) + "\n\n" +

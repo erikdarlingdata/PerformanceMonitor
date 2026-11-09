@@ -109,7 +109,7 @@ public partial class WaitDrillDownWindow : Window
 
         data = SortByProperty(data, classification.SortProperty);
         _filterManager.UpdateData(data);
-        SummaryText.Text = $"{data.Count} snapshot(s) | {classification.Description} | {GetTimeRangeDescription(data)}";
+        SummaryText.Text = $"{CountText.Plural(data.Count, "snapshot")} | {classification.Description} | {GetTimeRangeDescription(data)}";
         ApplyInitialSort(classification.SortProperty);
     }
 
@@ -127,7 +127,7 @@ public partial class WaitDrillDownWindow : Window
 
         data = SortByProperty(data, classification.SortProperty);
         _filterManager.UpdateData(data);
-        SummaryText.Text = $"{data.Count} snapshot(s) | {classification.Description} | {GetTimeRangeDescription(data)}" +
+        SummaryText.Text = $"{CountText.Plural(data.Count, "snapshot")} | {classification.Description} | {GetTimeRangeDescription(data)}" +
             (data.Count < totalCount ? $" | showing newest 1,000 of {totalCount:N0}" : "");
         ApplyInitialSort(classification.SortProperty);
     }
@@ -153,7 +153,7 @@ public partial class WaitDrillDownWindow : Window
         if (headBlockerInfos.Count == 0)
         {
             _filterManager.UpdateData(waiters);
-            SummaryText.Text = $"{waiters.Count} snapshot(s) | {classification.Description} | {GetTimeRangeDescription(waiters)} | No blocking chains found, showing waiters{truncationNote}";
+            SummaryText.Text = $"{CountText.Plural(waiters.Count, "snapshot")} | {classification.Description} | {GetTimeRangeDescription(waiters)} | No blocking chains found, showing waiters{truncationNote}";
             return;
         }
 
@@ -176,13 +176,13 @@ public partial class WaitDrillDownWindow : Window
         if (headBlockerRows.Count == 0)
         {
             _filterManager.UpdateData(waiters);
-            SummaryText.Text = $"{waiters.Count} snapshot(s) | {classification.Description} | {GetTimeRangeDescription(waiters)} | Head blockers not in snapshots, showing waiters{truncationNote}";
+            SummaryText.Text = $"{CountText.Plural(waiters.Count, "snapshot")} | {classification.Description} | {GetTimeRangeDescription(waiters)} | Head blockers not in snapshots, showing waiters{truncationNote}";
             return;
         }
 
         InsertChainColumn();
         _filterManager.UpdateData(headBlockerRows);
-        SummaryText.Text = $"{headBlockerRows.Count} head blocker(s) from {waiters.Count} waiting session(s) | {classification.Description} | {GetTimeRangeDescription(headBlockerRows)}{truncationNote}";
+        SummaryText.Text = $"{CountText.Plural(headBlockerRows.Count, "head blocker")} from {CountText.Plural(waiters.Count, "waiting session")} | {classification.Description} | {GetTimeRangeDescription(headBlockerRows)}{truncationNote}";
     }
 
     /// <summary>Inserts the "Blocking Path" chain column at the front (Lite's InsertChainColumns —

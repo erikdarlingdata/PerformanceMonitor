@@ -251,7 +251,7 @@ internal static class TrendPayloads
     /// misspelt database and an idle one both land here and only a list of the real names tells them apart.
     /// </summary>
     public static string FileIoScopeEmptyMessage(string serverName, string scope, int hoursBack) =>
-        $"No read or write activity was recorded for database '{scope}' on {serverName} in the last {hoursBack} hour(s). The name must match a collected database exactly (get_file_io_stats lists them); omit database_name for every database.";
+        $"No read or write activity was recorded for database '{scope}' on {serverName} in the last {CountText.Plural(hoursBack, "hour")}. The name must match a collected database exactly (get_file_io_stats lists them); omit database_name for every database.";
 
     /// <summary>
     /// <c>get_lock_wait_trend</c>'s data envelope: the family's bucketed rate, and the per-type legend that says

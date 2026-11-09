@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -433,7 +434,7 @@ public static partial class PgTargetAdvice
             : "That does not meet the pinned-horizon standard (a query that ran long and finished looks like this), so it is context, not a finding, exactly as the alert would decline to page it. ");
         if (heldCaptures > 0)
         {
-            inv.Append($"Attribution, separately: {distinctHolders:0} distinct holder(s) won captures of the run, client backends {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerBackendShareKey))}, replication slots {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerSlotShareKey))}, standby feedback {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerStandbyShareKey))}, prepared transactions {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerPreparedShareKey))}. ");
+            inv.Append($"Attribution, separately: {CountText.Plural((long)distinctHolders, "distinct holder")} won captures of the run, client backends {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerBackendShareKey))}, replication slots {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerSlotShareKey))}, standby feedback {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerStandbyShareKey))}, prepared transactions {HolderShare(m.GetValueOrDefault(PgTargetScorer.XminWinnerPreparedShareKey))}. ");
             inv.Append(attributed
                 ? $"{holder} won {modalShare:P0} of the run, at or past the {PgTargetScorer.XminHolderDominanceShare:P0} share this finding needs before it names a holder (a chosen line, not a measured one (threshold_lineage = 0), and it gates only the NAME, never the grade), so the remedy below is its kind's. "
                 : $"No holder reached the {PgTargetScorer.XminHolderDominanceShare:P0} share this finding needs before naming one (a chosen line, not a measured one (threshold_lineage = 0) gating only the name, never the grade); the largest won {modalShare:P0}, so the fact names none. ");
