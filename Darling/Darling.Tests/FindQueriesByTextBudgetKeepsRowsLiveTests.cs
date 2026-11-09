@@ -36,9 +36,12 @@ public sealed class FindQueriesByTextBudgetKeepsRowsLiveTests
 
     private const string NewestHash = "0xAA01";
     private const string OlderHash = "0xBB02";
+    private const string UnmatchedHash = "0xDD04";
 
-    /// <summary>Two texts that both name dbo.Ledger. The newest statement ran an hour ago and two hours ago, and also three days ago; the
-    /// older statement ran three days ago only. Both sit inside the raw tier's window; only the first sits in its newest hours.</summary>
+    /// <summary>Two texts that both name dbo.Ledger, and one that does not. The newest statement ran in Books an hour ago, two hours ago
+    /// and three days ago, and in Archive, with the same text, three days and an hour ago; the older statement ran in Books three days ago
+    /// only; the unmatched statement ran an hour ago and three days ago. All sit inside the raw tier's window; only the newest and the
+    /// unmatched statements sit in its newest hours, so a text first judged there is seen again, matched or not, in a later span.</summary>
     private static async Task<(ScratchPostgres Scratch, DateTime NewestSample)> OpenScratchAsync(CancellationToken ct)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
@@ -50,19 +53,23 @@ public sealed class FindQueriesByTextBudgetKeepsRowsLiveTests
         await DarlingMcpTestData.ExecAsync(c, ct,
             @"INSERT INTO collect.query_text_dim (digest, query_text, last_seen)
               VALUES (sha256('newest'::text::bytea), 'SELECT * FROM dbo.Ledger WHERE LedgerId = @p', timezone('UTC', now())),
-                     (sha256('older'::text::bytea), 'SELECT COUNT(*) FROM dbo.Ledger', timezone('UTC', now()))");
+                     (sha256('older'::text::bytea), 'SELECT COUNT(*) FROM dbo.Ledger', timezone('UTC', now())),
+                     (sha256('unmatched'::text::bytea), 'SELECT 1 FROM dbo.Other', timezone('UTC', now()))");
 
         var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
-        async Task Stat(string hash, string text, TimeSpan age) =>
+        async Task Stat(string hash, string text, TimeSpan age, string database = "Books") =>
             await DarlingMcpTestData.ExecAsync(c, ct,
                 @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_text_digest)
-                  VALUES ($1,$2,1,'ledger','Books',$3,sha256($4::text::bytea))",
-                CollectionIdGenerator.Next(), now - age, hash, text);
+                  VALUES ($1,$2,1,'ledger',$5,$3,sha256($4::text::bytea))",
+                CollectionIdGenerator.Next(), now - age, hash, text, database);
 
         await Stat(NewestHash, "newest", TimeSpan.FromHours(1));
         await Stat(NewestHash, "newest", TimeSpan.FromHours(2));
         await Stat(NewestHash, "newest", TimeSpan.FromDays(3));
+        await Stat(NewestHash, "newest", TimeSpan.FromDays(3) + TimeSpan.FromHours(1), "Archive");
         await Stat(OlderHash, "older", TimeSpan.FromDays(3));
+        await Stat(UnmatchedHash, "unmatched", TimeSpan.FromHours(1));
+        await Stat(UnmatchedHash, "unmatched", TimeSpan.FromDays(3));
         return (scratch, now - TimeSpan.FromHours(1));
     }
 
@@ -77,6 +84,9 @@ public sealed class FindQueriesByTextBudgetKeepsRowsLiveTests
 
     private static string[] Hashes(JsonElement planCache) =>
         planCache.GetProperty("rows").EnumerateArray().Select(r => r.GetProperty("query_hash").GetString()!).ToArray();
+
+    private static (string Hash, string Database)[] Keys(JsonElement planCache) =>
+        planCache.GetProperty("rows").EnumerateArray().Select(r => (r.GetProperty("query_hash").GetString()!, r.GetProperty("database_name").GetString()!)).ToArray();
 
     [Fact]
     public async Task ABudgetThatRunsOutAfterTheNewestSpan_ReturnsTheRowsFoundThere_AndSaysItStopped()
@@ -124,6 +134,9 @@ public sealed class FindQueriesByTextBudgetKeepsRowsLiveTests
         Assert.Contains("(none)", planCache.GetProperty("message").GetString(), StringComparison.Ordinal);
     }
 
+    /// <summary>The newest statement's text is judged in the newest span, where it ran in Books, and the same text's run in Archive sits
+    /// spans later: it lists there too, once per database, with that database's own newest sighting. The unmatched text, also judged in
+    /// the newest span and seen again later, lists nowhere.</summary>
     [Fact]
     public async Task TheWholeBudget_ListsEveryMatchNewestFirst_OncePerHashAndDatabase()
     {
@@ -134,8 +147,9 @@ public sealed class FindQueriesByTextBudgetKeepsRowsLiveTests
         var planCache = await PlanCacheAsync(scratch, DarlingMcpFindQueriesByTextTools.SourceBudget.Default, 20, ct);
 
         Assert.Equal("ok", planCache.GetProperty("status").GetString());
-        Assert.Equal([NewestHash, OlderHash], Hashes(planCache));
+        Assert.Equal([(NewestHash, "Books"), (OlderHash, "Books"), (NewestHash, "Archive")], Keys(planCache));
         Assert.Equal(DateTime.SpecifyKind(newestSample, DateTimeKind.Utc).ToString("o"), planCache.GetProperty("rows")[0].GetProperty("last_collected_at").GetString());
+        Assert.Equal(DateTime.SpecifyKind(newestSample - TimeSpan.FromDays(3), DateTimeKind.Utc).ToString("o"), planCache.GetProperty("rows")[2].GetProperty("last_collected_at").GetString());
         Assert.False(planCache.GetProperty("truncated").GetBoolean());
     }
 
