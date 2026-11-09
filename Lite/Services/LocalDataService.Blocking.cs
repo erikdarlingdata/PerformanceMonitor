@@ -151,13 +151,14 @@ LIMIT $4";
     }
 
     /// <summary>
-    /// Gets hourly-bucketed metrics from query snapshots for the time-range slicer.
-    /// The metric column is determined by the caller's sort preference.
+    /// Gets bucketed metrics from query snapshots for the time-range slicer, at the width <see cref="SlicerBuckets"/> picks for the window:
+    /// a minute over a short window, an hour over a day. The metric column is determined by the caller's sort preference.
     /// </summary>
     public async Task<List<TimeSliceBucket>> GetActiveQuerySlicerDataAsync(
         int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, bool includeMonitor = false)
     {
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+        var bucketMinutes = SlicerBuckets.MinutesFor(startTime, endTime);
 
         /* #7256: a window that starts after the newest archived row of query_snapshots reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
         return await ReadWindowSkippingEmptyArchiveAsync("query_snapshots", "collection_time", startTime, ReadAsync, CancellationToken.None);
@@ -167,11 +168,13 @@ LIMIT $4";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues) + MonitorSnapshotClause("program_name", includeMonitor);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues) + MonitorSnapshotClause("program_name", includeMonitor);
+        /* $4 is the bucket width in minutes, on the grid every width of SlicerBuckets divides. */
+        var bucket = $"time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql})";
 
         command.CommandText = @"
 SELECT
-    date_trunc('hour', collection_time) AS bucket,
+    " + bucket + @" AS bucket,
     COUNT(*) AS session_count,
     COALESCE(SUM(cpu_time_ms), 0) AS total_cpu,
     COALESCE(SUM(total_elapsed_time_ms), 0) AS total_elapsed,
@@ -182,13 +185,14 @@ FROM v_query_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3" + dbClause + @"
-GROUP BY date_trunc('hour', collection_time)
+GROUP BY " + bucket + @"
 ORDER BY bucket";
         command.CommandText = command.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
@@ -230,7 +234,10 @@ ORDER BY bucket";
         : " AND (h.session_id IS NOT NULL OR " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramPredicate(column) + ")";
 
     /// <summary>
-    /// Gets query snapshots (currently running queries) for a server.
+    /// Gets query snapshots (currently running queries) for a server: the Active Queries grid read. A <c>WAITFOR</c> row is an idle shell and
+    /// is left out, unless another row of the SAME capture names it as its blocker: the classic head blocker is a session sitting in
+    /// <c>WAITFOR</c> with an open transaction, and the grid keeps it the way <see cref="GetActiveQueriesPageAsync"/> does, so the row a
+    /// victim's blocking session id points at is on the grid. Same capture, not same window, because session ids are reused.
     /// </summary>
     public async Task<List<QuerySnapshotRow>> GetLatestQuerySnapshotsAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, bool includeMonitor = false)
     {
@@ -277,12 +284,24 @@ SELECT
     percent_complete,
     query_hash,
     request_id
-FROM v_query_snapshots
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3" + dbClause + @"
-AND   query_text NOT LIKE 'WAITFOR%'
-ORDER BY collection_time DESC, cpu_time_ms DESC";
+FROM v_query_snapshots AS w
+LEFT JOIN (
+    /* (capture, session) pairs some OTHER session in the SAME capture names as its blocker. A session naming itself is not its own victim. */
+    SELECT DISTINCT collection_time AS head_time, blocking_session_id AS head_session
+    FROM v_query_snapshots
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   blocking_session_id > 0
+    AND   blocking_session_id <> session_id
+) AS h
+  ON  h.head_time = w.collection_time
+  AND h.head_session = w.session_id
+WHERE w.server_id = $1
+AND   w.collection_time >= $2
+AND   w.collection_time <= $3" + dbClause + @"
+AND   (w.query_text NOT LIKE 'WAITFOR%' OR h.head_session IS NOT NULL)
+ORDER BY w.collection_time DESC, w.cpu_time_ms DESC";
         command.CommandText = command.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -299,7 +318,7 @@ ORDER BY collection_time DESC, cpu_time_ms DESC";
             {
                 SessionId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
                 DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : PerformanceMonitor.Common.ElapsedTimeText.WithoutZeroDays(reader.GetString(2)),
                 QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
                 Status = reader.IsDBNull(4) ? "" : reader.GetString(4),
                 BlockingSessionId = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
@@ -1040,7 +1059,8 @@ LIMIT 5000";
     }
 
     /// <summary>
-    /// Gets hourly-bucketed metrics from blocked process reports for the time-range slicer.
+    /// Gets bucketed metrics from blocked process reports for the time-range slicer, at the width <see cref="SlicerBuckets"/> picks for
+    /// the window: a minute over a short window, an hour over a day.
     /// </summary>
     public async Task<List<TimeSliceBucket>> GetBlockingSlicerDataAsync(
         int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
@@ -1048,25 +1068,28 @@ LIMIT 5000";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var bucketMinutes = SlicerBuckets.MinutesFor(startTime, endTime);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        /* $4 is the bucket width in minutes, on the grid every width of SlicerBuckets divides. */
+        static string BucketOf(string column) => $"time_bucket(to_minutes(CAST($4 AS INTEGER)), {column}, {TrendBuckets.OriginSql})";
 
         /* BPR buckets, falling back to the always-on DMV snapshot only when BPR has no buckets in the
            window (AWS RDS) — so a server with both sources never double-counts. */
         command.CommandText = @"
 WITH bpr AS (
     SELECT
-        date_trunc('hour', event_time) AS bucket,
+        " + BucketOf("event_time") + @" AS bucket,
         COUNT(*) AS event_count,
         COALESCE(SUM(wait_time_ms), 0) / 1000.0 AS total_wait_sec,
         COUNT(DISTINCT blocking_spid) AS distinct_blockers,
         COUNT(DISTINCT blocked_spid) AS distinct_blocked,
         COUNT(DISTINCT database_name) AS distinct_databases
     FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause) + @" AS ev
-    GROUP BY date_trunc('hour', event_time)
+    GROUP BY " + BucketOf("event_time") + @"
 ),
 dmv AS (
     SELECT
-        date_trunc('hour', collection_time) AS bucket,
+        " + BucketOf("collection_time") + @" AS bucket,
         COUNT(*) AS event_count,
         COALESCE(SUM(wait_time_ms), 0) / 1000.0 AS total_wait_sec,
         COUNT(DISTINCT blocking_spid) AS distinct_blockers,
@@ -1074,7 +1097,7 @@ dmv AS (
         COUNT(DISTINCT database_name) AS distinct_databases
     FROM v_dmv_blocking_snapshots
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause + @"
-    GROUP BY date_trunc('hour', collection_time)
+    GROUP BY " + BucketOf("collection_time") + @"
 )
 SELECT bucket, event_count, total_wait_sec, distinct_blockers, distinct_blocked, distinct_databases FROM bpr
 UNION ALL
@@ -1085,6 +1108,7 @@ ORDER BY bucket";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 

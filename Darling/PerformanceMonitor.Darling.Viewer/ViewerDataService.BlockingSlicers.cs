@@ -30,7 +30,9 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>
-    /// Hourly blocking-event buckets for the slicer — Lite's <c>GetBlockingSlicerDataAsync</c> ported.
+    /// Blocking-event buckets for the slicer — Lite's <c>GetBlockingSlicerDataAsync</c> ported, at the width
+    /// <see cref="SlicerBuckets"/> picks for the window ($6 minutes, on the grid every width of it divides: a minute
+    /// over a short window, an hour over a day).
     /// The XE blocked-process reports are the primary source; the DMV snapshot contributes only when the
     /// XE source has no buckets in the window. Columns feed the slicer's sort-driven metric overlay
     /// (events / total-wait-sec / distinct blockers / blocked / databases).
@@ -46,7 +48,7 @@ public sealed partial class ViewerDataService
     public const string BlockingSlicerSql = $"""
         WITH bpr AS (
             SELECT
-                date_trunc('hour', event_time) AS bucket,
+                date_bin(CAST($6 AS integer) * INTERVAL '1 minute', event_time, {TrendBucketSql.OriginSql}) AS bucket,
                 COUNT(*) AS event_count,
                 COALESCE(SUM(wait_time_ms), 0) / 1000.0 AS total_wait_sec,
                 COUNT(DISTINCT blocking_spid) AS distinct_blockers,
@@ -57,11 +59,11 @@ public sealed partial class ViewerDataService
             AND   collection_time >= $5
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
-            GROUP BY date_trunc('hour', event_time)
+            GROUP BY 1
         ),
         dmv AS (
             SELECT
-                date_trunc('hour', collection_time) AS bucket,
+                date_bin(CAST($6 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}) AS bucket,
                 COUNT(*) AS event_count,
                 COALESCE(SUM(wait_time_ms), 0) / 1000.0 AS total_wait_sec,
                 COUNT(DISTINCT blocking_spid) AS distinct_blockers,
@@ -71,7 +73,7 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
-            GROUP BY date_trunc('hour', collection_time)
+            GROUP BY 1
         )
         SELECT bucket, event_count, total_wait_sec, distinct_blockers, distinct_blocked, distinct_databases FROM bpr
         UNION ALL
@@ -90,6 +92,7 @@ public sealed partial class ViewerDataService
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = SlicerBuckets.MinutesFor(startUtc, endUtc) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
