@@ -510,14 +510,9 @@ public sealed class PgTargetWriteTests
             using (var doc = JsonDocument.Parse(json))
             {
                 var root = doc.RootElement;
-                Assert.Equal("findings", root.GetProperty("status").GetString());
-                var findings = root.GetProperty("findings").EnumerateArray().ToList();
-                string RootKey(JsonElement f) => f.GetProperty("root_fact").GetProperty("key").GetString()!;
-                /* shared_buffers at its default is the ONE advisory; the write chain roots nothing and is in no path. */
-                var only = Assert.Single(findings);
-                Assert.Equal(PgTargetFactKeys.ConfigSharedBuffers, RootKey(only));
-                Assert.DoesNotContain(PgTargetFactKeys.CheckpointPressure, only.GetProperty("story_path").GetString()!, StringComparison.Ordinal);
-                Assert.DoesNotContain(PgTargetFactKeys.ConfigMaxWalSize, only.GetProperty("story_path").GetString()!, StringComparison.Ordinal);
+                /* #8322: shared_buffers at the initdb figure is the service's value on Aurora, so no advisory roots there
+                   either; with the write chain rooting nothing, the Aurora target at defaults is an all-clear. */
+                Assert.Equal("empty", root.GetProperty("status").GetString());
             }
 
             var factsJson = await DarlingMcpTools.GetAnalysisFacts(service, postgres, AuroraServerName, 4, PgTargetSources.WriteSource, as_of: asOf);
@@ -562,8 +557,12 @@ public sealed class PgTargetWriteTests
                 Assert.Equal(1, checkpointTimeout.GetProperty("metadata").GetProperty("not_applicable").GetDouble());
                 Assert.Equal(1, checkpointTimeout.GetProperty("metadata").GetProperty("not_applicable_on_aurora").GetDouble());
 
+                /* #8322: the same stamp on shared_buffers, which the service sizes from the instance's capacity on Aurora. */
                 var sharedBuffers = doc.RootElement.GetProperty("facts").EnumerateArray().Single(f => f.GetProperty("key").GetString() == PgTargetFactKeys.ConfigSharedBuffers);
-                Assert.Equal(0.4, sharedBuffers.GetProperty("base_severity").GetDouble(), precision: 6);
+                Assert.Equal(128, sharedBuffers.GetProperty("value").GetDouble());
+                Assert.Equal(0, sharedBuffers.GetProperty("base_severity").GetDouble());
+                Assert.Equal(1, sharedBuffers.GetProperty("metadata").GetProperty("not_applicable").GetDouble());
+                Assert.Equal(1, sharedBuffers.GetProperty("metadata").GetProperty("not_applicable_on_aurora").GetDouble());
             }
 
             bodySucceeded = true;

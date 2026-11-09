@@ -90,6 +90,7 @@ public partial class AddServerDialog : Window
         : this(serverManager, profileManager)
     {
         Title = "Edit SQL Server";
+        HeaderText.Text = "Edit SQL Server Connection";
         _originalHost = existing.ServerName;
         _editing = existing;
         _hostChange = serverManager.HostChange(existing);
