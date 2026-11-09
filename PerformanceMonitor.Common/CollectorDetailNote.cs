@@ -32,7 +32,7 @@ public static class CollectorDetailNote
             + $"{partialCount} {(partialCount == 1 ? "needs" : "need")} a look (failing, stale, stopped, erroring, denied, regressed, or an unexplained zero) and {(partialCount == 1 ? "carries" : "carry")} a leaner partial_detail shape instead of full detail: in a partial row a missing key means null, false or 0, and only collector, status, partial_detail, total_runs and errors are always present.";
         if (notCollectedCount > 0)
         {
-            note += $" {CountText.Plural(notCollectedCount, "more row")} below {(notCollectedCount == 1 ? "is" : "are")} not collected on this server (the row says why) and {(notCollectedCount == 1 ? "is" : "are")} counted in collectors_total but not above.";
+            note += $" {CountText.Plural(notCollectedCount, "more row")} below {(notCollectedCount == 1 ? "is" : "are")} not collected on this server ({(notCollectedCount == 1 ? "the row says why" : "each row says why")}) and {(notCollectedCount == 1 ? "is" : "are")} counted in collectors_total but not above.";
         }
 
         return note + " Pass full_detail=true for every field on every collector.";

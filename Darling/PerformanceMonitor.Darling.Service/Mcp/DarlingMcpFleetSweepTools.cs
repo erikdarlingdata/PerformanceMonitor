@@ -176,9 +176,11 @@ public sealed class DarlingMcpFleetSweepTools
             /* #8318: the newest sweep's document ships once. latest carries it in full, with its verdicts, so the
                timeline entry for the same sweep keeps its header facts and a slim report holding exactly the fields
                the sweep rows draw from (fleet.bands, watch, and would_have_paged when the sweep ran muted), equal to
-               latest's, and names latest with report_under. Older entries keep their documents. The Viewer's and the
-               web feed's entry shape (BuildRunNode) is unchanged; ViewerFleetSweepsReadTests compares this reply's
-               newest entry with its document taken from latest, field for field. */
+               latest's except that watch.carried is the carried items' COUNT where latest's is their list (the rows
+               read opened and closed; the carried items ride once, under latest and in watch_items), and names latest
+               with report_under. Older entries keep their documents. The Viewer's and the web feed's entry shape
+               (BuildRunNode) is unchanged; ViewerFleetSweepsReadTests compares this reply's newest entry with its
+               document taken from latest, field for field. */
             var latestId = latestNode["sweep_id"]?.GetValue<string>();
             foreach (var entry in entries.OfType<JsonObject>())
             {
@@ -197,7 +199,13 @@ public sealed class DarlingMcpFleetSweepTools
 
                     if (full["watch"] is JsonNode watch)
                     {
-                        slim["watch"] = watch.DeepClone();
+                        var slimWatch = watch.DeepClone();
+                        if (slimWatch is JsonObject watchObject && watchObject["carried"] is JsonArray carried)
+                        {
+                            watchObject["carried"] = carried.Count;
+                        }
+
+                        slim["watch"] = slimWatch;
                     }
 
                     if (full["would_have_paged"] is JsonNode wouldHavePaged)
