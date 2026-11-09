@@ -162,7 +162,7 @@ public sealed class McpSweepReportsWorklistBudgetLiveTests
 
     /// <summary>Two small sweeps in the window: the newest sweep's document ships once. <c>latest</c> carries it in full; the
     /// newest timeline entry keeps its header facts and a slim <c>report</c> with exactly the fields the sweep rows draw from
-    /// (<c>fleet.bands</c>, <c>watch</c>, and <c>would_have_paged</c> when the sweep ran muted), equal to latest's, and names
+    /// (<c>fleet.bands</c>, <c>watch</c>, and <c>would_have_paged</c> when the sweep ran muted), equal to latest's except that <c>watch.carried</c> is the carried items' count where latest carries their list, and names
     /// latest with <c>report_under</c>. The older entry keeps its whole document.</summary>
     [Fact]
     public async Task GetSweepReports_TheNewestSweepsDocument_ShipsOnce_AndItsEntryKeepsTheRowCounts()
@@ -174,7 +174,7 @@ public sealed class McpSweepReportsWorklistBudgetLiveTests
         await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
         await using var postgres = NpgsqlDataSource.Create(WithSearchPath(scratch));
 
-        await SeedSweepsAsync(postgres, sweepCount: 2, serversPerReport: 6, openItems: 0, carriedItems: 0, ct);
+        await SeedSweepsAsync(postgres, sweepCount: 2, serversPerReport: 6, openItems: 0, carriedItems: 1, ct);
 
         var json = await DarlingMcpFleetSweepTools.GetSweepReports(postgres, NullLogger.Instance, cancellationToken: ct);
         using var doc = JsonDocument.Parse(json);
@@ -192,7 +192,10 @@ public sealed class McpSweepReportsWorklistBudgetLiveTests
         Assert.Equal(new[] { "bands" }, slim.GetProperty("fleet").EnumerateObject().Select(p => p.Name));
         var full = latest.GetProperty("report");
         Assert.Equal(full.GetProperty("fleet").GetProperty("bands").GetRawText(), slim.GetProperty("fleet").GetProperty("bands").GetRawText());
-        Assert.Equal(full.GetProperty("watch").GetRawText(), slim.GetProperty("watch").GetRawText());
+        Assert.Equal(full.GetProperty("watch").GetProperty("opened").GetRawText(), slim.GetProperty("watch").GetProperty("opened").GetRawText());
+        Assert.Equal(full.GetProperty("watch").GetProperty("closed").GetRawText(), slim.GetProperty("watch").GetProperty("closed").GetRawText());
+        Assert.Equal(1, full.GetProperty("watch").GetProperty("carried").GetArrayLength());
+        Assert.Equal(1, slim.GetProperty("watch").GetProperty("carried").GetInt32());
         Assert.Equal(6, full.GetProperty("servers").GetArrayLength());
 
         var older = Assert.Single(entries, entry => entry.GetProperty("sweep_id").GetString() != latestId);
@@ -325,6 +328,10 @@ public sealed class McpSweepReportsWorklistBudgetLiveTests
             ids.Add(id);
             var cards = string.Join(",", Enumerable.Range(1, serversPerReport).Select(n =>
                 $"{{\"server\":\"server-{n}\",\"band\":\"healthy\",\"reason\":\"{new string('x', 240)}\"}}"));
+            var opened = string.Join(",", Enumerable.Range(1, i == 0 ? openItems : 0).Select(n =>
+                $"{{\"server_id\":{n},\"item\":\"item-{n}\",\"condition\":\"a condition\"}}"));
+            var carried = string.Join(",", Enumerable.Range(openItems + 1, i == 0 ? carriedItems : 0).Select(n =>
+                $"{{\"server_id\":{n},\"item\":\"item-{n}\",\"consecutive_hits\":1,\"consecutive_misses\":0}}"));
             var run = new FleetSweepRun(
                 SweepId: id,
                 SweptAtUtc: sweptAt,
@@ -337,7 +344,7 @@ public sealed class McpSweepReportsWorklistBudgetLiveTests
                 InstrumentsAlive: true,
                 InstrumentLivenessJson: """{"alert_pass_counter":{"read":true,"advancing":true}}""",
                 ReportJson: string.Create(CultureInfo.InvariantCulture,
-                    $"{{\"sweep_id\":{id},\"fleet\":{{\"bands\":{{\"Healthy\":{serversPerReport - 1},\"Warning\":1}}}},\"watch\":{{\"opened\":{(i == 0 ? openItems : 0)},\"carried\":{(i == 0 ? carriedItems : 0)},\"closed\":0}},{(i == 0 && newestMuted ? "\"would_have_paged\":[{\"server_id\":2,\"family\":\"cpu\"}]," : string.Empty)}\"servers\":[{cards}]}}"));
+                    $"{{\"sweep_id\":{id},\"fleet\":{{\"bands\":{{\"Healthy\":{serversPerReport - 1},\"Warning\":1}}}},\"watch\":{{\"opened\":[{opened}],\"carried\":[{carried}],\"closed\":[]}},{(i == 0 && newestMuted ? "\"would_have_paged\":[{\"server_id\":2,\"family\":\"cpu\"}]," : string.Empty)}\"servers\":[{cards}]}}"));
 
             var items = i == 0
                 ? Enumerable.Range(1, openItems)

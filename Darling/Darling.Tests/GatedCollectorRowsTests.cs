@@ -267,6 +267,9 @@ public sealed class GatedCollectorRowsLiveTests
             /* collectors_returned / collectors_total (#6180) count the collectors array itself, gated rows included, so they
                move with it exactly as the array does; the test below holds them to the array's own length instead. */
             if (p.Name is "collectors" or "collectors_returned" or "collectors_total" or "collection_health_age_seconds") continue;
+            /* collector_detail_note names the gated rows the array carries (how many sit below as not collected), so it moves with
+               the array too; the test below holds it to the array's own composition instead. */
+            if (p.Name is "collector_detail_note") continue;
             map[p.Name] = p.Value.GetRawText();
         }
 
@@ -392,8 +395,23 @@ public sealed class GatedCollectorRowsLiveTests
                         string.Join(",", without.RootElement.GetProperty("collectors").EnumerateArray().Select(r => r.GetRawText())),
                         string.Join(",", withGated.RootElement.GetProperty("collectors").EnumerateArray().Take(plainNames.Length).Select(r => r.GetRawText())));
 
-                    // sweep_pressure, alert_read_health, the counts note, stored_caveats and every other key.
+                    // sweep_pressure, alert_read_health, stored_caveats and every other key.
                     Assert.Equal(Rollups(without), Rollups(withGated));
+                    // The counts note follows the array: with the gated rows appended it says how many sit below as not
+                    // collected, so its count and collectors_total describe the same list; without them it says nothing of the kind.
+                    var gatedNote = withGated.RootElement.GetProperty("collector_detail_note").GetString()!;
+                    var plainNote = without.RootElement.GetProperty("collector_detail_note").GetString()!;
+                    if (full)
+                    {
+                        Assert.Equal(plainNote, gatedNote);
+                    }
+                    else
+                    {
+                        Assert.Contains($"{CountText.Plural(gatedNames.Length - plainNames.Length, "more row")} below", gatedNote, StringComparison.Ordinal);
+                        Assert.Contains("not collected on this server", gatedNote, StringComparison.Ordinal);
+                        Assert.DoesNotContain("not collected on this server", plainNote, StringComparison.Ordinal);
+                        Assert.StartsWith(plainNote[..plainNote.IndexOf(" Pass full_detail=true", StringComparison.Ordinal)], gatedNote, StringComparison.Ordinal);
+                    }
                     foreach (var answer in new[] { withGated, without })
                     {
                         var served = answer.RootElement.GetProperty("collectors").GetArrayLength();
