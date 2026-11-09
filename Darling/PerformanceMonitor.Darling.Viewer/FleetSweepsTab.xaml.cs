@@ -50,21 +50,33 @@ public partial class FleetSweepsTab : UserControl
     /// <summary>Reloads the timeline, the selected sweep and the worklist (the shell calls this when the tab becomes visible / on the timer).</summary>
     public async Task RefreshAsync()
     {
-        var timeline = await LoadTimelineAsync();
-        var loaded = await Task.WhenAll(LoadDetailAsync(), LoadWatchItemsAsync());
-        /* Each load reports its own failure; the stamp follows only when all three finished, so it never writes over one. */
-        if (timeline && loaded[0] && loaded[1])
+        await LoadTimelineAsync();
+        await Task.WhenAll(LoadDetailAsync(), LoadWatchItemsAsync());
+        StampIfLoaded();
+    }
+
+    /// <summary>Each load's last outcome: true once its read put its content on screen, false once a read failed. A load that a newer one
+    /// superseded leaves its outcome to that newer load.</summary>
+    private bool _timelineLoaded;
+    private bool _detailLoaded;
+    private bool _watchItemsLoaded;
+
+    /// <summary>Raises "fleet sweeps — refreshed …" when all three loads last finished. Each load reports its own failure, so the stamp
+    /// never writes over one, and a load that finishes after a failure replaces the failure line it answers.</summary>
+    private void StampIfLoaded()
+    {
+        if (_timelineLoaded && _detailLoaded && _watchItemsLoaded)
         {
             StatusChanged?.Invoke($"fleet sweeps — refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
     }
 
-    /// <summary>Reads the timeline into the runs grid. True when it is on screen; false when the read failed, a newer load superseded this one, or there is no store.</summary>
-    private async Task<bool> LoadTimelineAsync()
+    /// <summary>Reads the timeline into the runs grid and records whether it is on screen.</summary>
+    private async Task LoadTimelineAsync()
     {
         if (_dataService == null)
         {
-            return false;
+            return;
         }
 
         var gen = _loads.Claim(nameof(LoadTimelineAsync));
@@ -75,7 +87,7 @@ public partial class FleetSweepsTab : UserControl
             var (startUtc, endUtc, _) = ViewerTimeRangeWindow.Window(
                 TimeRangePickerControl.Value, DateTime.UtcNow, ViewerTimeHelper.FleetWideZone());
             var node = await _dataService.GetFleetSweepTimelineAsync(startUtc, endUtc);
-            if (_loads.Superseded(nameof(LoadTimelineAsync), gen)) return false;
+            if (_loads.Superseded(nameof(LoadTimelineAsync), gen)) return;
 
             /* The cadence line is display only, from the same alert settings the web page reads; a failed read leaves it blank and never costs the timeline. */
             try
@@ -87,7 +99,7 @@ public partial class FleetSweepsTab : UserControl
                 CadenceIndicator.Text = "";
             }
 
-            if (_loads.Superseded(nameof(LoadTimelineAsync), gen)) return false;
+            if (_loads.Superseded(nameof(LoadTimelineAsync), gen)) return;
 
             var rows = FleetSweepsRows.Runs(node);
             _binding = true;
@@ -104,15 +116,15 @@ public partial class FleetSweepsTab : UserControl
             NoRunsMessage.Text = "No sweeps in this span. Widen the span, or check that fleet_sweep.enabled is on — a gap in this timeline is a missed sweep, with its cause on the service log.";
             NoRunsMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.RefreshedStamp();
-            return true;
+            _timelineLoaded = true;
         }
         catch (Exception ex)
         {
             /* A load the operator has moved past does not report its failure over the newer load's status. */
-            if (_loads.Superseded(nameof(LoadTimelineAsync), gen)) return false;
+            if (_loads.Superseded(nameof(LoadTimelineAsync), gen)) return;
 
+            _timelineLoaded = false;
             StatusChanged?.Invoke($"failed to load the fleet sweep timeline: {ex.Message}");
-            return false;
         }
         finally
         {
@@ -123,12 +135,12 @@ public partial class FleetSweepsTab : UserControl
         }
     }
 
-    /// <summary>Reads the selected sweep into the detail panes. True when the detail, or the note that there is none, is on screen; false when the read failed, a newer load superseded this one, or there is no store.</summary>
-    private async Task<bool> LoadDetailAsync()
+    /// <summary>Reads the selected sweep into the detail panes and records whether it, or the note that there is none, is on screen.</summary>
+    private async Task LoadDetailAsync()
     {
         if (_dataService == null)
         {
-            return false;
+            return;
         }
 
         var gen = _loads.Claim(nameof(LoadDetailAsync));
@@ -136,7 +148,7 @@ public partial class FleetSweepsTab : UserControl
         {
             long? id = _selectedSweepId is { } s && long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : null;
             var detail = await _dataService.GetFleetSweepDetailAsync(id);
-            if (_loads.Superseded(nameof(LoadDetailAsync), gen)) return false;
+            if (_loads.Superseded(nameof(LoadDetailAsync), gen)) return;
 
             if (detail is null)
             {
@@ -146,19 +158,20 @@ public partial class FleetSweepsTab : UserControl
                 NoDetailMessage.Text = (id is null ? "No sweep has been recorded yet." : "Sweep not found.")
                     + " Sweeps appear here once fleet_sweep.enabled is on and the cadence elapses.";
                 NoDetailMessage.Visibility = Visibility.Visible;
-                return true;
+                _detailLoaded = true;
+                return;
             }
 
             ShowDetail(detail);
-            return true;
+            _detailLoaded = true;
         }
         catch (Exception ex)
         {
             /* A load the operator has moved past does not report its failure over the newer load's status. */
-            if (_loads.Superseded(nameof(LoadDetailAsync), gen)) return false;
+            if (_loads.Superseded(nameof(LoadDetailAsync), gen)) return;
 
+            _detailLoaded = false;
             StatusChanged?.Invoke($"failed to load the fleet sweep: {ex.Message}");
-            return false;
         }
     }
 
@@ -196,12 +209,12 @@ public partial class FleetSweepsTab : UserControl
         }
     }
 
-    /// <summary>Reads the watch items into their grid. True when they are on screen; false when the read failed, a newer load superseded this one, or there is no store.</summary>
-    private async Task<bool> LoadWatchItemsAsync()
+    /// <summary>Reads the watch items into their grid and records whether they are on screen.</summary>
+    private async Task LoadWatchItemsAsync()
     {
         if (_dataService == null)
         {
-            return false;
+            return;
         }
 
         var gen = _loads.Claim(nameof(LoadWatchItemsAsync));
@@ -209,7 +222,7 @@ public partial class FleetSweepsTab : UserControl
         {
             var closed = ShowClosedCheckBox.IsChecked == true;
             var node = await _dataService.GetFleetSweepWatchItemsAsync(closed ? "closed" : null);
-            if (_loads.Superseded(nameof(LoadWatchItemsAsync), gen)) return false;
+            if (_loads.Superseded(nameof(LoadWatchItemsAsync), gen)) return;
 
             var rows = FleetSweepsRows.WatchItems(node);
             WatchItemsDataGrid.ItemsSource = rows;
@@ -218,15 +231,15 @@ public partial class FleetSweepsTab : UserControl
                 ? "No closed watch items."
                 : "No watch items are open or carried.";
             NoWatchMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            return true;
+            _watchItemsLoaded = true;
         }
         catch (Exception ex)
         {
             /* A load the operator has moved past does not report its failure over the newer load's status. */
-            if (_loads.Superseded(nameof(LoadWatchItemsAsync), gen)) return false;
+            if (_loads.Superseded(nameof(LoadWatchItemsAsync), gen)) return;
 
+            _watchItemsLoaded = false;
             StatusChanged?.Invoke($"failed to load the fleet sweep watch items: {ex.Message}");
-            return false;
         }
     }
 
@@ -235,6 +248,7 @@ public partial class FleetSweepsTab : UserControl
         if (IsLoaded)
         {
             await LoadTimelineAsync();
+            StampIfLoaded();
         }
     }
 
@@ -250,6 +264,7 @@ public partial class FleetSweepsTab : UserControl
         {
             _selectedSweepId = row.SweepId;
             await LoadDetailAsync();
+            StampIfLoaded();
         }
     }
 
@@ -258,6 +273,7 @@ public partial class FleetSweepsTab : UserControl
         if (IsLoaded)
         {
             await LoadWatchItemsAsync();
+            StampIfLoaded();
         }
     }
 

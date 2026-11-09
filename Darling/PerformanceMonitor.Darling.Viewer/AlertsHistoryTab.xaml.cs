@@ -209,6 +209,9 @@ public partial class AlertsHistoryTab : UserControl
         }
         catch (Exception ex)
         {
+            /* A load the operator has moved past does not report its failure over the newer load's status. */
+            if (_loads.Superseded(nameof(LoadAlertsAsync), gen)) return;
+
             StatusChanged?.Invoke($"failed to load alert history: {ex.Message}");
         }
     }
