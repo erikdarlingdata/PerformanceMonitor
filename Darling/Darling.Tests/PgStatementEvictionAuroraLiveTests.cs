@@ -109,7 +109,7 @@ public sealed class PgStatementEvictionAuroraLiveTests
             Assert.Equal(2, known.EvictionPasses);
             var knownNote = PgStatementEvictionNote.Build(known);
             Assert.NotNull(knownNote);
-            Assert.Contains("evicted entries 2 time(s)", knownNote, StringComparison.Ordinal);
+            Assert.Contains("evicted entries 2 times", knownNote, StringComparison.Ordinal);
             Assert.DoesNotContain("CREATE EXTENSION", knownNote, StringComparison.Ordinal);
             bodySucceeded = true;
         }

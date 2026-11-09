@@ -239,25 +239,31 @@ internal static class DarlingHostBinding
         || (!string.IsNullOrEmpty(host) && !string.IsNullOrEmpty(extraAllowedHost)
             && string.Equals(host, extraAllowedHost, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>The fewest characters an access token may have. The <c>--configure-network</c> wizard
-    /// generates 32; a shorter one was typed by hand (a <c>file:</c>/<c>env:</c> reference, or a plaintext
-    /// <c>token</c>), and below this it is too short to protect a network-facing port.</summary>
-    internal const int MinimumTokenLength = 16;
+    /// <summary>The fewest characters an access token may have (<see cref="McpTokenFloor.MinimumLength"/>, the floor both
+    /// apps share). The <c>--configure-network</c> wizard generates 32; a shorter one was typed by hand (a <c>file:</c>/<c>env:</c>
+    /// reference, or a plaintext <c>token</c>), and below this it is too short to protect a network-facing port.</summary>
+    internal const int MinimumTokenLength = McpTokenFloor.MinimumLength;
 
-    /// <summary>The fewest different characters an access token may use. Length alone passes a token such as
-    /// sixteen copies of one letter, which a handful of guesses finds; this keeps the floor from being met by
-    /// padding. A generated token (the wizard's 32 random characters, or the README's one-liner) is far above it.</summary>
-    internal const int MinimumDistinctTokenCharacters = 6;
+    /// <summary>The fewest different characters an access token may use (<see cref="McpTokenFloor.MinimumDistinctCharacters"/>).
+    /// Length alone passes a token such as sixteen copies of one letter, which a handful of guesses finds; this keeps the floor
+    /// from being met by padding. A generated token (the wizard's 32 random characters, or the README's one-liner) is far above it.</summary>
+    internal const int MinimumDistinctTokenCharacters = McpTokenFloor.MinimumDistinctCharacters;
 
     /// <summary>
-    /// PURE: why a resolved token cannot gate an exposed surface, or null when it can. Empty (nothing to
-    /// compare against), too short (see <see cref="MinimumTokenLength"/>) and too repetitive (see
-    /// <see cref="MinimumDistinctTokenCharacters"/>) all fail closed; the caller logs
-    /// the text at Critical and binds loopback-only. Says nothing about the token's value, and does not give
-    /// its length either: a short token is "shorter than" the floor, never "N characters long".
+    /// PURE: why a resolved token cannot gate an exposed surface, or null when it can. The decision is
+    /// <see cref="McpTokenFloor.Clears"/>, the one rule Lite's <c>McpTokenStore.IsUsableToken</c> also decides by; this
+    /// names the reason. Empty (nothing to compare against), too short (see <see cref="MinimumTokenLength"/>) and too
+    /// repetitive (see <see cref="MinimumDistinctTokenCharacters"/>) all fail closed; the caller logs the text at Critical
+    /// and binds loopback-only. Says nothing about the token's value, and does not give its length either: a short token
+    /// is "shorter than" the floor, never "N characters long".
     /// </summary>
     internal static string? DescribeTokenProblem(string? token)
     {
+        if (McpTokenFloor.Clears(token))
+        {
+            return null;
+        }
+
         if (string.IsNullOrWhiteSpace(token))
         {
             return "resolved to empty after decryption";
@@ -269,13 +275,8 @@ internal static class DarlingHostBinding
                 + "(--configure-network generates 32; to make one yourself, see the token note in the README)";
         }
 
-        if (token.Distinct().Count() < MinimumDistinctTokenCharacters)
-        {
-            return $"uses fewer than {MinimumDistinctTokenCharacters} different characters, and at least {MinimumDistinctTokenCharacters} are required for an exposed surface "
-                + "(--configure-network generates a random 32-character token; to make one yourself, see the token note in the README)";
-        }
-
-        return null;
+        return $"uses fewer than {MinimumDistinctTokenCharacters} different characters, and at least {MinimumDistinctTokenCharacters} are required for an exposed surface "
+            + "(--configure-network generates a random 32-character token; to make one yourself, see the token note in the README)";
     }
 
     /// <summary>What the floor decided for one resolved token: whether the network bind stays on, and the

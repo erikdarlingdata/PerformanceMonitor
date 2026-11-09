@@ -185,7 +185,7 @@ public class ProfileManager : IProfileLookup
         if (inUse > 0)
         {
             throw new InvalidOperationException(
-                $"This profile is used by {inUse} server(s). Reassign or remove them first.");
+                $"This profile is used by {CountText.Plural(inUse, "server")}. Reassign or remove {(inUse == 1 ? "it" : "them")} first.");
         }
 
         CredentialProfile? profile;

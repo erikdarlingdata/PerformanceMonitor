@@ -277,6 +277,45 @@ public sealed class DarlingLoopbackTokenStartTests
         }
     }
 
+    /// <summary>#8462: in Darling, <c>mcp.allowTokenlessLoopback</c> applies only to a start with no token configured. With a
+    /// token configured the setting changes nothing: the token gates every request, the write tools are served when
+    /// <c>mcp.allowWrites</c> asks for them, and the start does not log the tokenless line.</summary>
+    [Fact]
+    public async Task Mcp_TokenlessLoopbackOn_WithAConfiguredToken_StillGates_AndServesTheWrites()
+    {
+        var port = ClosedPort();
+        var log = new CapturingTestLogger();
+        var host = NewMcpHost(log);
+        try
+        {
+            var config = Config("mcp", port, ", 'allowTokenlessLoopback': true, 'allowWrites': true, 'network': { 'token': '" + Token + "' }");
+            Assert.True(await TryStartAsync(host, config, port), log.Joined);
+            using var client = Client(port);
+
+            Assert.Equal(HttpStatusCode.Unauthorized, await McpToolsListAsync(client, bearer: null));
+            Assert.Equal(HttpStatusCode.Unauthorized, await McpToolsListAsync(client, "not-the-token"));
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, "/")
+            {
+                Content = new StringContent("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}", Encoding.UTF8, "application/json"),
+            };
+            request.Headers.Accept.ParseAdd("application/json");
+            request.Headers.Accept.ParseAdd("text/event-stream");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Token);
+            using var response = await client.SendAsync(request);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var listed = await response.Content.ReadAsStringAsync();
+            Assert.Contains("\"mute_analysis_finding\"", listed, StringComparison.Ordinal);
+
+            Assert.DoesNotContain(log.Lines, l => l.Contains(DarlingMcpHostService.TokenlessLoopbackMessage, StringComparison.Ordinal));
+            Assert.DoesNotContain(log.Lines, l => l.Contains(Token, StringComparison.Ordinal));
+        }
+        finally
+        {
+            await host.DisposeFailedStartAsync();
+        }
+    }
+
     /// <summary>#6542 with the loopback token rule: named tokens (<c>mcp.tokens</c>) and no legacy token are tokens. The start
     /// must not stop with the "no token" refusal, and every request, loopback included, must present one of them.</summary>
     [Fact]

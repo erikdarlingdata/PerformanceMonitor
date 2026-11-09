@@ -65,7 +65,7 @@ public sealed class DarlingPerDatabaseProbeFailureTests
         Assert.Equal(2, cycle.Failures.Count);
         Assert.Equal("StackOverflow2013", cycle.Failures[0].Item);
         Assert.Equal("Crap", cycle.Failures[1].Item);
-        Assert.Contains("2 item(s) failed their enumeration probe", cycle.Note);
+        Assert.Contains("2 items failed the enumeration probe", cycle.Note);
     }
 
     [Fact]
@@ -80,14 +80,14 @@ public sealed class DarlingPerDatabaseProbeFailureTests
         await DrainPayloadAsync(reader);
         var outcome = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, CancellationToken.None);
 
-        Assert.Contains("1 item(s) failed their enumeration probe", outcome.Note);
+        Assert.Contains("1 item failed the enumeration probe", outcome.Note);
 
         cycle.Add(outcome);
         using var second = MakeReader(("db2", "boom"));
         await DrainPayloadAsync(second);
         cycle.Add(await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(second, CancellationToken.None));
 
-        Assert.Contains("2 item(s) failed their enumeration probe", cycle.Note);
+        Assert.Contains("2 items failed the enumeration probe", cycle.Note);
     }
 
     [Fact]
@@ -121,7 +121,7 @@ public sealed class DarlingPerDatabaseProbeFailureTests
             cycle.Add(await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(noisy, CancellationToken.None));
         }
 
-        Assert.Contains("1 item(s) failed their enumeration probe", cycle.Note);
+        Assert.Contains("1 item failed the enumeration probe", cycle.Note);
     }
 
     [Fact]
@@ -140,7 +140,7 @@ public sealed class DarlingPerDatabaseProbeFailureTests
         }
 
         Assert.Equal(12, cycle.Failures.Count);
-        Assert.Contains("12 item(s) failed their enumeration probe", cycle.Note);
+        Assert.Contains("12 items failed the enumeration probe", cycle.Note);
         Assert.True(cycle.Failures.Count > EnumeratedCollectorDriver.MaxLoggedProbeFailures,
             "the fixture must exceed the cap or it proves nothing about it");
     }
