@@ -183,7 +183,9 @@ WHERE server_id = $1 AND deadlock_time >= $2";
            that reached the server. Every attempt writes a row, ERROR and PERMISSIONS included, so a server Lite
            cannot reach writes one per collector per cycle, and a read over every row moved this stamp, and the
            freshness band under it, forward on each failed attempt. The filter is the one
-           GetLastSuccessfulCollectionAsync applies for the server list, so the card and the list agree. */
+           GetLastSuccessfulCollectionAsync applies for the server list, so the card and the list agree; both read
+           CollectionRunSql.SuccessfulCollectorRun, the fragment Darling's card, sidebar dot, list_servers and
+           get_server_summary read too (#8464). */
         foreach (var relation in NewestFirstRelations("collection_log"))
         {
             using var cmd = connection.CreateCommand();
@@ -191,8 +193,7 @@ WHERE server_id = $1 AND deadlock_time >= $2";
 SELECT MAX(collection_time)
 FROM " + relation + $@"
 WHERE server_id = $1
-AND   status = 'SUCCESS'
-AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
+AND   {CollectionRunSql.SuccessfulCollectorRun}";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             var result = await cmd.ExecuteScalarAsync();
             if (result != null && result != DBNull.Value)
@@ -296,8 +297,7 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
 SELECT MAX(collection_time)
 FROM " + relation + $@"
 WHERE server_id = $1
-AND   status = 'SUCCESS'
-AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
+AND   {CollectionRunSql.SuccessfulCollectorRun}";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             var result = await cmd.ExecuteScalarAsync();
             if (result != null && result != DBNull.Value)

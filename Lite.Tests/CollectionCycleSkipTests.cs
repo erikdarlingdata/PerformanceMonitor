@@ -461,9 +461,11 @@ public sealed class CollectionCycleSkipTests : IDisposable
     public void TheThirteenPredicates_InterpolateTheCollectorName()
     {
         var services = Path.Combine(RepoRootFromThisFile(), "Lite", "Services");
+        /* #8464: the Overview card's Last Collect and the server list's last success interpolate the shared
+           CollectionRunSql.SuccessfulCollectorRun, which carries the same name from the same constant; they count here too. */
         var count = Directory.EnumerateFiles(services, "LocalDataService.*.cs")
             .Sum(f => System.Text.RegularExpressions.Regex.Matches(File.ReadAllText(f),
-                @"collector_name <> '\{CollectionCycleSkip\.CollectorName\}'").Count);
+                @"collector_name <> '\{CollectionCycleSkip\.CollectorName\}'|\{CollectionRunSql\.SuccessfulCollectorRun\}").Count);
 
         Assert.Equal(13, count);
     }

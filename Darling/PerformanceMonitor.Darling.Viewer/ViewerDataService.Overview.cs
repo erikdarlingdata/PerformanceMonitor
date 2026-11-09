@@ -249,7 +249,10 @@ FROM
 ) AS sampled";
 
     /// <summary>
-    /// Newest collection time across all collectors for one server. $1 server_id.
+    /// Newest successful collection time across all collectors for one server. $1 server_id. #8464: only a
+    /// <c>SUCCESS</c> row counts (<see cref="CollectionRunSql.SuccessfulCollectorRun"/>). Every attempt writes a row, a failed
+    /// one included, so a read over every row moved this stamp, and the freshness band under it, forward on each failed
+    /// attempt, and a dark server read fresh. Collection Health and the alert notebook already counted SUCCESS rows only.
     ///
     /// <para><b>#3976: <c>ORDER BY collection_time DESC LIMIT 1</c>, not <c>MAX(collection_time)</c>.</b> Same
     /// answer — <c>ExecuteScalarAsync</c> reads null identically whether MAX found no matching row or LIMIT 1
@@ -265,7 +268,7 @@ FROM
 SELECT collection_time
 FROM v_collection_log
 WHERE server_id = $1
-AND   {CollectionCycleRow.NotCycleRowSql}
+AND   {CollectionRunSql.SuccessfulCollectorRun}
 ORDER BY collection_time DESC
 LIMIT 1";
 

@@ -27,9 +27,12 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>
-    /// Newest collection time per server across all collectors, in one statement — the sidebar dots and the
+    /// Newest successful collection time per server across all collectors, in one statement — the sidebar dots and the
     /// status bar's collection field derive freshness from this (the same newest <c>collection_time</c> the
     /// Overview cards use per server, so a dot and its card agree). Timestamps are the store's naive UTC.
+    /// #8464: only a <c>SUCCESS</c> row counts (<see cref="CollectionRunSql.SuccessfulCollectorRun"/>), so a failed
+    /// attempt moves no dot. A connect failure is banded by <c>connect_down_since</c> beside this (#7590); a collector
+    /// that fails after a good connect is banded by the age of its last success.
     /// Excludes <c>server_id = 0</c>, the fleet-level retention run-record sentinel
     /// (<c>DarlingObservability.FleetServerId</c>) — it is not a real server, so it must not appear as a
     /// phantom key a future key-iterating consumer could render as "server 0".
@@ -53,7 +56,7 @@ CROSS JOIN LATERAL
     SELECT collection_time
     FROM v_collection_log
     WHERE server_id = s.server_id
-    AND   {CollectionCycleRow.NotCycleRowSql}
+    AND   {CollectionRunSql.SuccessfulCollectorRun}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -9,13 +10,13 @@ namespace PerformanceMonitor.Darling.Storage;
 /// the data_retention sentinel trick (server_id 0, left out of every per-server read) does not hide it. Every read of
 /// the log that counts runs, rates, streaks, "last collected" or "any row" leaves it out through
 /// <see cref="NotCycleRowSql"/>; the reads that name one collector, or <c>status = 'SUCCESS'</c>, never see it; the raw
-/// log reads show it on purpose. <c>CollectionCycleReaderCensusTests</c> holds the line for every later reader, and
-/// no file but this one may spell the collector name as a literal.
+/// log reads show it on purpose. <c>CollectionCycleReaderCensusTests</c> holds the line for every later reader. The name
+/// is spelled once, in <see cref="CollectionRunSql.CycleRowCollectorName"/> (#8464), and no Darling file spells it as a literal.
 /// </summary>
 public static class CollectionCycleRow
 {
     /// <summary>The <c>collection_log.collector_name</c> of a skipped-slots row.</summary>
-    public const string CollectorName = "collection_cycle";
+    public const string CollectorName = CollectionRunSql.CycleRowCollectorName;
 
     /// <summary>The <c>collection_log.status</c> of a skipped-slots row.</summary>
     public const string Status = "SKIPPED";
@@ -46,7 +47,7 @@ public static class CollectionCycleRow
 public static class AnalysisPassRow
 {
     /// <summary>The <c>collection_log.collector_name</c> of an analysis-pass row.</summary>
-    public const string CollectorName = "analysis_pass";
+    public const string CollectorName = CollectionRunSql.AnalysisPassCollectorName;
 
     /// <summary>The status of a pass that finished (with findings, none, or too little data to analyze).</summary>
     public const string Analyzed = "ANALYZED";

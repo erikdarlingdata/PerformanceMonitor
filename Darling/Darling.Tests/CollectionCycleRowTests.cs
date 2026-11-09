@@ -720,9 +720,9 @@ VALUES ($1, $2, $3, $4, $5, 100, $6, NULL, $7, 80, 20)",
 }
 
 /// <summary>
-/// #5735: every read of <c>collection_log</c> in Darling's code either leaves the skipped-slots row out, names its collector
-/// or <c>status = 'SUCCESS'</c> (which the row never has), or is on the safe list below with its reason. And no file but
-/// <c>CollectionCycleRow.cs</c> spells the collector's name as a literal.
+/// #5735: every read of <c>collection_log</c> in Darling's code either leaves the skipped-slots row out (<c>NotCycleRowSql</c>, or
+/// the shared <c>CollectionRunSql.SuccessfulCollectorRun</c> since #8464), names its collector or <c>status = 'SUCCESS'</c> (which
+/// the row never has), or is on the safe list below with its reason. And no Darling file spells the collector's name as a literal.
 /// <para>The safe list is per READ (the file plus the statement constant or the method that holds the SQL), never per file: a
 /// per-file entry's reason covers only the reads it was written for, and a listed file would then hide a later read the reason
 /// says nothing about. Each predicate is judged inside its own subquery, so a statement with three subqueries cannot borrow
@@ -850,6 +850,7 @@ public sealed class CollectionCycleReaderCensusTests
 
     private static bool Excludes(string statement) =>
         statement.Contains("NotCycleRowSql", StringComparison.Ordinal)
+        || statement.Contains("CollectionRunSql.SuccessfulCollectorRun", StringComparison.Ordinal)
         || Regex.IsMatch(statement, @"collector_name\s*(=|IN\b|<>\s*ALL|LIKE\b)", RegexOptions.IgnoreCase)
         || Regex.IsMatch(statement, @"\bstatus\s*=\s*'(SUCCESS|PERMISSIONS|SESSION_MISSING)'", RegexOptions.IgnoreCase)
         || Regex.IsMatch(statement, @"server_id\s*=\s*\$?\{?\w*FleetServerId", RegexOptions.IgnoreCase);
