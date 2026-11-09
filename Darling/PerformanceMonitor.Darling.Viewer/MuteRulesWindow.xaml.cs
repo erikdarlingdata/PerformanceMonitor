@@ -11,6 +11,7 @@ using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitor.Ui;
 
@@ -174,7 +175,7 @@ public partial class MuteRulesWindow : Window
             }
 
             MessageBox.Show(
-                removed > 0 ? $"Removed {removed} expired rule(s)." : "No expired rules to remove.",
+                removed > 0 ? $"Removed {CountText.Plural(removed, "expired rule")}." : "No expired rules to remove.",
                 "Purge Complete", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (Exception ex)

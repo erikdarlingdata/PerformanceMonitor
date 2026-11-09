@@ -227,7 +227,7 @@ public partial class AddMultipleServersDialog : Window
         int badCount = rows.Count(r => !r.IsValid);
         StatusText.Text = rows.Count == 0
             ? ""
-            : $"{newCount} new server(s), {dupCount} duplicate(s), {badCount} invalid line(s).";
+            : $"{CountText.Plural(newCount, "new server")}, {CountText.Plural(dupCount, "duplicate")}, {CountText.Plural(badCount, "invalid line")}.";
     }
 
     // ── Test All (SEQUENTIAL sweep through the service; Cancel stops between rows) ────────────────────────
@@ -406,7 +406,7 @@ public partial class AddMultipleServersDialog : Window
                 CollidedCount = 0;
                 StatusText.Text = firstError != null
                     ? $"No servers added — {firstError}."
-                    : $"No new servers to add ({skipped} duplicate(s) skipped).";
+                    : $"No new servers to add ({CountText.Plural(skipped, "duplicate")} skipped).";
                 return;
             }
 
@@ -465,7 +465,7 @@ public partial class AddMultipleServersDialog : Window
                 return;
             }
 
-            StatusText.Text = $"No servers added ({skipped} duplicate(s), {collided} collided, {failed} failed).";
+            StatusText.Text = $"No servers added ({CountText.Plural(skipped, "duplicate")}, {collided} collided, {failed} failed).";
         }
         catch (Exception ex)
         {

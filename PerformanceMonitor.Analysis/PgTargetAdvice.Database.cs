@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -95,8 +96,8 @@ public static partial class PgTargetAdvice
           .Append(DbCount(rate.Metadata.GetValueOrDefault(PgTargetScorer.CounterIntervalsKey))).Append(" intervals");
         if (resets > 0 || rewinds > 0)
         {
-            sb.Append("; the counters were reset ").Append(DbCount(resets)).Append(" time(s) in the window (")
-              .Append(DbCount(rewinds)).Append(" rewind(s) seen), each clamped to zero rather than read as a negative rate");
+            sb.Append("; the counters were reset ").Append(CountText.Plural((long)resets, "time")).Append(" in the window (")
+              .Append(CountText.Plural((long)rewinds, "rewind")).Append(" seen), each clamped to zero rather than read as a negative rate");
         }
 
         sb.Append(". The tiers are the alerting layer's measured deadlock band (")

@@ -13,6 +13,7 @@ using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
@@ -197,7 +198,7 @@ public partial class DatabaseStateOverridesWindow : Window
                read make no claim, so the count shows as it always did. */
             StatusText.Text = ServerTab.EngineGapStateFromRuns(serverName, engineEdition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition, "database_states", _rows.Count, skipped: null, runs, awsRdsKind: AwsRdsKind.None) is { Visibility: Visibility.Visible } gap
                 ? gap.Text
-                : $"{_rows.Count} database(s); {deviating} currently deviating from expected.";
+                : $"{CountText.Plural(_rows.Count, "database")}; {deviating} currently deviating from expected.";
         }
         catch (Exception ex)
         {
@@ -327,7 +328,7 @@ public partial class DatabaseStateOverridesWindow : Window
                    mark them as no longer changed, so the retry writes only the rest. */
                 var outcome = saved == 0
                     ? "nothing was changed"
-                    : $"{saved} of {changed.Count} change(s) were saved and the rest were not";
+                    : $"{saved} of {CountText.Plural(changed.Count, "change")} {(saved == 1 ? "was" : "were")} saved and the rest were not";
                 StatusText.Text = StoreBusyReport.Report("DatabaseStates", "Save database state overrides", ex, "saving the overrides", outcome);
             }
         }
