@@ -40,9 +40,16 @@ SELECT
       WHERE h.server_id = $1 AND (h.readonly_reason & 8) <> 0
         AND h.capture_time = (SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1)
         AND h.database_name <> 'tempdb' AND UPPER(COALESCE(h.actual_state, '')) <> 'OFF'),
-    (SELECT cl.rows_collected::bigint FROM collection_log AS cl
-      WHERE cl.server_id = $1 AND cl.collector_name = 'query_store' AND cl.status = 'SUCCESS'
-      ORDER BY cl.collection_time DESC LIMIT 1)";
+    run.fanout_item_count::bigint,
+    run.log_id IS NOT NULL
+FROM (SELECT 1) AS one
+LEFT JOIN LATERAL (
+    SELECT cl.log_id, cl.fanout_item_count
+    FROM collection_log AS cl
+    WHERE cl.server_id = $1 AND cl.collector_name = 'query_store' AND cl.status = 'SUCCESS'
+      AND cl.collection_time > COALESCE((SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1), '-infinity'::timestamp)
+    ORDER BY cl.collection_time DESC
+    LIMIT 1) AS run ON TRUE";
 
     /// <summary>
     /// The judgment with the newest capture counted as one the <c>query_store_health</c> collector refreshes, for a caller that has not
@@ -82,7 +89,8 @@ SELECT
                 (int)reader.GetInt64(3),
                 replicaConfigured: !reader.IsDBNull(1),
                 healthCaptureRefreshes,
-                reader.IsDBNull(4) ? null : reader.GetInt64(4));
+                reader.IsDBNull(4) ? null : reader.GetInt64(4),
+                reader.GetBoolean(5));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -99,21 +107,25 @@ SELECT
     /// frozen all-secondary capture under a PRIMARY role is a failover, and the collector runs; a frozen capture under a SECONDARY role
     /// is read as that role. A role that is null, Standalone or anything else carries no answer: the properties collector writes
     /// Standalone for every instance outside an availability group, a readable standby and a primary promoted after a failover alike,
-    /// so the newest <c>query_store</c> collector run decides (<paramref name="newestQueryStoreRows"/>, a fact that refreshes on its
-    /// own cadence whatever <c>query_store_health</c>'s schedule). Its statement skips the same readable-secondary databases, so a run
-    /// that collected rows proves a database is read and the capture is left out; a run that collected nothing corroborates the
-    /// frozen capture, which then decides; with no run logged the capture is not trusted alone and the role decides. Null when the
-    /// server is not a readable secondary under that rule, or a <c>query_store_replica</c> is set for it.
+    /// so the newest successful <c>query_store</c> collector run newer than the capture decides, by its enumeration (a fact that
+    /// refreshes on its own cadence whatever <c>query_store_health</c>'s schedule). The enumeration skips the same readable-secondary
+    /// databases, and a database whose Query Store is off, so a run that found databases to read (<paramref name="newerRunFanout"/>
+    /// above zero) leaves the capture out whatever it stored; a run that found none (no fanout) corroborates the frozen capture, which
+    /// then decides; a run from before the capture, or none at all (<paramref name="newerRunExists"/> false), decides nothing and the
+    /// role decides. A database with Query Store off is left out of the capture's counts, so a frozen capture of such databases never
+    /// reads as a secondary. Null when the server is not a readable secondary under that rule, or a <c>query_store_replica</c> is set for it.
     /// </summary>
     /// <param name="healthDatabases">Databases in the newest capture, leaving out tempdb and any database whose Query Store is OFF.</param>
     /// <param name="healthSecondaryDatabases">Of those, how many carry the readable-secondary bit.</param>
-    /// <param name="newestQueryStoreRows">Rows the newest successful <c>query_store</c> run collected on the server, or null when none is logged.</param>
+    /// <param name="newerRunFanout">The databases the newest successful <c>query_store</c> run newer than the capture found to read (<c>fanout_item_count</c>); null when it found none, or when there is no such run.</param>
+    /// <param name="newerRunExists">Whether a successful <c>query_store</c> run newer than the capture is logged at all. A run from before the capture decides nothing.</param>
     public static string? Message(
         string serverName, string? agReplicaRole, int healthDatabases, int healthSecondaryDatabases, bool replicaConfigured, bool healthCaptureRefreshes,
-        long? newestQueryStoreRows)
+        long? newerRunFanout, bool newerRunExists)
     {
+        /* A live primary's run stores zero rows most slots (closed intervals only), so its rows say nothing; the enumeration does. */
         var captureCounts = healthCaptureRefreshes
-            || (!RoleAnswers(agReplicaRole) && newestQueryStoreRows == 0);
+            || (!RoleAnswers(agReplicaRole) && newerRunExists && (newerRunFanout ?? 0) == 0);
         return CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
             serverName,
             agReplicaRole,
@@ -148,12 +160,6 @@ role AS (
     FROM server_properties AS sp
     JOIN ids ON ids.server_id = sp.server_id
     ORDER BY sp.server_id, sp.collection_time DESC),
-newest_run AS (
-    SELECT DISTINCT ON (cl.server_id) cl.server_id, cl.rows_collected::bigint AS rows_collected
-    FROM collection_log AS cl
-    JOIN ids ON ids.server_id = cl.server_id
-    WHERE cl.collector_name = 'query_store' AND cl.status = 'SUCCESS'
-    ORDER BY cl.server_id, cl.collection_time DESC),
 newest AS (
     SELECT h.server_id, MAX(h.capture_time) AS capture_time
     FROM v_query_store_health AS h
@@ -172,11 +178,19 @@ SELECT ids.server_id,
        EXISTS (SELECT 1 FROM config.config_monitored_servers AS c WHERE c.server_id = ids.server_id AND NULLIF(btrim(c.query_store_replica), '') IS NOT NULL) AS replica_configured,
        COALESCE(counts.health_databases, 0),
        COALESCE(counts.health_secondary_databases, 0),
-       newest_run.rows_collected
+       run.fanout_item_count::bigint,
+       run.log_id IS NOT NULL
 FROM ids
 LEFT JOIN role ON role.server_id = ids.server_id
+LEFT JOIN newest AS n ON n.server_id = ids.server_id
 LEFT JOIN counts ON counts.server_id = ids.server_id
-LEFT JOIN newest_run ON newest_run.server_id = ids.server_id";
+LEFT JOIN LATERAL (
+    SELECT cl.log_id, cl.fanout_item_count
+    FROM collection_log AS cl
+    WHERE cl.server_id = ids.server_id AND cl.collector_name = 'query_store' AND cl.status = 'SUCCESS'
+      AND cl.collection_time > COALESCE(n.capture_time, '-infinity'::timestamp)
+    ORDER BY cl.collection_time DESC
+    LIMIT 1) AS run ON TRUE";
 
     /// <summary>One server the fleet form asks about: its id, the name the sentence carries, and whether its <c>query_store_health</c> capture can refresh.</summary>
     public readonly record struct FleetServer(int ServerId, string ServerName, bool HealthCaptureRefreshes);
@@ -216,7 +230,8 @@ LEFT JOIN newest_run ON newest_run.server_id = ids.server_id";
                     (int)reader.GetInt64(4),
                     replicaConfigured: reader.GetBoolean(2),
                     server.HealthCaptureRefreshes,
-                    reader.IsDBNull(5) ? null : reader.GetInt64(5));
+                    reader.IsDBNull(5) ? null : reader.GetInt64(5),
+                    reader.GetBoolean(6));
                 if (message is not null)
                 {
                     messages[server.ServerId] = message;

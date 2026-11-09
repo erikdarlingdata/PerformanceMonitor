@@ -179,13 +179,15 @@ public sealed partial class ViewerDataService
 
         var withRows = data.Sections.GetValueOrDefault(QueryTagRollupSection.QueryStore.Name)?.Select(f => f.ServerId).ToHashSet() ?? [];
         IReadOnlyList<CollectorScheduleRow>? scheduleRows = null;
-        /* Whether the query_store_health collector's effective schedule lets it refresh its capture on the server: the server's own
-           row, then the fleet row, then enabled, the layers the service's schedule resolution reads. */
+        /* Whether the query_store_health collector's effective schedule lets it refresh its capture on the server, resolved the way the
+           service resolves a schedule: the collector name matched ignoring case, the server's own row over the fleet row, and the
+           collector's own default when neither row says. */
         static bool QueryStoreHealthCaptureRefreshes(IReadOnlyList<CollectorScheduleRow> rows, int serverId)
         {
-            var own = rows.FirstOrDefault(r => r.ServerId == serverId && string.Equals(r.CollectorName, "query_store_health", StringComparison.Ordinal));
-            var fleet = rows.FirstOrDefault(r => r.ServerId is null && string.Equals(r.CollectorName, "query_store_health", StringComparison.Ordinal));
-            return own?.Enabled ?? fleet?.Enabled ?? true;
+            var name = PerformanceMonitor.Collectors.QueryStoreHealthCollector.Instance.Name;
+            var own = rows.FirstOrDefault(r => r.ServerId == serverId && string.Equals(r.CollectorName, name, StringComparison.OrdinalIgnoreCase));
+            var fleet = rows.FirstOrDefault(r => r.ServerId is null && string.Equals(r.CollectorName, name, StringComparison.OrdinalIgnoreCase));
+            return own?.Enabled ?? fleet?.Enabled ?? PerformanceMonitor.Collectors.CollectorScheduleDefaults.All[name].DefaultEnabled;
         }
 
         foreach (var server in servers)
