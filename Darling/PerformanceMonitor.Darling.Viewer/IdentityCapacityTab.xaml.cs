@@ -95,6 +95,7 @@ public partial class IdentityCapacityTab : UserControl
 
             Show(read, clock);
             LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.RefreshedStamp();
+            StatusChanged?.Invoke($"identity capacity — refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
