@@ -249,7 +249,7 @@ public static partial class PlanAnalyzer
             var severity = pct >= 0.5 ? PlanWarningSeverity.Critical
                 : pct >= 0.1 ? PlanWarningSeverity.Warning
                 : PlanWarningSeverity.Info;
-            return (severity, $"Operator time: {ownMs:N0}ms ({pct * 100:N0}% of statement) over {node.ActualExecutions:N0} lookups.");
+            return (severity, $"Operator time: {ownMs:N0}ms ({pct * 100:N0}% of statement) over {CountText.Plural(node.ActualExecutions, "lookup")}.");
         }
 
         return (node.ActualExecutions >= KeyLookupWarningExecutions ? PlanWarningSeverity.Warning : PlanWarningSeverity.Info,
@@ -1428,7 +1428,7 @@ public static partial class PlanAnalyzer
                 {
                     RuleNumber = 14,
                     WarningType = "Lazy Spool Ineffective",
-                    Message = $"Lazy spool has low cache hit ratio ({source}): {rebinds:N0} rebinds (cache misses), {rewinds:N0} rewinds (cache hits), {ratio}. The spool is caching results but rarely reusing them, adding overhead for no benefit.",
+                    Message = $"Lazy spool has low cache hit ratio ({source}): {rebinds:N0} rebinds (cache misses), {rewinds:N0} {(rewinds == 1 ? "rewind (cache hit)" : "rewinds (cache hits)")}, {ratio}. The spool is caching results but rarely reusing them, adding overhead for no benefit.",
                     Severity = severity
                 });
             }
