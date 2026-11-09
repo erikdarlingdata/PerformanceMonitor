@@ -1659,7 +1659,10 @@ public sealed class McpConfig
     /// <see cref="McpNetworkConfig.EncryptedToken"/> or <see cref="McpNetworkConfig.Token"/>, an enabled MCP server does not
     /// start, and the log names the settings to add. On, a loopback-only server with no token serves local clients
     /// without one, with the write and investigation tools off (they need the token), and every start logs one line
-    /// saying so. A configured token always gates, whatever this says. File-only and restart-only.
+    /// saying so. This applies only to a start with no token configured: a configured token is still resolved and gates
+    /// every request, and the write and investigation tools are served as their settings say, whatever this says. Lite's
+    /// <c>mcp_allow_tokenless_loopback</c> differs: on, Lite does not read its stored token at all and serves reads only.
+    /// File-only and restart-only.
     /// </summary>
     [JsonPropertyName("allowTokenlessLoopback")]
     public bool AllowTokenlessLoopback { get; set; }

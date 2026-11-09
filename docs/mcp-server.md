@@ -30,7 +30,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/ 
 
    If MCP was already on when you updated, Lite makes the token at its first start and logs a line saying so. Copy the new config then, because the old registration has no token.
 
-   To serve local clients with no token, as earlier builds did, set `mcp_allow_tokenless_loopback` to `true` in `settings.json` and restart Lite. Lite then serves the read tools only: the write tools and the investigation tools need a token (at least 16 characters, with at least 6 different ones), so they stay off, and Lite logs one Critical line for each one you asked for. Import Settings never brings `mcp_allow_tokenless_loopback`, `mcp_allow_writes` or `mcp_allow_investigations` in from another folder.
+   To serve local clients with no token, as earlier builds did, set `mcp_allow_tokenless_loopback` to `true` in `settings.json` and restart Lite. Lite then does not read its stored token at all: there is no gate, and Lite serves the read tools only. The write tools and the investigation tools need a token (at least 16 characters, with at least 6 different ones) the gate compares against, so they stay off even with a token stored, and Lite logs one Critical line for each one you asked for. (Darling's `mcp.allowTokenlessLoopback` differs: it applies only when no token is configured.) Import Settings never brings `mcp_allow_tokenless_loopback`, `mcp_allow_writes` or `mcp_allow_investigations` in from another folder.
 
 #### Darling
 
@@ -53,7 +53,7 @@ The MCP token gates the entire read surface. It also gates `analyze_server`, whi
 
    On Windows, use `encryptedToken`, which holds the output of `--encrypt-password`. `mcp.network.token` takes the token itself, or an `env:NAME` or `file:PATH` reference, and suits Linux and the compose container, where there is no DPAPI. Leave `mcp.network.listen` out to keep the server on loopback. `--configure-network` makes a 32-character token, and the [Darling network endpoints page](darling/network-endpoints.md#mcp-endpoint-assistant-over-the-lan) has a PowerShell command that makes one. If you lose the token, run `--print-mcp-token` elevated on the service host.
 
-   To serve local clients with no token, set `mcp.allowTokenlessLoopback` to `true`. Darling then serves the read tools only, and logs a line at every start saying so.
+   To serve local clients with no token, set `mcp.allowTokenlessLoopback` to `true` and leave the token out. Darling then serves the read tools only, and logs a line at every start saying so. The setting applies only when no token is configured: with a token in `darling.json` it changes nothing, the token gates every request, and the write and investigation tools are served as `mcp.allowWrites` and `mcp.allowInvestigations` say.
 3. Register with Claude Code. Send the token as a header on every request:
 
 ```

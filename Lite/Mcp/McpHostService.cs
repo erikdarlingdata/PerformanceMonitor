@@ -324,10 +324,12 @@ public sealed class McpHostService : BackgroundService
     }
 
     /// <summary>Makes <paramref name="newToken"/> the token every request must carry, from the next request on; the old one is refused
-    /// at once. False (nothing changes) when this host serves without a token or the new token is empty.</summary>
+    /// at once. False (nothing changes) when this host serves without a token or the new token is not usable
+    /// (<see cref="McpTokenStore.IsUsableToken"/>): what a start serves was decided against a usable token, and a weaker
+    /// one must never take its place in front of the write or investigation tools.</summary>
     internal bool ReplaceToken(string newToken)
     {
-        if (_serving.Token is null || string.IsNullOrEmpty(newToken))
+        if (_serving.Token is null || !McpTokenStore.IsUsableToken(newToken))
         {
             return false;
         }
