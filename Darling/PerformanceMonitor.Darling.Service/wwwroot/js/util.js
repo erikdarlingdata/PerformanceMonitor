@@ -1554,6 +1554,64 @@ export async function apiGet(path, signal) {
 /* The /api/read/ requests in flight right now, by path - see apiGetJoined. */
 const joinedReads = new Map();
 
+/* #8452: the reads a tab issues that take seconds each on an ordinary store: the Queries tab's Query Store clutter, regressions,
+   heatmap and plan corrections, 5 to 9 s apiece under ordinary load. A browser opens about six connections to one origin over
+   HTTP/1.1, and the tab issues about eighteen reads at once, so with all four heavy reads sent together they held four
+   connections for their whole run and every later request on the page queued behind them: the tab's small reads, and the
+   page's own ping, store size and alert badge, which have nothing to do with the tab. At most HEAVY_READ_CAP of these are in
+   flight at once per page; the rest wait their turn here, in the order asked, and every other read is sent at once. A heavy
+   read whose caller aborts while it waits is dropped without a request. The four take two rounds, so the slowest of them lands
+   later than it would alone, while nothing else on the page waits on them. The server's own long-read limit is per store, across
+   every visitor; this one is the page's share of it. */
+const HEAVY_PAGE_READS = new Set(["get_query_store_clutter", "get_query_store_regressions", "get_query_heatmap", "get_plan_corrections"]);
+const HEAVY_READ_CAP = 2;
+let heavyInFlight = 0;
+const heavyWaiting = [];
+
+/** True for a read the page sends through the heavy-read gate (#8452). */
+export function isHeavyPageRead(tool) {
+  return HEAVY_PAGE_READS.has(tool);
+}
+
+/* Resolves true when a heavy slot is this request's, in the order asked, or false if `signal` aborted while it waited. */
+function takeHeavySlot(signal) {
+  if (heavyInFlight < HEAVY_READ_CAP && heavyWaiting.length === 0) {
+    heavyInFlight++;
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    const waiter = { resolve };
+    heavyWaiting.push(waiter);
+    if (signal) {
+      signal.addEventListener("abort", () => {
+        const i = heavyWaiting.indexOf(waiter);
+        if (i >= 0) {
+          heavyWaiting.splice(i, 1);
+          resolve(false);
+        }
+      }, { once: true });
+    }
+  });
+}
+
+function releaseHeavySlot() {
+  heavyInFlight--;
+  while (heavyInFlight < HEAVY_READ_CAP && heavyWaiting.length > 0) {
+    heavyInFlight++;
+    heavyWaiting.shift().resolve(true);
+  }
+}
+
+/* fetchBody for a heavy read: the request is sent when a slot is free and the slot is given back when the body has landed. */
+async function gatedFetchBody(path, signal) {
+  if (!(await takeHeavySlot(signal))) return { aborted: true };
+  try {
+    return await fetchBody(path, signal);
+  } finally {
+    releaseHeavySlot();
+  }
+}
+
 /**
  * apiGet for a tool read, with ONE request shared by every caller that asks for the same path while it is in flight
  * (#5489, the apiGetFleet idea for the tool reads). The Wait Stats tab asked for get_spinlock_stats twice in one load:
@@ -1564,9 +1622,10 @@ const joinedReads = new Map();
  * Nothing outlives the response: a caller that starts after it landed sends a fresh request, so no page renders an
  * older answer than it would have. Each caller classifies (so parses) the shared body for itself, so every panel owns
  * the rows it was handed. A caller's `signal` (#4191) cancels only that caller: it gets { kind: "aborted" } at once,
- * and the request itself is cancelled only when no caller is left waiting on it.
+ * and the request itself is cancelled only when no caller is left waiting on it. A `heavy` read (#8452, isHeavyPageRead) is
+ * sent through the heavy-read gate above, once per joined request rather than once per caller.
  */
-export async function apiGetJoined(path, signal) {
+export async function apiGetJoined(path, signal, heavy) {
   if (signal && signal.aborted) return { kind: "aborted" };
   const scope = pageReads;
   scope.n++;
@@ -1579,7 +1638,7 @@ export async function apiGetJoined(path, signal) {
     if (!entry) {
       const controller = new AbortController();
       const joined = { controller, waiters: 0, body: null };
-      joined.body = fetchBody(path, controller.signal).finally(() => {
+      joined.body = (heavy ? gatedFetchBody(path, controller.signal) : fetchBody(path, controller.signal)).finally(() => {
         if (joinedReads.get(key) === joined) joinedReads.delete(key);
       });
       joinedReads.set(key, joined);
@@ -2009,7 +2068,7 @@ export function readTool(tool, params, signal, options) {
      a table, a stat or any other caller passes none and its read keeps the old budget, and so does a read of a level (withPlotPoints). */
   const plotPx = options && options.plotPx > 0 ? options.plotPx : 0;
   const sized = withPlotPoints(tool, plan.params, plotPx);
-  return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, sized)), signal)
+  return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, sized)), signal, isHeavyPageRead(tool))
     .then(localizeWindowNote)
     .then((res) => finishCustomRange(res, plan, bucketStarts))
     .then((res) => (selection && res && res.kind === "data" ? { ...res, data: trimToRange(res.data, selection.startMs, selection.endMs, 0, bucketStarts) } : res));
