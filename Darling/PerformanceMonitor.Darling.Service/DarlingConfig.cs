@@ -1298,9 +1298,10 @@ public sealed class AlertsConfig
     public AlertNotificationMode DeliveryMode { get; set; } = AlertNotificationMode.Summary;
 
     /// <summary>Per-event mode's cap on incidents delivered individually per cycle before the trailing
-    /// "+N more" batch (#1141); clamped 1–100 when applied. Stored as <c>config_alert_settings.per_event_max</c>.</summary>
+    /// "+N more" batch (#1141); clamped 1–100 when applied. Defaults to <see cref="AlertDefaults.PerEventMax"/>, the figure Lite
+    /// ships too. Stored as <c>config_alert_settings.per_event_max</c>.</summary>
     [JsonPropertyName("perEventMax")]
-    public int PerEventMax { get; set; } = 5;
+    public int PerEventMax { get; set; } = AlertDefaults.PerEventMax;
 
     /* The long-running-query read shape (V20 control-plane knobs) — the row cap + the five noise-filter
        opt-outs the shared AlertEngine forwards to GetLongRunningQueriesAsync. Defaults match Lite's App.*
