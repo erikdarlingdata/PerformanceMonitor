@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -90,10 +91,13 @@ internal static class PgStatementTable
     /// <summary>
     /// Runs <paramref name="body"/> until no eviction pass lands inside it, up to <see cref="MaxAttempts"/> times. Before
     /// each run, <see cref="EnsureHeadroomAsync"/> makes sure the table has room for the body's entries, so a pass inside
-    /// the run can only come from another session; a run that a pass did land in is voided and the body runs again. With
-    /// <paramref name="forcePass"/>, the first run's <see cref="PgStatementTableAttempt.BeforeReadAsync"/> forces a pass,
-    /// which that run then voids. Returns the last run, whose <see cref="PgStatementTableAttempt.PassesInside"/> is 0
-    /// unless every run had a pass inside it.
+    /// the run can only come from another session; a run that a pass did land in is voided and the body runs again,
+    /// whether the body finished or its reads failed on the entries the pass took. A failure in a run with no pass inside
+    /// is the body's own and comes out of here as it was thrown; a skip and a cancellation come out whatever the counter
+    /// did. With <paramref name="forcePass"/>, the first run's <see cref="PgStatementTableAttempt.BeforeReadAsync"/>
+    /// forces a pass, which that run then voids. Returns the last run, whose
+    /// <see cref="PgStatementTableAttempt.PassesInside"/> is 0 unless every run had a pass inside it; when the last of
+    /// those runs failed as well, fails with the pass count and the reads' failure.
     /// </summary>
     public static async Task<PgStatementTableAttempt> RunAsync(
         NpgsqlConnection connection, CancellationToken ct, Func<PgStatementTableAttempt, Task> body, bool forcePass = false)
@@ -103,10 +107,32 @@ internal static class PgStatementTable
         {
             await EnsureHeadroomAsync(connection, ct);
             attempt = new PgStatementTableAttempt(connection, number, forcePass && number == 1, await DeallocAsync(connection, ct));
-            await body(attempt);
-            attempt.Finish(await DeallocAsync(connection, ct));
-            if (attempt.PassesInside == 0 || number == MaxAttempts)
+            ExceptionDispatchInfo? failure = null;
+            try
             {
+                await body(attempt);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException and not Xunit.Sdk.SkipException)
+            {
+                /* The reads look for the entries the statements made; a pass inside the run takes them, and the reads fail
+                   on what is left. The counter, read next, says whether this failure is the pass's or the body's own. */
+                failure = ExceptionDispatchInfo.Capture(ex);
+            }
+
+            attempt.Finish(await DeallocAsync(connection, ct));
+            if (attempt.PassesInside == 0)
+            {
+                failure?.Throw();
+                return attempt;
+            }
+
+            if (number == MaxAttempts)
+            {
+                if (failure is not null)
+                {
+                    Assert.Fail(PassInsideMessage(attempt) + " The reads of that run failed: " + failure.SourceException.Message);
+                }
+
                 return attempt;
             }
         }
@@ -165,11 +191,10 @@ internal static class PgStatementTable
     }
 
     /// <summary>The run's reads looked at the entries its statements made: no eviction pass ran inside it.</summary>
-    public static void AssertNoPassInside(PgStatementTableAttempt run)
-    {
-        Assert.True(run.PassesInside == 0,
-            $"pg_stat_statements ran {run.PassesInside} eviction pass(es) between the statements and the read of attempt {run.Number} (dealloc {run.DeallocAtStart} -> {run.DeallocAtEnd}).");
-    }
+    public static void AssertNoPassInside(PgStatementTableAttempt run) => Assert.True(run.PassesInside == 0, PassInsideMessage(run));
+
+    private static string PassInsideMessage(PgStatementTableAttempt run)
+        => $"pg_stat_statements ran {run.PassesInside} eviction pass(es) between the statements and the read of attempt {run.Number} (dealloc {run.DeallocAtStart} -> {run.DeallocAtEnd}).";
 
     /// <summary><c>pg_stat_statements_info.dealloc</c>, or NULL where this database has no such view (the extension is below 1.9).</summary>
     public static async Task<long?> DeallocAsync(NpgsqlConnection connection, CancellationToken ct)
