@@ -67,7 +67,7 @@ internal static class DarlingServerResolver
     internal static IReadOnlyList<int>? WebAllowedServerIds => WebScope.Value?.Ids;
     internal static IReadOnlyList<int>? WebAllowedTagIds => WebScope.Value?.Tags;
 
-    internal static async Task<string> ReadWebScopeAsync(IReadOnlyList<int> ids, IReadOnlyList<int> tags, Func<Task<string>> read)
+    internal static async Task<T> ReadWebScopeAsync<T>(IReadOnlyList<int> ids, IReadOnlyList<int> tags, Func<Task<T>> read)
     {
         var previous = WebScope.Value;
         WebScope.Value = (ids, tags);
@@ -82,7 +82,7 @@ internal static class DarlingServerResolver
     }
 
     /// <summary>Keep every resolution in an authorized web read on the same server ID.</summary>
-    internal static async Task<string> ReadWebServerAsync(int serverId, Func<Task<string>> read)
+    internal static async Task<T> ReadWebServerAsync<T>(int serverId, Func<Task<T>> read)
     {
         var previous = WebServerId.Value;
         WebServerId.Value = serverId;

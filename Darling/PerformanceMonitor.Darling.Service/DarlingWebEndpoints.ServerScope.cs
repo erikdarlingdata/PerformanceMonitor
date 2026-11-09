@@ -247,14 +247,9 @@ public static partial class DarlingWebEndpoints
             return null;
         }
 
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(
-            postgres, Server(context), context.RequestAborted);
-        if (error is not null)
-        {
-            return null;
-        }
-
         var serverIds = allowedServerIds ?? await AllowedWebServerIdsAsync(postgres, allowedTagIds, context.RequestAborted);
-        return Array.IndexOf(serverIds, resolved.ServerId) >= 0 ? resolved.ServerId : null;
+        var (resolved, error) = await DarlingServerResolver.ReadWebScopeAsync(serverIds, allowedTagIds,
+            () => DarlingServerResolver.ResolveOrErrorAsync(postgres, Server(context), context.RequestAborted));
+        return error is null ? resolved.ServerId : null;
     }
 }

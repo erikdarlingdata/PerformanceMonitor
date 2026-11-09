@@ -66,9 +66,11 @@ internal static class DarlingServerDataStartEndpoint
                     Route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
 
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(
-                postgres, DarlingWebEndpoints.First(context, "server") ?? DarlingWebEndpoints.First(context, "server_name"),
-                context.RequestAborted);
+            var serverName = DarlingWebEndpoints.First(context, "server") ?? DarlingWebEndpoints.First(context, "server_name");
+            var (resolved, error) = scopedServerId is int permittedId
+                ? await DarlingServerResolver.ReadWebServerAsync(permittedId,
+                    () => DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, context.RequestAborted))
+                : await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, context.RequestAborted);
             if (scopedServerId is int authorizedId && (error is not null || resolved.ServerId != authorizedId))
             {
                 return DarlingWebStatementSweep.JsonText("""{"error":"Server data is unavailable to this token."}""",

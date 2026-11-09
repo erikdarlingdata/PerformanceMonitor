@@ -493,6 +493,19 @@ public sealed class DarlingWebNamedTokenTests
         await AssertFleetAsync(OperatorToken, 41, 42, 43);
 
         var financeCookie = await SignIn(server, ReaderToken);
+        // The partial matches both the permitted Finance server and hidden servers in the registry.
+        foreach (var path in new[] { "/api/read/get_wait_stats", "/api/server-databases", "/api/server-data-start", "/api/catalog" })
+        {
+            var (response, body) = await Send(server, HttpMethods.Get, path + "?server=server", financeCookie);
+            Assert.True(response.Response.StatusCode == StatusCodes.Status200OK,
+                path + " answered " + response.Response.StatusCode + ": " + body);
+            Assert.DoesNotContain("operations-server", body, StringComparison.Ordinal);
+            if (path == "/api/server-databases")
+            {
+                Assert.Contains("finance-server_db", body, StringComparison.Ordinal);
+            }
+        }
+
         var (unscopedRoute, _) = await Send(server, HttpMethods.Get, "/api/ag", financeCookie);
         Assert.Equal(StatusCodes.Status403Forbidden, unscopedRoute.Response.StatusCode);
 
