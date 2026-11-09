@@ -38,6 +38,9 @@ public partial class ViewerServerTab
 
     private DispatcherTimer? _autoRefreshTimer;
 
+    /* #8367: the window whose Closed event stops _autoRefreshTimer; see HookHostWindowClosed. */
+    private Window? _hostWindow;
+
     /// <summary>
     /// Raised when the user clicks "Apply to All": MainWindow broadcasts the held range to every other open server
     /// tab (<see cref="TimeRangePresets.ForBroadcast"/>: a calendar period goes as the instants it names). The
@@ -104,7 +107,25 @@ public partial class ViewerServerTab
         {
             _autoRefreshTimer.Start();
         }
+
+        /* #8367: a DispatcherTimer is rooted by its dispatcher, so a tab whose window has closed would otherwise keep ticking on
+           that thread for the life of the process. Unloaded cannot tell that apart from a tab switch (a TabControl unloads the
+           tab it switches away from, and the tab stays in its window), so the window's own Closed event is what stops it. */
+        Loaded += HookHostWindowClosed;
     }
+
+    /* #8367: Loaded fires again on every switch back to this tab, so the window is hooked once; a tab that moves to another
+       window lets go of the first. */
+    private void HookHostWindowClosed(object sender, RoutedEventArgs e)
+    {
+        var window = Window.GetWindow(this);
+        if (window is null || ReferenceEquals(window, _hostWindow)) return;
+        if (_hostWindow is not null) _hostWindow.Closed -= HostWindow_Closed;
+        _hostWindow = window;
+        window.Closed += HostWindow_Closed;
+    }
+
+    private void HostWindow_Closed(object? sender, EventArgs e) => _autoRefreshTimer?.Stop();
 
     private async void OnAutoRefreshTick(object? sender, EventArgs e)
     {
