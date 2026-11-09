@@ -87,7 +87,7 @@ public sealed partial class LocalDataService
             if (oldestRun is DateTime run)
             {
                 var clock = await ReadJobHistoryClockAsync(id, openTabClocks is not null && openTabClocks.TryGetValue(id, out var open) ? open : null);
-                var runUtc = clock.ToUtc(run);
+                var runUtc = DateTime.SpecifyKind(clock.ToUtc(run), DateTimeKind.Utc);
                 if (runUtc < start)
                 {
                     start = runUtc;
