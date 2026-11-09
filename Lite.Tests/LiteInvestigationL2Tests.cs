@@ -53,6 +53,10 @@ public sealed class LiteInvestigationL2Tests : IDisposable
         Directory.CreateDirectory(_tempDir);
         _db = new DuckDbInitializer(Path.Combine(_tempDir, "lite.duckdb"));
         _db.InitializeAsync().GetAwaiter().GetResult();
+        /* #8490: the write lock is process-wide, and a budgeted writer polls for it with no queue position for all but the last second
+           of its budget (#7256), so against parallel classes whose parked writers win every handoff a two-minute budget can run out
+           polling. A tail no shorter than the budget parks this fixture's writers at once, and the budget is a real bound on the wait. */
+        _db.WriteLockParkTail = DuckDbInvestigationStoreTests.TestLockBudget;
         /* Windows auth, so AddServer never touches the credential store. */
         _servers = new ServerManager(_tempDir);
         _store = new DuckDbInvestigationStore(_db, () => _now, DuckDbInvestigationStoreTests.TestLockBudget,

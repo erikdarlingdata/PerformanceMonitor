@@ -46,6 +46,11 @@ public sealed class McpQueryTagWriteUndoTests : IDisposable
         Directory.CreateDirectory(_tempDir);
         _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "undo.duckdb"));
         _duckDb.InitializeAsync().GetAwaiter().GetResult();
+        /* #8490: the write lock is process-wide, and a budgeted writer polls for it with no queue position for all but the last second
+           of its budget (#7256), so against parallel classes whose parked writers win every handoff the budget can run out polling and
+           a create answers with an error that has no tag. The larger of the two budgets a LocalDataService built this way gives its
+           writers, so its background and its user writes both park at once, and the budget is a real bound on the wait. */
+        _duckDb.WriteLockParkTail = LocalDataService.UserWriteLockBudget;
         _data = new LocalDataService(_duckDb);
     }
 

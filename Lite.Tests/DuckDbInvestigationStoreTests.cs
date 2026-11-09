@@ -37,7 +37,10 @@ public sealed class DuckDbInvestigationStoreTests : IDisposable
     /// databases in parallel, one of them can hold it past the shipped 5 s budget on a loaded CI runner. A test that makes
     /// 150 writes in a row (the journal page one) then hit <c>StoreLockTimeoutException</c> from ClaimAsync, which says
     /// nothing about the journal page. These tests are not about the lock budget, so they wait long enough for the holder
-    /// to finish. Lock timeout behaviour has its own tests (<c>WriteLockBudgetTests</c>, <c>StoreLockHolderTests</c>).</summary>
+    /// to finish. A budgeted writer polls with no queue position for all but the last second of its budget (#7256), and the writers
+    /// other classes park on the lock win every handoff, so each fixture here also parks its writers for the whole budget
+    /// (<c>WriteLockParkTail</c>), which makes the budget a real bound on the wait (#8490). Lock timeout behaviour has its own tests
+    /// (<c>WriteLockBudgetTests</c>, <c>StoreLockHolderTests</c>).</summary>
     internal static readonly TimeSpan TestLockBudget = TimeSpan.FromMinutes(2);
 
     private readonly string _tempDir;
@@ -51,6 +54,7 @@ public sealed class DuckDbInvestigationStoreTests : IDisposable
         Directory.CreateDirectory(_tempDir);
         _db = new DuckDbInitializer(Path.Combine(_tempDir, "lite.duckdb"));
         _db.InitializeAsync().GetAwaiter().GetResult();
+        _db.WriteLockParkTail = TestLockBudget;
         _store = new DuckDbInvestigationStore(_db, () => _now, TestLockBudget);
     }
 
