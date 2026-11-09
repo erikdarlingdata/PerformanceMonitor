@@ -225,18 +225,19 @@ public sealed class GatedCollectorRowsLiveTests
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task LogAsync(NpgsqlConnection c, int id, string server, string collector, int minutesAgo, CancellationToken ct)
+    private static async Task LogAsync(NpgsqlConnection c, int id, string server, string collector, int minutesAgo, CancellationToken ct, int rows = 10)
     {
         await using var cmd = new NpgsqlCommand(
             """
             INSERT INTO collection_log (log_id, collection_time, server_id, server_name, collector_name, status, duration_ms, rows_collected)
-            VALUES ($1, $2, $3, $4, $5, 'SUCCESS', 100, 10)
+            VALUES ($1, $2, $3, $4, $5, 'SUCCESS', 100, $6)
             """, c);
         cmd.Parameters.AddWithValue(CollectionIdGenerator.Next());
         cmd.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-minutesAgo), DateTimeKind.Unspecified));
         cmd.Parameters.AddWithValue(id);
         cmd.Parameters.AddWithValue(server);
         cmd.Parameters.AddWithValue(collector);
+        cmd.Parameters.AddWithValue(rows);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -659,12 +660,14 @@ public sealed class GatedCollectorRowsLiveTests
             const int rowId = 524_926;
             await RegisterAsync(connection, rowId, "qs-standby", MonitoredEngineKind.SqlServer, null, ct);
             await LogAsync(connection, rowId, "qs-standby", "query_store_hints", 5, ct);
+            await LogAsync(connection, rowId, "qs-standby", "query_store", 2, ct, rows: 0);
             await CaptureAsync(connection, rowId, "qs-standby", DateTime.UtcNow - old, "db1", 8, ct);
             await CaptureAsync(connection, rowId, "qs-standby", DateTime.UtcNow - old, "db2", 8, ct);
             await DisableAsync(connection, rowId, "query_store_health", ct);
 
             const int fleetId = 524_927;
             await RegisterAsync(connection, fleetId, "qs-standby-fleet", MonitoredEngineKind.SqlServer, null, ct);
+            await LogAsync(connection, fleetId, "qs-standby-fleet", "query_store", 2, ct, rows: 0);
             await CaptureAsync(connection, fleetId, "qs-standby-fleet", DateTime.UtcNow - old, "db1", 8, ct);
             await DisableAsync(connection, fleetId, "query_store_health", ct);
 

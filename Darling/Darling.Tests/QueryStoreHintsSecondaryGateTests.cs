@@ -230,20 +230,77 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             "INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) VALUES ($1, $2, 60, 30, FALSE)",
             ct, id, collector);
 
+    /// <summary>The newest <c>query_store</c> collector run on the server, as the scheduler logs it: its statement skips every readable-secondary database, so its row count says whether any database was read.</summary>
+    private static Task QueryStoreRunAsync(NpgsqlConnection c, int id, string name, int rows, TimeSpan age, CancellationToken ct) =>
+        ExecAsync(c,
+            "INSERT INTO collection_log (log_id, collection_time, server_id, server_name, collector_name, status, duration_ms, rows_collected) VALUES ($1, $2, $3, $4, 'query_store', 'SUCCESS', 100, $5)",
+            ct, CollectionIdGenerator.Next(), Naive(DateTime.UtcNow - age), id, name, rows);
+
+    [Fact]
+    public async Task APromotedPrimary_WithTheSameFrozenCaptureAndAStandaloneRole_RunsTheCollector_OnceQueryStoreCollectsRows_WhileTheStandbyStaysGated()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* Two servers outside any availability group with the same facts a readable standby leaves behind: a frozen all-secondary
+               capture, query_store_health disabled, and a Standalone role, which the properties collector writes for a standby and a
+               primary alike. The newest query_store run tells them apart: on the standby it reads nothing (its statement skips the
+               readable-secondary databases), on the promoted primary it collects rows. The capture alone never decides. */
+            const int standbyId = 840_204;
+            const string standby = "qs-standby-run";
+            const int promotedId = 840_205;
+            const string promoted = "qs-promoted";
+            foreach (var (id, name) in new[] { (standbyId, standby), (promotedId, promoted) })
+            {
+                await RegisterAsync(connection, id, name, ct);
+                await CaptureAsync(connection, id, name, "db1", 8, TimeSpan.FromDays(19), ct);
+                await RoleAsync(connection, id, name, "Standalone", TimeSpan.FromMinutes(5), ct);
+                await DisableAsync(connection, id, QueryStoreHealthCollector.Instance.Name, ct);
+            }
+
+            await QueryStoreRunAsync(connection, standbyId, standby, 0, TimeSpan.FromMinutes(2), ct);
+            await QueryStoreRunAsync(connection, promotedId, promoted, 480, TimeSpan.FromMinutes(2), ct);
+
+            var worker = DailyRunKit.MakeWorker(new DailyRunLogger());
+            worker.StoreForTests = postgres;
+            worker.ScheduleOverridesForTest = new[]
+            {
+                new ScheduleOverride(standbyId, QueryStoreHealthCollector.Instance.Name, null, null, false),
+                new ScheduleOverride(promotedId, QueryStoreHealthCollector.Instance.Name, null, null, false),
+            };
+            var standbyServer = DailyRunKit.MakeServer(standbyId, Hints);
+            var promotedServer = DailyRunKit.MakeServer(promotedId, Hints);
+
+            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(standbyServer, standbyServer.Runtime!, ct));
+            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(promotedServer, promotedServer.Runtime!, ct));
+            Assert.NotNull(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, standbyId, standby, ct));
+            Assert.Null(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, promotedId, promoted, ct));
+
+            /* With no query_store run logged at all, the frozen capture is not trusted alone: the collector runs. */
+            const int quietId = 840_206;
+            const string quiet = "qs-quiet";
+            await RegisterAsync(connection, quietId, quiet, ct);
+            await CaptureAsync(connection, quietId, quiet, "db1", 8, TimeSpan.FromDays(19), ct);
+            worker.ScheduleOverridesForTest = new[] { new ScheduleOverride(quietId, QueryStoreHealthCollector.Instance.Name, null, null, false) };
+            var quietServer = DailyRunKit.MakeServer(quietId, Hints);
+            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(quietServer, quietServer.Runtime!, ct));
+        });
+    }
+
     [Fact]
     public async Task AFrozenCapture_StillGatesAReadableStandby_WhoseRoleCarriesNoAvailabilityGroupAnswer()
     {
         await RunAsync(async (connection, postgres, ct) =>
         {
             /* A readable standby outside any availability group: the capture, taken weeks ago, flags every database as a readable
-               secondary, query_store_health is disabled for the server, and server_properties carries no Availability Group role
-               for it (no row at all, then Standalone, as a read replica reads). The frozen capture is the only evidence there is,
-               and it is the evidence the Query Store reads judge, so the gate judges it too. */
+               secondary, query_store_health is disabled for the server, server_properties carries no Availability Group role
+               for it (no row at all, then Standalone, as a read replica reads), and the newest query_store run read nothing. The
+               capture, corroborated by that run, is the evidence the Query Store reads judge, so the gate judges it too. */
             const int id = 840_201;
             const string name = "qs-standby";
             await RegisterAsync(connection, id, name, ct);
             await CaptureAsync(connection, id, name, "db1", 8, TimeSpan.FromDays(19), ct);
             await CaptureAsync(connection, id, name, "db2", 8, TimeSpan.FromDays(19), ct);
+            await QueryStoreRunAsync(connection, id, name, 0, TimeSpan.FromMinutes(2), ct);
 
             var worker = DailyRunKit.MakeWorker(new DailyRunLogger());
             worker.StoreForTests = postgres;
@@ -284,6 +341,7 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             }
 
             await RoleAsync(connection, primaryId, primary, "PRIMARY", TimeSpan.FromMinutes(5), ct);
+            await QueryStoreRunAsync(connection, standbyId, standby, 0, TimeSpan.FromMinutes(2), ct);
 
             var worker = DailyRunKit.MakeWorker(new DailyRunLogger());
             worker.StoreForTests = postgres;
