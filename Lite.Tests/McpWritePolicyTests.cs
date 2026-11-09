@@ -321,23 +321,27 @@ public sealed class McpWritePolicyTests
         Assert.True(unserved.Count == 0, "the instructions name tools this configuration does not serve: " + string.Join(", ", unserved));
     }
 
-    /// <summary>#5820 L5c: the investigation paragraph appears exactly when the investigation tools are served (the setting
-    /// on and the writes off), and with them off the rendered text names none of the four tools, in the paragraph or the census.</summary>
+    /// <summary>#5820 L5c, #8461: the investigation paragraph is always rendered, because the two investigation reads are served in
+    /// every configuration and the paragraph names them and the setting that serves the rest; the tools that claim and report are named
+    /// only when the setting serves them, so the text never points a client at a tool <c>tools/list</c> lacks.</summary>
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void RenderedInstructions_CarryTheInvestigationParagraph_OnlyWhenTheInvestigationToolsAreServed(bool investigationsServed)
+    public void RenderedInstructions_AlwaysNameTheInvestigationReads_AndTheToolsThatClaimAndReport_OnlyWhenServed(bool investigationsServed)
     {
         var all = RegisteredTools();
-        var catalog = McpWritePolicy.ToolNames(all).Where(n => investigationsServed || !McpInvestigationPolicy.IsInvestigationTool(n)).ToList();
+        var catalog = McpWritePolicy.ToolNames(all).Where(n => investigationsServed || !McpInvestigationPolicy.IsStateChanging(n)).ToList();
         var served = catalog.Where(n => !McpWritePolicy.IsWrite(n)).ToList();
         var text = McpInstructions.Build(catalog, served);
 
-        Assert.Equal(investigationsServed, text.Contains("### Investigation requests", StringComparison.Ordinal));
-        Assert.Equal(investigationsServed, text.Contains("mcp_allow_investigations", StringComparison.Ordinal));
-        foreach (var name in McpInvestigationPolicy.InvestigationTools)
+        Assert.Contains("### Investigation requests", text, StringComparison.Ordinal);
+        Assert.Contains("mcp_allow_investigations", text, StringComparison.Ordinal);
+        Assert.Contains("`list_investigation_requests`", text, StringComparison.Ordinal);
+        Assert.Contains("`get_investigation_reports`", text, StringComparison.Ordinal);
+        foreach (var name in McpInvestigationPolicy.StateChangingTools)
         {
-            Assert.Equal(investigationsServed, text.Contains($"`{name}`", StringComparison.Ordinal));
+            Assert.True(investigationsServed == text.Contains($"`{name}`", StringComparison.Ordinal),
+                $"`{name}` is named in the instructions exactly when it is served (served: {investigationsServed})");
         }
     }
 
