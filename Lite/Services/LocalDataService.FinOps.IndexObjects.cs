@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
@@ -23,16 +24,18 @@ public partial class LocalDataService
 
     /// <summary>
     /// Per-table size and growth (indexes rolled up per table) for a server: the latest snapshot's sizes
-    /// beside the same table's reserved size at the newest snapshot at/older than 7 and 30 days and at the
-    /// store's earliest snapshot, projected RAW (#3541 A12). The growth figures are derived on
+    /// beside the same table's reserved size at the snapshot nearest 7 and 30 days ago within a day either side
+    /// (<see cref="GrowthBaselineReach.Tolerance"/>, the storage-growth read's rule) and at the store's earliest
+    /// snapshot, projected RAW (#3541 A12). The growth figures are derived on
     /// <see cref="ObjectSizeGrowthBaselineRow"/>, where each can refuse when its baseline does not exist.
     /// <para>The SQL this replaced derived them here through <c>COALESCE(p30, p7, oldest, current)</c>, which
     /// is three lies in one expression: with ten days of history "30-day growth" was growth since the
     /// SEVEN-day snapshot; with two days it was growth since the oldest snapshot, still labelled 30d; and a
     /// table absent from every baseline (created this week) fell through to <c>current - current = 0</c>,
     /// "not growing", for the one table that is nothing BUT growth. The two cutoff snapshots are resolved
-    /// once in <c>boundaries</c> with <c>FILTER</c> so the baseline CTEs and the projected snapshot times
-    /// cannot disagree about which capture was used. Darling's <c>DarlingObjectStatsReader.ObjectSizeGrowthSql</c>
+    /// once, in <c>span</c> (the newest within the tolerance at or before each cutoff and the oldest within it after, by
+    /// <c>FILTER</c>) and <c>boundaries</c> (the nearer of the two), so the baseline CTEs and the projected snapshot
+    /// times cannot disagree about which capture was used. Darling's <c>DarlingObjectStatsReader.ObjectSizeGrowthSql</c>
     /// is the twin.</para>
     /// <para>#5244: <paramref name="databaseNames"/> (null or empty = every database, the statement as it always read) limits the four
     /// snapshot CTEs, and NOT <c>boundaries</c>, so the snapshot anchors and the store's span stay the server's and a filtered and an
@@ -49,17 +52,36 @@ public partial class LocalDataService
         var now = DateTime.UtcNow;
         var cutoff7d = now.AddDays(-7);
         var cutoff30d = now.AddDays(-30);
+        /* Each baseline is the snapshot nearest its cutoff within this many seconds either side (GrowthBaselineReach.Tolerance, the
+           storage-growth read's rule); the later one on a tie, NULL when none lies within it. Darling's twin binds it as $6. */
+        var toleranceSeconds = GrowthBaselineReach.Tolerance.TotalSeconds.ToString("0", CultureInfo.InvariantCulture);
 
         command.CommandText = $@"
-WITH boundaries AS (
+WITH span AS (
     SELECT
         MAX(collection_time) AS latest_time,
         MIN(collection_time) AS earliest_time,
-        CAST(MAX(collection_time) AS DATE) - CAST(MIN(collection_time) AS DATE) AS days_of_data,
-        MAX(collection_time) FILTER (WHERE collection_time <= $2) AS snapshot_7d_time,
-        MAX(collection_time) FILTER (WHERE collection_time <= $3) AS snapshot_30d_time
+        MAX(collection_time) FILTER (WHERE collection_time <= CAST($2 AS TIMESTAMP) AND epoch(CAST($2 AS TIMESTAMP)) - epoch(collection_time) <= {toleranceSeconds}) AS before_7d,
+        MIN(collection_time) FILTER (WHERE collection_time > CAST($2 AS TIMESTAMP) AND epoch(collection_time) - epoch(CAST($2 AS TIMESTAMP)) <= {toleranceSeconds}) AS after_7d,
+        MAX(collection_time) FILTER (WHERE collection_time <= CAST($3 AS TIMESTAMP) AND epoch(CAST($3 AS TIMESTAMP)) - epoch(collection_time) <= {toleranceSeconds}) AS before_30d,
+        MIN(collection_time) FILTER (WHERE collection_time > CAST($3 AS TIMESTAMP) AND epoch(collection_time) - epoch(CAST($3 AS TIMESTAMP)) <= {toleranceSeconds}) AS after_30d
     FROM v_index_object_stats
     WHERE server_id = $1
+),
+boundaries AS (
+    SELECT
+        latest_time,
+        earliest_time,
+        CAST(latest_time AS DATE) - CAST(earliest_time AS DATE) AS days_of_data,
+        CASE WHEN before_7d IS NULL THEN after_7d
+             WHEN after_7d IS NULL THEN before_7d
+             WHEN epoch(after_7d) - epoch(CAST($2 AS TIMESTAMP)) <= epoch(CAST($2 AS TIMESTAMP)) - epoch(before_7d) THEN after_7d
+             ELSE before_7d END AS snapshot_7d_time,
+        CASE WHEN before_30d IS NULL THEN after_30d
+             WHEN after_30d IS NULL THEN before_30d
+             WHEN epoch(after_30d) - epoch(CAST($3 AS TIMESTAMP)) <= epoch(CAST($3 AS TIMESTAMP)) - epoch(before_30d) THEN after_30d
+             ELSE before_30d END AS snapshot_30d_time
+    FROM span
 ),
 latest AS (
     SELECT database_name, schema_name, table_name,
@@ -740,8 +762,8 @@ public class ObjectSizeGrowthBaselineRow
     public int DaysOfData { get; set; }
 
     /// <summary>Whether the 7-day baseline snapshot exists and sits within reach of its window (<see cref="GrowthBaselineReach"/>):
-    /// the span from it to the latest snapshot is 6 to 8 days. A store with a gap in its snapshots resolves the
-    /// cutoff to a snapshot far older than the window, and a figure measured from that is not a 7-day figure.</summary>
+    /// the span from it to the latest snapshot is 6 to 8 days to the nearest day. A collector whose latest snapshot is itself
+    /// days old finds its baseline only a day or two before it, and a figure measured over that is not a 7-day figure.</summary>
     public bool Covers7d => GrowthBaselineReach.Covers(Snapshot7dTime, LatestSnapshotTime, GrowthBaselineReach.ShortWindowDays);
 
     /// <summary>Same for the 30-day baseline: the span is 29 to 31 days.</summary>

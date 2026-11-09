@@ -13,20 +13,21 @@ namespace PerformanceMonitor.Common;
 
 /// <summary>
 /// How far a nominal growth window's baseline snapshot may sit from the span its name promises. get_table_index_sizes
-/// reads each baseline as the newest index snapshot at or before the window's cutoff, and the snapshots are daily at
-/// best: a collector that stalled, or a server that was out of scope for a while, leaves a gap, and the newest snapshot
-/// before a cutoff can then be weeks older than the window. A 7-day figure measured from a 30-day-old snapshot is the
-/// 30-day figure under another name, and the two read identical on every steadily growing table. A figure therefore
-/// stands only when the span it covers, from its baseline snapshot to the latest snapshot, is within <see cref="Tolerance"/>
-/// of the window: a 7-day figure spans 6 to 8 days, a 30-day figure 29 to 31. The tolerance is the one get_storage_growth
-/// already judges its database baselines by, so a table's "7 days ago" and a database's "7 days ago" are the same span,
-/// the two ranges are disjoint, so the two figures can never be one measurement, and the span's lower bound keeps a stalled
-/// collector, whose latest snapshot is itself days old, from labelling two days of growth as seven. Both products' rows
-/// judge their baselines here, so the rule is one rule.
+/// reads each baseline as the index snapshot nearest the window's cutoff within <see cref="Tolerance"/> either side, the
+/// rule get_storage_growth applies to database baselines, so a table's "7 days ago" and a database's are one span and a
+/// daily collector that missed its run at the mark resolves to the snapshot a day inside it rather than to nothing or to
+/// one a day outside. A store with a gap wider than the tolerance on both sides of a cutoff has no baseline there.
+/// The figure measured from a baseline then stands only when the span from it to the latest snapshot, judged to the
+/// nearest whole day, is within the tolerance of the window: 6, 7 or 8 days for a 7-day figure, 29 to 31 for a 30-day one.
+/// Snapshots are daily, so spans are whole days plus the seconds a run started early or late, and the rounding keeps that
+/// drift from flipping the guard at the 6- and 8-day edges a missed run lands on. The guard refuses a collector whose latest
+/// snapshot is itself days old, whose "7-day" baseline is then only a day or two before it, and the two windows' ranges are
+/// disjoint, so the two figures can never be one measurement. Both products' rows judge their baselines here, so the rule
+/// is one rule.
 /// </summary>
 public static class GrowthBaselineReach
 {
-    /// <summary>How far from its window a baseline snapshot may sit: one day either side, the storage-growth reader's rule.</summary>
+    /// <summary>How far from its cutoff a baseline snapshot may sit: one day either side, the storage-growth reader's rule.</summary>
     public static readonly TimeSpan Tolerance = TimeSpan.FromDays(1);
 
     /// <summary>The shorter nominal window, in days.</summary>
@@ -42,19 +43,37 @@ public static class GrowthBaselineReach
     public static TimeSpan LongestSpan(int windowDays) => TimeSpan.FromDays(windowDays) + Tolerance;
 
     /// <summary>
-    /// True when a baseline snapshot exists and the span from it to the latest snapshot is within reach of the window:
-    /// the figure measured from it may carry the window's name.
+    /// True when a baseline snapshot exists and the span from it to the latest snapshot, to the nearest whole day, is within
+    /// reach of the window: the figure measured from it may carry the window's name.
     /// </summary>
     public static bool Covers(DateTime? baselineSnapshot, DateTime latestSnapshot, int windowDays)
     {
         if (baselineSnapshot is not { } baseline) return false;
-        var span = latestSnapshot - baseline;
-        return span >= ShortestSpan(windowDays) && span <= LongestSpan(windowDays);
+        var wholeDays = Math.Round((latestSnapshot - baseline).TotalDays, MidpointRounding.AwayFromZero);
+        return wholeDays >= ShortestSpan(windowDays).TotalDays && wholeDays <= LongestSpan(windowDays).TotalDays;
     }
+
+    /// <summary>
+    /// True when the store's span (whole calendar days between its earliest and latest snapshots) is too short to hold any
+    /// snapshot within the tolerance of the window's cutoff: no baseline exists because nothing is that old, not because of
+    /// a gap.
+    /// </summary>
+    public static bool StoreYoungerThan(int daysOfData, int windowDays) => daysOfData < ShortestSpan(windowDays).TotalDays;
 
     /// <summary>The range a figure for <paramref name="windowDays"/> may span, for a sentence: "6 to 8 days".</summary>
     public static string DescribeRange(int windowDays) =>
         string.Create(CultureInfo.InvariantCulture, $"{ShortestSpan(windowDays).TotalDays:0.#} to {LongestSpan(windowDays).TotalDays:0.#} days");
+
+    /// <summary>The tolerance, for a sentence: "a day".</summary>
+    public static string ToleranceWords =>
+        Tolerance == TimeSpan.FromDays(1) ? "a day" : string.Create(CultureInfo.InvariantCulture, $"{Tolerance.TotalDays:0.#} days");
+
+    /// <summary>
+    /// Why a store old enough to hold a baseline has none for the window: no snapshot lies within the tolerance of the cutoff
+    /// on either side (a gap in the snapshots). "no snapshot lies within a day of 7 days ago".
+    /// </summary>
+    public static string NoneWithinToleranceClause(int windowDays) =>
+        string.Create(CultureInfo.InvariantCulture, $"no snapshot lies within {ToleranceWords} of {windowDays} days ago");
 
     /// <summary>
     /// Why a baseline snapshot that exists is out of reach of its window, for the history note: the snapshot, how far it
@@ -66,6 +85,6 @@ public static class GrowthBaselineReach
         if (baselineSnapshot is not { } baseline || Covers(baseline, latestSnapshot, windowDays)) return null;
         var spanDays = (latestSnapshot - baseline).TotalDays;
         return string.Create(CultureInfo.InvariantCulture,
-            $"the newest snapshot at or before {windowDays} days ago is from {baseline:o}, {spanDays:0.#} days before the latest snapshot and outside the {DescribeRange(windowDays)} a {windowDays}-day figure may span");
+            $"the snapshot nearest {windowDays} days ago is from {baseline:o}, {spanDays:0.#} days before the latest snapshot and outside the {DescribeRange(windowDays)} a {windowDays}-day figure may span");
     }
 }
