@@ -51,6 +51,8 @@ public partial class ServerTab : UserControl
     }
     private readonly CredentialResolver _credentialResolver;
     private readonly DispatcherTimer _refreshTimer;
+    /* #8367: the window whose Closed event stops _refreshTimer; see HookHostWindowClosed. */
+    private Window? _hostWindow;
     private bool _refreshPendingWhileHidden;
     private bool _isRefreshing;
     /* Re-entrancy latch for the Ctrl+V plan-paste handler (#2870). #2837's async clipboard retry keeps the UI
@@ -280,6 +282,11 @@ public partial class ServerTab : UserControl
         {
             _refreshTimer.Start();
         }
+
+        /* #8367: a DispatcherTimer is rooted by its dispatcher, so a tab whose window has closed would otherwise keep polling on
+           that thread for the life of the process. Unloaded cannot tell that apart from a tab switch (a TabControl unloads the
+           tab it switches away from, and the tab stays in its window), so the window's own Closed event is what stops it. */
+        Loaded += HookHostWindowClosed;
 
         /* When this tab isn't selected the timer skips its data refresh (see RefreshAllDataAsync);
            refresh once when it becomes visible again so it isn't showing stale data on return. */
@@ -731,8 +738,21 @@ public partial class ServerTab : UserControl
         }
     }
 
+    /* #8367: Loaded fires again on every switch back to this tab, so the window is hooked once; a tab that moves to another
+       window lets go of the first. */
+    private void HookHostWindowClosed(object sender, RoutedEventArgs e)
+    {
+        var window = Window.GetWindow(this);
+        if (window is null || ReferenceEquals(window, _hostWindow)) return;
+        if (_hostWindow is not null) _hostWindow.Closed -= HostWindow_Closed;
+        _hostWindow = window;
+        window.Closed += HostWindow_Closed;
+    }
+
+    private void HostWindow_Closed(object? sender, EventArgs e) => StopRefresh();
+
     /// <summary>
-    /// Stops the refresh timer when the tab is removed.
+    /// Stops the refresh timer when the tab is removed, or when its window closes.
     /// </summary>
     public void StopRefresh()
     {
