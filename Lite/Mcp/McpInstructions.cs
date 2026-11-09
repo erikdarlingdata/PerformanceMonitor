@@ -19,7 +19,7 @@ internal static class McpInstructions
     public const string Text = Head + "\n\n" + CatalogCensus + Tail;
 
     /// <summary>The census of the whole catalog, as <see cref="Text"/> carries it.</summary>
-    private const string CatalogCensus = "113 tools (97 by default; `mcp_allow_writes` adds the twelve write tools, `mcp_allow_investigations` the four investigation tools)";
+    private const string CatalogCensus = "113 tools (99 by default; `mcp_allow_writes` adds the twelve write tools, `mcp_allow_investigations` the two tools that claim and report on investigation requests)";
 
     /// <summary>
     /// #5789: the instructions THIS server sends. The census counts <paramref name="served"/> (the tools left after
@@ -47,9 +47,10 @@ internal static class McpInstructions
            pointing a client at tools tools/list lacks. */
         var head = served.Any(McpWritePolicy.IsWrite) ? Head : Head.Replace(PreambleWriteToolList, "", StringComparison.Ordinal);
         var tail = served.Contains(MuteTool) ? Tail : Tail.Replace(WorkflowMuteStep, "", StringComparison.Ordinal);
-        /* #5820: the investigation paragraph names the four tools and their gate, so it goes when none is served. */
+        /* #5820, #8461: the investigation reads are served in every configuration, so their paragraph stays; the flow that names the
+           tools that claim and report goes when the setting does not serve them. */
         if (!served.Any(McpInvestigationPolicy.IsInvestigationTool))
-            tail = tail.Replace(InvestigationSection, "", StringComparison.Ordinal);
+            tail = tail.Replace(InvestigationClaimFlow, "", StringComparison.Ordinal);
         return head + "\n\n" + census + tail;
     }
 
@@ -107,15 +108,24 @@ internal static class McpInstructions
         """;
 
     /// <summary>
-    /// #5820: the investigation tools' paragraph. <see cref="Build"/> drops it when none of the four tools is served, so a
-    /// client is never pointed at tools that <c>tools/list</c> lacks.
+    /// #5820, #8461: the investigation paragraph. The two reads are served in every configuration, so the heading and
+    /// <see cref="InvestigationReads"/> always render; <see cref="Build"/> drops <see cref="InvestigationClaimFlow"/>, which names the
+    /// tools that claim and report, when the setting does not serve them, so a client is never pointed at tools that <c>tools/list</c> lacks.
     /// </summary>
-    private const string InvestigationSection = """
+    private const string InvestigationSection = InvestigationReads + InvestigationClaimFlow;
+
+    private const string InvestigationReads = """
 
 
         ### Investigation requests
 
-        Served only with `mcp_allow_investigations` true and `mcp_allow_writes` false in settings.json (both on: the four tools stay off). An alert on a notification route set to Investigate (`agent_level` 1) opens a request. Flow: `list_investigation_requests` -> `claim_investigation_request` (brief, `claim_id`, lease; pass the `claim_id` again to renew) -> make the calls the brief names -> `submit_investigation_report` (verdict, root cause, evidence, summary). `get_investigation_reports` reads reports back: an agent's claim, not a finding. Lite has no token: any local process that reaches the MCP port can claim and report. Level 1 proposes no action. `mcp_data_detail` masks briefs and reports like every other answer.
+        `list_investigation_requests` and `get_investigation_reports` are reads, served in every configuration: with no request open they answer an empty list. The tools that claim a request and submit a report are served only with `mcp_allow_investigations` true and `mcp_allow_writes` false in settings.json (both on: they stay off). An alert on a notification route set to Investigate (`agent_level` 1) opens a request. `mcp_data_detail` masks briefs and reports like every other answer.
+        """;
+
+    private const string InvestigationClaimFlow = """
+
+
+        Flow: `list_investigation_requests` -> `claim_investigation_request` (brief, `claim_id`, lease; pass the `claim_id` again to renew) -> make the calls the brief names -> `submit_investigation_report` (verdict, root cause, evidence, summary). `get_investigation_reports` reads reports back: an agent's claim, not a finding. Any client that holds the MCP token can claim and report. Level 1 proposes no action.
         """;
 
     private const string TailAfterInvestigations = """

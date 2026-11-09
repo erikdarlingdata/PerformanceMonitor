@@ -232,7 +232,7 @@ public sealed class McpWritePolicyTests
         Assert.Equal(all.Count, writesServed.Count);
         Assert.Equal(McpWritePolicy.WriteTools.Count, all.Count - defaultServed.Count);
 
-        /* #5820: the four investigation tools are served only by their own setting (McpInvestigationPolicy), so the default
+        /* #5820, #8461: the two tools that claim and report are served only by their own setting (McpInvestigationPolicy), so the default
            count leaves them out too. */
         var defaultCount = defaultServed.Count - McpInvestigationPolicy.InvestigationTools.Count;
 

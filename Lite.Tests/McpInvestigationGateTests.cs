@@ -26,7 +26,7 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// #5820 slice L4: the two Lite settings <c>mcp_allow_investigations</c> and <c>mcp_data_detail</c>, the gate that serves
-/// the four investigation tools BY NAME (on AND writes off, no token), and the data-detail masking through the host's REAL
+/// the state-changing investigation tools BY NAME (on AND writes off, no token; #8461: the two reads are never gated), and the data-detail masking through the host's REAL
 /// registration (<see cref="McpHostService.RegisterMcpServer"/> and <see cref="McpHostService.AddCallToolFilters"/>). The
 /// four tool classes come later, so a stand-in class carries the four names plus one that must never be gated.
 /// </summary>
