@@ -326,16 +326,29 @@ public sealed class PgOwnStatementRoleLiveTests
 
         var side = (int)Math.Ceiling(Math.Sqrt((max + 1) / 8.0)) + 1;
         var next = 0;
-        for (var free = max - await EntryCountAsync(target, ct); free > 1; free = max - await EntryCountAsync(target, ct))
+        var free = max - await EntryCountAsync(target, ct);
+        while (free > 1)
         {
+            var size = Math.Min(free - 1, 400);
             var batch = new StringBuilder();
-            for (var i = Math.Min(free - 1, 400); i > 0; i--)
+            for (var i = size; i > 0; i--)
             {
                 batch.Append(FillerStatement(next++, side)).Append(';');
             }
 
             await DarlingMcpTestData.ExecAsync(target, ct, batch.ToString());
             await DarlingMcpTestData.ExecAsync(target, ct, batch.ToString());
+
+            /* A batch of new shapes that leaves the count where it was means the module is not tracking this session's
+               statements (pg_stat_statements.track is none for the cluster or for this login); the next batch would add
+               nothing either, so the fill stops here instead of running until the job's timeout. */
+            var afterBatch = max - await EntryCountAsync(target, ct);
+            if (afterBatch == free)
+            {
+                Assert.Fail($"A batch of {size} new statement shapes left pg_stat_statements at {max - free} of {max} entries: the module is not tracking this session's statements.");
+            }
+
+            free = afterBatch;
         }
     }
 
