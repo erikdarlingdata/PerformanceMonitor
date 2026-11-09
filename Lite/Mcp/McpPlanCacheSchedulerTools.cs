@@ -98,7 +98,7 @@ public sealed class McpPlanCacheSchedulerTools
     /// equal instead. Change one, change both.
     /// </summary>
     internal const string CpuSchedulerPressureDescription =
-        "Gets CPU scheduler pressure from the latest snapshot: runnable task queue depth, worker thread utilization, queued/blocked requests, the collector's pressure warning flags, and the banded pressure_level verdict with its recommendation. Shows whether the server has enough worker threads and if tasks are queuing for CPU time. LATEST IS A TIME: this is the newest scheduler snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant it was collected and age_seconds its distance from the window's end; the verdict is that instant's, so read age_seconds before reading pressure_level as current.";
+        "Gets CPU scheduler pressure from the latest snapshot: runnable task queue depth, worker thread utilization, queued/blocked requests, the collector's pressure warning flags, and the banded pressure_level verdict with its recommendation. Shows whether the server has enough worker threads and if tasks are queuing for CPU time. LATEST IS A TIME: this is the newest scheduler snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant it was collected and age_seconds its distance from the window's end; the verdict is that instant's, so read age_seconds before reading pressure_level as current." + McpHelpers.UtcStampsDescription;
 
     [ReadsLatestSnapshot(LatestSnapshotShape.SearchBound)]
     [McpServerTool(Name = "get_cpu_scheduler_pressure"), Description(CpuSchedulerPressureDescription)]

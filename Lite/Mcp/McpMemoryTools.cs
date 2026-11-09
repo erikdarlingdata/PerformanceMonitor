@@ -11,7 +11,7 @@ namespace PerformanceMonitorLite.Mcp;
 public sealed class McpMemoryTools
 {
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
-    [McpServerTool(Name = "get_memory_stats"), Description("Gets the latest memory statistics snapshot: physical memory, buffer pool size, plan cache size, memory utilization %, and SQL Server memory model. Use this for a quick memory health check; use get_memory_clerks to see detailed breakdown by component. LATEST IS A TIME: this reads one snapshot, not a window, and captured_at is the instant that snapshot was collected - read it before treating any figure as current, because the newest row a store holds can be minutes or days old.")]
+    [McpServerTool(Name = "get_memory_stats"), Description("Gets the latest memory statistics snapshot: physical memory, buffer pool size, plan cache size, memory utilization %, and SQL Server memory model. Use this for a quick memory health check; use get_memory_clerks to see detailed breakdown by component. LATEST IS A TIME: this reads one snapshot, not a window, and captured_at is the instant that snapshot was collected - read it before treating any figure as current, because the newest row a store holds can be minutes or days old." + McpHelpers.UtcStampsDescription)]
     public static async Task<string> GetMemoryStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -84,7 +84,7 @@ public sealed class McpMemoryTools
         return ServerHardwareScope.WithMemoryNote(scoped).ToJsonString(McpHelpers.JsonOptions);
     }
 
-    [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage over time in time buckets: total server, target, buffer pool and plan cache memory, with granted memory from the memory-grant series joined per bucket. total_granted_mb is null where that series has no snapshot (granted_note says why); use get_memory_grants for grant detail." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage over time in time buckets: total server, target, buffer pool and plan cache memory, with granted memory from the memory-grant series joined per bucket. total_granted_mb is null where that series has no snapshot (granted_note says why); use get_memory_grants for grant detail." + McpHelpers.UtcStampsDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetMemoryTrend(
         LocalDataService dataService,
         ServerManager serverManager,

@@ -88,7 +88,7 @@ public sealed class McpIoTools
         }
     }
 
-    [McpServerTool(Name = "get_file_io_trend"), Description("Gets file I/O read and write latency over time per database, data and log files pooled, heaviest I/O stall first; past the top five the rest fold into one (other) line. database_name charts one database per file. Useful for spotting degradation in storage performance." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_file_io_trend"), Description("Gets file I/O read and write latency over time per database, data and log files pooled, heaviest I/O stall first; past the top five the rest fold into one (other) line. database_name charts one database per file. Useful for spotting degradation in storage performance." + McpHelpers.UtcStampsDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetFileIoTrend(
         LocalDataService dataService,
         ServerManager serverManager,

@@ -485,7 +485,7 @@ public sealed class McpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_blocking_trend"), Description("Gets a time-series of blocked-process report counts per minute over time (reports, not blocked sessions: one wait can write several reports; when the window holds no reports for the chosen databases the count is the always-on DMV blocking snapshot's rows instead). Useful for identifying patterns (e.g., blocking spikes during batch jobs) or confirming whether blocking is a new, worsening, or resolved issue. The source key names the collector that answered, blocked-process-report or DMV snapshot; the DMV snapshot is used only when the blocked process reports have no rows for the chosen databases, so source can differ between filters.")]
+    [McpServerTool(Name = "get_blocking_trend"), Description("Gets a time-series of blocked-process report counts per minute over time (reports, not blocked sessions: one wait can write several reports; when the window holds no reports for the chosen databases the count is the always-on DMV blocking snapshot's rows instead). Useful for identifying patterns (e.g., blocking spikes during batch jobs) or confirming whether blocking is a new, worsening, or resolved issue. The source key names the collector that answered, blocked-process-report or DMV snapshot; the DMV snapshot is used only when the blocked process reports have no rows for the chosen databases, so source can differ between filters." + McpHelpers.UtcStampsDescription)]
     public static async Task<string> GetBlockingTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -572,7 +572,7 @@ public sealed class McpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_deadlock_trend"), Description("Gets a time-series of deadlock event counts over time. Useful for identifying patterns or confirming whether deadlock issues are new, worsening, or resolved.")]
+    [McpServerTool(Name = "get_deadlock_trend"), Description("Gets a time-series of deadlock event counts over time. Useful for identifying patterns or confirming whether deadlock issues are new, worsening, or resolved." + McpHelpers.UtcStampsDescription)]
     public static async Task<string> GetDeadlockTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -635,7 +635,7 @@ public sealed class McpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_lock_wait_trend"), Description("Gets the AGGREGATE lock-wait rate over time for a server: every LCK% wait type's wait summed, in milliseconds per second, plus a wait_types legend naming which types waited. get_wait_trend charts ONE named wait type and get_blocking_trend counts incidents; this is the whole lock family at once, as a rate rather than a count. Use it to see whether a server's lock pressure is rising when no single wait type dominates, to tell a few long blocks from constant low-grade contention, and to pick which LCK type to hand to get_wait_trend next. Rates are over each collection's measured interval, so they compare across servers on different cadences.")]
+    [McpServerTool(Name = "get_lock_wait_trend"), Description("Gets the AGGREGATE lock-wait rate over time for a server: every LCK% wait type's wait summed, in milliseconds per second, plus a wait_types legend naming which types waited. get_wait_trend charts ONE named wait type and get_blocking_trend counts incidents; this is the whole lock family at once, as a rate rather than a count. Use it to see whether a server's lock pressure is rising when no single wait type dominates, to tell a few long blocks from constant low-grade contention, and to pick which LCK type to hand to get_wait_trend next. Rates are over each collection's measured interval, so they compare across servers on different cadences." + McpHelpers.UtcStampsDescription)]
     public static async Task<string> GetLockWaitTrend(
         LocalDataService dataService,
         ServerManager serverManager,

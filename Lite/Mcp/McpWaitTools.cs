@@ -145,7 +145,7 @@ public sealed class McpWaitTools
         }
     }
 
-    [McpServerTool(Name = "get_wait_trend"), Description("Gets one wait type's wait time per second over time, in time buckets. Use get_wait_types first to discover available wait types. A wait is counted in sys.dm_os_wait_stats only when it ends, so a wait still in progress (a long blocking incident, for example) reads zero until it finishes. For waits happening now use get_waiting_tasks or get_current_waits_trend." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_wait_trend"), Description("Gets one wait type's wait time per second over time, in time buckets. Use get_wait_types first to discover available wait types. A wait is counted in sys.dm_os_wait_stats only when it ends, so a wait still in progress (a long blocking incident, for example) reads zero until it finishes. For waits happening now use get_waiting_tasks or get_current_waits_trend." + McpHelpers.UtcStampsDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetWaitTrend(
         LocalDataService dataService,
         ServerManager serverManager,

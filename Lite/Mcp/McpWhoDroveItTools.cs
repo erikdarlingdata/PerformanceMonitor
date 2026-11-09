@@ -43,7 +43,7 @@ public sealed class McpWhoDroveItTools
         "procedure_cpu_ms is the procedure stats' CPU, shown beside cpu_ms and NEVER added to it: a procedure's statements are already in cpu_ms. cpu_source and procedure_cpu_source name where each figure came from. <<GUIDE>> " +
         "Lite reads its raw query_stats and procedure_stats only (no hourly rollup), so effective_start and window_truncated say how far the window reached; Darling's statements_window and procedures_window are not here. " +
         "Rows: database_name, cpu_ms, share, elapsed_ms, executions, statements, top_statement (query_hash, cpu_ms, share_of_database, executions, query_text preview masked by mcp.dataDetail), procedure_cpu_ms, top_procedure. " +
-        "An empty answer says why: the plan cache was not collected, or the window held no statement CPU. databases_returned/truncated: top caps at 100 and truncated says more databases matched. Deltas only, so a plan evicted between samples loses its CPU, the same limit get_top_queries_by_cpu has.")]
+        "An empty answer says why: the plan cache was not collected, or the window held no statement CPU. databases_returned/truncated: top caps at 100 and truncated says more databases matched. Deltas only, so a plan evicted between samples loses its CPU, the same limit get_top_queries_by_cpu has." + McpHelpers.UtcStampsDescription)]
     public static async Task<string> GetCpuByDatabase(
         LocalDataService dataService,
         ServerManager serverManager,
