@@ -66,8 +66,9 @@ public sealed class FinOpsUtilizationGoldenLiveTests
                 ["d"] = await viewer.GetUtilizationEfficiencyAsync(ServerIdD, ct),
                 ["e"] = await viewer.GetUtilizationEfficiencyAsync(ServerIdE, ct),
             };
-            var trend = await viewer.GetProvisioningTrendAsync(ServerIdB, ct);
-            var grants = await viewer.GetMemoryGrantEfficiencyAsync(ServerIdB, hoursBack: 24 * 6, ct);
+            /* UTC days: the fixture's day values are offsets from the UTC seed anchor, the days the reader's own UTC-day reads name. */
+            var trend = await viewer.GetProvisioningTrendAsync(ServerIdB, TimeZoneInfo.Utc, ct);
+            var grants = await viewer.GetMemoryGrantEfficiencyAsync(ServerIdB, TimeZoneInfo.Utc, hoursBack: 24 * 6, ct);
             return Serialize(anchor, efficiency, trend, grants);
         });
 
