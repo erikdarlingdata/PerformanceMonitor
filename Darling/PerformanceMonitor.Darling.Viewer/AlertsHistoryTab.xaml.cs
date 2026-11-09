@@ -167,7 +167,7 @@ public partial class AlertsHistoryTab : UserControl
 
         var displayCount = AlertsDataGrid.Items.Count;
         NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-        DismissAllButton.IsEnabled = displayCount > 0 && !_dataService.IsReadOnly;
+        DismissAllButton.IsEnabled = displayCount > 0 && _dataService?.IsReadOnly != true;
         AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ViewerTimeHelper.CurrentDisplayMode, ListSpansServers); // D5: the column names its clock
         TimeRangePickerControl.Refresh(); // the range label names the same clock
         DataGridHeaderFit.Apply(AlertsDataGrid); // #6136: a longer title widens its column
