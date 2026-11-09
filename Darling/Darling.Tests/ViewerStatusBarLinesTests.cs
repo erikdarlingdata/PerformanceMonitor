@@ -20,8 +20,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #8332: the status bar keeps one line per top-level tab. A load that fails stores its failure under the tab whose load it was, not under
-/// the tab selected when the failure lands (the fleet tabs and a server tab report their own read failures through their status events, so the Recommendations findings read is the one that reaches the window's catch); a server tab is stamped when its refresh completes, so the bar is not blank while one is on
-/// screen; and an empty bar opens no tooltip. The real main window is built on the shared STA thread with the Dark theme and hosted at
+/// the tab selected when the failure lands (the fleet tabs and a server tab report their own read failures through their status events, so the Recommendations findings read is the one that reaches the window's catch); a server tab's slot holds the line the tab itself raises, "refresh failed: …" when its read fails, so
+/// the host writes nothing over it; and an empty bar opens no tooltip. The real main window is built on the shared STA thread with the Dark theme and hosted at
 /// 1000x700, inside a 1024x768 screen; a store at a closed local port makes every read fail without a server.
 /// </summary>
 [Collection("viewer-time-statics")]
@@ -87,12 +87,12 @@ public sealed class ViewerStatusBarLinesTests
     }
 
     [Fact]
-    public void AServerTab_IsStampedWhenItsRefreshCompletes_SoTheBarIsNotBlankOverIt()
+    public void AServerTabsFailedRefresh_ReadsFailed_WithTheTabSelected()
     {
         var findings = new List<string>();
         StaTestThread.Run(async () =>
         {
-            await WithThemeAsync(() =>
+            await WithThemeAsync(async () =>
             {
                 var w = Shell();
                 var host = Host(w, 1000, 700);
@@ -101,22 +101,25 @@ public sealed class ViewerStatusBarLinesTests
                     var tabs = (TabControl)w.FindName("MainTabs");
                     var status = (TextBlock)w.FindName("StatusText");
                     var service = new ViewerDataService(ClosedStore);
-                    typeof(MainWindow).GetField("_dataService", Instance)!.SetValue(w, service);
-                    /* The tab's own refresh is already in flight, so selecting it completes the window's refresh without a read. */
-                    var serverItem = AddServerTab(w, tabs, service, new DarlingServer(3, "srv-c", "srv-c", true, null), blockRefresh: true);
+                    var serverItem = AddServerTab(w, tabs, service, new DarlingServer(3, "srv-c", "srv-c", true, null));
 
+                    /* The server tab is selected with no store, so nothing loads yet; then the store arrives and the tab's own load runs
+                       and fails, raising its "refresh failed" line through the writer wired to its TabItem. */
                     tabs.SelectedItem = serverItem;
-                    if (!status.Text.StartsWith("srv-c — refreshed ", StringComparison.Ordinal))
+                    ClippedTextProbe.Settle(host);
+                    typeof(MainWindow).GetField("_dataService", Instance)!.SetValue(w, service);
+                    await (Task)typeof(MainWindow).GetMethod("RefreshVisibleAsync", Instance)!.Invoke(w, null)!;
+                    ClippedTextProbe.Settle(host);
+
+                    if (!status.Text.StartsWith("refresh failed: ", StringComparison.Ordinal))
                     {
-                        findings.Add($"with a server tab on screen the status bar reads \"{status.Text}\"");
+                        findings.Add($"with a server tab whose read failed on screen the status bar reads \"{status.Text}\"");
                     }
                 }
                 finally
                 {
                     host.Close();
                 }
-
-                return Task.CompletedTask;
             });
         });
 
@@ -160,14 +163,9 @@ public sealed class ViewerStatusBarLinesTests
     }
 
     /// <summary>A server tab in the main window's tab strip, the way OpenServerTab places one, with its status writer wired the same way.</summary>
-    private static TabItem AddServerTab(MainWindow w, TabControl tabs, ViewerDataService service, DarlingServer server, bool blockRefresh)
+    private static TabItem AddServerTab(MainWindow w, TabControl tabs, ViewerDataService service, DarlingServer server)
     {
         var tab = new ViewerServerTab(service, server);
-        if (blockRefresh)
-        {
-            typeof(ViewerServerTab).GetField("_refreshInFlight", Instance)!.SetValue(tab, true);
-        }
-
         ((UIElement)w.FindName("EmptyStatePanel")).Visibility = Visibility.Collapsed;
         tabs.Visibility = Visibility.Visible;
         var item = new TabItem { Header = server.DisplayName, Content = tab };
