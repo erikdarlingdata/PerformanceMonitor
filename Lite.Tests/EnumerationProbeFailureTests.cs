@@ -335,7 +335,7 @@ public class EnumerationProbeFailureTests
                 DatabaseScopedConfigCollector.Instance, new ServerConnection { ServerName = "s", DisplayName = "s" }, failures);
 
             var info = Assert.Single(log, l => l.Level == LogLevel.Information);
-            Assert.Contains("12 online user databases not collected", info.Message, StringComparison.Ordinal);
+            Assert.Contains("12 online user database(s) not collected", info.Message, StringComparison.Ordinal);
             Assert.Contains("db09", info.Message, StringComparison.Ordinal);
             Assert.DoesNotContain("db10", info.Message, StringComparison.Ordinal);
             Assert.Contains("and 2 more", info.Message, StringComparison.Ordinal);

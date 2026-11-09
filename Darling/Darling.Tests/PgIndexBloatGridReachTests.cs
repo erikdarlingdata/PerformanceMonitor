@@ -401,7 +401,7 @@ public sealed class PgIndexBloatGridReachTests
             {
                 Assert.Equal(cap, page.AnswerlessShown + page.AnsweredShown);
                 Assert.Contains(
-                    "took " + N(answeredInGrid) + " of the " + N(cap) + " row(s)",
+                    "took " + N(answeredInGrid) + " of the " + N(cap) + (cap == 1 ? " row" : " rows"),
                     prose,
                     StringComparison.Ordinal);
                 Assert.Contains(
