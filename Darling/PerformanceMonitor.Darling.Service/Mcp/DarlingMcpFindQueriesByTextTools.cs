@@ -125,12 +125,19 @@ LIMIT $4";
     /// (the page cap + 1 less the rows earlier spans found), $5 and $6 the span's floor and ceiling (naive UTC, floor inclusive), $7 and $8 the
     /// query_hash and database_name of every row an earlier span already found, so a statement seen again here is not listed twice. The
     /// one-server search runs this once per span of the raw window, newest span first (<see cref="RawTierSpans"/>), inside the source's one
-    /// budget: a span is one bounded statement, so a budget that runs out between spans leaves the rows the earlier spans found. The server's
-    /// distinct (hash, database, digest) in the span come first, so the pattern is tested once per distinct text instead of once per sample;
-    /// one row per query_hash and database, the newest sighting of each (#7905: a statement that runs in several databases lists once per
-    /// database, each with the <c>database_name</c> that <c>get_query_trend</c> takes), and a statement's first span, the newest it ran in,
-    /// carries its newest sighting. The match and the page carry the digest only: the whole text (<c>query_text_dim.query_text</c> has no size
-    /// cap) is read by primary key for the at most $4 rows of the page, so a common pattern never sorts every matching text.
+    /// transaction and one budget: a span is one bounded statement, so a budget that runs out between spans leaves the rows the earlier spans
+    /// found. The server's distinct (hash, database, digest) in the span come first; one row per query_hash and database, the newest sighting
+    /// of each (#7905: a statement that runs in several databases lists once per database, each with the <c>database_name</c> that
+    /// <c>get_query_trend</c> takes), and a statement's first span, the newest it ran in, carries its newest sighting. The match and the page
+    /// carry the digest only: the whole text (<c>query_text_dim.query_text</c> has no size cap) is read by primary key for the at most $4 rows
+    /// of the page, so a common pattern never sorts every matching text.
+    /// <para>Each text is judged once per search, whichever spans it runs in. The digests this span sees for the first time (<c>judged</c>) are
+    /// tested against the pattern and written, with the verdict, to the transaction's <c>judged_text</c> table (<see cref="JudgedTextSql"/>) by a
+    /// data-modifying CTE, which runs once whatever the rest of the statement reads; the span's hits take their verdict from this span's
+    /// judgement or from an earlier span's, which the statement's snapshot already holds. A statement sampled in every span, which is most
+    /// procedure and parameterized text, therefore has its text tested in its newest span only, and a span whose distinct texts number in the
+    /// tens of thousands, where the planner tests the pattern by scanning every text rather than reading each by key, pays that scan once per
+    /// search instead of once per span. Measured: see <see cref="RawTierSpanCount"/>. A digest with no text row is judged unmatched.</para>
     /// <para>#7674: the match is <c>(d.query_text || '') ILIKE</c>, not <c>d.query_text ILIKE</c>, on purpose. With the opt-in trigram index on
     /// <c>query_text_dim.query_text</c> the planner would otherwise run a bitmap scan of that index over the whole table and join it to this server's
     /// digests, which the issue measured at 1.7 to 2.0 s cold for one server and one database against 0.2 to 0.7 s without the index. The concatenation is
@@ -147,12 +154,24 @@ WITH seen AS MATERIALIZED (
     AND   ($2::text IS NULL OR database_name = $2)
     GROUP BY query_hash, database_name, query_text_digest
 ),
+judged AS MATERIALIZED (
+    SELECT f.digest, COALESCE((d.query_text || '') ILIKE '%' || $3 || '%' ESCAPE '\', FALSE) AS matched
+    FROM (SELECT DISTINCT s.query_text_digest AS digest
+          FROM seen AS s
+          WHERE NOT EXISTS (SELECT 1 FROM pg_temp.judged_text AS t WHERE t.digest = s.query_text_digest)) AS f
+    LEFT JOIN query_text_dim AS d ON d.digest = f.digest
+),
+remember AS (
+    INSERT INTO pg_temp.judged_text (digest, matched)
+    SELECT digest, matched FROM judged
+    ON CONFLICT (digest) DO NOTHING
+),
 hits AS (
     SELECT DISTINCT ON (s.query_hash, s.database_name)
            s.query_hash, s.database_name, s.last_collected, s.query_text_digest
     FROM seen AS s
-    JOIN query_text_dim AS d ON d.digest = s.query_text_digest
-    WHERE (d.query_text || '') ILIKE '%' || $3 || '%' ESCAPE '\'
+    WHERE (EXISTS (SELECT 1 FROM judged AS j WHERE j.digest = s.query_text_digest AND j.matched)
+           OR EXISTS (SELECT 1 FROM pg_temp.judged_text AS t WHERE t.digest = s.query_text_digest AND t.matched))
     AND   NOT EXISTS (SELECT 1
                       FROM unnest($7::text[], $8::text[]) AS k(query_hash, database_name)
                       WHERE k.query_hash IS NOT DISTINCT FROM s.query_hash
@@ -169,6 +188,10 @@ SELECT p.query_hash, p.database_name, p.last_collected, d.query_text
 FROM page AS p
 JOIN query_text_dim AS d ON d.digest = p.query_text_digest
 ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
+
+    /// <summary>The transaction's table of the texts one search has judged (<see cref="PlanCacheSql"/>): one row per digest with its verdict,
+    /// created before the first span's statement and dropped with the transaction, so a text is judged once however many spans it runs in.</summary>
+    internal const string JudgedTextSql = "CREATE TEMP TABLE judged_text (digest bytea PRIMARY KEY, matched boolean NOT NULL) ON COMMIT DROP";
 
     /// <summary>#7674: the plan-cache text of every enabled server, served by the trigram index on <c>query_text_dim.query_text</c>. Only offered when
     /// <see cref="QueryTextTrigramIndex"/> reports <c>Ready</c>. $1 the escaped pattern, $2 row cap + 1, $3 the raw-tier floor (naive UTC). The match is
@@ -218,8 +241,12 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
     /// How many spans the one-server plan-cache search cuts the raw window into. Each span is one statement (<see cref="PlanCacheSql"/>) under
     /// what is left of the source's budget, run newest span first, so a budget that runs out leaves the rows the earlier spans found and the
     /// reply says how much of the window they cover. Sixteen spans of a four-day window are six hours each: a window whose whole-window
-    /// statement takes twice the budget still answers from its newest two days, and the sixteen statements cost well under the budget on a
-    /// small store.
+    /// statement takes twice the budget still answers from its newest two days. Each text is judged once per search whichever spans it
+    /// runs in (see <see cref="PlanCacheSql"/>), which keeps the sixteen statements at about the cost of one. Measured warm on a seeded
+    /// large store (330,000 texts; a server with 30,000 distinct texts in 970,000 samples over four days, the older half compressed): the
+    /// whole window in one statement takes 0.54 s, and in sixteen spans 0.59 s (0.41 s and 0.26 s with a database named), where sixteen
+    /// spans that each judge every text they see take 4.9 s, more than the budget, because a span with tens of thousands of distinct
+    /// texts judges them by scanning every text in the store and pays that scan once per span; seven coarser spans cut that only to 2.2 s.
     /// </summary>
     public const int RawTierSpanCount = 16;
 
@@ -242,13 +269,15 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
         return spans;
     }
 
-    /// <summary>How much of the raw window the spans a search finished cover, for the stopped message: "6 hours", "1.5 days".</summary>
+    /// <summary>How much of the raw window the spans a search finished cover, for the stopped message: "6 hours", "1 day", "1.5 days". The
+    /// number is rendered first and the unit's word follows the rendered number, so the newest day of the tier, a hair over 24 hours once the
+    /// Query Store source's time is in the window, reads "1 day".</summary>
     internal static string DescribeSearched(int completedSpans, DateTime floor, DateTime now)
     {
         var searched = (now - floor) / RawTierSpanCount * completedSpans;
-        return searched.TotalHours < 24
-            ? string.Create(CultureInfo.InvariantCulture, $"{searched.TotalHours:0.#} hours")
-            : string.Create(CultureInfo.InvariantCulture, $"{searched.TotalDays:0.#} days");
+        var (value, unit) = searched.TotalHours < 24 ? (searched.TotalHours, "hour") : (searched.TotalDays, "day");
+        var rendered = value.ToString("0.#", CultureInfo.InvariantCulture);
+        return rendered + " " + unit + (rendered == "1" ? string.Empty : "s");
     }
 
     /// <summary>#7849: the matched digests, read first so the sample read can take them as an array. $1 the escaped pattern, $2 the cap + 1: a result
@@ -418,23 +447,29 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
                     };
                 }, cancellationToken);
 
-            /* The raw window newest span first, one statement per span inside the one budget (see RawTierSpanCount): the rows a span finds
-               are kept whatever happens to the spans after it, and a span already-found statements ran in again does not list them twice. */
+            /* The raw window newest span first, one statement per span inside the one transaction and budget (see RawTierSpanCount): the rows
+               a span finds are kept whatever happens to the spans after it, a span already-found statements ran in again does not list them
+               twice, and the transaction's judged_text table carries each text's verdict from the span that judged it to the spans after. */
             var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
             var spans = RawTierSpans(floor, now);
             var planCacheOutcome = await RunSourceAsync<PlanCacheHit, object>(
                 postgres, planCacheBudget, limit,
-                (_, _, step, collected, _) =>
+                async (connection, transaction, step, collected, ct) =>
                 {
                     if (step >= spans.Count || collected.Count > limit)
                     {
-                        return Task.FromResult<SourceStatement?>(null);
+                        return null;
+                    }
+
+                    if (step == 0)
+                    {
+                        await using var judged = new NpgsqlCommand(JudgedTextSql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+                        await judged.ExecuteNonQueryAsync(ct);
                     }
 
                     var span = spans[step];
                     var wanted = limit + 1 - collected.Count;
-                    return Task.FromResult<SourceStatement?>(new SourceStatement(
-                        PlanCacheSql, p => BindPlanCacheSpan(p, resolved.ServerId, database, escaped, wanted, span, collected)));
+                    return new SourceStatement(PlanCacheSql, p => BindPlanCacheSpan(p, resolved.ServerId, database, escaped, wanted, span, collected));
                 },
                 StoppedAdvice(database),
                 completedSpans => completedSpans == 0

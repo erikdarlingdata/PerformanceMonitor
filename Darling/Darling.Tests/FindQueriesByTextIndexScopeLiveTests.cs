@@ -114,7 +114,15 @@ public sealed class FindQueriesByTextIndexScopeLiveTests
             await analyze.ExecuteNonQueryAsync(ct);
         }
 
-        await using var explain = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + sql, c);
+        /* The one-server statement reads the transaction's table of judged texts, so the EXPLAIN runs in a transaction that has it. */
+        await using var transaction = await c.BeginTransactionAsync(ct);
+        if (withServer)
+        {
+            await using var judged = new NpgsqlCommand(DarlingMcpFindQueriesByTextTools.JudgedTextSql, c, transaction);
+            await judged.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var explain = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + sql, c, transaction);
         var floor = LiveClock.Now() - TimescaleSupport.RawRetentionSpan;
         if (withServer)
         {
