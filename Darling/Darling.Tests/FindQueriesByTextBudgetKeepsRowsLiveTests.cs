@@ -7,11 +7,15 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -151,6 +155,44 @@ public sealed class FindQueriesByTextBudgetKeepsRowsLiveTests
         Assert.Equal(DateTime.SpecifyKind(newestSample, DateTimeKind.Utc).ToString("o"), planCache.GetProperty("rows")[0].GetProperty("last_collected_at").GetString());
         Assert.Equal(DateTime.SpecifyKind(newestSample - TimeSpan.FromDays(3), DateTimeKind.Utc).ToString("o"), planCache.GetProperty("rows")[2].GetProperty("last_collected_at").GetString());
         Assert.False(planCache.GetProperty("truncated").GetBoolean());
+    }
+
+    /// <summary>Each text is judged once per search. What one span's statement carries in is the digests the spans before it judged, with
+    /// their verdicts, so a digest a later span sees again is not judged again: the newest span sees the newest and the unmatched texts and
+    /// carries both into the second span, no step carries a digest twice or more than the seed's three texts, and the last step carries all
+    /// three, the older text included, which only the three-day-old spans see.</summary>
+    [Fact]
+    public async Task EveryText_IsJudgedOnce_AndItsVerdictCarriedToTheSpansAfter()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, _) = await OpenScratchAsync(ct);
+        await using var _s = scratch;
+
+        var carried = new List<string[]>();
+        var budget = new DarlingMcpFindQueriesByTextTools.SourceBudget(DarlingMcpFindQueriesByTextTools.BudgetMilliseconds)
+        {
+            StatementBound = (_, parameters) =>
+            {
+                var digests = parameters.Cast<NpgsqlParameter>().Single(p => p.NpgsqlDbType == (NpgsqlDbType.Array | NpgsqlDbType.Bytea));
+                carried.Add(((byte[][])digests.Value!).Select(Convert.ToHexString).ToArray());
+            },
+        };
+
+        var planCache = await PlanCacheAsync(scratch, budget, 20, ct);
+
+        Assert.Equal("ok", planCache.GetProperty("status").GetString());
+        Assert.Equal(DarlingMcpFindQueriesByTextTools.RawTierSpanCount, carried.Count);
+        Assert.Empty(carried[0]);
+        Assert.Equal(new[] { Digest("newest"), Digest("unmatched") }.Order(), carried[1].Order());
+        foreach (var step in carried)
+        {
+            Assert.Equal(step.Length, step.Distinct().Count());
+            Assert.True(step.Length <= 3, string.Join(",", step));
+        }
+
+        Assert.Equal(new[] { Digest("newest"), Digest("older"), Digest("unmatched") }.Order(), carried[^1].Order());
+
+        static string Digest(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
     }
 
     [Fact]
