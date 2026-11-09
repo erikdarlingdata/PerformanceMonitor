@@ -122,7 +122,7 @@ public class PlanSync4564ReproScriptTests
         var plan = PlanWithParameter("@id", "int; DROP TABLE dbo.Orders --", "(1)");
         var sql = ReproScriptBuilder.BuildReproScript("SELECT 1", "db", plan, null);
 
-        Assert.Contains("1 parameter(s) omitted", sql);
+        Assert.Contains("1 parameter omitted", sql);
     }
 
     /// <summary>@32be789: real-world compiled values must survive the filter unchanged.</summary>
@@ -225,7 +225,7 @@ public class PlanSync4564ReproScriptTests
         var plan = PlanWithParameter("@id&#10;", "int", "(1)");
         var sql = ReproScriptBuilder.BuildReproScript("SELECT 1", "db", plan, null);
 
-        Assert.Contains("1 parameter(s) omitted", sql);
+        Assert.Contains("1 parameter omitted", sql);
     }
 
     /// <summary>
@@ -269,7 +269,7 @@ public class PlanSync4564ReproScriptTests
         var plan = PlanWithParameter("@id", "int) SELECT 2 SELECT (1", "(1)");
         var sql = ReproScriptBuilder.BuildReproScript("SELECT 1", "db", plan, null);
 
-        Assert.Contains("1 parameter(s) omitted", sql);
+        Assert.Contains("1 parameter omitted", sql);
         Assert.DoesNotContain("SELECT 2", sql);
     }
 

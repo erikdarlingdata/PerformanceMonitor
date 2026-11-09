@@ -654,7 +654,7 @@ public sealed class PgTargetVacuumTests
         var a = FactAdvice.Compose(PgTargetFactKeys.XminHold, Lookup(sameKind))!;
 
         Assert.Contains("The xmin horizon sat at least 60,000,000 transactions back for 24 of 25 consecutive captures: 5 holders took turns holding it", a.Headline, StringComparison.Ordinal);
-        Assert.Contains("5 distinct holder(s) won captures of the run, client backends 100%", a.Investigation, StringComparison.Ordinal);
+        Assert.Contains("5 distinct holders won captures of the run, client backends 100%", a.Investigation, StringComparison.Ordinal);
         Assert.Contains("No holder reached the 50% share", a.Investigation, StringComparison.Ordinal);
         Assert.Contains("threshold_lineage = 0", a.Investigation, StringComparison.Ordinal);
         Assert.StartsWith("5 equally old holders took turns holding the horizon: resolving one moves the horizon to the next", a.Remediation, StringComparison.Ordinal);

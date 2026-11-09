@@ -493,7 +493,7 @@ public static class FinOpsRecommendationFigures
                 Category = "Databases",
                 Severity = idleDbs.Count >= 3 ? "High" : "Medium",
                 Confidence = "High",
-                Finding = $"{idleDbs.Count} idle database(s) consuming {totalSizeGb:N1}GB",
+                Finding = $"{CountText.Plural(idleDbs.Count, "idle database")} consuming {totalSizeGb:N1}GB",
                 Detail = $"No query activity in 7 days: {dbNames}" +
                          (idleDbs.Count > 5 ? $" and {idleDbs.Count - 5} more" : "") +
                          ". Consider archiving or removing these databases.",
@@ -513,7 +513,7 @@ public static class FinOpsRecommendationFigures
                 Category = "Environment",
                 Severity = "Medium",
                 Confidence = "Low",
-                Finding = $"{devDbs.Count} possible dev/test database(s) on production server",
+                Finding = $"{CountText.Plural(devDbs.Count, "possible dev/test database")} on production server",
                 Detail = $"Databases matching dev/test patterns: {string.Join(", ", devDbs.Take(10))}" +
                          (devDbs.Count > 10 ? $" and {devDbs.Count - 10} more" : "") +
                          ". If these are non-production workloads, consider moving to a lower-cost tier or separate server."

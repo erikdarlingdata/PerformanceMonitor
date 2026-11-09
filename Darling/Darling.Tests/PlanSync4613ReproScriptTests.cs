@@ -215,7 +215,7 @@ public class PlanSync4613ReproScriptTests
         var plan = PlanWithParameter("@id", dataType, "(1)");
         var sql = ReproScriptBuilder.BuildReproScript("SELECT 1", "db", plan, null);
 
-        Assert.Contains("1 parameter(s) omitted", sql);
+        Assert.Contains("1 parameter omitted", sql);
         Assert.DoesNotContain("SELECT 2", sql);
     }
 
@@ -252,14 +252,14 @@ public class PlanSync4613ReproScriptTests
             """;
         var sql = ReproScriptBuilder.BuildReproScript("SELECT 1", "db", plan, null);
 
-        Assert.Contains("2 parameter(s) omitted", sql);
+        Assert.Contains("2 parameters omitted", sql);
         Assert.DoesNotContain("PRINT 1", sql);
         /* The header opens once at the top and the first close ends it: no opener or closer inside. */
         Assert.Equal(0, sql.IndexOf("/*", StringComparison.Ordinal));
         var headerEnd = sql.IndexOf("*/", StringComparison.Ordinal);
         Assert.True(headerEnd > 0);
         Assert.Equal(-1, sql.IndexOf("/*", 2, headerEnd - 2, StringComparison.Ordinal));
-        Assert.Contains("2 parameter(s) omitted", sql[..headerEnd]);
+        Assert.Contains("2 parameters omitted", sql[..headerEnd]);
     }
 
     [Fact]

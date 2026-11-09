@@ -9,7 +9,6 @@
 using System;
 using System.Data;
 using System.Data.Common;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -98,7 +97,7 @@ public sealed class PayloadProbeFailureTests
         Assert.Equal("Restoring", outcome.ProbeFailures[0].Item);
         Assert.Contains("not currently available", outcome.ProbeFailures[0].Error);
         Assert.Equal("NoAccess", outcome.ProbeFailures[1].Item);
-        Assert.Contains("2 item(s) failed their enumeration probe", outcome.Note);
+        Assert.Contains("2 items failed the enumeration probe", outcome.Note);
     }
 
     [Fact]
@@ -123,7 +122,7 @@ public sealed class PayloadProbeFailureTests
 
         var failure = Assert.Single(outcome.ProbeFailures);
         Assert.Equal("Restoring", failure.Item);
-        Assert.Contains("1 item(s) failed their enumeration probe", outcome.Note);
+        Assert.Contains("1 item failed the enumeration probe", outcome.Note);
     }
 
     [Fact]
@@ -138,7 +137,7 @@ public sealed class PayloadProbeFailureTests
         var outcome = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, CancellationToken.None);
 
         Assert.Equal(
-            string.Format(CultureInfo.InvariantCulture, EnumeratedCollectorDriver.ProbeFailureNoteFormat, 7),
+            "7 items failed the enumeration probe - see the app log for the per-item errors",
             outcome.Note);
         Assert.Equal(EnumeratedCollectorDriver.BuildNote(enumerationWasEmpty: false, probeFailureCount: 7), outcome.Note);
     }
@@ -181,7 +180,7 @@ public sealed class PayloadProbeFailureTests
         var failure = Assert.Single(outcome.ProbeFailures);
         Assert.Equal(EnumeratedCollectorDriver.ContractViolationItem, failure.Item);
         Assert.Equal(EnumeratedCollectorDriver.ContractViolationError, failure.Error);
-        Assert.Contains("1 item(s) failed their enumeration probe", outcome.Note);
+        Assert.Contains("1 item failed the enumeration probe", outcome.Note);
     }
 
     [Fact]
@@ -203,7 +202,7 @@ public sealed class PayloadProbeFailureTests
         var failure = Assert.Single(outcome.ProbeFailures);
         Assert.Equal(EnumeratedCollectorDriver.ContractViolationItem, failure.Item);
         Assert.Contains("could not be read", failure.Error);
-        Assert.Contains("1 item(s) failed their enumeration probe", outcome.Note);
+        Assert.Contains("1 item failed the enumeration probe", outcome.Note);
     }
 
     [Fact]

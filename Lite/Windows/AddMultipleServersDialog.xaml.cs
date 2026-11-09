@@ -196,7 +196,7 @@ public partial class AddMultipleServersDialog : Window
         int badCount = rows.Count(r => !r.IsValid);
         StatusText.Text = rows.Count == 0
             ? ""
-            : $"{newCount} new server(s), {dupCount} duplicate(s), {badCount} invalid line(s).";
+            : $"{CountText.Plural(newCount, "new server")}, {CountText.Plural(dupCount, "duplicate")}, {CountText.Plural(badCount, "invalid line")}.";
     }
 
     // ── Test All (bounded-parallel, cancellable, never-faulting probes) ──────────────────────────────────
@@ -393,7 +393,7 @@ public partial class AddMultipleServersDialog : Window
             var collidedPart = collided > 0 ? $", {collided} collided" : string.Empty;
             StatusText.Text = firstBuildError != null
                 ? $"No servers added — {firstBuildError}."
-                : $"No new servers to add ({skipped} duplicate(s) skipped{collidedPart}).";
+                : $"No new servers to add ({CountText.Plural(skipped, "duplicate")} skipped{collidedPart}).";
             return;
         }
 
@@ -451,7 +451,7 @@ public partial class AddMultipleServersDialog : Window
         }
 
         var notAddedCollided = collided > 0 ? $", {collided} collided" : string.Empty;
-        StatusText.Text = $"No servers added ({skipped} duplicate(s){notAddedCollided}, {failed} failed).";
+        StatusText.Text = $"No servers added ({CountText.Plural(skipped, "duplicate")}{notAddedCollided}, {failed} failed).";
     }
 
     private void MarkRow(int lineNumber, string status)

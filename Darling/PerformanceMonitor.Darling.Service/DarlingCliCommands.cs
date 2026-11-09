@@ -1063,8 +1063,8 @@ public static partial class DarlingCliCommands
     /// <summary>The note <c>--validate-config</c> prints when its store connection is not the store owner, so the saved
     /// passwords in the old format of <paramref name="count"/> server(s) were not checked (#5366).</summary>
     internal static string OldFormatPasswordsNotCheckedText(int count) =>
-        $"NOTE: this connection is not the store owner, so the saved passwords of {count.ToString(System.Globalization.CultureInfo.InvariantCulture)} "
-        + "server(s) in the old format could not be checked and those server(s) were not tested. Run the verb with the service's own store connection to check them.";
+        $"NOTE: this connection is not the store owner, so the saved passwords of {CountText.Plural(count, "server")} "
+        + $"in the old format could not be checked and {(count == 1 ? "that server was" : "those servers were")} not tested. Run the verb with the service's own store connection to check {(count == 1 ? "it" : "them")}.";
 
     /// <summary>True when this session may read the pins that old-format saved passwords are matched to: it is the owner of the
     /// pin table, or the store has no such table yet. Never throws for a store answer.</summary>
@@ -6889,7 +6889,7 @@ public static partial class DarlingCliCommands
 
         if (result.VerifyFailures > 0)
         {
-            error.WriteLine(Inv($"  [WARN] {CountText.Plural(result.VerifyFailures, "row")} FAILED round-trip verification and kept their text unchanged."));
+            error.WriteLine(Inv($"  [WARN] {CountText.Plural(result.VerifyFailures, "row")} FAILED round-trip verification and kept {(result.VerifyFailures == 1 ? "its" : "their")} text unchanged."));
             error.WriteLine("  Investigate before re-running; those rows are readable exactly as before.");
             error.WriteLine("  VACUUM FULL was skipped — compaction can wait until the conversion is clean.");
             return 1;

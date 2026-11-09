@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -130,7 +131,7 @@ public static partial class PgTargetAdvice
                 sb.Append("At most ").Append(KnobNum(peakBackends)).Append(" backends were seen waiting on it in one collection. ");
             var resets = KnobMeta(fact, PgTargetScorer.WaitCounterResetsKey) ?? 0;
             if (resets > 0)
-                sb.Append("The sampling profile was reset ").Append(KnobNum(resets)).Append(" time(s) inside the window, so the count is a floor. ");
+                sb.Append("The sampling profile was reset ").Append(CountText.Plural((long)resets, "time")).Append(" inside the window, so the count is a floor. ");
         }
         else
         {
@@ -142,7 +143,7 @@ public static partial class PgTargetAdvice
               .Append(" of one backend waiting on this continuously (time summed over tasks per second of wall clock; it can exceed one). ");
             var restarts = KnobMeta(fact, PgTargetScorer.WaitRestartCollectionsKey) ?? 0;
             if (restarts > 0)
-                sb.Append(KnobNum(restarts)).Append(" collection(s) in the window were a restart or first sighting and contributed no sample. ");
+                sb.Append(CountText.Plural((long)restarts, "collection")).Append(restarts == 1 ? " in the window was a restart or first sighting and contributed no sample. " : " in the window were a restart or first sighting and contributed no sample. ");
         }
 
         sb.Append("That is ").Append(KnobPct(share)).Append(" of all waiting the profile holds for the window");
