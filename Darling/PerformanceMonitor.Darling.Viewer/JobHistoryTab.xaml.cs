@@ -96,14 +96,49 @@ public partial class JobHistoryTab : UserControl
     internal static Task ShowJobHistoryDataStartAsync(TextBlock banner, Task<DateTime?> probe, DateTime startUtc, IEnumerable<ViewerJobHistoryRow> read) =>
         ViewerServerTab.ShowEventDataStartAsync(banner, probe, "Job History", startUtc, read.Select(r => r.RunDateTimeUtc), RowCap);
 
-    /// <summary>Sets the picker's "Data starts ..." note from the data-start probe the tab already awaited (#5562 R7): the floor its
-    /// "Showing since" banner reads, fed by <see cref="ViewerServerTab.UpdateTruncationBanner"/>. No query of its own.</summary>
-    internal void RecordDataStart(DateTime? floor)
+    /// <summary>The scope (a server id, or null for All Servers) the picker's "Data starts" note was last read for, when, and what it
+    /// read, so a load within the read's life writes the note again: a failed read on another scope hides it in between.</summary>
+    private int? _oldestRetainedScope;
+    private DateTime _oldestRetainedReadUtc = DateTime.MinValue;
+    private DateTime? _oldestRetainedUtc;
+
+    /// <summary>
+    /// Points the picker's "Data starts" note at the oldest job history the store holds for the scope on screen (the picked server's
+    /// own, or the fleet's at All Servers, <see cref="ViewerDataService.GetJobHistoryOldestRetainedAsync"/>). The note previews
+    /// whatever range a reader types, so it cannot take the "Showing since" probe's floor: a probe reads the oldest row inside the
+    /// window it was asked about, which for a covered window is the window's own start, not where the data starts. One read per
+    /// scope, at most once per <see cref="ViewerServerTab.ServerDataStartMaxAge"/>, as the server tab keeps its data start: the
+    /// start only moves later, when old rows are purged. A read that fails hides the note (null makes no claim) and leaves the read
+    /// time old, so the next load reads again. A load a newer one has superseded writes nothing.
+    /// </summary>
+    private async Task RefreshPickerDataStartAsync(int? serverId, int gen)
     {
-        if (TimeRangePickerControl.DataStartUtc != floor)
+        if (_dataService == null) return;
+        if (_oldestRetainedScope == serverId && DateTime.UtcNow - _oldestRetainedReadUtc < ViewerServerTab.ServerDataStartMaxAge)
         {
-            TimeRangePickerControl.DataStartUtc = floor;
+            TimeRangePickerControl.DataStartUtc = _oldestRetainedUtc;
+            return;
         }
+
+        DateTime? oldest;
+        try
+        {
+            oldest = await _dataService.GetJobHistoryOldestRetainedAsync(serverId);
+        }
+        catch
+        {
+            /* The note only previews where a typed range would run out of data. A read that failed makes no claim, so the note is
+               hidden rather than trust a start the failed read could not confirm; the read time stays old, so the next load tries again. */
+            if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+            TimeRangePickerControl.DataStartUtc = null;
+            return;
+        }
+
+        if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+        _oldestRetainedScope = serverId;
+        _oldestRetainedReadUtc = DateTime.UtcNow;
+        _oldestRetainedUtc = oldest;
+        TimeRangePickerControl.DataStartUtc = oldest;
     }
 
     /// <summary>
@@ -226,6 +261,7 @@ public partial class JobHistoryTab : UserControl
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             await ShowJobHistoryDataStartAsync(JobHistoryTruncationBanner, dataStartTask, sinceUtc, all);
+            await RefreshPickerDataStartAsync(serverId, gen);
             await choicesApplied;
         }
         catch (Exception ex)
