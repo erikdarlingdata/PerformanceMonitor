@@ -230,11 +230,69 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             "INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) VALUES ($1, $2, 60, 30, FALSE)",
             ct, id, collector);
 
-    /// <summary>The newest <c>query_store</c> collector run on the server, as the scheduler logs it: its statement skips every readable-secondary database, so its row count says whether any database was read.</summary>
-    private static Task QueryStoreRunAsync(NpgsqlConnection c, int id, string name, int rows, TimeSpan age, CancellationToken ct) =>
+    /// <summary>
+    /// A successful <c>query_store</c> collector run on the server, as the runner logs it. <paramref name="fanout"/> is the number of
+    /// databases its enumeration found to read (<c>fanout_item_count</c>); the enumeration skips every readable-secondary database and
+    /// every database whose Query Store is off, and a run that found none writes no fanout at all (NULL) beside its zero rows. A live
+    /// primary's run stores zero rows most slots too (closed intervals only), so rows say nothing and the fanout is the fact.
+    /// </summary>
+    private static Task QueryStoreRunAsync(NpgsqlConnection c, int id, string name, int? fanout, TimeSpan age, CancellationToken ct) =>
         ExecAsync(c,
-            "INSERT INTO collection_log (log_id, collection_time, server_id, server_name, collector_name, status, duration_ms, rows_collected) VALUES ($1, $2, $3, $4, 'query_store', 'SUCCESS', 100, $5)",
-            ct, CollectionIdGenerator.Next(), Naive(DateTime.UtcNow - age), id, name, rows);
+            "INSERT INTO collection_log (log_id, collection_time, server_id, server_name, collector_name, status, duration_ms, rows_collected, fanout_item_count) VALUES ($1, $2, $3, $4, 'query_store', 'SUCCESS', 100, 0, $5)",
+            ct, CollectionIdGenerator.Next(), Naive(DateTime.UtcNow - age), id, name, fanout.HasValue ? fanout.Value : DBNull.Value);
+
+    [Fact]
+    public async Task AQuietPrimary_WhoseRunFoundDatabasesButStoredNoRows_RunsTheCollector_AndARunOlderThanTheCaptureDecidesNothing()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* The same frozen all-secondary capture, query_store_health disabled and a Standalone role on three servers. The quiet
+               primary's newest query_store run found two databases to read and stored no rows, as a primary's run does most slots:
+               it runs the collector. The second server's only run is older than the capture and decides nothing, so the role
+               decides: not gated. The third was a standby whose frozen capture lists only databases with Query Store off: nothing
+               in it is a readable-secondary database, so the role decides there too, whatever its empty run says. */
+            const int quietId = 840_207;
+            const string quiet = "qs-quiet-primary";
+            const int oldRunId = 840_208;
+            const string oldRun = "qs-old-run";
+            const int offId = 840_209;
+            const string off = "qs-off";
+            foreach (var (id, name) in new[] { (quietId, quiet), (oldRunId, oldRun), (offId, off) })
+            {
+                await RegisterAsync(connection, id, name, ct);
+                await RoleAsync(connection, id, name, "Standalone", TimeSpan.FromMinutes(5), ct);
+                await DisableAsync(connection, id, QueryStoreHealthCollector.Instance.Name, ct);
+            }
+
+            await CaptureAsync(connection, quietId, quiet, "db1", 8, TimeSpan.FromDays(19), ct);
+            await QueryStoreRunAsync(connection, quietId, quiet, 2, TimeSpan.FromMinutes(2), ct);
+            await CaptureAsync(connection, oldRunId, oldRun, "db1", 8, TimeSpan.FromDays(19), ct);
+            await QueryStoreRunAsync(connection, oldRunId, oldRun, null, TimeSpan.FromDays(20), ct);
+            await ExecAsync(connection,
+                """
+                INSERT INTO query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason,
+                                                current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days,
+                                                max_plans_per_query, interval_length_minutes, query_capture_mode, wait_stats_capture_mode)
+                VALUES ($1, $2, $3, $4, 'db1', 'OFF', 'OFF', 0, 0, 1000, 'AUTO', 30, 200, 60, 'AUTO', 'ON')
+                """, ct, CollectionIdGenerator.Next(), Naive(DateTime.UtcNow - TimeSpan.FromDays(19)), offId, off);
+            await QueryStoreRunAsync(connection, offId, off, null, TimeSpan.FromMinutes(2), ct);
+
+            var worker = DailyRunKit.MakeWorker(new DailyRunLogger());
+            worker.StoreForTests = postgres;
+            worker.ScheduleOverridesForTest = new[]
+            {
+                new ScheduleOverride(quietId, QueryStoreHealthCollector.Instance.Name, null, null, false),
+                new ScheduleOverride(oldRunId, QueryStoreHealthCollector.Instance.Name, null, null, false),
+                new ScheduleOverride(offId, QueryStoreHealthCollector.Instance.Name, null, null, false),
+            };
+            foreach (var (id, name) in new[] { (quietId, quiet), (oldRunId, oldRun), (offId, off) })
+            {
+                var server = DailyRunKit.MakeServer(id, Hints);
+                Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(server, server.Runtime!, ct));
+                Assert.Null(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, id, name, ct));
+            }
+        });
+    }
 
     [Fact]
     public async Task APromotedPrimary_WithTheSameFrozenCaptureAndAStandaloneRole_RunsTheCollector_OnceQueryStoreCollectsRows_WhileTheStandbyStaysGated()
@@ -257,8 +315,8 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
                 await DisableAsync(connection, id, QueryStoreHealthCollector.Instance.Name, ct);
             }
 
-            await QueryStoreRunAsync(connection, standbyId, standby, 0, TimeSpan.FromMinutes(2), ct);
-            await QueryStoreRunAsync(connection, promotedId, promoted, 480, TimeSpan.FromMinutes(2), ct);
+            await QueryStoreRunAsync(connection, standbyId, standby, null, TimeSpan.FromMinutes(2), ct);
+            await QueryStoreRunAsync(connection, promotedId, promoted, 2, TimeSpan.FromMinutes(2), ct);
 
             var worker = DailyRunKit.MakeWorker(new DailyRunLogger());
             worker.StoreForTests = postgres;
@@ -300,7 +358,7 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             await RegisterAsync(connection, id, name, ct);
             await CaptureAsync(connection, id, name, "db1", 8, TimeSpan.FromDays(19), ct);
             await CaptureAsync(connection, id, name, "db2", 8, TimeSpan.FromDays(19), ct);
-            await QueryStoreRunAsync(connection, id, name, 0, TimeSpan.FromMinutes(2), ct);
+            await QueryStoreRunAsync(connection, id, name, null, TimeSpan.FromMinutes(2), ct);
 
             var worker = DailyRunKit.MakeWorker(new DailyRunLogger());
             worker.StoreForTests = postgres;
@@ -341,7 +399,7 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             }
 
             await RoleAsync(connection, primaryId, primary, "PRIMARY", TimeSpan.FromMinutes(5), ct);
-            await QueryStoreRunAsync(connection, standbyId, standby, 0, TimeSpan.FromMinutes(2), ct);
+            await QueryStoreRunAsync(connection, standbyId, standby, null, TimeSpan.FromMinutes(2), ct);
 
             var worker = DailyRunKit.MakeWorker(new DailyRunLogger());
             worker.StoreForTests = postgres;
