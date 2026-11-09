@@ -1014,8 +1014,8 @@
                         <TextBlock Style="{StaticResource ScopeLineStyle}" Text="This viewer only. The defaults below apply to what you do in this viewer."/>
                         <Border x:Name="ViewerOnlyTriageDefaults" Background="{DynamicResource BackgroundLightBrush}" CornerRadius="4" Padding="12" Margin="0,0,0,12">
                             <StackPanel>
-                                <TextBlock Text="Triage Defaults" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
-                                <WrapPanel Orientation="Horizontal" Margin="20,0,0,4">
+                                <TextBlock Text="Triage Defaults" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,4">
                                     <TextBlock x:Name="MuteRuleDefaultExpirationLabel" TextWrapping="Wrap" Text="Default expiration for new mute rules:" VerticalAlignment="Center" Margin="0,0,8,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <ComboBox AutomationProperties.LabeledBy="{Binding ElementName=MuteRuleDefaultExpirationLabel}" x:Name="MuteRuleDefaultExpirationCombo" Width="130" VerticalAlignment="Center">
