@@ -104,25 +104,29 @@ public static class PropertyRows
     /// 0 None, 1 User (explicit parameters), 2 Simple and 3 Forced. A code outside that list is given as its number,
     /// so a value a later engine adds stays visible.
     /// A 0 is not a plain "None": the engine writes 0 for a parameterized statement whenever the database's Query
-    /// Store is not READ_WRITE. When every name in the statement's parameter list is numbered (<c>@1</c>, <c>@2</c>),
-    /// the engine named the parameters itself, so the shape proves auto-parameterization: simple parameterization
-    /// numbers from <c>@1</c> and forced parameterization from <c>@0</c>. Any other 0 is "None or not recorded".
+    /// Store is not READ_WRITE, so every 0 reads "Not recorded". When every name in the statement's parameter list is
+    /// numbered (<c>@1</c>, <c>@2</c>), the shape follows as a hint, not a verdict: simple parameterization numbers
+    /// from <c>@1</c> and forced parameterization from <c>@0</c>, but a prepared statement with numbered names
+    /// (<c>sp_executesql</c> with <c>@0</c>, or the positional names some data-access libraries emit) gives the same
+    /// plan XML, so the hint names both readings.
     /// </summary>
     public static string ParameterizationTypeName(int code, IEnumerable<string> parameterNames) => code switch
     {
-        0 => AutoParameterizationByShape(parameterNames) ?? "None or not recorded",
+        0 => "Not recorded" + NumberedParameterHint(parameterNames),
         1 => "User",
         2 => "Simple",
         3 => "Forced",
         _ => code.ToString(CultureInfo.InvariantCulture),
     };
 
-    private static string? AutoParameterizationByShape(IEnumerable<string> parameterNames)
+    private static string NumberedParameterHint(IEnumerable<string> parameterNames)
     {
         var names = parameterNames.ToList();
         if (names.Count == 0 || !names.All(IsNumberedParameter))
-            return null;
-        return names.Contains("@0") ? "Forced (by its @0-style parameters)" : "Simple (by its @1-style parameters)";
+            return "";
+        return names.Contains("@0")
+            ? " (parameters numbered from @0: forced parameterization or a prepared statement)"
+            : " (parameters numbered from @1: simple parameterization or a prepared statement)";
     }
 
     private static bool IsNumberedParameter(string name) =>
