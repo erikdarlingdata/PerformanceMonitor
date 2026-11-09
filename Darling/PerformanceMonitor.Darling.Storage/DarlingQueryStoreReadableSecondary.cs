@@ -43,19 +43,18 @@ SELECT
 
     /// <summary>
     /// The one-line reason a Query Store read on this server is empty because it is a readable secondary with <c>query_store_replica</c> off,
-    /// or <c>null</c> when it is not or the read fails: it runs on a path that already found nothing.
+    /// or <c>null</c> when it is not or the read fails: it runs on a path that already found nothing. Counts the newest capture whatever
+    /// the <c>query_store_health</c> collector's schedule, for a caller with no route to the schedule rows (the viewer); the service's
+    /// reads and the scheduler's gate pass that schedule to <see cref="MessageAsync(NpgsqlDataSource, int, string, bool, int, CancellationToken)"/>.
     /// </summary>
     public static Task<string?> MessageAsync(
         NpgsqlDataSource postgres, int serverId, string serverName, int commandTimeoutSeconds, CancellationToken cancellationToken = default) =>
         MessageAsync(postgres, serverId, serverName, healthCaptureRefreshes: true, commandTimeoutSeconds, cancellationToken);
 
     /// <summary>
-    /// #8361: the same judgment as the gate the collection scheduler applies to <c>query_store_hints</c>. The newest
-    /// <c>query_store_health</c> capture is evidence only while the <c>query_store_health</c> collector can refresh it on this server
-    /// (<paramref name="healthCaptureRefreshes"/>, its effective schedule's enabled state). When it cannot, the capture is frozen at
-    /// whatever role the server had when it was taken, so a server that failed over to primary would read as a secondary for as long
-    /// as the capture stood: the capture is then left out and the newest <c>ag_replica_role</c> decides alone. A read's wording
-    /// (<see cref="MessageAsync(NpgsqlDataSource, int, string, int, CancellationToken)"/>) always counts the capture.
+    /// #8361: the judgment the collection scheduler's gate on <c>query_store_hints</c>, <c>get_collection_health</c> and the Query Store
+    /// reads' <c>not_collected</c> answer all apply, <see cref="Message"/>, from <see cref="FactsSql"/>. <paramref name="healthCaptureRefreshes"/>
+    /// is whether the <c>query_store_health</c> collector's effective schedule lets it refresh the capture on this server.
     /// </summary>
     public static async Task<string?> MessageAsync(
         NpgsqlDataSource postgres, int serverId, string serverName, bool healthCaptureRefreshes, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
@@ -71,18 +70,56 @@ SELECT
                 return null;
             }
 
-            return CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
+            return Message(
                 serverName,
                 reader.IsDBNull(0) ? null : reader.GetString(0),
-                healthCaptureRefreshes ? (int)reader.GetInt64(2) : 0,
-                healthCaptureRefreshes ? (int)reader.GetInt64(3) : 0,
+                (int)reader.GetInt64(2),
+                (int)reader.GetInt64(3),
                 replicaConfigured: !reader.IsDBNull(1),
-                SettingClause);
+                healthCaptureRefreshes);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// #8402: the one judgment the scheduler's gate, <c>get_collection_health</c> and the Query Store reads apply to a server's facts,
+    /// <see cref="CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage"/> with the frozen-capture rule in front of it. The
+    /// newest <c>query_store_health</c> capture counts while the <c>query_store_health</c> collector can refresh it
+    /// (<paramref name="healthCaptureRefreshes"/>). When it cannot, the capture is frozen at whatever role the server had when it was
+    /// taken, and only an Availability Group role in the newest <c>ag_replica_role</c> can overrule it (<see cref="RoleAnswers"/>): a
+    /// frozen all-secondary capture under a PRIMARY role is a failover, and the collector runs; a frozen capture under a SECONDARY role
+    /// is read as that role. A role that is null, Standalone or anything else carries no answer, as on a readable standby outside any
+    /// availability group, so the frozen capture stays the evidence, and both surfaces read it the same way. Null when the server is
+    /// not a readable secondary under that rule, or a <c>query_store_replica</c> is set for it.
+    /// </summary>
+    /// <param name="healthDatabases">Databases in the newest capture, leaving out tempdb and any database whose Query Store is OFF.</param>
+    /// <param name="healthSecondaryDatabases">Of those, how many carry the readable-secondary bit.</param>
+    public static string? Message(
+        string serverName, string? agReplicaRole, int healthDatabases, int healthSecondaryDatabases, bool replicaConfigured, bool healthCaptureRefreshes)
+    {
+        var captureCounts = healthCaptureRefreshes || !RoleAnswers(agReplicaRole);
+        return CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
+            serverName,
+            agReplicaRole,
+            captureCounts ? healthDatabases : 0,
+            captureCounts ? healthSecondaryDatabases : 0,
+            replicaConfigured,
+            SettingClause);
+    }
+
+    /// <summary>
+    /// Whether a collected <c>ag_replica_role</c> names an Availability Group role, PRIMARY or SECONDARY. Standalone (a server
+    /// outside any availability group, a readable standby among them), RESOLVING, blank and null do not, and say nothing about
+    /// whether the server's Query Store is the primary's, replicated.
+    /// </summary>
+    public static bool RoleAnswers(string? agReplicaRole)
+    {
+        var role = agReplicaRole?.Trim();
+        return string.Equals(role, "Primary", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(role, "Secondary", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -151,13 +188,13 @@ LEFT JOIN counts ON counts.server_id = ids.server_id";
                     continue;
                 }
 
-                var message = CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(
+                var message = Message(
                     server.ServerName,
                     reader.IsDBNull(1) ? null : reader.GetString(1),
-                    server.HealthCaptureRefreshes ? (int)reader.GetInt64(3) : 0,
-                    server.HealthCaptureRefreshes ? (int)reader.GetInt64(4) : 0,
+                    (int)reader.GetInt64(3),
+                    (int)reader.GetInt64(4),
                     replicaConfigured: reader.GetBoolean(2),
-                    SettingClause);
+                    server.HealthCaptureRefreshes);
                 if (message is not null)
                 {
                     messages[server.ServerId] = message;

@@ -175,10 +175,12 @@ internal static class DarlingGatedCollectorRows
             : Array.Empty<object>();
 
     /// <summary>
-    /// #8361: the readable-secondary sentence for this server under the same judgment the scheduler's gate applies, or null when
-    /// its last known role is not one or the store cannot say. The newest <c>query_store_health</c> capture counts only while that
-    /// collector's effective schedule (the store's rows, as <c>StoreConfigProvider.ResolveSchedule</c> reads them) lets it refresh on
-    /// this server; disabled, the newest <c>ag_replica_role</c> decides alone, so the row agrees with the gate after a failover.
+    /// #8361: the readable-secondary sentence for this server under the same judgment the scheduler's gate applies
+    /// (<see cref="DarlingQueryStoreReadableSecondary.Message"/>), or null when its last known role is not one or the store cannot say.
+    /// Whether the <c>query_store_health</c> collector can refresh the capture is its effective schedule in the store's rows, as
+    /// <c>StoreConfigProvider.ResolveSchedule</c> reads them; disabled, the capture is frozen and only a PRIMARY or SECONDARY role
+    /// overrules it, so the row agrees with the gate after a failover and on a readable standby whose role carries no answer. The
+    /// Query Store reads' <c>not_collected</c> answer comes through here too (#8402).
     /// </summary>
     internal static async Task<string?> QueryStoreSecondaryMessageAsync(NpgsqlDataSource postgres, int serverId, string serverName, CancellationToken cancellationToken)
     {
