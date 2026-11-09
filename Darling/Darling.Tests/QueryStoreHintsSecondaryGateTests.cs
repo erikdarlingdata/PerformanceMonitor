@@ -14,6 +14,7 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -219,6 +220,87 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             /* A primary with no capture at all is not gated. */
             await RoleAsync(connection, id, name, "PRIMARY", TimeSpan.Zero, ct);
             Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(server, runtime, ct));
+        });
+    }
+
+    /// <summary>A schedule row that disables <paramref name="collector"/> for the server, the way an operator does for a secondary's Query Store collectors.</summary>
+    private static Task DisableAsync(NpgsqlConnection c, int id, string collector, CancellationToken ct) =>
+        ExecAsync(c,
+            "INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) VALUES ($1, $2, 60, 30, FALSE)",
+            ct, id, collector);
+
+    [Fact]
+    public async Task AFrozenCapture_StillGatesAReadableStandby_WhoseRoleCarriesNoAvailabilityGroupAnswer()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* A readable standby outside any availability group: the capture, taken weeks ago, flags every database as a readable
+               secondary, query_store_health is disabled for the server, and server_properties carries no Availability Group role
+               for it (no row at all, then Standalone, as a read replica reads). The frozen capture is the only evidence there is,
+               and it is the evidence the Query Store reads judge, so the gate judges it too. */
+            const int id = 840_201;
+            const string name = "qs-standby";
+            await RegisterAsync(connection, id, name, ct);
+            await CaptureAsync(connection, id, name, "db1", 8, TimeSpan.FromDays(19), ct);
+            await CaptureAsync(connection, id, name, "db2", 8, TimeSpan.FromDays(19), ct);
+
+            var worker = DailyRunKit.MakeWorker(new DailyRunLogger());
+            worker.StoreForTests = postgres;
+            worker.ScheduleOverridesForTest = new[] { new ScheduleOverride(id, QueryStoreHealthCollector.Instance.Name, null, null, false) };
+            var server = DailyRunKit.MakeServer(id, Hints);
+            var runtime = server.Runtime!;
+
+            /* No role row at all: the capture decides, and the slot is gated. */
+            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(server, runtime, ct));
+
+            /* Standalone carries no answer against the capture either. */
+            await RoleAsync(connection, id, name, "Standalone", TimeSpan.FromMinutes(5), ct);
+            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(server, runtime, ct));
+
+            /* PRIMARY contradicts the frozen capture: a failover, and the collector runs. */
+            await RoleAsync(connection, id, name, "PRIMARY", TimeSpan.FromMinutes(1), ct);
+            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(server, runtime, ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheQueryStoreReads_ReachTheGatesVerdict_OnAFrozenCapture_EitherWay()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* Two servers with the same frozen all-secondary capture and query_store_health disabled in the store's schedule rows.
+               One carries no role and is a readable standby: the gate holds the collector, and the reads answer not_collected.
+               The other failed over and reads PRIMARY: the gate runs the collector, and the reads must not call it a secondary. */
+            const int standbyId = 840_202;
+            const string standby = "qs-standby-read";
+            const int primaryId = 840_203;
+            const string primary = "qs-failover-read";
+            foreach (var (id, name) in new[] { (standbyId, standby), (primaryId, primary) })
+            {
+                await RegisterAsync(connection, id, name, ct);
+                await CaptureAsync(connection, id, name, "db1", 8, TimeSpan.FromDays(19), ct);
+                await DisableAsync(connection, id, QueryStoreHealthCollector.Instance.Name, ct);
+            }
+
+            await RoleAsync(connection, primaryId, primary, "PRIMARY", TimeSpan.FromMinutes(5), ct);
+
+            var worker = DailyRunKit.MakeWorker(new DailyRunLogger());
+            worker.StoreForTests = postgres;
+            worker.ScheduleOverridesForTest = new[]
+            {
+                new ScheduleOverride(standbyId, QueryStoreHealthCollector.Instance.Name, null, null, false),
+                new ScheduleOverride(primaryId, QueryStoreHealthCollector.Instance.Name, null, null, false),
+            };
+            var standbyServer = DailyRunKit.MakeServer(standbyId, Hints);
+            var primaryServer = DailyRunKit.MakeServer(primaryId, Hints);
+
+            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(standbyServer, standbyServer.Runtime!, ct));
+            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(primaryServer, primaryServer.Runtime!, ct));
+
+            var standbyRead = await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, standbyId, standby, ct);
+            Assert.NotNull(standbyRead);
+            Assert.Contains("readable secondary", standbyRead, StringComparison.Ordinal);
+            Assert.Null(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, primaryId, primary, ct));
         });
     }
 }
