@@ -140,7 +140,8 @@ public static partial class ParameterCard
     /// tree — the same three exclusions as PerformanceStudio's <c>FindUnresolvedVariables</c>. Table
     /// variable names come from <paramref name="rootNode"/>'s subtree so a table variable read (which
     /// shows up in the query text as an ordinary <c>@name</c> reference) isn't misreported as an
-    /// unresolved local variable.
+    /// unresolved local variable. The references come from <see cref="VariableReferenceScanner"/>, so a
+    /// name inside a string literal, a comment, a quoted identifier or a bracketed name is not one.
     /// </summary>
     public static List<string> FindUnresolvedVariables(
         string queryText, IReadOnlyList<PlanParameter> parameters, PlanNode? rootNode = null)
@@ -156,13 +157,10 @@ public static partial class ParameterCard
         if (rootNode != null)
             CollectTableVariableNames(rootNode, tableVarNames);
 
-        // A pass cut short by a timeout lists the variables found so far.
-        var matches = PlanRegex.Matches(AtVariableRegExp(), queryText, "unresolved variables in the parameter card");
         var seenVars = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (Match match in matches)
+        foreach (var varName in VariableReferenceScanner.Scan(queryText))
         {
-            var varName = match.Value;
             if (seenVars.Contains(varName) || extractedNames.Contains(varName))
                 continue;
             if (varName.StartsWith("@@", StringComparison.OrdinalIgnoreCase))
@@ -192,9 +190,6 @@ public static partial class ParameterCard
 
     [GeneratedRegex(@"OPTIMIZE\s+FOR\s+UNKNOWN", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
     private static partial Regex OptimizeForUnknownRegExp();
-
-    [GeneratedRegex(@"@\w+", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: PlanRegex.TimeoutMilliseconds)]
-    private static partial Regex AtVariableRegExp();
 }
 
 /// <summary>Which value columns the Parameters card shows, and the compiled column's header text.</summary>
