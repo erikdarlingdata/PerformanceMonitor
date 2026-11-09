@@ -158,13 +158,22 @@ internal static class OversizedPlanBacklogSweep
     internal const int MaxPlansPerServerPerTick = 10;
 
     /// <summary>
-    /// #8404: the most rows the sweep can take off one server's backlog in a day, <see cref="MaxPlansPerServerPerTick"/>
-    /// times the passes a day holds at <see cref="SweepInterval"/>. Reported by <c>get_oversized_plan_backlog</c> beside
-    /// each server's rows captured over the last day, so a drain running at this figure reads as the cap doing what it
-    /// is for, and a drain below it with pending rows waiting reads as something else. Derived from the two constants,
-    /// so it moves with them.
+    /// #8404: the most rows a day of passes can take off one server's backlog when every pass finishes inside
+    /// <see cref="SweepInterval"/>: <see cref="MaxPlansPerServerPerTick"/> times the passes a day holds at that interval.
+    /// The claim bounds captured plus expired together, so this bounds the day's DRAIN, not captures alone. It is the
+    /// interval's ceiling, not the reachable figure: the worker launches a pass only after the previous one has
+    /// finished, so a pass that overruns its interval costs the next slot, and the passes that ran in a day can sit
+    /// below the interval's count. <c>get_oversized_plan_backlog</c> reports this beside <see cref="ReachableRowsPerServer"/>
+    /// for the passes its run records show. Derived from the two constants, so it moves with them.
     /// </summary>
     internal static int RowsPerServerPerDayCeiling => MaxPlansPerServerPerTick * (int)(TimeSpan.FromDays(1) / SweepInterval);
+
+    /// <summary>
+    /// #8404: the most rows the given number of passes could have taken off one server's backlog, each pass claiming at
+    /// most <see cref="MaxPlansPerServerPerTick"/>, captured and expired together. The figure a day's drain is held
+    /// against: a server drained at or near it with pending rows waiting was at the cap for the passes that ran.
+    /// </summary>
+    internal static int ReachableRowsPerServer(int passes) => passes * MaxPlansPerServerPerTick;
 
     /// <summary>
     /// WALL-CLOCK ceiling for one plan's fetch — connect, execute AND drain. It is the binding constraint,

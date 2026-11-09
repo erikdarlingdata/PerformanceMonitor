@@ -301,6 +301,33 @@ LIMIT $2";
         public string Verdict => VerdictOf(CapturedAt, ExpiredAt);
     }
 
+    /// <summary>
+    /// #8404: how many sweep passes ran in the day before the read, from the run records the sweep writes under the
+    /// fleet sentinel, one per pass whatever the pass found (<c>DarlingObservability.LogOversizedPlanSweepRunAsync</c>).
+    /// <c>$1</c> is the sentinel id, <c>$2</c> the sweep's collector name and <c>$3</c> the instant the day starts at;
+    /// the statement reads no clock of its own. The worker launches a pass only after the previous one has finished,
+    /// so on a store whose passes outrun their interval this count sits below the interval's, and it is the count the
+    /// day's drain is held against.
+    /// </summary>
+    public const string SweepPassesLastDaySql = @"
+SELECT count(*)
+FROM collection_log
+WHERE server_id = $1
+AND   collector_name = $2
+AND   collection_time >= $3";
+
+    public static async Task<int> GetSweepPassesLastDayAsync(
+        NpgsqlDataSource postgres, DateTime lastDaySince, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(SweepPassesLastDaySql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.AddWithValue(DarlingObservability.FleetServerId);
+        command.Parameters.AddWithValue(DarlingObservability.OversizedPlanSweepCollectorName);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(lastDaySince, DateTimeKind.Unspecified));
+        var count = await command.ExecuteScalarAsync(cancellationToken);
+        return count is long passes ? (int)passes : 0;
+    }
+
     /// <param name="lastDaySince">
     /// #8404: the naive-UTC instant the three last-day counts start at, one day before the read as the caller's clock
     /// has it. A parameter rather than <c>now()</c> in the statement, so the read has one clock, the caller's, and the
