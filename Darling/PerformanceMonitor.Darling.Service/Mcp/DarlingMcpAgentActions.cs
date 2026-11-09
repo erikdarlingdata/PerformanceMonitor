@@ -108,9 +108,25 @@ internal static class DarlingMcpAgentActions
             .Select(f => (string)f.GetRawConstantValue()!),
         StringComparer.OrdinalIgnoreCase));
 
-    /// <summary>True when an agent may not mute <paramref name="metric"/>: its family is self-monitor, or it is a protected self alert constant.</summary>
+    /// <summary>
+    /// Every self-monitor name the census knows, compared without regard to case: each <see cref="AlertFamily.MetricFamilies"/> key whose
+    /// family is self-monitor, and each <see cref="AlertFamily.RecoveryPairs"/> name on either side of a self-monitor pair. A mute rule
+    /// matches its metric case-insensitively (<see cref="MuteRule.NamesMetric"/>) and the store keeps the name as sent, so a spelling that
+    /// differs only in case would still silence the protected alert; the census lookup itself (<see cref="AlertFamily.Of"/>) is ordinal
+    /// and is left as it is for its other callers.
+    /// </summary>
+    private static readonly Lazy<HashSet<string>> SelfMonitorNames = new(() => new HashSet<string>(
+        AlertFamily.MetricFamilies.Where(pair => string.Equals(pair.Value, AlertFamily.SelfMonitor, StringComparison.Ordinal)).Select(pair => pair.Key)
+            .Concat(AlertFamily.RecoveryPairs
+                .Where(pair => string.Equals(AlertFamily.Of(pair.Key), AlertFamily.SelfMonitor, StringComparison.Ordinal)
+                    || string.Equals(AlertFamily.Of(pair.Value), AlertFamily.SelfMonitor, StringComparison.Ordinal))
+                .SelectMany(pair => new[] { pair.Key, pair.Value })),
+        StringComparer.OrdinalIgnoreCase));
+
+    /// <summary>True when an agent may not mute <paramref name="metric"/>: its family is self-monitor (in any spelling of the name), or it is a protected self alert constant.</summary>
     internal static bool IsProtectedMetric(string metric) =>
         string.Equals(AlertFamily.Of(metric), AlertFamily.SelfMonitor, StringComparison.Ordinal)
+        || SelfMonitorNames.Value.Contains(metric.Trim())
         || ProtectedConstants.Value.Contains(metric.Trim());
 
     private static AgentActionRefusal? MetricRefusal(string metric) => IsProtectedMetric(metric)

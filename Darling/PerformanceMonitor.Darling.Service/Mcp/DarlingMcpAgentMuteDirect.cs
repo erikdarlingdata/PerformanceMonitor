@@ -71,8 +71,8 @@ internal static class DarlingMcpAgentMuteDirect
     /// Direct-path writes per agent per hour (#8473: counted by the journal actor, so one agent's writes never use up another's). A real
     /// storm needs a few rules: say three create calls, a couple of updates to narrow them and a delete when it ends, about ten writes,
     /// and a rule made twice because the first guess was wrong stays far under this. Twenty leaves that headroom twice over and still
-    /// holds a runaway loop to 20 rows an hour, so a change an operator may want to undo stays on the 200 row Agent changes list for ten
-    /// hours of the worst case instead of falling off it in minutes.
+    /// holds one runaway agent to 20 rows an hour. The service-wide worst case is that many for each agent token and the legacy token
+    /// together, so how long a change stays on the 200 row Agent changes list depends on how many agent tokens the operator has issued.
     /// </summary>
     internal const int MaxWritesPerHour = 20;
 

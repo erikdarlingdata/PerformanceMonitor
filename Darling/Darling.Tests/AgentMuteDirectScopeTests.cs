@@ -114,6 +114,9 @@ VALUES ('{id}', {(enabled ? "TRUE" : "FALSE")}, now() AT TIME ZONE 'utc', {(serv
     [Theory]
     [InlineData("Collection Stopped", 7, DarlingMcpAgentActions.SelfMonitorMetric)]
     [InlineData("Store Disk Pressure", 7, DarlingMcpAgentActions.SelfMonitorMetric)]
+    /* A spelling that differs only in case still matches the protected alert (mute rules match the metric case-insensitively), so it is protected too. */
+    [InlineData("collection stopped", 7, DarlingMcpAgentActions.SelfMonitorMetric)]
+    [InlineData("COLLECTOR COST REGRESSION", 7, DarlingMcpAgentActions.SelfMonitorMetric)]
     [InlineData("Blocking Detected", null, DarlingMcpAgentActions.MuteNeedsMetric)]
     public async Task ACreateTheClaimPathRefuses_ForAProtectedMetricOrNoServer_IsRefusedForTheSameReason_ReSentAsAMuteWithoutAgentAction(
         string metric, int? serverId, string code)
@@ -147,6 +150,14 @@ VALUES ('{id}', {(enabled ? "TRUE" : "FALSE")}, now() AT TIME ZONE 'utc', {(serv
             var direct = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, rule, Changes("metric_name", "\"Collection Stopped\""), agentSeat: Agent));
             Assert.True("refused" == (string?)direct["status"], direct.ToJsonString());
             Assert.Equal((string?)claim["reason"], (string?)direct["reason"]);
+            Assert.Equal("High CPU", await ScalarAsync(c, $"SELECT metric_name FROM config_mute_rules WHERE id = '{rule}'"));
+
+            /* The same move with a spelling that differs only in case: the rule would still match the protected alert, so both paths refuse it. */
+            var claimLower = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, rule, "{\"reason\":\"x\",\"metric_name\":\"collection stopped\"}", c.Arg, Agent));
+            Assert.True(DarlingMcpAgentActions.SelfMonitorMetric == (string?)claimLower["reason"], claimLower.ToJsonString());
+            var directLower = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, rule, Changes("metric_name", "\"collection stopped\""), agentSeat: Agent));
+            Assert.True("refused" == (string?)directLower["status"], directLower.ToJsonString());
+            Assert.Equal(DarlingMcpAgentActions.SelfMonitorMetric, (string?)directLower["reason"]);
             Assert.Equal("High CPU", await ScalarAsync(c, $"SELECT metric_name FROM config_mute_rules WHERE id = '{rule}'"));
 
             /* Enabling an operator's disabled mute of a protected metric. */
