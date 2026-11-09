@@ -84,6 +84,13 @@ const scenarios = {
   noServer: { cells: [header, panel("Lock modes", "pie")], opts: { alert: null, catalog } },
   // The link's firing was dismissed: the card says so, beside the alert's own facts.
   dismissed: { cells: [header], opts: { alert: { ...alert, dismissed: true }, catalog, scopeServer: "SRV1" } },
+  // A resolution row: state_only, with the stored 0 that is not a reading on both sides, as get_alert_history serves it.
+  resolution: { cells: [header], opts: { alert: { ...alert, metric_name: "Client Timeouts Cleared", current_value: 0, threshold_value: 0, state_only: true }, catalog, scopeServer: "SRV1" } },
+  // A state-only row whose current value is a real number beside a stored-zero threshold.
+  stateMeasured: { cells: [header], opts: { alert: { ...alert, metric_name: "Database State", current_value: 3, threshold_value: 0, state_only: true }, catalog, scopeServer: "SRV1" } },
+  // A measured row, and a measured row whose reading really is 0.
+  measured: { cells: [header], opts: { alert: { ...alert, current_value: 90, threshold_value: 80, state_only: false }, catalog, scopeServer: "SRV1" } },
+  measuredZero: { cells: [header], opts: { alert: { ...alert, current_value: 0, threshold_value: 0, state_only: false }, catalog, scopeServer: "SRV1" } },
   // A cell kind the page has no renderer for must say so.
   unknownKind: { cells: [header, { type: "sparkline", title: "Mystery cell" }], opts: { alert, catalog } },
   // Three panels that cannot start a load, then a read: if a bad panel held its limiter slot the read never draws.
@@ -150,12 +157,21 @@ const walkTitles = (n) => {
   n.kids.forEach(walkTitles);
 };
 walkTitles(main);
+// The header card's labelled fields, as [label, value] pairs in the order drawn.
+const fields = [];
+const walkFields = (n) => {
+  if (!n || typeof n !== "object") return;
+  if (n.tag === "div" && n.cls === "detail-field") fields.push([n.kids[0] && n.kids[0].text, n.kids[1] && n.kids[1].text]);
+  n.kids.forEach(walkFields);
+};
+walkFields(main);
 
 console.log(JSON.stringify({
   errors: strips("error"),
   notices: strips("notice"),
   loading: strips("loading").length,
   titles,
+  fields,
   reads: calls.reads,
   composed: calls.composed,
   markdown: calls.markdown,
