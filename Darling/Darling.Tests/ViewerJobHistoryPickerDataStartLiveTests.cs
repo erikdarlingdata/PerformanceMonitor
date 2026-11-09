@@ -113,18 +113,31 @@ FROM generate_series($3::timestamp - interval '30 days', $3::timestamp, interval
         }
 
         /* One job outcome, stored at its own run time (the server has no clock row, so its stored run time reads as UTC). */
-        private static async Task InsertRunAsync(NpgsqlConnection connection, long id, int serverId, DateTime utc, CancellationToken ct)
+        private static Task InsertRunAsync(NpgsqlConnection connection, long id, int serverId, DateTime utc, CancellationToken ct) =>
+            InsertRunAsync(connection, id, serverId, utc, utc, ct);
+
+        /* One job outcome stored at collectedUtc that ran at runUtc: a first collection copies the history msdb already holds. */
+        private static async Task InsertRunAsync(NpgsqlConnection connection, long id, int serverId, DateTime collectedUtc, DateTime runUtc, CancellationToken ct)
         {
             await using var insert = new NpgsqlCommand(@"
 INSERT INTO collect.job_history
     (job_history_id, collection_time, server_id, server_name, instance_id, job_id, job_name, job_enabled, step_id, step_name,
      run_status, run_status_desc, run_datetime, run_duration_seconds, retries_attempted, message)
-VALUES ($1, $3, $2, $4, $1, 'job-1', 'Nightly', true, 0, '(Job outcome)', 1, 'The job succeeded.', $3, 5, 0, NULL)", connection);
+VALUES ($1, $3, $2, $4, $1, 'job-1', 'Nightly', true, 0, '(Job outcome)', 1, 'The job succeeded.', $5, 5, 0, NULL)", connection);
             insert.Parameters.AddWithValue(id);
             insert.Parameters.AddWithValue(serverId);
-            insert.Parameters.AddWithValue(Naive(utc));
+            insert.Parameters.AddWithValue(Naive(collectedUtc));
             insert.Parameters.AddWithValue(ServerName(serverId));
+            insert.Parameters.AddWithValue(Naive(runUtc));
             await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        /// <summary>Adds a run of <paramref name="serverId"/> stored at <paramref name="collectedUtc"/> that ran at <paramref name="runUtc"/>.</summary>
+        public async Task AddRunAsync(long id, int serverId, DateTime collectedUtc, DateTime runUtc, CancellationToken ct)
+        {
+            await using var connection = new NpgsqlConnection(_scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await InsertRunAsync(connection, id, serverId, collectedUtc, runUtc, ct);
         }
 
         public ValueTask DisposeAsync() => _scratch.DisposeAsync();
@@ -207,6 +220,54 @@ VALUES ($1, $3, $2, $4, $1, 'job-1', 'Nightly', true, 0, '(Job outcome)', 1, 'Th
             await tab.RefreshJobsAsync();
 
             Assert.Equal(store.Seeded.FirstB, tab.TimeRangePickerControl.DataStartUtc);
+            Assert.Contains("\nData starts ", Notes(tab.TimeRangePickerControl), StringComparison.Ordinal);
+        });
+    }
+
+    /* Server A's first collection, three days ago, copied a run msdb already held from a week before that. The grid can show
+       that run, so the note names it, not the collection that stored it. */
+    [Fact]
+    public async Task ARunCopiedFromMsdbBeforeTheFirstCollection_IsWhereTheDataStarts_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        var copiedRun = store.Seeded.OldestA.AddDays(-7);
+        await store.AddRunAsync(4, ServerA, store.Seeded.OldestA, copiedRun, ct);
+
+        StaTestThread.Run(async () =>
+        {
+            var tab = Tab(store.Viewer);
+            /* A month: a range that starts before the copied run, so the note has something to say. */
+            tab.TimeRangePickerControl.Value = TimeRangePresets.Find("1mo")!;
+
+            await tab.RefreshJobsAsync();
+
+            Assert.Equal(copiedRun, tab.TimeRangePickerControl.DataStartUtc);
+            Assert.Contains("\nData starts ", Notes(tab.TimeRangePickerControl), StringComparison.Ordinal);
+        });
+    }
+
+    /* A read that fails on another scope hides the note. Coming back to a scope whose start was read within the cache's life
+       must show that start again, not stay hidden until the cache ages out. */
+    [Fact]
+    public async Task AHiddenNote_ComesBackOnACachedScope_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+
+        StaTestThread.Run(async () =>
+        {
+            var tab = Tab(store.Viewer);
+            tab.TimeRangePickerControl.Value = TimeRangePresets.Find("1w")!;
+            await tab.RefreshJobsAsync();
+            Assert.Equal(store.Seeded.OldestA, tab.TimeRangePickerControl.DataStartUtc);
+
+            /* What a failed read on another scope leaves behind, with this scope's read still cached. */
+            tab.TimeRangePickerControl.DataStartUtc = null;
+
+            await tab.RefreshJobsAsync();
+
+            Assert.Equal(store.Seeded.OldestA, tab.TimeRangePickerControl.DataStartUtc);
             Assert.Contains("\nData starts ", Notes(tab.TimeRangePickerControl), StringComparison.Ordinal);
         });
     }

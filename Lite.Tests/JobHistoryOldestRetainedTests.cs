@@ -54,8 +54,34 @@ public sealed class JobHistoryOldestRetainedTests : IDisposable
 
     private const string Columns = "(job_history_id, collection_time, server_id, server_name, instance_id, job_id, job_name, job_enabled, step_id, run_status, run_duration_seconds, retries_attempted, run_datetime)";
 
-    private static string Run(long id, int serverId, DateTime collectionTime) =>
-        $"({id}, TIMESTAMP '{collectionTime:yyyy-MM-dd HH:mm:ss}', {serverId}, 'SERVER-{serverId}', {id}, 'job-{serverId}', 'Nightly', true, 0, 1, 5, 0, TIMESTAMP '{collectionTime:yyyy-MM-dd HH:mm:ss}')";
+    private static string Run(long id, int serverId, DateTime collectionTime) => Run(id, serverId, collectionTime, collectionTime);
+
+    /// <summary>One job outcome stored at <paramref name="collectionTime"/> whose run happened at <paramref name="runDateTime"/>, the
+    /// server's wall clock: a first collection copies the history msdb already holds, so a run can sit long before its collection.</summary>
+    private static string Run(long id, int serverId, DateTime collectionTime, DateTime runDateTime) =>
+        $"({id}, TIMESTAMP '{collectionTime:yyyy-MM-dd HH:mm:ss}', {serverId}, 'SERVER-{serverId}', {id}, 'job-{serverId}', 'Nightly', true, 0, 1, 5, 0, TIMESTAMP '{runDateTime:yyyy-MM-dd HH:mm:ss}')";
+
+    /// <summary>A run of server B stored at <see cref="FirstB"/> that happened six weeks earlier, before any collection in the store.</summary>
+    private static readonly DateTime CopiedRunB = FirstB.AddDays(-42);
+
+    [Fact]
+    public async Task ARunStoredBeforeItsCollection_IsWhereTheDataStarts_ForItsServerAndForAllServers()
+    {
+        var initializer = await StoreAsync();
+        var service = new LocalDataService(initializer);
+        using (var connection = new DuckDBConnection($"Data Source={Path.Combine(_tempDir, "test.duckdb")}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            await ExecuteAsync(connection, $"INSERT INTO job_history {Columns} VALUES {Run(5, ServerB, FirstB, CopiedRunB)}");
+        }
+
+        /* The run's time is the server's wall clock, read to UTC with the clock the grid reads that server's runs on. */
+        var expected = (await service.ReadJobHistoryClockAsync(ServerB)).ToUtc(CopiedRunB);
+
+        Assert.Equal(expected, await service.GetOldestJobHistoryAsync(ServerB, TestContext.Current.CancellationToken));
+        Assert.Equal(expected, await service.GetOldestJobHistoryAsync(null, TestContext.Current.CancellationToken));
+        Assert.Equal(ArchivedA, await service.GetOldestJobHistoryAsync(ServerA, TestContext.Current.CancellationToken));
+    }
 
     private static async Task ExecuteAsync(DuckDBConnection connection, string sql)
     {
