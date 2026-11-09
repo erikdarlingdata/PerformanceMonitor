@@ -68,6 +68,15 @@ public partial class ViewerServerTab : IDisposable
     /// MainWindow when the server tab closes.</summary>
     public void Dispose()
     {
+        /* #8367: let go of the window too, or a tab closed on its own stays reachable from the window's Closed list, and with it
+           every chart and grid it holds, until the window closes. Unhooking inside HostWindow_Closed is safe: the invocation
+           list is a snapshot. */
+        if (_hostWindow is not null)
+        {
+            _hostWindow.Closed -= HostWindow_Closed;
+            _hostWindow = null;
+        }
+
         /* Stop the toolbar's auto-refresh timer so a closed tab's timer can't fire against a torn-down UI. */
         if (_autoRefreshTimer != null)
         {

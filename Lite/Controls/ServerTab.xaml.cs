@@ -756,6 +756,15 @@ public partial class ServerTab : UserControl
     /// </summary>
     public void StopRefresh()
     {
+        /* #8367: let go of the window too, or a tab closed on its own stays reachable from the window's Closed list, and with it
+           every chart and grid it holds, until the window closes. Unhooking inside HostWindow_Closed is safe: the invocation
+           list is a snapshot. */
+        if (_hostWindow is not null)
+        {
+            _hostWindow.Closed -= HostWindow_Closed;
+            _hostWindow = null;
+        }
+
         _refreshTimer.Stop();
         /* #7181: a Get Actual Plan re-run runs with no command timeout; closing the tab (or removing the
            server) is the last chance to stop it on the monitored server. */
