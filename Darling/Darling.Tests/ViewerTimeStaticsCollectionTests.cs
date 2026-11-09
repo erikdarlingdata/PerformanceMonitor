@@ -47,13 +47,18 @@ public sealed class ViewerTimeStaticsCollectionTests
     /// <summary>
     /// Calls into product code that write a static on the caller's behalf, so a file that makes one is a writer without naming the
     /// helper: the shell's constructor applies the stored display mode (<see cref="TheShellsConstructor_WritesTheDisplayMode"/>
-    /// proves it by constructing the shell), and a server tab's <c>ApplyServerClockToHelper</c> installs its clock (an internal
-    /// member that needs a tab with a clock; no class outside the collection calls it).
+    /// proves it by constructing the shell; the target-typed <c>MainWindow w = new();</c> is the same constructor), and a server
+    /// tab's <c>ApplyServerClockToHelper</c> installs its clock, as do the members that reach it: the public
+    /// <c>RefreshActiveInnerTabAsync</c> and the internal <c>DeepLinkTo*Async</c> methods. No class outside the collection calls
+    /// any of the tab's three today.
     /// </summary>
     private static readonly Regex[] ProductWritersByCall =
     {
         new(@"\bnew\s+MainWindow\s*[({]", RegexOptions.CultureInvariant),
+        new(@"\bMainWindow\s+\w+\s*=\s*new\s*\(", RegexOptions.CultureInvariant),
         new(@"\bApplyServerClockToHelper\s*\(", RegexOptions.CultureInvariant),
+        new(@"\bRefreshActiveInnerTabAsync\s*\(", RegexOptions.CultureInvariant),
+        new(@"\bDeepLinkTo\w+Async\s*\(", RegexOptions.CultureInvariant),
     };
 
     /// <summary>
@@ -201,6 +206,10 @@ public sealed class ViewerTimeStaticsCollectionTests
         Assert.True(WritesTheStatics("class C { void M() { ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC; } }"), "a direct assignment");
         Assert.True(WritesTheStatics("class C { void M() { ViewerTimeHelper.ActiveServerClock = ServerClock.Utc; } }"), "a direct assignment of the clock");
         Assert.True(WritesTheStatics("class C { void M() { var w = new MainWindow(); } }"), "the shell's constructor applies the stored display mode");
+        Assert.True(WritesTheStatics("class C { void M() { MainWindow w = new(); } }"), "the shell's constructor, target-typed");
+        Assert.True(WritesTheStatics("class C { void M(ViewerServerTab tab) => tab.ApplyServerClockToHelper(); }"), "ApplyServerClockToHelper installs the tab's clock");
+        Assert.True(WritesTheStatics("class C { Task M(ViewerServerTab tab) => tab.RefreshActiveInnerTabAsync(); }"), "RefreshActiveInnerTabAsync reaches ApplyServerClockToHelper");
+        Assert.True(WritesTheStatics("class C { Task M(ViewerServerTab tab) => tab.DeepLinkToBlockingAsync(1); }"), "a DeepLinkTo*Async method reaches ApplyServerClockToHelper");
         Assert.True(WritesTheStatics("class C { void M() { QueryGridSeed.ReadBanner(banner => Task.CompletedTask); } }"), "QueryGridSeed.ReadBanner sets the mode for its caller");
         Assert.True(WritesTheStatics("class C { string M(DateTime utc) => DataStartBannerReadout.Since(utc); }"), "DataStartBannerReadout.Since sets the mode for its caller");
         Assert.True(WritesTheStatics("class C { string? M() => DataStartBannerReadout.For(1, 2); }"), "DataStartBannerReadout.For sets the mode for its caller");
