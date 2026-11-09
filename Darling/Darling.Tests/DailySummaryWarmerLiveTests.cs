@@ -93,6 +93,62 @@ public sealed class DailySummaryWarmerLiveTests
         }
     }
 
+    /// <summary>#8451: the service's own shape. The warmer reads through the worker's pool, and a visitor's
+    /// <c>get_daily_summary_range</c> goes through the web host's own pool over the same store, built by the product's
+    /// host-pool constructor with the web host's application name. The block the pass built must serve that first read: a
+    /// block the web host's read does not find leaves every server's first visitor on the cold read, warmer or not.</summary>
+    [Fact]
+    public async Task WarmerPass_ThroughTheWorkersPool_ServesTheWebHostsFirstRangeRead()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live daily-summary warmer test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var workerPool = NpgsqlDataSource.Create(cs!);
+        await using var webPool = DarlingWorker.CreateHostStoreDataSource(cs!, DarlingManagedPostgres.WebApplicationName);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerIdA, ServerA, ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerIdB, ServerB, ct);
+
+            var today = DateTime.UtcNow.Date;
+            var closedDay = today.AddDays(-2);
+            await PlantWaitAsync(connection, ServerIdA, ServerA, closedDay.AddHours(10), 1000, ct);
+            await PlantWaitAsync(connection, ServerIdB, ServerB, closedDay.AddHours(10), 3000, ct);
+
+            DarlingHealthReader.ResetRangeCacheForTests();
+
+            var warmer = Warmers.Create(
+                servers: () => [(ServerIdA, ServerA), (ServerIdB, ServerB)],
+                warm: (serverId, name, token) => Warmers.WarmAsync(workerPool, serverId, name, token),
+                enabled: () => true,
+                admission: null);
+            await Warmers.RunPassAsync(warmer, ct);
+
+            await PlantWaitAsync(connection, ServerIdA, ServerA, closedDay.AddHours(11), 4000, ct);
+            await PlantWaitAsync(connection, ServerIdB, ServerB, closedDay.AddHours(11), 4000, ct);
+
+            Assert.Equal(1000m, await ClosedDayWaitMsAsync(webPool, ServerA, closedDay));
+            Assert.Equal(3000m, await ClosedDayWaitMsAsync(webPool, ServerB, closedDay));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            DarlingHealthReader.ResetRangeCacheForTests();
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /// <summary>The closed day's total wait in ms from the FIRST <c>get_daily_summary_range</c> call this test makes for
     /// the server: the Overview's own read, 31 days ending today with no anchor.</summary>
     private static async Task<decimal> ClosedDayWaitMsAsync(NpgsqlDataSource dataSource, string serverName, DateTime closedDay)

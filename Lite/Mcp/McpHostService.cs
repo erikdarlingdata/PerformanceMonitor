@@ -226,9 +226,9 @@ public sealed class McpHostService : BackgroundService
     {
         /* #6066: Lite's pseudonym key (Credential Manager), for the data-detail filter and the brief composer at metadataOnly. None: logins are numbered per answer. */
         if (pseudonymKeys is not null) services.AddSingleton<IPseudonymKeySource>(pseudonymKeys);
-        /* #5820: the four investigation tools are served only with mcp_allow_investigations on AND the writes off
-           (McpInvestigationPolicy). Registered BEFORE the write policy so its instructions census (built there) counts
-           only the tools this start offers. */
+        /* #5820, #8461: the tools that claim and report on investigation requests are served only with mcp_allow_investigations on
+           AND the writes off (McpInvestigationPolicy); the two investigation reads are ordinary reads. Registered BEFORE the write
+           policy so its instructions census (built there) counts only the tools this start offers. */
         services.AddMcpInvestigationPolicy(McpInvestigationPolicy.Served(allowInvestigations, allowWrites));
 
         /* #5820: mcp_data_detail, read once per start. McpDataDetailFilter (AddCallToolFilters) reads this singleton on

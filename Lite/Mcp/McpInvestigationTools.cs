@@ -19,9 +19,10 @@ namespace PerformanceMonitorLite.Mcp;
 /// The Level 1 investigation tools on Lite (#5820): the twin of Darling's <c>DarlingMcpInvestigationTools</c>, with the same
 /// names, parameters, status words and answers. An agent lists the requests alerts opened, claims one (the brief is
 /// composed and stored at claim time), and returns one report under its claim; a person reads the requests, reports and
-/// journal back. The four are served only with <c>mcp_allow_investigations</c> on and the write tools off
-/// (<see cref="McpInvestigationPolicy"/>, by tool name). The shared <see cref="InvestigationToolCore"/> does the work; these
-/// are thin wrappers over the registered <see cref="IInvestigationRequestStore"/> (Lite's DuckDB store).
+/// journal back. The two that claim and report are served only with <c>mcp_allow_investigations</c> on and the write tools off
+/// (<see cref="McpInvestigationPolicy"/>, by tool name); the two reads are served in every configuration (#8461). The shared
+/// <see cref="InvestigationToolCore"/> does the work; these are thin wrappers over the registered
+/// <see cref="IInvestigationRequestStore"/> (Lite's DuckDB store).
 /// </summary>
 [McpServerToolType]
 public sealed class McpInvestigationTools

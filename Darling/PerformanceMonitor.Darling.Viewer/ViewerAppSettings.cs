@@ -175,9 +175,9 @@ public sealed class ViewerAppSettings
 
     /// <summary>Deadlock/blocking notification delivery: "Summary" (one card per cycle) or "PerEvent".
     /// Store-backed since V18 (the service honors it); retained here only as the pre-3b migrate-in source, so its
-    /// defaults match <see cref="AlertSettingsRow.Defaults"/> (Summary / 5) — a fresh viewer imports nothing.</summary>
+    /// defaults match <see cref="AlertSettingsRow.Defaults"/> (Summary / <see cref="AlertDefaults.PerEventMax"/>) — a fresh viewer imports nothing.</summary>
     public string AlertDeliveryMode { get; set; } = "Summary";
-    public int AlertPerEventMaxPerCycle { get; set; } = 5;
+    public int AlertPerEventMaxPerCycle { get; set; } = AlertDefaults.PerEventMax;
 
     /// <summary>Default expiration for new mute rules: "1 hour", "24 hours", "7 days", or "Never".</summary>
     public string MuteRuleDefaultExpiration { get; set; } = "24 hours";
@@ -250,7 +250,7 @@ public sealed class ViewerAppSettings
         AlertCooldownMinutes = Clamp(AlertCooldownMinutes, 1, 120, 5);
         EmailCooldownMinutes = Clamp(EmailCooldownMinutes, 1, 120, 15);
         AlertDeliveryMode = (AlertDeliveryMode is "Summary" or "PerEvent") ? AlertDeliveryMode : "Summary";
-        AlertPerEventMaxPerCycle = Clamp(AlertPerEventMaxPerCycle, 1, 100, 5);
+        AlertPerEventMaxPerCycle = Clamp(AlertPerEventMaxPerCycle, 1, 100, AlertDefaults.PerEventMax);
         MuteRuleDefaultExpiration = (MuteRuleDefaultExpiration is "1 hour" or "24 hours" or "7 days" or "Never")
             ? MuteRuleDefaultExpiration : "24 hours";
 

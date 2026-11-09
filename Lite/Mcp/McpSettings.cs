@@ -57,7 +57,8 @@ internal sealed class McpSettings
     public bool AllowWrites { get; set; } = false;
 
     /// <summary>
-    /// Whether the four investigation tools (<see cref="McpInvestigationPolicy.InvestigationTools"/>, #5820) are
+    /// Whether the state-changing investigation tools (<see cref="McpInvestigationPolicy.InvestigationTools"/>, #5820; the two
+    /// investigation reads are ordinary reads, #8461) are
     /// offered. Default OFF. Read from <c>mcp_allow_investigations</c> (<see cref="McpInvestigationPolicy.InvestigationsSetting"/>)
     /// at start, like <c>mcp_allow_writes</c>. They are served only when this is on AND <see cref="AllowWrites"/> is
     /// off (<see cref="McpInvestigationPolicy.Served"/>): they also need a token, so with mcp_allow_tokenless_loopback on they are not served, and the mute
