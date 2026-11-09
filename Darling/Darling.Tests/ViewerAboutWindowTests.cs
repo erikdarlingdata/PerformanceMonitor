@@ -56,8 +56,7 @@ public sealed class ViewerAboutWindowTests
             return text;
         }));
 
-        Assert.Contains("SQL Server", description, StringComparison.Ordinal);
-        Assert.Contains("PostgreSQL", description, StringComparison.Ordinal);
+        Assert.Contains("every monitored SQL Server and PostgreSQL server", description, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -69,12 +68,15 @@ public sealed class ViewerAboutWindowTests
             Show(window);
             var content = (FrameworkElement)window.Content;
             var client = (FrameworkElement)VisualTreeHelper.GetChild(window, 0);
+            // The window's own layout pass clamps the content's DesiredSize to the height the window offered, so content that
+            // does not fit still reports a fit. Measured again with no height constraint, DesiredSize is what the content needs.
+            content.Measure(new Size(client.ActualWidth, double.PositiveInfinity));
             var result = (content.DesiredSize.Height, client.ActualHeight);
             window.Close();
             return result;
         }));
 
-        Assert.True(needed <= given, $"the About window's content needs {needed:F0} px of height and the window gives it {given:F0} px");
+        Assert.True(needed <= given, $"the About window's content needs {needed:F1} px of height and the window gives it {given:F1} px");
     }
 
     private static void Show(Window window)
