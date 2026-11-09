@@ -13,12 +13,13 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #8439: the families of statement shapes the live classes fill <c>pg_stat_statements</c> with share no shape. The
-/// <c>pg-cluster-roles</c> collection runs its classes one after another on one cluster, and nothing resets the module's
-/// table between them, so a fill that runs after another class's fill must bring shapes of its own: a shape already in
-/// the table adds no entry, and a fill that counts its entries after each batch reads the count as not moving and stops
-/// as if the module were not tracking the session. The module's query id ignores constants, so two texts here differ
-/// only where their structure does: the operator, the columns, the terms or the suffix.
+/// #8439: the families of statement shapes the live tests fill <c>pg_stat_statements</c> with share no shape. The module
+/// keys an entry by database as well as by query id, and more than one family runs on one database: the chain's
+/// one-free-slot fill is followed by the headroom step, and the test that lands a pass inside a batch runs the forcing
+/// fill, the one-free-slot fill and its hook's headroom shapes on one scratch database. A shape already in the table for
+/// that database adds no entry, and the one-free-slot fill counts its entries after each batch, so a fill that runs after
+/// another on the same database must bring shapes of its own. The module's query id ignores constants, so two texts here
+/// differ only where their structure does: the operator, the columns, the terms or the suffix.
 /// </summary>
 public sealed class PgStatementFillerFamiliesTests
 {
@@ -29,8 +30,8 @@ public sealed class PgStatementFillerFamiliesTests
     public void TheOneFreeSlotFill_SharesNoShapeWithTheForcingFill_OrWithEitherHeadroomFamily(int max)
     {
         var side = (int)Math.Ceiling(Math.Sqrt((max + 1) / 8.0)) + 1;
-        /* A fill that carries on past eviction passes runs more shapes than the table is wide. */
-        var count = 2 * max;
+        /* A fill that carries on past five eviction passes, each freeing five percent, runs up to a quarter more shapes than the table is wide. */
+        var count = max + max / 4;
         var forcing = Enumerable.Range(0, count).Select(n => PgStatementTable.Shape(n, side)).ToArray();
         var oneFreeSlot = Enumerable.Range(0, count).Select(n => PgOwnStatementRoleLiveTests.FillerStatement(n, side)).ToArray();
         var headroom = Enumerable.Range(0, PgStatementTable.Headroom + 16).Select(PgStatementTable.HeadroomShape)

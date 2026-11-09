@@ -108,6 +108,12 @@ public sealed class PgOwnStatementRoleLiveTests
            the count back to exactly where the batch started: the count alone cannot tell this batch from one the module ignored. */
         await PgStatementTable.ForcePassAsync(target, ct);
 
+        /* On a narrow table a pass frees about one forcing batch, which the rest of that batch fills again: with fewer than
+           two slots free the fill runs no batch, and there is no window to land a pass in. */
+        var freeAfterPass = max - await EntryCountAsync(target, ct);
+        Assert.SkipWhen(freeAfterPass < 2,
+            $"pg_stat_statements.max is {max}: the forced pass left {freeAfterPass} free slot(s), so the fill runs no batch.");
+
         var batches = 0;
         await FillToOneFreeSlotAsync(target, ct, async before =>
         {
@@ -467,9 +473,11 @@ public sealed class PgOwnStatementRoleLiveTests
     /// product of one or more <c>1</c>s, under one of eight WHERE/LIMIT/OFFSET suffixes. Constants and aliases do not enter
     /// the module's query id, so a shape has to differ in structure to get an entry of its own, and a single-column shape
     /// would be the chain's own <c>SELECT $1 * $2</c>; <paramref name="side"/> bounds the columns and the terms, and the
-    /// family holds <c>8 * side * (side + 1)</c> shapes. The operator keeps the family apart from the other fills in the
-    /// collection: <see cref="PgStatementTable.Shape"/> builds sums and the headroom families build differences, and the
-    /// table is not reset between the collection's classes, so a shape another fill made would add no entry here.
+    /// family holds <c>8 * side * (side + 1)</c> shapes. The operator keeps the family apart from the other fills that run
+    /// on the same database: <see cref="PgStatementTable.Shape"/> builds sums and the headroom families build differences.
+    /// The chain's fill is followed by the headroom step on its own database, and the pass test's forcing fill, this fill
+    /// and its hook all run on one scratch database; a shape already present there adds no entry, and this fill counts its
+    /// entries after each batch.
     /// </summary>
     internal static string FillerStatement(int n, int side)
     {
