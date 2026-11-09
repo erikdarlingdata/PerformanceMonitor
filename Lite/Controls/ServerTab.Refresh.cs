@@ -1332,14 +1332,23 @@ public partial class ServerTab : UserControl
             if (read.Jobs.Count == 0 && !bannerShows && read.LastGoodCollection is DateTime lastGood
                 && RunningJobsNoDataMessage.Tag is string ownText && RunningJobsNoDataMessage.Text == ownText)
             {
-                RunningJobsNoDataMessage.Text = RunningJobsCurrency.NotCurrentNote(lastGood);
-                RunningJobsNoDataMessage.Visibility = System.Windows.Visibility.Visible;
+                ShowRunningJobsNotCurrent(lastGood);
             }
         }
         catch (Exception ex)
         {
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshRunningJobsAsync failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// The Running Jobs empty text when the collector has not collected within its freshness bound: the last good collection, worded
+    /// the way the tab words its other times (#8307: the Collection Health format on the tab's server clock), in place of the jobs.
+    /// </summary>
+    internal void ShowRunningJobsNotCurrent(DateTime lastGoodCollectionUtc)
+    {
+        RunningJobsNoDataMessage.Text = RunningJobsCurrency.NotCurrentNote(lastGoodCollectionUtc, utc => CollectionHealthTime.Format(utc, _serverClock));
+        RunningJobsNoDataMessage.Visibility = System.Windows.Visibility.Visible;
     }
 
     /// <summary>Tab 11 — Configuration</summary>
