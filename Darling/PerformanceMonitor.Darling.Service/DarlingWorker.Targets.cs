@@ -2130,7 +2130,7 @@ LIMIT 1";
         var where = string.IsNullOrWhiteSpace(connectedDatabase)
             ? $"run {create} in the connected database (extensions are per-database). "
             : $"run {create} in database '{connectedDatabase}', which is the one this collector connects "
-              + "to — an extension installed in a DIFFERENT database on the same cluster is invisible "
+              + "to: an extension installed in a DIFFERENT database on the same cluster is invisible "
               + "from here. ";
 
         var preload = required.Any(r => r.InstallKind == PgExtensionInstallKind.SharedPreloadLibraries)
@@ -2139,7 +2139,7 @@ LIMIT 1";
               + "whatever else is installed. "
             : string.Empty;
 
-        return $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the {names} {noun} this collector reads is "
+        return $"{ex.MessageText} (SQLSTATE {ex.SqlState}): the {names} {noun} this collector reads is "
             + "not installed on this target. This is NOT a missing grant, and no GRANT will change it: "
             + where
             + preload
