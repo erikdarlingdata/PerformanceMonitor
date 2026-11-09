@@ -2970,10 +2970,10 @@ public static partial class PlanAnalyzer
        ScanRuleMinRows rows, returned under ScanPredicateMaxSelectivity of what it read when the plan says
        how many it read, and spent at least ScanRuleMinOwnTimeSharePct of the statement's time in the scan
        when the plan carries statement time. The rows floor reads ActualRowsRead when the plan carries it;
-       when it does not (#8381), the table's cardinality stands in, scaled by the scan's executions because
-       the cardinality is a per-execution figure and the rows read are a total across executions, and a plan
-       that carries neither gives nothing to put a floor on. The impact details come out either way, so the
-       caller does not build them twice. */
+       when it does not (#8381), the table's cardinality stands in, scaled by the scan's executions (the
+       largest one thread reports, on a parallel scan) because the cardinality is a per-execution figure and
+       the rows read are a total across executions, and a plan that carries neither gives nothing to put a
+       floor on. The impact details come out either way, so the caller does not build them twice. */
     private static bool ScanPredicateIsWorthReporting(PlanNode node, PlanStatement stmt, out ScanImpact details)
     {
         details = BuildScanImpactDetails(node, stmt);
@@ -2985,7 +2985,7 @@ public static partial class PlanAnalyzer
             if (Math.Max(node.ActualRowsRead, node.ActualRows) < ScanRuleMinRows)
                 return false;
         }
-        else if (node.HasTableCardinality && node.TableCardinality * Math.Max(1, node.ActualExecutions) < ScanRuleMinRows)
+        else if (node.HasTableCardinality && node.TableCardinality * Math.Max(1, StandInExecutions(node)) < ScanRuleMinRows)
         {
             return false;
         }
@@ -2995,6 +2995,14 @@ public static partial class PlanAnalyzer
         var ownShare = OwnTimeSharePct(node, stmt);
         return ownShare is null || ownShare.Value >= ScanRuleMinOwnTimeSharePct;
     }
+
+    /* #8381: the executions that scale rule 11's cardinality stand-in. The parser sums ActualExecutions across
+       threads, so on a parallel scan the sum counts the threads, not the passes over the table: at DOP 8 a
+       table read once sums to 8. The largest count any one thread reports is the passes. */
+    private static long StandInExecutions(PlanNode node) =>
+        node.PerThreadStats.Count > 1
+            ? node.PerThreadStats.Max(t => t.ActualExecutions)
+            : node.ActualExecutions;
 
     /// <summary>
     /// Checks whether a function call in a predicate is on the column side of the comparison.
