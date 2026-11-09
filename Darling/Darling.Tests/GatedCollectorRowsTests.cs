@@ -503,6 +503,245 @@ public sealed class GatedCollectorRowsLiveTests
         });
     }
 
+    /// <summary>One database's row in a server's newest <c>query_store_health</c> capture: the readable-secondary bit is <c>readonly_reason</c> 8.</summary>
+    private static async Task CaptureAsync(NpgsqlConnection c, int id, string server, DateTime captureTime, string database, int readonlyReason, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand(
+            """
+            INSERT INTO query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason,
+                                            current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days,
+                                            max_plans_per_query, interval_length_minutes, query_capture_mode, wait_stats_capture_mode)
+            VALUES ($1, $2, $3, $4, $5, $6, 'READ_WRITE', $7, 100, 1000, 'AUTO', 30, 200, 60, 'AUTO', 'ON')
+            """, c);
+        cmd.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        cmd.Parameters.AddWithValue(DateTime.SpecifyKind(captureTime, DateTimeKind.Unspecified));
+        cmd.Parameters.AddWithValue(id);
+        cmd.Parameters.AddWithValue(server);
+        cmd.Parameters.AddWithValue(database);
+        cmd.Parameters.AddWithValue((readonlyReason & 8) != 0 ? "READ_ONLY" : "READ_WRITE");
+        cmd.Parameters.AddWithValue(readonlyReason);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    [Fact]
+    public async Task ASqlServerThatIsAReadableSecondaryForEveryQueryStoreDatabase_ListsQueryStoreHintsAsNotCollectedWithTheReason_AndAPrimaryDoesNot()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* #8361: on a server whose every Query Store database is a readable secondary the scheduler does not run
+               query_store_hints, so its logged row would read as a run that needs a look. The newest health capture saying so turns
+               it into a not_collected row carrying the readable-secondary sentence. A primary, and a server with one database Query
+               Store is still read for, keep the ordinary row. */
+            var capture = DateTime.UtcNow.AddMinutes(-3);
+            async Task LogAllAsync(int id, string server, params int[] readonlyReasons)
+            {
+                await RegisterAsync(connection, id, server, MonitoredEngineKind.SqlServer, null, ct);
+                await LogAsync(connection, id, server, "wait_stats", 5, ct);
+                await LogAsync(connection, id, server, "query_store_hints", 5, ct);
+                for (var i = 0; i < readonlyReasons.Length; i++)
+                {
+                    await CaptureAsync(connection, id, server, capture, $"db{i + 1}", readonlyReasons[i], ct);
+                }
+            }
+
+            async Task<JsonElement[]> RowsAsync(string server, bool full)
+            {
+                var (_, doc) = await HealthAsync(postgres, server, full, ct);
+                using (doc)
+                {
+                    return doc.RootElement.GetProperty("collectors").EnumerateArray().Select(r => r.Clone()).ToArray();
+                }
+            }
+
+            const int secondaryId = 524_921;
+            await LogAllAsync(secondaryId, "qs-secondary", 8, 8);
+            const int primaryId = 524_922;
+            await LogAllAsync(primaryId, "qs-primary", 0, 0);
+            const int mixedId = 524_923;
+            await LogAllAsync(mixedId, "qs-mixed", 8, 0);
+
+            /* The sentence the Query Store reads already answer with on this server; the health row carries the same one. */
+            var reason = await DarlingQueryStoreReadableSecondary.MessageAsync(postgres, secondaryId, "qs-secondary", 30, ct);
+            Assert.NotNull(reason);
+
+            foreach (var full in new[] { false, true })
+            {
+                var rows = await RowsAsync("qs-secondary", full);
+                Assert.Equal(1, rows.Count(r => r.GetProperty("collector").GetString() == "wait_stats"));
+                var hints = rows.Single(r => r.GetProperty("collector").GetString() == "query_store_hints");
+                Assert.Equal("not_collected", hints.GetProperty("status").GetString());
+                Assert.Equal(reason, hints.GetProperty("message").GetString());
+                Assert.Equal(new[] { "collector", "status", "message" }, hints.EnumerateObject().Select(p => p.Name).ToArray());
+
+                foreach (var server in new[] { "qs-primary", "qs-mixed" })
+                {
+                    var other = await RowsAsync(server, full);
+                    Assert.Equal(2, other.Length);
+                    Assert.DoesNotContain(other, r => r.GetProperty("status").GetString() == "not_collected");
+                }
+            }
+        });
+    }
+
+    /// <summary>The newest <c>server_properties</c> row's role, as the collector writes it (PRIMARY, SECONDARY, Standalone).</summary>
+    private static async Task RoleAsync(NpgsqlConnection c, int id, string server, string role, TimeSpan age, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand(
+            "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, ag_replica_role) VALUES ($1, $2, $3, $4, $5)", c);
+        cmd.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        cmd.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow - age, DateTimeKind.Unspecified));
+        cmd.Parameters.AddWithValue(id);
+        cmd.Parameters.AddWithValue(server);
+        cmd.Parameters.AddWithValue(role);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>A schedule row that disables <paramref name="collector"/> for the server, the way an operator does for a secondary's Query Store collectors.</summary>
+    private static async Task DisableAsync(NpgsqlConnection c, int id, string collector, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand(
+            "INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) VALUES ($1, $2, 60, 30, FALSE)", c);
+        cmd.Parameters.AddWithValue(id);
+        cmd.Parameters.AddWithValue(collector);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    [Fact]
+    public async Task AFrozenCaptureOnAPrimary_WhoseQueryStoreHealthIsDisabled_KeepsTheOrdinaryHintsRow()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* The capture flags every database as a readable secondary, but query_store_health is disabled for the server, so
+               nothing refreshes it, and the newest role says the server is now the primary: the gate does not hold, and the
+               health row must agree with the gate. The same facts with the collector enabled keep the capture in charge. */
+            var old = TimeSpan.FromDays(2);
+            const int frozenId = 524_924;
+            await RegisterAsync(connection, frozenId, "qs-frozen", MonitoredEngineKind.SqlServer, null, ct);
+            await LogAsync(connection, frozenId, "qs-frozen", "query_store_hints", 5, ct);
+            await CaptureAsync(connection, frozenId, "qs-frozen", DateTime.UtcNow - old, "db1", 8, ct);
+            await CaptureAsync(connection, frozenId, "qs-frozen", DateTime.UtcNow - old, "db2", 8, ct);
+            await RoleAsync(connection, frozenId, "qs-frozen", "PRIMARY", TimeSpan.FromMinutes(5), ct);
+            await DisableAsync(connection, frozenId, "query_store_health", ct);
+
+            const int liveId = 524_925;
+            await RegisterAsync(connection, liveId, "qs-refreshing", MonitoredEngineKind.SqlServer, null, ct);
+            await LogAsync(connection, liveId, "qs-refreshing", "query_store_hints", 5, ct);
+            await CaptureAsync(connection, liveId, "qs-refreshing", DateTime.UtcNow - old, "db1", 8, ct);
+            await CaptureAsync(connection, liveId, "qs-refreshing", DateTime.UtcNow - old, "db2", 8, ct);
+            await RoleAsync(connection, liveId, "qs-refreshing", "PRIMARY", TimeSpan.FromMinutes(5), ct);
+
+            var (_, frozen) = await HealthAsync(postgres, "qs-frozen", false, ct);
+            using (frozen)
+            {
+                var row = frozen.RootElement.GetProperty("collectors").EnumerateArray().Single(r => r.GetProperty("collector").GetString() == "query_store_hints");
+                Assert.NotEqual("not_collected", row.GetProperty("status").GetString());
+            }
+
+            var (_, refreshing) = await HealthAsync(postgres, "qs-refreshing", false, ct);
+            using (refreshing)
+            {
+                var row = refreshing.RootElement.GetProperty("collectors").EnumerateArray().Single(r => r.GetProperty("collector").GetString() == "query_store_hints");
+                Assert.Equal("not_collected", row.GetProperty("status").GetString());
+            }
+        });
+    }
+
+    [Fact]
+    public async Task TheFleetForm_ListsAReadableSecondaryUnderNotApplicable_WithTheReason_AndAPrimaryWithNoRunUnderNoRun()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* Neither server has a query_store_hints run in the window. The secondary is skipped by the gate and carries the
+               readable-secondary sentence; the primary has not run for some other reason and stays a no_run_in_window row. */
+            const int secondaryId = 524_926;
+            await RegisterAsync(connection, secondaryId, "qs-fleet-secondary", MonitoredEngineKind.SqlServer, null, ct);
+            await CaptureAsync(connection, secondaryId, "qs-fleet-secondary", DateTime.UtcNow.AddMinutes(-3), "db1", 8, ct);
+            const int primaryId = 524_927;
+            await RegisterAsync(connection, primaryId, "qs-fleet-primary", MonitoredEngineKind.SqlServer, null, ct);
+            await CaptureAsync(connection, primaryId, "qs-fleet-primary", DateTime.UtcNow.AddMinutes(-3), "db1", 0, ct);
+
+            var reason = await DarlingQueryStoreReadableSecondary.MessageAsync(postgres, secondaryId, "qs-fleet-secondary", 30, ct);
+            Assert.NotNull(reason);
+
+            var json = await DarlingMcpDataTools.GetCollectionHealth(postgres, "*", collector_name: "query_store_hints", hours_back: 24, cancellationToken: ct);
+            using var doc = JsonDocument.Parse(json);
+            var servers = doc.RootElement.GetProperty("servers").EnumerateArray().ToArray();
+            var notApplicable = doc.RootElement.GetProperty("not_applicable").EnumerateArray().ToArray();
+
+            var primary = Assert.Single(servers, s => s.GetProperty("server_name").GetString() == "qs-fleet-primary");
+            Assert.Equal("no_run_in_window", primary.GetProperty("outcome").GetString());
+            Assert.DoesNotContain(servers, s => s.GetProperty("server_name").GetString() == "qs-fleet-secondary");
+
+            var secondary = Assert.Single(notApplicable, s => s.GetProperty("server_name").GetString() == "qs-fleet-secondary");
+            Assert.Equal(reason, secondary.GetProperty("reason").GetString());
+            Assert.Equal(1, doc.RootElement.GetProperty("servers_not_applicable").GetInt32());
+            Assert.Equal(1, doc.RootElement.GetProperty("servers_with_no_run").GetInt32());
+        });
+    }
+
+    [Fact]
+    public async Task TheFleetForm_AsksTheStoreAFixedNumberOfTimesForTheReadableSecondaryReasons_WhateverTheFleetSize()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* Six enabled servers, none with a query_store_hints run in the window: two readable secondaries (one with a frozen
+               capture whose query_store_health is disabled and whose newest role reads PRIMARY, so it is not gated), a primary, a
+               server with no facts at all, a PostgreSQL target the engine gap already lists, and a secondary whose capture refreshes.
+               The health route answers outside admission, so the reasons must cost a fixed number of store commands: one read of
+               the schedule rows and one set-based read of the facts, whatever the fleet's size, and none for the engine-gated server. */
+            var capture = DateTime.UtcNow.AddMinutes(-3);
+            var old = DateTime.UtcNow.AddDays(-2);
+            const int secondaryId = 524_931;
+            await RegisterAsync(connection, secondaryId, "qs-fleet-a-secondary", MonitoredEngineKind.SqlServer, null, ct);
+            await CaptureAsync(connection, secondaryId, "qs-fleet-a-secondary", capture, "db1", 8, ct);
+            await CaptureAsync(connection, secondaryId, "qs-fleet-a-secondary", capture, "db2", 8, ct);
+            const int frozenId = 524_932;
+            await RegisterAsync(connection, frozenId, "qs-fleet-b-frozen", MonitoredEngineKind.SqlServer, null, ct);
+            await CaptureAsync(connection, frozenId, "qs-fleet-b-frozen", old, "db1", 8, ct);
+            await RoleAsync(connection, frozenId, "qs-fleet-b-frozen", "PRIMARY", TimeSpan.FromMinutes(5), ct);
+            await DisableAsync(connection, frozenId, "query_store_health", ct);
+            const int primaryId = 524_933;
+            await RegisterAsync(connection, primaryId, "qs-fleet-c-primary", MonitoredEngineKind.SqlServer, null, ct);
+            await CaptureAsync(connection, primaryId, "qs-fleet-c-primary", capture, "db1", 0, ct);
+            const int bareId = 524_934;
+            await RegisterAsync(connection, bareId, "qs-fleet-d-bare", MonitoredEngineKind.SqlServer, null, ct);
+            const int postgresId = 524_935;
+            await RegisterAsync(connection, postgresId, "qs-fleet-e-postgres", MonitoredEngineKind.Postgres, 17, ct);
+            const int secondaryTwoId = 524_936;
+            await RegisterAsync(connection, secondaryTwoId, "qs-fleet-f-secondary", MonitoredEngineKind.SqlServer, null, ct);
+            await CaptureAsync(connection, secondaryTwoId, "qs-fleet-f-secondary", capture, "db1", 8, ct);
+
+            var reasonA = await DarlingQueryStoreReadableSecondary.MessageAsync(postgres, secondaryId, "qs-fleet-a-secondary", 30, ct);
+            var reasonF = await DarlingQueryStoreReadableSecondary.MessageAsync(postgres, secondaryTwoId, "qs-fleet-f-secondary", 30, ct);
+            Assert.NotNull(reasonA);
+            Assert.NotNull(reasonF);
+
+            /* A data source whose commands are counted. The data source's own connection string leaves the password out, so it is
+               put back from the base string the scratch database shares its login with. */
+            var counting = new CommandCountingLoggerFactory();
+            var counted = new NpgsqlConnectionStringBuilder(postgres.ConnectionString) { Password = new NpgsqlConnectionStringBuilder(ConnectionString!).Password };
+            await using var countedPostgres = new NpgsqlDataSourceBuilder(counted.ConnectionString).UseLoggerFactory(counting).Build();
+            counting.Provider.Reset();
+            var json = await DarlingMcpDataTools.GetCollectionHealth(countedPostgres, "*", collector_name: "query_store_hints", hours_back: 24, cancellationToken: ct);
+            using var doc = JsonDocument.Parse(json);
+            Assert.True(doc.RootElement.TryGetProperty("not_applicable", out _), json);
+
+            string[] NamesOf(string property) => doc.RootElement.GetProperty(property).EnumerateArray().Select(s => s.GetProperty("server_name").GetString()!).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+            Assert.Equal(new[] { "qs-fleet-a-secondary", "qs-fleet-e-postgres", "qs-fleet-f-secondary" }, NamesOf("not_applicable"));
+            Assert.Equal(new[] { "qs-fleet-b-frozen", "qs-fleet-c-primary", "qs-fleet-d-bare" }, NamesOf("servers"));
+            Assert.All(doc.RootElement.GetProperty("servers").EnumerateArray(), s => Assert.Equal("no_run_in_window", s.GetProperty("outcome").GetString()));
+            var notApplicable = doc.RootElement.GetProperty("not_applicable").EnumerateArray().ToDictionary(s => s.GetProperty("server_name").GetString()!, s => s.GetProperty("reason").GetString());
+            Assert.Equal(reasonA, notApplicable["qs-fleet-a-secondary"]);
+            Assert.Equal(reasonF, notApplicable["qs-fleet-f-secondary"]);
+            Assert.Equal(3, doc.RootElement.GetProperty("servers_with_no_run").GetInt32());
+            Assert.Equal(3, doc.RootElement.GetProperty("servers_not_applicable").GetInt32());
+
+            /* The schedule rows are read once and the facts once, for the whole fleet. */
+            Assert.Equal(1, counting.Provider.CountContaining("config_collector_schedules"));
+            Assert.Equal(1, counting.Provider.CountContaining("v_query_store_health"));
+        });
+    }
+
     [Fact]
     public async Task OnASqlServerWithoutAlwaysOn_TheCompactNoteCountsOnlyTheRowsListedAsCollected()
     {

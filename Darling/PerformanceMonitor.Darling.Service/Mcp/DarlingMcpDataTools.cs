@@ -2029,7 +2029,9 @@ ORDER BY server_name";
     /// <summary>
     /// #6074: <c>get_collection_health</c> with <c>server_name</c> "*": one collector's liveness on every enabled server in one call, built by
     /// <see cref="CollectorFleetLiveness"/> from the one statement <see cref="CollectorFleetLiveness.LivenessSql"/> (one row per server, so the answer
-    /// is bounded by the fleet and not by the window). Two reads, each with the MCP deadline.
+    /// is bounded by the fleet and not by the window). Two reads, each with the MCP deadline; for <c>query_store_hints</c> two more
+    /// (#8361: every schedule row, then the readable-secondary facts of the servers with no run in one set-based statement), whatever
+    /// the fleet's size, so the cost of this admission-free route never grows with the number of servers.
     /// </summary>
     private static async Task<string> GetCollectionHealthFleetAsync(
         NpgsqlDataSource postgres, string? collector_name, int hours_back, CancellationToken cancellationToken)
@@ -2085,7 +2087,23 @@ ORDER BY server_name";
                 }
             }
 
-            return CollectorFleetLiveness.Build(collector, hours_back, windowStart, windowEnd, servers, runs);
+            /* #8361: the scheduler does not run query_store_hints on a server whose every Query Store database is a readable
+               secondary, so such a server has no run in the window. The servers with no run that the engine gap does not already
+               list are asked about together, under the gate's own judgment and in two commands whatever their number (this route
+               answers outside admission), so each that is one is listed under not_applicable with the readable-secondary sentence,
+               the way an engine gap is, instead of beside servers whose service is down. */
+            IReadOnlyDictionary<int, string>? noRunReasons = null;
+            if (string.Equals(collector, DarlingGatedCollectorRows.QueryStoreSecondaryCollector, StringComparison.Ordinal))
+            {
+                var ran = runs.Select(r => r.ServerId).ToHashSet();
+                var asked = servers
+                    .Where(s => !ran.Contains(s.ServerId)
+                        && CollectorEngineCapability.NotCollectedMessage(s.ServerName, s.EngineEdition, s.EngineKind, collector, s.AwsRdsKind) is null)
+                    .ToList();
+                noRunReasons = await DarlingGatedCollectorRows.QueryStoreSecondaryFleetMessagesAsync(postgres, asked, cancellationToken);
+            }
+
+            return CollectorFleetLiveness.Build(collector, hours_back, windowStart, windowEnd, servers, runs, noRunReasons);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -2233,6 +2251,17 @@ ORDER BY server_name";
                 ? DarlingGatedCollectorRows.RowsShownWhenAlwaysOnOff(runningRows)
                 : runningRows;
 
+            /* #8361: on a server whose every Query Store database is a readable secondary the scheduler does not run
+               query_store_hints (nothing it could read), so its row reads HEALTHY with zero rows while its last run is recent and
+               STOPPED once the gate has held it off past the cutoff. Shown as not_collected with the readable-secondary sentence
+               instead, the way the Always On rows are, under the gate's own judgment: the newest health capture decides while the
+               query_store_health collector's effective schedule lets it refresh on this server, and otherwise the newest
+               ag_replica_role decides alone; a failing or denied row keeps its own. Only the listing changes: the rows still feed
+               the sweep arithmetic below. */
+            var queryStoreSecondary = await DarlingGatedCollectorRows.QueryStoreSecondaryMessageAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken);
+            if (queryStoreSecondary is not null)
+                shownRows = DarlingGatedCollectorRows.RowsShownWhenQueryStoreSecondary(shownRows);
+
             var compactCount = full_detail ? 0 : shownRows.Count(IsCollectionHealthCompactEligible);
             /* #4198's second cut: a row that fails the predicate above used to keep the full ~30-field shape
                below regardless of full_detail. Measured on both SKUs' #4198 fixtures that alone could not clear
@@ -2252,6 +2281,8 @@ ORDER BY server_name";
             result = result.Concat(await DarlingGatedCollectorRows.AppendAsync(postgres, resolved.ServerId, resolved.DisplayName, rows, cancellationToken));
             if (alwaysOnOff)
                 result = result.Concat(DarlingGatedCollectorRows.AlwaysOnOffRows(runningRows));
+            if (queryStoreSecondary is not null)
+                result = result.Concat(DarlingGatedCollectorRows.QueryStoreSecondaryRows(runningRows, queryStoreSecondary));
             if (engineGate is not null)
                 result = result.Concat(engineGate.NotCollectedRows(rows));
 
