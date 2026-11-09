@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// ThemeManager applies each of its three themes, and carry their brushes from that theme. The Viewer's twin of the Lite test, which
 /// runs the same check against Lite's theme files.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerSharedTextStylesTests
 {
     [Theory]

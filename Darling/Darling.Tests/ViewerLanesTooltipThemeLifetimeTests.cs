@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// unloaded is collectable, that a theme switch while it is unloaded leaves its tooltip alone, and that the tooltip catches up with the
 /// theme when the control loads again.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerLanesTooltipThemeLifetimeTests
 {
     private static Uri ThemeUri(string name) => new($"pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/{name}Theme.xaml");

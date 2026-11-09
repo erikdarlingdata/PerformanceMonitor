@@ -21,6 +21,7 @@ namespace Darling.Tests;
 /// that thread for the life of the process. A tab switch inside a <c>TabControl</c> unloads the tab too, and that must not stop the
 /// timer: the tab is still in its window and shows again on the next click.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerServerTabRefreshTimerLifetimeTests
 {
     [Fact]

@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// stolen memory that decides a low-CPU day, gives the day's reason on its Status, and says which window the badge covers. Lite's twin is
 /// FinOpsPagesReadabilityTests in Lite.Tests.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerFinOpsPagesReadabilityTests
 {
     private const int MaximizedTabWidth = 1270;

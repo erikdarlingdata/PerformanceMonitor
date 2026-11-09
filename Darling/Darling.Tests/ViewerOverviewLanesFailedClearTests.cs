@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// builds the real lanes control on the shared STA thread with the theme loaded, shows it, drives the lane through the same calls
 /// a refresh makes, and reads back what ScottPlot holds and what the crosshair would say.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerOverviewLanesFailedClearTests
 {
     private static List<(double Time, double Value)> Series(DateTime from, DateTime to, double lo, double hi) =>
