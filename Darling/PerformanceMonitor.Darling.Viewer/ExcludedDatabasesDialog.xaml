@@ -58,7 +58,7 @@
             <Button Content="_Add" Width="70" Height="26" Margin="8,0,0,0" Click="ManualAdd_Click"/>
         </StackPanel>
 
-        <TextBlock Grid.Row="4" x:Name="StatusText" FontSize="10" FontStyle="Italic"
+        <TextBlock Grid.Row="4" x:Name="StatusText" FontSize="10" FontStyle="Italic" TextWrapping="Wrap"
                    Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,8,0,0"/>
 
         <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">

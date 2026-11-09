@@ -310,12 +310,9 @@ public partial class ViewerServerTab
             if (string.IsNullOrEmpty(planXml))
             {
                 HidePlanLoading();
-                MessageBox.Show(
-                    "No execution plan was captured for this row. The plan may not have been collected yet, " +
-                    "or it aged out of the store's retention window.",
-                    "No Plan Available",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Information);
+                InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
+                "No execution plan was captured for this row. The plan may not have been collected yet, " +
+                    "or it aged out of the store's retention window.");
                 return;
             }
         }

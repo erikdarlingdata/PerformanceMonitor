@@ -646,6 +646,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         foreach (var chart in charts)
             chart.Plot.Axes.SetLimitsX(xMin, xMax);
 
+        /* #8307: a lane's plot is flush with the lane's top edge, so a Y tick at the top of the range would have its label cut
+           there. Each lane's range is given the headroom its top tick label needs, before the gutters are measured from the
+           labels the final range gets. */
+        LaneTopTickHeadroom.Apply(charts);
+
         /* #2533: every lane's Y limits and X limits are final by now, so this is the one place that can
            see all five gutters at once and hand them the widest. It has to run on EVERY refresh, not
            once at Initialize: ClearChart() calls WpfPlot.Reset(), which swaps in a fresh Plot and takes
@@ -666,10 +671,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
     /* Render an empty lane as a live, gridded chart instead of a dead black box. This is most often
        the Blocking/Deadlocking lane on a healthy server (no events = good news), so make it match the
-       populated lanes: keep the grid and show a 0-1 Y axis. We no longer blank the axes or add the old
-       "No Data" text (which SyncXAxes pushed off-screen anyway). X limits and the vertical gridlines are
+       populated lanes: keep the grid and show a 0-1 Y axis. X limits and the vertical gridlines are
        set afterward by SyncXAxes so the time axis aligns with the other lanes; the left axis keeps its
-       default numeric ticks, so 0/1 labels and horizontal gridlines render. The title arg is retained
+       default numeric ticks, so 0/1 labels and horizontal gridlines render. #8307: the lane also says it
+       is empty, in the one muted sentence the other charts use, anchored to the plot's center in pixels so
+       the X limits SyncXAxes sets afterwards do not carry it off the screen. The title arg is retained
        for call-site readability. */
     private void ShowEmpty(ScottPlot.WPF.WpfPlot chart, string title)
     {
@@ -687,19 +693,49 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         if (chart == BlockingChart) ChartStyle.UseCountAxis(chart); // #8224: an empty count lane still labels whole numbers
         chart.Plot.Axes.SetLimitsY(0, 1);
 
+        var note = chart.Plot.Add.Annotation(EmptySentence(chart), ScottPlot.Alignment.MiddleCenter);
+        note.LabelFontSize = 14;
+        note.LabelFontColor = EmptyTextColor();
+        note.LabelBackgroundColor = ScottPlot.Colors.Transparent;
+        note.LabelBorderColor = ScottPlot.Colors.Transparent;
+        note.LabelBorderWidth = 0;
+        note.LabelShadowColor = ScottPlot.Colors.Transparent;
+
         chart.Refresh();
     }
 
-    /* A lane whose read failed is drawn as the empty lane is, then says so over it, so it cannot pass for a quiet healthy lane. */
+    /// <summary>The sentence an empty lane shows, the one the other charts use.</summary>
+    private string EmptySentence(ScottPlot.WPF.WpfPlot chart) => $"No {LaneName(chart)} data in this window";
+
+    /// <summary>The lane's name in its empty sentence, the one Initialize uses before the first read.</summary>
+    private string LaneName(ScottPlot.WPF.WpfPlot chart) =>
+        chart == CpuChart ? "SQL CPU"
+        : chart == WaitStatsChart ? "Wait Stats"
+        : chart == BlockingChart ? "Blocking"
+        : chart == MemoryChart ? "Buffer Pool"
+        : "I/O Latency";
+
+    /// <summary>The theme's muted text color (the one the XAML empty hints use), or the palette's placeholder grey when no theme is loaded.</summary>
+    private static ScottPlot.Color EmptyTextColor() =>
+        System.Windows.Application.Current?.TryFindResource("ForegroundMutedBrush") is System.Windows.Media.SolidColorBrush brush
+            ? new ScottPlot.Color(brush.Color.R, brush.Color.G, brush.Color.B, brush.Color.A)
+            : ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
+
+    /* A lane whose read failed is drawn as the empty lane is (its ruler and grid) and says only that the read failed, so it cannot
+       pass for a quiet healthy lane. */
     private void ShowFailed(ScottPlot.WPF.WpfPlot chart, string title)
     {
         ShowEmpty(chart, title);
         MarkFailed(chart);
     }
 
-    /* The note is anchored to the lane's pixels, not its axes, so SyncXAxes leaves it where it is. */
-    private static void MarkFailed(ScottPlot.WPF.WpfPlot chart)
+    /* A failed read says only that it failed: the empty sentence the lane may already carry would claim the window holds no data,
+       which a read that did not return cannot establish, so it goes before the note is added. The note is anchored to the lane's
+       pixels, not its axes, so SyncXAxes leaves it where it is. */
+    private void MarkFailed(ScottPlot.WPF.WpfPlot chart)
     {
+        foreach (var empty in chart.Plot.GetPlottables<ScottPlot.Plottables.Annotation>().Where(a => a.LabelText == EmptySentence(chart)).ToList())
+            chart.Plot.Remove(empty);
         var note = chart.Plot.Add.Annotation("read failed", ScottPlot.Alignment.MiddleCenter);
         note.LabelFontColor = ChartStyle.GetThemeColors().Text;
         note.LabelFontSize = 11;

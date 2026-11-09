@@ -115,6 +115,11 @@
                      ToolTip="Alerts raised for a client application whose name contains this value (case-insensitive) will be muted, for example Management Studio to mute SSMS cancels."/>
         </Grid>
 
+        <!-- Shown when the alert the dialog opened from has no metric name, so the rule cannot be narrowed to a type -->
+        <TextBlock Grid.Row="14" x:Name="MetricScopeNote" Visibility="Collapsed" TextWrapping="Wrap" Margin="0,0,0,8"
+                   Foreground="{DynamicResource ForegroundDimBrush}"
+                   Text="This alert has no metric name, so the rule cannot be limited to one alert type. With Metric left at (any), it mutes every alert type that matches the other fields."/>
+
         <!-- Buttons -->
         <StackPanel Grid.Row="16" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
             <Button Content="_Save" Width="80" Height="28" Margin="0,0,8,0"

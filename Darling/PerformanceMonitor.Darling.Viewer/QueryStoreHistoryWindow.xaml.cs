@@ -263,8 +263,8 @@ public partial class QueryStoreHistoryWindow : Window
 
         if (string.IsNullOrEmpty(planXml))
         {
-            MessageBox.Show(this, "No Query Store plan was captured in the collected data for this plan ID.",
-                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(this, "No Plan Available",
+                "No Query Store plan was captured in the collected data for this plan ID.");
             return;
         }
 
@@ -344,7 +344,7 @@ public partial class QueryStoreHistoryWindow : Window
         _filterPopupContent.FilterCleared += FilterPopup_FilterCleared;
 
         _filterManager.Filters.TryGetValue(columnName, out var existingFilter);
-        _filterPopupContent.Initialize(columnName, existingFilter);
+        _filterPopupContent.Initialize(columnName, existingFilter, columnHeader: ColumnFilterPopup.ColumnHeaderFor(button));
 
         _filterPopup!.PlacementTarget = button;
         _filterPopup.IsOpen = true;

@@ -241,14 +241,22 @@ public static partial class PgTargetAdvice
         var knob = KnobFact(facts, PgTargetFactKeys.ConfigSharedBuffers);
         var pressure = KnobFact(facts, PgTargetFactKeys.BufferCachePressure);
 
+        /* #8322: on Aurora the service sizes the knob, so neither the headline nor the story names initdb. */
+        var managedByService = (KnobMeta(knob, "not_applicable_on_aurora") ?? 0) > 0;
         var stated = knob is null
             ? "at the initdb default of 128 MB"
-            : KnobMb(knob.Value) + (knob.Value <= PgTargetScorer.SharedBuffersInitdbDefaultMb ? ": the initdb default" : string.Empty);
+            : KnobMb(knob.Value) + (managedByService
+                ? ": set by the service from the instance's capacity"
+                : (knob.Value <= PgTargetScorer.SharedBuffersInitdbDefaultMb ? ": the initdb default" : string.Empty));
 
         var sb = new StringBuilder(720);
-        sb.Append("`shared_buffers` is PostgreSQL's own page cache. initdb writes 128 MB into every new cluster's postgresql.conf " +
-                  "regardless of the host, so 128 MB means nobody sized it: a 64 GB host caching 128 MB of its data itself and " +
-                  "relying on the operating system's page cache for the rest. ");
+        sb.Append(managedByService
+            ? "`shared_buffers` is PostgreSQL's own page cache. On Aurora the service sets it from the instance's capacity (a " +
+              "parameter-group formula over the instance class's memory, or the current capacity units on Serverless, which " +
+              "moves it as the capacity moves), so the value is not a default nobody sized, and it is not graded here. "
+            : "`shared_buffers` is PostgreSQL's own page cache. initdb writes 128 MB into every new cluster's postgresql.conf " +
+              "regardless of the host, so 128 MB means nobody sized it: a 64 GB host caching 128 MB of its data itself and " +
+              "relying on the operating system's page cache for the rest. ");
 
         if (pressure is not null && pressure.BaseSeverity > 0)
         {
@@ -368,6 +376,20 @@ public static partial class PgTargetAdvice
         var current = knob is null ? "128 MB (assumed: no config snapshot)" : KnobMb(knob.Value);
         var atDefault = knob is null || knob.Value <= PgTargetScorer.SharedBuffersInitdbDefaultMb;
         var fired = pressure is not null && pressure.BaseSeverity > 0;
+        /* #8322: the collector's stamp for an Aurora target, where the service sizes the knob. */
+        var managedByService = (KnobMeta(knob, "not_applicable_on_aurora") ?? 0) > 0;
+
+        if (managedByService)
+        {
+            sb.Append("shared_buffers is ").Append(current)
+              .Append(", and on Aurora the service sets it from the instance's capacity: a parameter-group formula over the " +
+                      "instance class's memory, or the current capacity units on Serverless, which moves it as the capacity moves. " +
+                      "Nobody left it unsized, so raising the number is not the move. Read the capacity figures first " +
+                      "(get_pg_cpu_utilization's acu_utilization_percent and the instance class): a cache that is measurably short " +
+                      "on a capacity-sized instance is an instance too small for its working set, or a working set worth shrinking " +
+                      "(get_pg_buffer_usage: one large sequential scanner or a bloated table can churn a cache no size would satisfy).");
+            return sb.ToString();
+        }
 
         if (atDefault)
         {

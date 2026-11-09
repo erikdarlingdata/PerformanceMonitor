@@ -324,20 +324,26 @@ public sealed class DarlingServer : INotifyPropertyChanged
     public string DotTooltip => !IsEnabled
         ? string.Join(
             "\n",
+            DisplayName,
             "Collection is disabled for this server",
             "The service does not collect from a disabled server, so its silence is not an outage.",
-            "Double-click the row to open this server's tab")
+            DotTooltipAction)
         : ConnectDownSince.HasValue
         ? string.Join(
             "\n",
+            DisplayName,
             ServerCollectionStatus.Offline.Headline(),
             ServerHealthClassifier.UnreachableReason(ConnectDownSince.Value, LastConnectError),
-            "Double-click the row to open this server's tab")
+            DotTooltipAction)
         : string.Join(
             "\n",
+            DisplayName,
             CardStatus.Headline(),
             "Darling has no live ping: this is how old the newest collection is, not a connection check.",
-            "Double-click the row to open this server's tab");
+            DotTooltipAction);
+
+    /// <summary>The tooltip's last line: the gesture the sidebar supports whether it shows rows or only dots, so it names no row.</summary>
+    private const string DotTooltipAction = "Double-click to open this server's tab";
 
     /// <summary>Raises the change notifications for everything derived from the three status flags. One
     /// helper rather than three call sites per setter: <see cref="DotTooltip"/> was added after

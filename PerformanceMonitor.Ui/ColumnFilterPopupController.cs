@@ -56,7 +56,7 @@ internal sealed class ColumnFilterPopupController
 
         /* Initialize with existing filter state */
         manager.Filters.TryGetValue(columnName, out var existingFilter);
-        _content.Initialize(columnName, existingFilter, manager.GetValueCatalog(columnName), manager.AnyFilterActive);
+        _content.Initialize(columnName, existingFilter, manager.GetValueCatalog(columnName), manager.AnyFilterActive, ColumnFilterPopup.ColumnHeaderFor(button));
 
         _popup!.PlacementTarget = button;
         _popup.IsOpen = true;

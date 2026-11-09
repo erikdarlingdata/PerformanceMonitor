@@ -587,6 +587,7 @@ public partial class ServerTab : UserControl
         var totals = sorted.Select(d => d.TotalReservedMb + d.UnallocatedMb).ToArray();
 
         var sizePlot = TempDbSizeChart.Plot.Add.TimeSeries(times, totals);
+        sizePlot.LegendText = "Allocated MB";
         sizePlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("UnallocatedTempdb"));
         ChartStyle.StyleScatter(sizePlot);
         _tempDbSizeHover?.Add(sizePlot, "Allocated MB");
@@ -598,6 +599,9 @@ public partial class ServerTab : UserControl
         /* A near-flat allocation (the file sizes rarely move) would otherwise fit an axis a hundredth of a megabyte tall. */
         ChartYSpan.ApplyMinimum(TempDbSizeChart.Plot, totals);
         TempDbSizeChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbSizeChart.Plot, xMin, xMax), xMax);
+        /* #8307: the chart group gives every plot the same bottom, so without a legend of its own this chart kept an empty band
+           under its time axis the height of its siblings' legends. */
+        ShowChartLegend(TempDbSizeChart);
         TempDbSizeChart.Refresh();
     }
 
@@ -768,7 +772,7 @@ public partial class ServerTab : UserControl
         ReapplyAxisColors(FileIoReadChart);
         FileIoReadChart.Plot.YLabel("ms");
         SetChartYLimitsWithLegendPadding(FileIoReadChart, 0, readMax > 0 ? readMax : 10);
-        ShowChartLegend(FileIoReadChart);
+        ShowChartLegend(FileIoReadChart, oneRow: true);
         FileIoReadChart.Refresh();
 
         FileIoWriteChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
@@ -776,7 +780,7 @@ public partial class ServerTab : UserControl
         ReapplyAxisColors(FileIoWriteChart);
         FileIoWriteChart.Plot.YLabel("ms");
         SetChartYLimitsWithLegendPadding(FileIoWriteChart, 0, writeMax > 0 ? writeMax : 10);
-        ShowChartLegend(FileIoWriteChart);
+        ShowChartLegend(FileIoWriteChart, oneRow: true);
         FileIoWriteChart.Refresh();
     }
 
@@ -850,7 +854,7 @@ public partial class ServerTab : UserControl
         ReapplyAxisColors(FileIoReadThroughputChart);
         FileIoReadThroughputChart.Plot.YLabel("MB/s");
         SetChartYLimitsWithLegendPadding(FileIoReadThroughputChart, 0, readMax > 0 ? readMax : 1);
-        ShowChartLegend(FileIoReadThroughputChart);
+        ShowChartLegend(FileIoReadThroughputChart, oneRow: true);
         FileIoReadThroughputChart.Refresh();
 
         FileIoWriteThroughputChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
@@ -858,7 +862,7 @@ public partial class ServerTab : UserControl
         ReapplyAxisColors(FileIoWriteThroughputChart);
         FileIoWriteThroughputChart.Plot.YLabel("MB/s");
         SetChartYLimitsWithLegendPadding(FileIoWriteThroughputChart, 0, writeMax > 0 ? writeMax : 1);
-        ShowChartLegend(FileIoWriteThroughputChart);
+        ShowChartLegend(FileIoWriteThroughputChart, oneRow: true);
         FileIoWriteThroughputChart.Refresh();
     }
 
@@ -1570,9 +1574,9 @@ public partial class ServerTab : UserControl
     /// <summary>
     /// Shows legend on chart and tracks it for proper cleanup on next refresh.
     /// </summary>
-    private void ShowChartLegend(ScottPlot.WPF.WpfPlot chart)
+    private void ShowChartLegend(ScottPlot.WPF.WpfPlot chart, bool oneRow = false)
     {
-        _chartHelper.ShowChartLegend(chart);
+        _chartHelper.ShowChartLegend(chart, oneRow);
         MarkAllZero(chart);
     }
 
