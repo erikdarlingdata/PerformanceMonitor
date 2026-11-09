@@ -22,6 +22,7 @@ namespace PerformanceMonitorLite.Tests;
 /// <c>ServerName</c>, and the filter button carries that property name; the popup that opens from it must read "Filter: Server",
 /// not "Filter: ServerName". The real tab is rendered and the real button is clicked.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class FilterPopupHeaderTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

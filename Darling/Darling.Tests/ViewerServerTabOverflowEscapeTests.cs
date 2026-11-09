@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// the overflow. A control open inside the overflow (the Compare combo's list) takes the first Escape for itself, and the overflow
 /// stays until the next one. At 900x600 the filters toolbar overflows, so there is something to open.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerServerTabOverflowEscapeTests
 {
     [Fact]

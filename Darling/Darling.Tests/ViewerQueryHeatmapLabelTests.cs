@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// #8220: the Viewer's Query Heatmap axes at the app's windows. The Y labels (seven duration buckets) do not touch and the X labels
 /// stay on one line with room between them, however many buckets the window holds.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerQueryHeatmapLabelTests
 {
     private readonly ITestOutputHelper _output;

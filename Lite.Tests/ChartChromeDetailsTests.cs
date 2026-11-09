@@ -28,6 +28,7 @@ namespace Lite.Tests;
 /// one 24-hour clock, the Viewer's. And a grid cell bound to a <see cref="DateTime"/> with a <c>StringFormat</c> exports what it
 /// shows, while Copy Cell keeps the raw value.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ChartChromeDetailsTests
 {
     private const string Page = "#0A0B0C";
