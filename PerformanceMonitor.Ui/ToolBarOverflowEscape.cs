@@ -84,9 +84,10 @@ public static class ToolBarOverflowEscape
         }
 
         OnOverflowClosed(sender, e);
+        var overflowPopup = (Popup)sender;
         KeyEventHandler handler = (_, key) =>
         {
-            if (key.Key == Key.Escape && toolBar.IsOverflowOpen)
+            if (key.Key == Key.Escape && toolBar.IsOverflowOpen && !InsideANestedPopup(key.OriginalSource as DependencyObject, overflowPopup))
             {
                 toolBar.IsOverflowOpen = false;
                 key.Handled = true;
@@ -96,6 +97,33 @@ public static class ToolBarOverflowEscape
         window.PreviewKeyDown += handler;
         toolBar.SetValue(WatchProperty, new Watch(window, handler));
     }
+
+    /// <summary>
+    /// True when the key came from inside something open within the overflow: a combo whose list is down, or any other popup. That
+    /// control takes the Escape for itself, and the overflow stays until the next one. The walk goes from the key's source up to the
+    /// overflow's own popup, through the visual tree and, where a popup's content has no visual parent, its logical parent.
+    /// </summary>
+    private static bool InsideANestedPopup(DependencyObject? source, Popup overflowPopup)
+    {
+        for (var node = source; node is not null; node = Parent(node))
+        {
+            if (ReferenceEquals(node, overflowPopup) || node is ToolBar)
+            {
+                return false;
+            }
+
+            if (node is ComboBox { IsDropDownOpen: true } || node is Popup { IsOpen: true })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static DependencyObject? Parent(DependencyObject node) =>
+        (node is System.Windows.Media.Visual or System.Windows.Media.Media3D.Visual3D ? System.Windows.Media.VisualTreeHelper.GetParent(node) : null)
+        ?? LogicalTreeHelper.GetParent(node);
 
     private static void OnOverflowClosed(object? sender, EventArgs e)
     {
