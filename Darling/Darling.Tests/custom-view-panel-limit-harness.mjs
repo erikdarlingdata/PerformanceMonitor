@@ -48,7 +48,12 @@ class FakeNode {
   removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parent = null; return c; }
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
   fire(t, e = {}) { for (const fn of this.listeners[t] || []) fn({ preventDefault() {}, target: this, ...e }); }
+  click() { this.fire("click", { target: this }); }
 }
+/* Export CSV hands the browser a Blob through an object URL and a click on an anchor; the harness keeps each Blob instead. */
+const downloads = [];
+URL.createObjectURL = (blob) => { downloads.push(blob); return "blob:kept"; };
+URL.revokeObjectURL = () => {};
 globalThis.Node = FakeNode;
 globalThis.document = {
   body: new FakeNode("body"),
@@ -359,6 +364,10 @@ const out = {};
   await flush();
   out.alertHistoryViewRows = all(main).filter((n) => n.tag === "tr").map((tr) => tr.children.filter((c) => c.tag === "td").map((td) => td.textContent)).filter((r) => r.length);
   out.alertHistoryViewErrors = stripsOf(main).filter((s) => /\berror\b/.test(s.cls)).map((s) => s.text);
+  /* Export CSV on the same table: the lines the file carries, with the byte-order mark dropped. */
+  const exportButton = all(main).find((n) => n.tag === "button" && n.textContent === "Export CSV");
+  if (exportButton) { exportButton.fire("click"); await flush(); }
+  out.alertHistoryViewCsv = !exportButton ? ["no Export CSV button"] : !downloads.length ? ["no download"] : (await downloads[downloads.length - 1].text()).replace(/^\uFEFF/, "").split(/\r?\n/).filter((l) => l.length);
 }
 
 console.log(JSON.stringify(out));

@@ -181,4 +181,13 @@ public sealed class CustomViewPanelLimitBehaviourTests
         Assert.Equal(new[] { "Client Timeouts Cleared", "\u2014", "\u2014" }, rows[0]);
         Assert.Equal(new[] { "High CPU", "90.00", "80.00" }, rows[1]);
     }
+
+    /// <summary>Export CSV on the saved view's alert-history table writes the dash a state-only row's stored zero shows in its cell, as Alert
+    /// History's own export does, and a measured row's stored numbers.</summary>
+    [Fact]
+    public void ExportCsv_OnTheSavedViewsAlertHistoryTable_WritesTheDashForAStateOnlyRowsStoredZeros_AndTheNumbersOfAMeasuredRow()
+    {
+        var lines = Strings(Result.Value.GetProperty("alertHistoryViewCsv"));
+        Assert.Equal(new[] { "Metric,Value,Threshold", "Client Timeouts Cleared,\u2014,\u2014", "High CPU,90,80" }, lines);
+    }
 }
