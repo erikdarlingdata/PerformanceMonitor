@@ -129,6 +129,11 @@ internal sealed class ReadResultCache : IDisposable
     internal static TimeSpan TtlFor(string route, string? band, bool fleetRead) =>
         ReadAdmission.FleetTtlApplies(route, fleetRead) ? ReadAdmission.FleetCachedRoutes[route] : TtlOf(band);
 
+    /// <summary><see cref="TtlFor(string, string?, bool)"/>, with the view's own TTL (<see cref="ReadAdmission.ServerHeldRoutes"/>) for the
+    /// one-server form of a held view (<paramref name="serverHeld"/>, from <see cref="ReadAdmission.IsServerHeldRead"/>).</summary>
+    internal static TimeSpan TtlFor(string route, string? band, bool fleetRead, string? view, bool serverHeld) =>
+        serverHeld && ReadAdmission.ServerHeldTtl(route, view) is { } held ? held : TtlFor(route, band, fleetRead);
+
     /// <summary>The TTL bucket of now, <c>floor(now / TTL)</c>, for a key with no <c>as_of</c>.</summary>
     internal long BucketOf(TimeSpan ttl) =>
         _time.GetUtcNow().ToUnixTimeMilliseconds() / Math.Max(1L, (long)ttl.TotalMilliseconds);
