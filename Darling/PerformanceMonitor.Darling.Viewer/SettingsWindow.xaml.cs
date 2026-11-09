@@ -1961,7 +1961,7 @@ public partial class SettingsWindow : Window
                 GenericWebhookUrlBox.Text?.Trim() ?? "",
                 ViewerWebhookSealing.ShownText(_loadedNotification.GenericUrl).Trim(), StringComparison.Ordinal))
         {
-            MessageBox.Show(ViewerWebhookSigningKeys.SaveUrlFirstText, "Signing key", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(this, "Signing key", ViewerWebhookSigningKeys.SaveUrlFirstText);
             return;
         }
 
@@ -1979,7 +1979,7 @@ public partial class SettingsWindow : Window
             var key = await ViewerPasswordKey.GetSealKeyAsync(_dataService, this);
             if (key.Notice is { } notice)
             {
-                MessageBox.Show(notice, "Signing key", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Signing key", notice);
             }
 
             if (key.Sealer is null)
@@ -2066,7 +2066,7 @@ public partial class SettingsWindow : Window
             refusal = key.Refusal;
             if (key.Notice is { } notice)
             {
-                MessageBox.Show(notice, "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Settings", notice);
             }
         }
 
@@ -2142,7 +2142,7 @@ public partial class SettingsWindow : Window
         {
             /* The window closes when the save succeeds, so the status line alone would never be seen. */
             SmtpStatusText.Text = key.Notice;
-            MessageBox.Show(key.Notice, "SMTP password", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(this, "SMTP password", key.Notice);
         }
 
         if (key.Sealer is null)
@@ -2266,14 +2266,14 @@ public partial class SettingsWindow : Window
             if (SmtpPasswordBox.Password.Length == 0 && !string.IsNullOrEmpty(_loadedNotification.SmtpEncryptedPassword))
             {
                 /* The saved password is never read back into this window: nothing here can send with it. */
-                MessageBox.Show(ViewerSmtpSeal.SavedCannotTestText, "Test Email", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Email", ViewerSmtpSeal.SavedCannotTestText);
                 return;
             }
 
             var error = await EmailSendCore.SendTestEmailAsync(settings, s_branding);
             if (error == null)
             {
-                MessageBox.Show("Test email sent successfully!", "Test Email", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Email", "Test email sent successfully!");
             }
             else
             {
@@ -2334,8 +2334,9 @@ public partial class SettingsWindow : Window
         TestPagerDutyButton.IsEnabled = enabled;
     }
 
-    /// <summary>Shows why a Send Test cannot run when its box is blank because the value is saved (#5366). True when it was shown.</summary>
-    private static bool RefuseTestOfSavedValue(string? typed, string? stored, string label)
+    /// <summary>Shows why a Send Test cannot run when its box is blank because the value is saved (#5366). True when it was shown. An instance
+    /// method, so the notice is owned by this window.</summary>
+    private bool RefuseTestOfSavedValue(string? typed, string? stored, string label)
     {
         var text = ViewerWebhookSealing.CannotTestSavedValueText(typed, stored, label);
         if (text is null)
@@ -2343,7 +2344,7 @@ public partial class SettingsWindow : Window
             return false;
         }
 
-        MessageBox.Show(text, "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+        InAppMessage.Show(this, "Test Webhook", text);
         return true;
     }
 
@@ -2365,7 +2366,7 @@ public partial class SettingsWindow : Window
 
             if (error == null)
             {
-                MessageBox.Show("PagerDuty test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Webhook", "PagerDuty test notification sent successfully!");
             }
             else
             {
@@ -2401,7 +2402,7 @@ public partial class SettingsWindow : Window
 
             if (error == null)
             {
-                MessageBox.Show("Teams test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Webhook", "Teams test notification sent successfully!");
             }
             else
             {
@@ -2437,7 +2438,7 @@ public partial class SettingsWindow : Window
 
             if (error == null)
             {
-                MessageBox.Show("Slack test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Webhook", "Slack test notification sent successfully!");
             }
             else
             {
@@ -2504,7 +2505,7 @@ public partial class SettingsWindow : Window
 
             if (error == null)
             {
-                MessageBox.Show("Generic webhook test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Webhook", "Generic webhook test notification sent successfully!");
             }
             else
             {
@@ -2620,9 +2621,7 @@ public partial class SettingsWindow : Window
            the dialog's banner already said could not happen. */
         if (_dataService is not null && _dataService.IsReadOnly)
         {
-            MessageBox.Show(
-                "Your viewer preferences were saved. The monitoring settings are read-only on this seat, so they were left as they are.",
-                "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(this, "Settings", "Your viewer preferences were saved. The monitoring settings are read-only on this seat, so they were left as they are.");
             return;
         }
 
