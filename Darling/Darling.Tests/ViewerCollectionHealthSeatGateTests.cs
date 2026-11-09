@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// buttons are. The seat is told before it clicks, not by the message box or status line after. The first three tests build the real tab on
 /// a real data service whose seat is read-only; the last two drive the gating predicate the buttons take their state from.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerCollectionHealthSeatGateTests
 {
     private const string ReadOnlySentenceStart = "This viewer is connected read-only, so";

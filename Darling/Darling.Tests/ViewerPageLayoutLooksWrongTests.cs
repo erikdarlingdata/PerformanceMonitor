@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// way its load does, and reads the realized layout: which scroll viewer has an extent, what a card's share of a page is, how many times a
 /// message is said, and how many rows a legend takes.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerPageLayoutLooksWrongTests
 {
     [Fact]

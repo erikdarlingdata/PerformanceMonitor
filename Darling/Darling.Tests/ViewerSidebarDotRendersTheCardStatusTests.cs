@@ -41,6 +41,7 @@ namespace Darling.Tests;
 /// themselves — an <c>if</c> chain, a switch, a dictionary and a ternary all have to spell them.</para>
 /// </summary>
 [Trait("Stage", "Guard")] // #5798: walks the repo tree, so the guard stage runs it
+[Collection("application-theme")] // #8395: reads a card brush off the STA thread
 public sealed class ViewerSidebarDotRendersTheCardStatusTests
 {
     private static readonly DateTime Now = new(2026, 8, 21, 12, 0, 0, DateTimeKind.Utc);

@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// the app themes it, laid out in a window, and the text its grid cells actually show is read back from the visual tree, so
 /// these fail on a grid whose rows exist but whose cells are blank, and on a grid that prints a raw double.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerPostgresQueryShapesGridRenderTests
 {
     private static string ViewerDir([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "") =>

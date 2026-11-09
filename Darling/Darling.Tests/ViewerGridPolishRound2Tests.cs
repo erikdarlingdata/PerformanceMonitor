@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// rows are bound, and everything is read from the realized controls (<see cref="GridPolishProbe"/>): where each column starts, whether its header and
 /// its values end on the same edge, whether a header carries the filter button, and whether long text is trimmed with an ellipsis and a tooltip.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerGridPolishRound2Tests
 {
     private static readonly string[] Themes = { "DarkTheme", "LightTheme", "CoolBreezeTheme" };

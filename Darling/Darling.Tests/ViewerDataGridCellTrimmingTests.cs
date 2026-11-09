@@ -20,6 +20,7 @@ namespace Darling.Tests;
 /// the text a text column makes with no element style of its own and the text styled with <c>DataGridCellText</c>, the style the other
 /// cell styles build on.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerDataGridCellTrimmingTests
 {
     private sealed record Row(string Text);

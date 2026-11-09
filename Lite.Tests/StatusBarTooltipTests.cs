@@ -21,6 +21,7 @@ namespace PerformanceMonitorLite.Tests;
 /// cleared message leaves) opens no tooltip at all. The real main window is built on the shared STA thread with the Dark theme and
 /// hosted at 900x600. The Viewer's twin is in ViewerStatusBarLinesTests.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class StatusBarTooltipTests
 {
     [Fact]
