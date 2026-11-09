@@ -74,6 +74,9 @@ public sealed class FinOpsDayLabelsDisplayZoneTests : IDisposable
         var sample = SampleUtc(DateTime.UtcNow);
         await SeedCpuAsync(duckDb, sample);
         await SeedCpuAsync(duckDb, sample.AddMinutes(1));
+        /* The page loads the trend only for a server with a memory sample (the summary's point-in-time read joins its newest memory
+           row), and the trend's rows come from the CPU samples alone, so this row adds no day. */
+        await SeedMemoryAsync(duckDb, sample);
 
         var pacificDay = Assert.Single(LoadRows(duckDb, TimeDisplayMode.ServerTime, "LoadUtilizationAsync", "ProvisioningTrendGrid").Cast<ProvisioningTrendRow>()).Day;
         var utcDay = Assert.Single(LoadRows(duckDb, TimeDisplayMode.UTC, "LoadUtilizationAsync", "ProvisioningTrendGrid").Cast<ProvisioningTrendRow>()).Day;
@@ -145,6 +148,22 @@ public sealed class FinOpsDayLabelsDisplayZoneTests : IDisposable
 INSERT INTO cpu_utilization_stats
     (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
 VALUES ($1, $2, $3, 'day-labels', $2, 40, 5)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
+        cmd.Parameters.Add(new DuckDBParameter { Value = at });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private async Task SeedMemoryAsync(DuckDbInitializer duckDb, DateTime at)
+    {
+        using var connection = duckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO memory_stats
+    (collection_id, collection_time, server_id, server_name, total_physical_memory_mb, available_physical_memory_mb,
+     target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
+VALUES ($1, $2, $3, 'day-labels', 16384, 4096, 12288, 12000, 10000)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = at });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
