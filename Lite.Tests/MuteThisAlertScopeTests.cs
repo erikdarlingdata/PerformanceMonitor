@@ -23,6 +23,7 @@ namespace PerformanceMonitorLite.Tests;
 /// from that server. The dialog's list names every alert type the engines check mute rules for, and the alert's own type
 /// is selected when the dialog opens from it, so the saved rule mutes that type and nothing else from the server.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class MuteThisAlertScopeTests
 {
     private static readonly DateTime Now = new(2026, 11, 8, 12, 0, 0, DateTimeKind.Utc);

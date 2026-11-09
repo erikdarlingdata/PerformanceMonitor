@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// shown in every theme. Every check builds the real control under the Dark theme, switches the theme at run time the way Settings does
 /// (<see cref="ThemeManager.Apply"/>), and reads the color from the element that rendered.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerThemeLeftoversRenderTests
 {
     private static T Themed<T>(Func<Application, T> body) =>

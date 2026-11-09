@@ -35,6 +35,7 @@ namespace Lite.Tests;
 /// the card has quietly grown numbers of its own — which is the drift the shared class was created to end
 /// (#1562).</para>
 /// </summary>
+[Collection("application-theme")] // #8395: reads a card brush off the STA thread
 public class ServerCollectionFreshnessTests
 {
     private static readonly DateTime Now = new(2026, 8, 21, 12, 0, 0, DateTimeKind.Utc);

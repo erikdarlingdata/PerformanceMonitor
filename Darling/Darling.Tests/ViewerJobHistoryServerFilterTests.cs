@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// drop-down lists only the picked server's categories. The tests drive the real tab's own redraw (<c>ApplyChoices</c>) and its real
 /// drop-downs.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerJobHistoryServerFilterTests
 {
     private const int SqlA = 1;

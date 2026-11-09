@@ -20,6 +20,7 @@ namespace PerformanceMonitorLite.Tests;
 /// so the value it opened with reads whole: from a Blocking Detected alert, Database and Query Text span the grid; from a Failed Agent
 /// Job alert, Job Name spans it from the left edge. With Metric at (any) every box shows and the two columns stay.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class MuteRuleDialogFieldWidthTests
 {
     [Fact]

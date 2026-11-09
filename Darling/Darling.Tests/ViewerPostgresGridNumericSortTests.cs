@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// grid's own collection view does, so they fail on the column's sort key and on the mapper's raw number, not on a copy
 /// of either.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerPostgresGridNumericSortTests
 {
     private static readonly DateTime Utc = new(2026, 3, 1, 12, 0, 0, DateTimeKind.Utc);

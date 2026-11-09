@@ -320,6 +320,17 @@ public sealed class QueryTagUsageBehaviourTests
         Assert.False(busy.GetProperty("planCardAfter").GetBoolean());
     }
 
+    /// <summary>#8417: the harness advances the Retry-After wait itself, so an event loop stalled past the Retry-After (the load a busy
+    /// test run puts on the machine) does not send the second read before the harness has counted the first.</summary>
+    [Fact]
+    public void ABusyRetry_WhileTheEventLoopStallsPastTheRetryAfter_IsSentOnlyWhenTheHarnessAdvancesTheWait()
+    {
+        var busy = Run().GetProperty("busyUnderLoad");
+        Assert.Equal(1, busy.GetProperty("readsBefore").GetInt32());
+        Assert.Equal(2, busy.GetProperty("readsAfter").GetInt32());
+        Assert.True(busy.GetProperty("planCardAfter").GetBoolean());
+    }
+
     /// <summary>#7945: a small figure such as 0.04 executions keeps two significant digits instead of reading 0.0; a figure from 0.1 up keeps one
     /// decimal, and a whole number prints whole.</summary>
     [Fact]

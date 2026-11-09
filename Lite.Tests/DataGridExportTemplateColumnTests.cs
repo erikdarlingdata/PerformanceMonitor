@@ -24,6 +24,7 @@ namespace Lite.Tests;
 /// real column with the theme loaded, on the shared STA thread, and the builders behind the three menu items are
 /// asserted to carry the value.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class DataGridExportTemplateColumnTests
 {
     private sealed class Detail

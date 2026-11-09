@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// through its own render method. Every chart the tab holds is found by walking the tree, so a new chart is measured with no change
 /// here. Each failure is reported by tab and chart name.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerServerTabChartLayoutTests
 {
     private readonly ITestOutputHelper _output;

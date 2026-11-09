@@ -309,11 +309,14 @@ ORDER BY lower(database_name), database_name";
     /// #6554: the one-line reason a Query Store read on this server is empty because it is a readable secondary with
     /// <c>query_store_replica</c> off, or <c>null</c> when it is not or the read fails. The one source of the wording: the
     /// Query Store reads' <c>not_collected</c> answer, a Change Watch request's brief, the tag roll-up (#7376) and the viewer all read it
-    /// through <see cref="DarlingQueryStoreReadableSecondary"/>.
+    /// through <see cref="DarlingQueryStoreReadableSecondary"/>. #8402: the same judgment the scheduler's gate on
+    /// <c>query_store_hints</c> and <c>get_collection_health</c> reach, with the <c>query_store_health</c> collector's effective
+    /// schedule read from the store's rows (<see cref="DarlingGatedCollectorRows.QueryStoreSecondaryMessageAsync"/>), so a read
+    /// never calls a server a secondary while the gate runs the collector on it, or the reverse.
     /// </summary>
     public static Task<string?> QueryStoreReadableSecondaryMessageAsync(
         NpgsqlDataSource postgres, int serverId, string serverName, CancellationToken cancellationToken = default) =>
-        DarlingQueryStoreReadableSecondary.MessageAsync(postgres, serverId, serverName, McpCommandDeadlines.ReadSeconds, cancellationToken);
+        DarlingGatedCollectorRows.QueryStoreSecondaryMessageAsync(postgres, serverId, serverName, cancellationToken);
 
     /// <summary>
     /// #6181: the message for a Query Store read that found no sample EVER stored, when the latest health snapshot says Query
