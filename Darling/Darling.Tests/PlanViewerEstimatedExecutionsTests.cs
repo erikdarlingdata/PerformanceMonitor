@@ -84,6 +84,18 @@ public sealed class PlanViewerEstimatedExecutionsTests
         Assert.Equal(Number(rows["Est. Rows All Execs"]), Number(rows["Est. Rows Per Exec"]) * Number(rows["Est. Executions"]));
     }
 
+    [Theory]
+    /* The one formatter behind Est. Executions: a fraction keeps one decimal and a whole count has none, with thousands separators either way. */
+    [InlineData(1.0, "1")]
+    [InlineData(1001.0, "1,001")]
+    [InlineData(11.5, "11.5")]
+    [InlineData(1134.87, "1,134.9")]
+    [InlineData(1e12, "1,000,000,000,000")]
+    public void TheFormatter_KeepsOneDecimalOnlyWhenTheCountHasOne(double executions, string expected)
+    {
+        Assert.Equal(expected, MetricFormatter.FormatEstimatedExecutions(executions, CultureInfo.InvariantCulture));
+    }
+
     [Fact]
     public void ThePropertiesPanel_AndTheArrowTooltip_AgreeOnRowsForAllExecutions()
     {
