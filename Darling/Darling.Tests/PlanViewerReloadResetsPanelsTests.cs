@@ -50,7 +50,7 @@ public sealed class PlanViewerReloadResetsPanelsTests
                 Assert.Equal(Visibility.Visible, Panel(control, "PropertiesPanel").Visibility);
 
                 StaTestThread.Step("LoadPlan: one statement, over the plan on screen");
-                await control.LoadPlan(Plan(Statement(1, Scan(0))), "Pasted Plan");
+                await control.LoadPlan(Plan(Statement(1, Scan(7))), "Pasted Plan");
                 LayOut(host);
 
                 Assert.Equal(Visibility.Collapsed, Panel(control, "StatementsPanel").Visibility);
@@ -58,7 +58,13 @@ public sealed class PlanViewerReloadResetsPanelsTests
                 Assert.Equal(Visibility.Collapsed, Panel(control, "PropertiesPanel").Visibility);
                 Assert.Equal(0, ((ColumnDefinition)control.FindName("PropertiesColumn")).Width.Value);
                 Assert.Equal(Visibility.Visible, Panel(control, "PlanScrollViewer").Visibility);
-                Assert.Single(OperatorBorders(control));
+
+                /* The canvas holds the pasted plan's operators alone: the statement's own root node, which the parser adds above
+                   the plan's first operator, and its one scan (node 7). The first plan's scan (node 0) is gone. */
+                var operators = OperatorBorders(control).Select(b => (PlanNode)b.Tag).ToList();
+                Assert.Equal(2, operators.Count);
+                Assert.Contains(operators, n => n.NodeId == 7);
+                Assert.DoesNotContain(operators, n => n.NodeId == 0);
             }
             finally
             {
