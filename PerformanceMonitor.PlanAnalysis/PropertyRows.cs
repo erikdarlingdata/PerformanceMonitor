@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text;
 
 namespace PerformanceMonitor.PlanAnalysis;
@@ -95,6 +96,21 @@ public static class PropertyRows
     /// whether or not anyone is filtering.
     /// </summary>
     public static bool SectionVisible(int visibleRowCount) => visibleRowCount > 0;
+
+    /// <summary>
+    /// The name of a statement's <c>StatementParameterizationType</c>. The showplan attribute carries the code the
+    /// engine also records in <c>sys.query_store_query.query_parameterization_type</c>, whose documented values are
+    /// 0 None, 1 User (explicit parameters), 2 Simple and 3 Forced. A code outside that list is given as its number,
+    /// so a value a later engine adds stays visible.
+    /// </summary>
+    public static string ParameterizationTypeName(int code) => code switch
+    {
+        0 => "None",
+        1 => "User",
+        2 => "Simple",
+        3 => "Forced",
+        _ => code.ToString(CultureInfo.InvariantCulture),
+    };
 
     /// <summary>
     /// The whole panel as plain text, for "Copy all properties": the operator header, then a
