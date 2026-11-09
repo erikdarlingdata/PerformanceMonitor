@@ -322,7 +322,7 @@ public sealed class PgLogNamedZoneTests
                 Assert.Null(await PgLogNamedZone.ResolveAsync(unopened, notNamed, pairs, 30, ct));
                 Assert.Equal(scansBefore + 1, ZoneScans());
             }
-        }, forcePass);
+        }, forcePass, forcePassDatabase: connection.Database);
         PgStatementTable.AssertNoPassInside(run);
 
         Assert.Equal(before, await SessionZoneAsync());

@@ -27,9 +27,9 @@ namespace Darling.Tests;
 /// statements made. The body calls <see cref="BeforeReadAsync"/> between its statements and its first read; on a run
 /// that forces a pass, that is where the pass lands. <see cref="PgStatementTable.RunAsync"/> secures room in the table
 /// before each run and runs the body again when a pass landed inside it, so the run it returns is one the pass missed.
-/// The classes that use it run in the <c>pg-cluster-roles</c> collection, alone, so in a test run no other session
-/// adds shapes while a body runs and a pass inside it is a finding, not a race the retry absorbs: the retry is what
-/// makes a forcing run pass, and what a run beside another session falls back on.
+/// The forcing runs live in one-fact classes in the <c>pg-cluster-roles</c> collection, alone, so the passes a fill brings
+/// on take nobody else's entries; the plain bodies run in the parallel collections, where another session's pass inside
+/// a run is the race the retry absorbs.
 /// </summary>
 internal sealed class PgStatementTableAttempt
 {
@@ -62,7 +62,7 @@ internal sealed class PgStatementTableAttempt
     /// <summary>How many eviction passes ran inside the body: 0 where the counter is unavailable.</summary>
     public long PassesInside => (DeallocAtEnd ?? 0) - (DeallocAtStart ?? 0);
 
-    /// <summary>Called by the body between its statements and its first read. On a forcing run, fills the table until eviction passes have taken the database's entries run once, the body's own among them.</summary>
+    /// <summary>Called by the body between its statements and its first read. On a forcing run, fills the table until eviction passes have taken the entries run at most <c>callsAtMost</c> times in the body's database, the body's own among them.</summary>
     public async Task BeforeReadAsync(CancellationToken ct)
     {
         if (_forcePass)
@@ -257,11 +257,12 @@ internal static class PgStatementTable
     }
 
     /// <summary>
-    /// Fills <c>pg_stat_statements</c> with distinct statement shapes until eviction passes have taken every entry run once
-    /// in the connection's database, the body's own among them, read back after each pass. The shapes go in batches of
-    /// <see cref="FillBatch"/>, and each batch runs twice: a pass removes the entries with the least usage, an entry run once
-    /// has less than one run twice, so each pass the fill brings on takes entries run once (a body's own, and at most one
-    /// batch of the fill) and leaves the rest of the fill in place. One pass is not enough on its own: the module lowers the
+    /// Fills <c>pg_stat_statements</c> with distinct statement shapes until eviction passes have taken every entry run at most
+    /// <paramref name="callsAtMost"/> times (once, as a rule) in <paramref name="database"/> (the connection's own, as a rule),
+    /// the body's own among them, read back after each pass. The shapes go in batches of <see cref="FillBatch"/>, and each
+    /// batch runs one time more than that: a pass removes the entries with the least usage, an entry run once has less than
+    /// one run twice, so each pass the fill brings on takes the entries read back (a body's own, and at most one batch of the
+    /// fill) and leaves the rest of the fill in place. One pass is not enough on its own: the module lowers the
     /// usage of every entry a pass leaves, so entries run once before an earlier pass (another database's, or a migration's)
     /// sort below the body's and go first, and with more of them than one pass removes the body's own entry stays. The fill
     /// goes on until the database's entries run once are gone, and a whole table's worth of passes that leave one in place is
@@ -282,6 +283,7 @@ internal static class PgStatementTable
         var maxPasses = (max + passSize - 1) / passSize + 1;
         var shapes = max + FillBatch + maxPasses * (passSize + FillBatch);
         var side = (int)Math.Ceiling(Math.Sqrt(shapes / 8.0)) + 1;
+        var runs = callsAtMost + 1;
         var next = 0;
         var dealloc = start;
         for (var passes = 1; ; passes++)
@@ -299,22 +301,27 @@ internal static class PgStatementTable
                 }
 
                 var statements = batch.ToString();
-                await DarlingMcpTestData.ExecAsync(connection, ct, statements);
-                await DarlingMcpTestData.ExecAsync(connection, ct, statements);
+                for (var run = 0; run < runs; run++)
+                {
+                    await DarlingMcpTestData.ExecAsync(connection, ct, statements);
+                }
+
                 dealloc = await DeallocAsync(connection, ct);
                 if (dealloc != before)
                 {
-                    /* The pass fired inside this batch and took some of its shapes: those run once by then, which the rest
-                       of the second run made entries run once again, and on a table with few entries run once some run
-                       twice, which are gone. Two more runs of the batch put every shape of it back with the rest of the fill,
-                       at two runs or more, so the count below is of the database's other entries run once, the body's own
+                    /* The pass fired inside this batch and took some of its shapes: those run few enough times by then, which
+                       the rest of the batch's runs made entries run once again, and on a table with few such entries some
+                       run more, which are gone. As many runs again put every shape of the batch back with the rest of the
+                       fill, above what is read back, so the read below is of the database's other entries, the body's own
                        among them. The table has a pass's worth of room, so these runs bring no pass on. */
-                    await DarlingMcpTestData.ExecAsync(connection, ct, statements);
-                    await DarlingMcpTestData.ExecAsync(connection, ct, statements);
+                    for (var run = 0; run < runs; run++)
+                    {
+                        await DarlingMcpTestData.ExecAsync(connection, ct, statements);
+                    }
                 }
             }
 
-            var left = await EntriesRunOnceAsync(connection, ct);
+            var left = await EntriesRunAtMostAsync(connection, callsAtMost, database, ct);
             if (left.Count == 0)
             {
                 return;
@@ -327,11 +334,12 @@ internal static class PgStatementTable
     }
 
     /// <summary>
-    /// The entries run once the connection's database has in the table, this read's own aside: the entries a pass takes
-    /// first, a body's own among them. Each as the first 120 characters of its text. Empty where this database has no
-    /// <c>pg_stat_statements</c> view.
+    /// The entries run at most <paramref name="callsAtMost"/> times that <paramref name="database"/> (the connection's own when
+    /// NULL) has in the table, the fill's own reads aside (they name the module or carry the helper's alias; a pass can take
+    /// the counter read, whose next run then makes it an entry run once again, so counting it would never end): the entries
+    /// a pass takes first, a body's own among them. Each as the first 120 characters of its text. Empty where the connection's database has no <c>pg_stat_statements</c> view.
     /// </summary>
-    private static async Task<IReadOnlyList<string>> EntriesRunOnceAsync(NpgsqlConnection connection, CancellationToken ct)
+    private static async Task<IReadOnlyList<string>> EntriesRunAtMostAsync(NpgsqlConnection connection, int callsAtMost, string? database, CancellationToken ct)
     {
         var texts = new List<string>();
         if (await ViewSchemaAsync(connection, "pg_stat_statements", ct) is not string schema)
@@ -341,8 +349,10 @@ internal static class PgStatementTable
 
         await using var command = new NpgsqlCommand(
             "SELECT left(query, 120) AS pgss_entries_run_once FROM " + Quote(schema) + ".pg_stat_statements "
-            + "WHERE dbid = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()) AND calls = 1 "
-            + "AND query NOT LIKE '%pgss\\_entries\\_run\\_once%'", connection);
+            + "WHERE dbid = (SELECT oid FROM pg_catalog.pg_database WHERE datname = $1) AND calls <= $2 "
+            + "AND query NOT LIKE '%pg\\_stat\\_statements%' AND query NOT LIKE '%pgss\\_helper%'", connection);
+        command.Parameters.AddWithValue(database ?? connection.Database);
+        command.Parameters.AddWithValue(callsAtMost);
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -375,7 +385,7 @@ internal static class PgStatementTable
     private static async Task<string?> ViewSchemaAsync(NpgsqlConnection connection, string view, CancellationToken ct)
     {
         await using var find = new NpgsqlCommand(
-            "SELECT n.nspname FROM pg_catalog.pg_class AS c JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace "
+            "SELECT n.nspname AS pgss_helper_schema FROM pg_catalog.pg_class AS c JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace "
             + "WHERE c.relname = $1 AND c.relkind = 'v' LIMIT 1", connection);
         find.Parameters.AddWithValue(view);
         return await find.ExecuteScalarAsync(ct) as string;

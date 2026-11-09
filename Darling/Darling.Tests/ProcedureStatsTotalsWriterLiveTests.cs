@@ -947,7 +947,7 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
                 Assert.Equal(0L, await CallsAsync("%pst_gap%"));
                 Assert.Equal(0L, await CallsAsync("%set_config(%"));
                 Assert.Equal(0L, await CallsAsync("%s.collection_time > $3%"));
-            }, forcePass);
+            }, forcePass, forcePassCallsAtMost: 2);
             PgStatementTable.AssertNoPassInside(run);
 
             bodySucceeded = true;
