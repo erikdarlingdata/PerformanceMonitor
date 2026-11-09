@@ -215,7 +215,7 @@ public sealed class PgStatementsDeallocLiveTests
             Assert.Equal(5, known.GetProperty("eviction_passes_in_window").GetInt64());
             Assert.Equal(5000, known.GetProperty("max_entries").GetInt64());
             var note = known.GetProperty("note").GetString();
-            Assert.Contains("evicted entries 5 time(s)", note, StringComparison.Ordinal);
+            Assert.Contains("evicted entries 5 times", note, StringComparison.Ordinal);
             Assert.Contains("currently 5000", note, StringComparison.Ordinal);
 
             /* Known and zero: a count of 0, no note. */
