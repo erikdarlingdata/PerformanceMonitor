@@ -18,7 +18,11 @@ public sealed partial class PgFactCollector
 {
     /* #5320: no statement text. The fact is keyed on the query hash and carries only numbers, so the read used to
        fetch a 200-character cut of the text for nothing, and a cut text read here would have been judged as a prefix.
-       The text is read, judged whole and then cut where an answer prints it (the BAD_ACTOR drill-down). */
+       The text is read, judged whole and then cut where an answer prints it (the BAD_ACTOR drill-down).
+       #8403: every row of the window counts, including a snapshot in which a long execution accrued CPU and reads
+       but no execution completed (delta_execution_count 0). The BAD_ACTOR drill-down sums the same rows, so the
+       finding's headline average and the drill-down beside it describe the same work. The execution bar in HAVING
+       still gates on completions, and the ordering guards its divisor. */
     public const string BadActorSql = @"
 SELECT
     database_name,
@@ -41,7 +45,6 @@ FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-AND   delta_execution_count > 0
 GROUP BY database_name, query_hash
 HAVING SUM(delta_execution_count) >= 100
 ORDER BY SUM(delta_worker_time)::DOUBLE PRECISION / GREATEST(SUM(delta_execution_count), 1) *
