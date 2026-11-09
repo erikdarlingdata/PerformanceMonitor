@@ -748,8 +748,9 @@ public sealed class AlertSettingsRow
     /// <c>delivery_mode</c> text, matching the service's <c>AlertNotificationMode</c> names. Default "Summary" (V18 DDL).</summary>
     public string DeliveryMode { get; set; } = "Summary";
 
-    /// <summary>Per-event mode's per-cycle incident cap before the "+N more" batch. Default 5 (V18 DDL); clamped 1–100.</summary>
-    public int PerEventMax { get; set; } = 5;
+    /// <summary>Per-event mode's per-cycle incident cap before the "+N more" batch. Default <see cref="AlertDefaults.PerEventMax"/>, the
+    /// V18 column default; clamped 1–100.</summary>
+    public int PerEventMax { get; set; } = AlertDefaults.PerEventMax;
 
     /* The long-running-query read shape (V20): the service forwards these to the LRQ read. Defaults match Lite's
        App.* (5 rows / every filter on) so a freshly-seeded row suppresses the same noise it always did. */

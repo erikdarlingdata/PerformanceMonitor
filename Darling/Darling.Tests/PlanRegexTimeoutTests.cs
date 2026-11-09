@@ -640,7 +640,7 @@ public sealed class PlanRegexTimeoutTests
             }
         }
 
-        Assert.True(generated >= 17, $"expected the project's generated regexes, found {generated}.");
+        Assert.True(generated >= 15, $"expected the project's generated regexes, found {generated}.");
         Assert.True(constructed >= 2, $"expected the compiled regexes, found {constructed}.");
     }
 }

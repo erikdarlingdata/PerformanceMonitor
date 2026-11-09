@@ -297,7 +297,7 @@ public partial class App : Application
     /* #1141: deadlock/blocking notification delivery — Summary (one batched card per cycle, the default)
        or PerEvent (one notification per distinct incident, capped, for per-incident ticketing). */
     public static AlertNotificationMode AlertDeliveryMode { get; set; } = AlertNotificationMode.Summary;
-    public static int AlertPerEventMaxPerCycle { get; set; } = 10; // Max per-event notifications per cycle before "+N more"
+    public static int AlertPerEventMaxPerCycle { get; set; } = AlertDefaults.PerEventMax; // Max per-event notifications per cycle before "+N more"
     public static string MuteRuleDefaultExpiration { get; set; } = "24 hours"; // Default expiration for new mute rules
     public static bool LogAlertDismissals { get; set; } = true; // Log alert dismiss/mute actions to file
 
@@ -1148,7 +1148,7 @@ public partial class App : Application
         }
 
         MessageBox.Show(
-            $"{s_badSettingValues.Count} setting(s) in settings.json could not be read and are at their " +
+            $"{CountText.Plural(s_badSettingValues.Count, "setting")} in settings.json could not be read and {(s_badSettingValues.Count == 1 ? "is at its" : "are at their")} " +
             "defaults for this session. Everything else in the file loaded normally.\n\n" +
             $"{Path.Combine(ConfigDirectory, "settings.json")}\n\n" +
             string.Join("\n", s_badSettingValues) + "\n\n" +

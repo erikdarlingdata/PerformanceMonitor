@@ -433,7 +433,7 @@ LEFT JOIN earliest e ON e.schema_name = l.schema_name AND e.table_name = l.table
 ORDER BY growth_mb DESC NULLS LAST, l.schema_name, l.table_name
 LIMIT $5";
 
-    /// <summary>Daily reserved-MB series for the ranked top-N objects (heatmap). $1 server_id, $2 database, $3 window start, $4 latest instant, $5 earliest instant, $6 topN — the two instants come from <see cref="ObjectGrowthBoundsSql"/>.</summary>
+    /// <summary>Daily reserved-MB series for the ranked top-N objects (heatmap). $1 server_id, $2 database, $3 window start, $4 latest instant, $5 earliest instant, $6 topN — the two instants come from <see cref="ObjectGrowthBoundsSql"/> — $7 the days' labels (date[]), $8 their starts and $9 their ends (timestamp[], naive UTC, half-open): one element per <see cref="DayBucket"/>. Each sample lands in the day whose range holds it, so a column is a day of the caller's calendar: UTC, or the selected time display's.</summary>
     public const string ObjectGrowthSeriesSql = @"
 WITH latest AS (
     SELECT schema_name, table_name, SUM(reserved_mb) AS cur_reserved_mb
@@ -454,26 +454,47 @@ ranked AS (
     LEFT JOIN earliest e ON e.schema_name = l.schema_name AND e.table_name = l.table_name
     ORDER BY growth_mb DESC NULLS LAST, l.schema_name, l.table_name
     LIMIT $6
+),
+days AS (
+    SELECT day, start_utc, end_utc
+    FROM unnest($7::date[], $8::timestamp[], $9::timestamp[]) AS d(day, start_utc, end_utc)
 )
 SELECT
     ios.schema_name,
     ios.table_name,
-    date_trunc('day', ios.collection_time) AS the_day,
+    d.day AS the_day,
     SUM(ios.reserved_mb) AS reserved_mb
 FROM v_index_object_stats ios
 JOIN ranked r ON r.schema_name = ios.schema_name AND r.table_name = ios.table_name
+JOIN days d
+  ON ios.collection_time >= d.start_utc
+ AND ios.collection_time < d.end_utc
 WHERE ios.server_id = $1 AND ios.database_name = $2 AND ios.collection_time >= $3
-GROUP BY ios.schema_name, ios.table_name, date_trunc('day', ios.collection_time)
+GROUP BY ios.schema_name, ios.table_name, d.day
 ORDER BY ios.schema_name, ios.table_name, the_day";
+
+    /// <summary>
+    /// Object-growth heatmap data for a single database (#1138 §3A) with the samples bucketed by UTC day, the day a caller with no
+    /// display, such as the MCP tools, names: the UTC days of the window, from <paramref name="windowStart"/> to the instant
+    /// <paramref name="daysBack"/> days after it.
+    /// </summary>
+    public static Task<(List<ObjectSizeGrowthDto> Objects, List<FinOpsObjectDaySample> Samples)> GetObjectGrowthHeatmapDataAsync(
+        NpgsqlDataSource dataSource, int serverId, string databaseName, DateTime windowStart, int daysBack, int topN,
+        int commandTimeoutSeconds, CancellationToken cancellationToken) =>
+        GetObjectGrowthHeatmapDataAsync(
+            dataSource, serverId, databaseName, windowStart, daysBack,
+            DarlingFinOpsUtilizationReader.UtcDays(windowStart, windowStart.AddDays(daysBack)), topN, commandTimeoutSeconds, cancellationToken);
 
     /// <summary>
     /// Object-growth heatmap data for a single database (#1138 §3A): the ranked top-N summary rows and the
     /// long-form daily reserved-MB samples (pivoted to a matrix by FinOpsHeatmapBuilder). Two pooled
     /// commands (mirrors Lite's two-command split for DuckDB's one-result-set-per-command limit).
     /// <paramref name="windowStart"/> is the naive-UTC window start the caller computed from <paramref name="daysBack"/>.
+    /// <paramref name="days"/> are the days the samples are bucketed by (<see cref="DayBucket"/>): UTC days for a caller with no
+    /// display, and the selected time display's days for the Viewer, so each sample's Day is a day of the caller's calendar.
     /// </summary>
     public static async Task<(List<ObjectSizeGrowthDto> Objects, List<FinOpsObjectDaySample> Samples)> GetObjectGrowthHeatmapDataAsync(
-        NpgsqlDataSource dataSource, int serverId, string databaseName, DateTime windowStart, int daysBack, int topN,
+        NpgsqlDataSource dataSource, int serverId, string databaseName, DateTime windowStart, int daysBack, IReadOnlyList<DayBucket> days, int topN,
         int commandTimeoutSeconds, CancellationToken cancellationToken)
     {
         var objects = new List<ObjectSizeGrowthDto>();
@@ -504,6 +525,8 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
         {
             return (objects, samples);
         }
+
+        days = DaysThrough(days, latest);
 
         await using (var command = dataSource.CreateCommand(ObjectGrowthSummarySql))
         {
@@ -542,6 +565,7 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = latest });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = earliest });
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
+            DarlingFinOpsUtilizationReader.AddDayBuckets(command, days);
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -555,6 +579,29 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
         }
 
         return (objects, samples);
+    }
+
+    /// <summary>
+    /// <paramref name="days"/>, with days appended until the last one ends after <paramref name="latest"/>, the window's newest
+    /// sample. The caller builds its days through its own clock, and a sample stamped at or after the last day's end, which the
+    /// store's host writes when the caller's clock trails it, would otherwise match no day and leave the series while the bounds
+    /// read already counts it. Each appended day starts where the last one ends and runs a day; one with no sample adds no column,
+    /// since the matrix takes its columns from the samples.
+    /// </summary>
+    internal static IReadOnlyList<DayBucket> DaysThrough(IReadOnlyList<DayBucket> days, DateTime latest)
+    {
+        if (days.Count == 0 || days[^1].EndUtc > latest)
+        {
+            return days;
+        }
+
+        var covered = new List<DayBucket>(days);
+        while (covered[^1].EndUtc <= latest)
+        {
+            var last = covered[^1];
+            covered.Add(new DayBucket(last.Day.AddDays(1), last.EndUtc, last.EndUtc.AddDays(1)));
+        }
+        return covered;
     }
 
     /// <summary>Per-index size + usage for one object at its database's latest snapshot (Storage Growth index drill).

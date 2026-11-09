@@ -362,7 +362,7 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
         var audit = DarlingPgLoggingAudit.Audit(rows);
 
         Assert.True(audit.Managed);
-        Assert.Contains("2 rds.* parameter(s)", audit.HostingEvidence, StringComparison.Ordinal);
+        Assert.Contains("2 rds.* parameters", audit.HostingEvidence, StringComparison.Ordinal);
 
         foreach (var facet in audit.Facets)
         {

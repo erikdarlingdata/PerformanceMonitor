@@ -10,8 +10,10 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Npgsql;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -112,9 +114,11 @@ public sealed class DailySummaryRangeCache<TRow>
     /// using the closed-day cache when <paramref name="asOfNow"/> is true (#4232 ruling item 5 -- an explicit
     /// end time is not "as of now" and always runs <paramref name="runRange"/> over the whole range, unmemoized).
     /// </summary>
-    /// <param name="storeKey">Distinguishes stores/connections sharing one cache instance (the service keeps ONE
-    /// cache for every store it serves). Reference-typed store handles (e.g. <c>NpgsqlDataSource</c>) compare by
-    /// identity here, which is exactly "same store"; a per-instance cache (the WPF viewer) can pass a constant.</param>
+    /// <param name="storeKey">Distinguishes stores sharing one cache instance (the service keeps ONE cache for every
+    /// store it serves). Compared by value: the service passes <see cref="DailySummaryRangeCache.StoreKeyFor"/>, which
+    /// names the store a data source reaches rather than the data source, because the worker, the web host and the MCP
+    /// host each hold their own over one store and a block built through one must serve a read through another (#8451);
+    /// a per-instance cache (the WPF viewer) can pass a constant.</param>
     /// <param name="routedSql">The exact statement text the caller resolved for THIS range, reused for every
     /// sub-range <paramref name="runRange"/> is asked to read (see the type doc) and folded into the cache key.</param>
     /// <param name="scopeKey">#4925: names the scope the rows were read under (see
@@ -253,8 +257,29 @@ public sealed class DailySummaryRangeCache<TRow>
 /// would need a row type to call (CA1000).</summary>
 public static class DailySummaryRangeCache
 {
+    private static readonly ConditionalWeakTable<NpgsqlDataSource, StoreKey> StoreKeys = new();
+
     /// <summary>#6809: the <c>trustFromUtc</c> both callers pass: the day after the retention horizon. The horizon
     /// day itself can be half-deleted on the DELETE purge path, so it is read live too. One definition for the
     /// service and the Viewer.</summary>
     public static DateTime TrustFloorFor(DateTime retentionHorizon) => retentionHorizon.Date.AddDays(1);
+
+    /// <summary>#8451: the <c>storeKey</c> the service passes for a read through <paramref name="postgres"/>: the store it
+    /// reaches (host, port and database), so two data sources over one store share its blocks. The service holds three
+    /// per store, the worker's, the web host's and the MCP host's, each with its own login, application name and pool,
+    /// and the daily-summary warmer builds a block through the worker's while a visitor reads through the web host's. The
+    /// login, application name, pool size and the rest of the string are not part of the key: every login reads the same
+    /// rows. A string that names no database reaches the login's own, as the server does. Parsed once per data source.</summary>
+    public static object StoreKeyFor(NpgsqlDataSource postgres)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+        return StoreKeys.GetValue(postgres, static source =>
+        {
+            var settings = new NpgsqlConnectionStringBuilder(source.ConnectionString);
+            return new StoreKey(settings.Host ?? "", settings.Port, settings.Database ?? settings.Username ?? "");
+        });
+    }
+
+    /// <summary>What <see cref="StoreKeyFor"/> answers: equal for two data sources over the same store.</summary>
+    private sealed record StoreKey(string Host, int Port, string Database);
 }

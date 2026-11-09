@@ -8,6 +8,7 @@
 
 using System.Collections.Generic;
 using System.Text;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -104,12 +105,12 @@ public static partial class PgTargetAdvice
         var inv = new StringBuilder();
         if (gone)
         {
-            inv.Append($"Worst of {standbys:0} standby(s) in the window: {standby}, which stopped reporting and was last seen {sinceLastSeen} before the window ended; when last seen its state was {(streaming ? "streaming" : "not streaming")}, sync_state {syncState}. ");
+            inv.Append($"Worst of {CountText.Plural((long)standbys, "standby")} in the window: {standby}, which stopped reporting and was last seen {sinceLastSeen} before the window ended; when last seen its state was {(streaming ? "streaming" : "not streaming")}, sync_state {syncState}. ");
             inv.Append($"Window peak replay gap {FmtBytes(peak)}, {FmtBytes(latest)} when last seen; the stage furthest behind at that last sample was {stage} ({FmtBytes(stageBytes)} opened there). ");
         }
         else
         {
-            inv.Append($"Worst of {standbys:0} standby(s) in the window: {standby}, state {(streaming ? "streaming" : "not streaming")}, sync_state {syncState}. ");
+            inv.Append($"Worst of {CountText.Plural((long)standbys, "standby")} in the window: {standby}, state {(streaming ? "streaming" : "not streaming")}, sync_state {syncState}. ");
             inv.Append($"Window peak replay gap {FmtBytes(peak)}, latest {FmtBytes(latest)}; the stage furthest behind at the latest sample is {stage} ({FmtBytes(stageBytes)} opened there). ");
         }
         inv.Append(driftComputable
@@ -254,7 +255,7 @@ public static partial class PgTargetAdvice
         var inv = new StringBuilder();
         if (gone)
             inv.Append($"This slot stopped being reported {sinceLastSeen} before the window ended (dropped, or the slot collector stopped), so these figures are the state it was last seen in, not a pile the primary holds now; it is not graded. ");
-        inv.Append($"Worst of {slots:0} slot(s) in the window ({graded:0} graded above zero): {slot}, {kind}, wal_status {walStatus}, consumer {(active ? "ACTIVE" : "INACTIVE")}. ");
+        inv.Append($"Worst of {CountText.Plural((long)slots, "slot")} in the window ({graded:0} graded above zero): {slot}, {kind}, wal_status {walStatus}, consumer {(active ? "ACTIVE" : "INACTIVE")}. ");
         inv.Append($"Retained WAL {FmtBytes(retained)} at the latest sample against {FmtBytes(first)} at the first ({(growth > 0 ? $"+{FmtBytes(growth)}" : growth < 0 ? $"−{FmtBytes(-growth)}" : "unchanged")} over {FmtHours(spanHours)}{(spanHours > 0 && growth != 0 ? $", {FmtBytes(perHour)}/h" : string.Empty)}); the shared bar is {FmtBytes(PostgresOutagePredictorThresholds.SlotRetainedWalWarningBytes)}, the same symbol the slot alert pages on. ");
         inv.Append(inactiveKnown
             ? $"The engine reports it inactive for {FmtHours(inactiveHours)} (inactive_since). "

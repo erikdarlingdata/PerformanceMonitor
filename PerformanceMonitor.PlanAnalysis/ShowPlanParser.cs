@@ -588,7 +588,8 @@ public static class ShowPlanParser
     {
         stmt.StatementOptmLevel = stmtEl.Attribute("StatementOptmLevel")?.Value;
         stmt.StatementOptmEarlyAbortReason = stmtEl.Attribute("StatementOptmEarlyAbortReason")?.Value;
-        stmt.StatementParameterizationType = (int)ParseDouble(stmtEl.Attribute("StatementParameterizationType")?.Value);
+        var parameterizationType = stmtEl.Attribute("StatementParameterizationType")?.Value;
+        stmt.StatementParameterizationType = parameterizationType is null ? null : (int)ParseDouble(parameterizationType);
         stmt.StatementSqlHandle = stmtEl.Attribute("StatementSqlHandle")?.Value;
         stmt.DatabaseContextSettingsId = ParseLong(stmtEl.Attribute("DatabaseContextSettingsId")?.Value);
         stmt.ParentObjectId = (int)ParseDouble(stmtEl.Attribute("ParentObjectId")?.Value);
@@ -1812,7 +1813,7 @@ public static class ShowPlanParser
             var writes = ParseLong(sortSpillEl.Attribute("WritesToTempDb")?.Value);
             var reads = ParseLong(sortSpillEl.Attribute("ReadsFromTempDb")?.Value);
             var prefix = spillToTempDbEl != null
-                ? $"Sort spill level {spillLevel}, {spillThreads} thread(s)"
+                ? $"Sort spill level {spillLevel}, {spillThreads} {(spillThreads == "1" ? "thread" : "threads")}"
                 : "Sort spill";
             result.Add(new PlanWarning
             {
@@ -1838,7 +1839,7 @@ public static class ShowPlanParser
             var writes = ParseLong(hashSpillEl.Attribute("WritesToTempDb")?.Value);
             var reads = ParseLong(hashSpillEl.Attribute("ReadsFromTempDb")?.Value);
             var prefix = spillToTempDbEl != null
-                ? $"Hash spill level {spillLevel}, {spillThreads} thread(s)"
+                ? $"Hash spill level {spillLevel}, {spillThreads} {(spillThreads == "1" ? "thread" : "threads")}"
                 : "Hash spill";
             result.Add(new PlanWarning
             {
@@ -1861,7 +1862,7 @@ public static class ShowPlanParser
             !warningsEl.Elements(Ns + "SortSpillDetails").Any() &&
             !warningsEl.Elements(Ns + "HashSpillDetails").Any())
         {
-            var msg = $"Spill level {spillLevel}, {spillThreads} thread(s)";
+            var msg = $"Spill level {spillLevel}, {spillThreads} {(spillThreads == "1" ? "thread" : "threads")}";
             var grantedKB = ParseLong(spillToTempDbEl.Attribute("GrantedMemoryKB")?.Value);
             var usedKB = ParseLong(spillToTempDbEl.Attribute("UsedMemoryKB")?.Value);
             var writes = ParseLong(spillToTempDbEl.Attribute("WritesToTempDb")?.Value);
