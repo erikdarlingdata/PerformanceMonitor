@@ -1407,7 +1407,7 @@
                                      would otherwise win. -->
                                 <Expander.HeaderTemplate>
                                     <DataTemplate>
-                                        <TextBlock Text="{Binding}" Foreground="{DynamicResource ForegroundBrush}"/>
+                                        <TextBlock Text="{Binding}" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"/>
                                     </DataTemplate>
                                 </Expander.HeaderTemplate>
                                 <ItemsControl ItemsSource="{Binding Cards}"
