@@ -194,6 +194,9 @@ public partial class TimeRangeSlicerControl : UserControl
     /// <summary>The empty-window text (null when the slicer holds data); exposed for the tests.</summary>
     public string? EmptyText => _emptyText;
 
+    /// <summary>Whether the strip holds buckets for the loaded window: the grid beside it words its own empty state from this.</summary>
+    public bool HasData => _data.Count > 0;
+
     private void DrawEmptyText()
     {
         if (_emptyText is null) return;
@@ -671,9 +674,15 @@ public partial class TimeRangeSlicerControl : UserControl
     private void FireRangeChanged()
     {
         if (_data.Count == 0) return;
-        // Snap to bucket boundaries so slider positions align with the buckets shown in the graph
+        /* Snap to bucket boundaries so slider positions align with the buckets shown in the graph, inside the loaded window:
+           the grid's own load reads exactly that window, so the range sent never reaches past its ends and the "All" chip reads
+           the rows the load reads. */
         var startUtc = SlicerBuckets.Floor(UtcAtNorm(_rangeStart), _bucketMinutes);
         var endUtc = SlicerBuckets.Ceiling(UtcAtNorm(_rangeEnd), _bucketMinutes);
+        var windowStart = DateTime.SpecifyKind(DataStartUtc, DateTimeKind.Utc);
+        var windowEnd = DateTime.SpecifyKind(DataEndUtc, DateTimeKind.Utc);
+        if (startUtc < windowStart) startUtc = windowStart;
+        if (endUtc > windowEnd) endUtc = windowEnd;
         RangeChanged?.Invoke(this, new SlicerRangeEventArgs(startUtc, endUtc));
     }
 }

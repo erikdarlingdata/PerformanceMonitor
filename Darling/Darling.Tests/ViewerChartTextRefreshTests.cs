@@ -33,6 +33,7 @@ namespace Darling.Tests;
 /// window at the shared plot-area floor, keep that floor when they scroll at 900x600, their captions hide the gridline behind them,
 /// and the Wait lane's band is a light tint.
 /// </summary>
+[Collection("viewer-time-statics")]
 public sealed class ViewerChartTextRefreshTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

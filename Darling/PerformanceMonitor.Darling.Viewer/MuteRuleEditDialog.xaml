@@ -37,6 +37,7 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Create Mute Rule" FontSize="18" FontWeight="Bold"
@@ -134,8 +135,13 @@
                      ToolTip="Alerts raised for a client application whose name contains this value (case-insensitive) will match this rule, for example Management Studio to match SSMS cancels."/>
         </Grid>
 
+        <!-- Shown when the alert the dialog opened from has no metric name, so the rule cannot be narrowed to a type -->
+        <TextBlock Grid.Row="14" x:Name="MetricScopeNote" Visibility="Collapsed" TextWrapping="Wrap" Margin="0,0,0,8"
+                   Foreground="{DynamicResource ForegroundDimBrush}"
+                   Text="This alert has no metric name, so the rule cannot be limited to one alert type. With Metric left at (any), it matches every alert type that matches the other fields."/>
+
         <!-- #7040: the optional repeating schedule. Hidden on a store below V231, which has no columns for it. -->
-        <StackPanel Grid.Row="14" x:Name="ScheduleSection" Margin="0,4,0,0">
+        <StackPanel Grid.Row="15" x:Name="ScheduleSection" Margin="0,4,0,0">
             <Border BorderThickness="0,0,0,1" BorderBrush="{DynamicResource BorderBrush}" Margin="0,0,0,12"/>
             <TextBlock Text="Repeats (optional)" FontSize="14" FontWeight="SemiBold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
             <TextBlock x:Name="WindowText" Text="Mute only inside a daily window. Leave the times blank for a one-off rule. With no day ticked, every day counts. A window that ends before it starts crosses midnight and belongs to the day it starts."
@@ -171,7 +177,7 @@
             </ComboBox>
         </StackPanel>
 
-        <StackPanel Grid.Row="15" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+        <StackPanel Grid.Row="16" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
             <!-- No IsDefault: reason, expiration, server, metric and four pattern boxes make this a
                  multi-field entry form, where Enter-to-submit is a surprise (#1828/#1859). Matches the
                  Lite twin, MuteRuleDialog. -->

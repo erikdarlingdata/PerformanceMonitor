@@ -394,7 +394,8 @@ public enum ServerCardStatus
     Offline,
 
     /// <summary>The server has not been connection-checked yet (<c>IsOnline</c> is null): a card built before
-    /// the first check completed, not a dead server.</summary>
+    /// the first check completed, not a dead server. Its word is "Connecting": the collectors run before the first check
+    /// finishes, so the card's rows are already green while this state lasts, and a verdict word would contradict them.</summary>
     Unknown,
 }
 
@@ -434,7 +435,7 @@ public static class ServerCardStatusRules
         ServerCardStatus.CollectorErrors => "Warning",
         ServerCardStatus.Online => "Online",
         ServerCardStatus.Offline => "Offline",
-        _ => "Unknown"
+        _ => "Connecting"
     };
 
     /// <summary>What the word means, in words — the first line of whichever tooltip renders it. Every arm names
@@ -445,7 +446,7 @@ public static class ServerCardStatusRules
         ServerCardStatus.CollectorErrors => "Warning — one or more collectors are failing on this server",
         ServerCardStatus.Online => "Online — the last connection check succeeded",
         ServerCardStatus.Offline => "Offline — the last connection check failed",
-        _ => "Unknown — this server has not been connection-checked yet",
+        _ => "Connecting — the first connection check has not finished yet",
     };
 }
 

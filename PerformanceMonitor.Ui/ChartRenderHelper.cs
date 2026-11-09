@@ -43,8 +43,9 @@ public sealed class ChartRenderHelper
     /// chart's <see cref="WrappedLegendLayout"/> applies the one legend rule on every layout, at the size the chart has then, so a chart
     /// drawn before it had a size, or resized later, still gets the right place (beside the plot, under it, or as one row).
     /// #7385: a legend under the plot wraps only when it does not fit the chart's width, so a chart pays for a second legend line only when it must.
+    /// #8307: with <paramref name="oneRow"/> the legend under the plot keeps to one row and "+N more" whatever the chart's height.
     /// </summary>
-    public void ShowChartLegend(ScottPlot.WPF.WpfPlot chart)
+    public void ShowChartLegend(ScottPlot.WPF.WpfPlot chart, bool oneRow = false)
     {
         ChartStyle.FloorAllZeroYAxis(chart.Plot);
         var panel = chart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
@@ -57,7 +58,7 @@ public sealed class ChartRenderHelper
         legend.OutlineWidth = 0;
         legend.ShadowColor = ScottPlot.Colors.Transparent;
         // The engine sets the edge, the orientation, the padding and the alignment for the side it picks, on every layout.
-        chart.Plot.Layout.LayoutEngine = new WrappedLegendLayout(panel);
+        chart.Plot.Layout.LayoutEngine = new WrappedLegendLayout(panel) { OneRow = oneRow };
     }
 
     /// <summary>

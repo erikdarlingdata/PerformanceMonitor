@@ -264,7 +264,7 @@ public partial class ServerTab : UserControl
                 LastRefreshText,
                 ct);
             if (status is not null)
-                ConnectionStatusText.Text = status;
+                ConnectionStatusText.Text = _awaitingFirstCollection && !status.StartsWith("Error", StringComparison.Ordinal) ? ConnectingStatusText : status;
         }
         catch (Exception ex)
         {
@@ -534,15 +534,17 @@ public partial class ServerTab : UserControl
                         }
                         break;
                     case TopQueriesByDurationSubTabIndex: // Top Queries by Duration
-                        var queryStats = await ReadTopQueriesAsync(hoursBack, fromDate, toDate);
+                        /* One pair of instants for the grid read, the strip load, the comparison and the banner. */
+                        var (topQueriesStart, topQueriesEnd) = QueriesWindowUtc(hoursBack, fromDate, toDate, DateTime.UtcNow);
+                        var queryStats = await ReadTopQueriesAsync(0, topQueriesStart, topQueriesEnd);
                         _queryStatsFilterMgr!.UpdateData(queryStats);
+                        UpdateQueryStatsEmptyMessage(queryStats.Count);
                         SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
-                        _ = LoadQueryStatsSlicerAsync();
+                        _ = LoadQueryStatsSlicerAsync(topQueriesStart, topQueriesEnd);
                         {
                             /* #4284: the comparison and the banner both read UTC collection_time, so they
-                               share the SAME UTC window GetTopQueriesByCpuAsync just read
-                               (LocalDataService.GetQueriesTabWindowUtc) -- computed once and handed to both. */
-                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                               share the SAME UTC window GetTopQueriesByCpuAsync just read -- computed once and handed to both. */
+                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(0, topQueriesStart, topQueriesEnd);
                             await RefreshQueryStatsComparisonAsync(windowStart, windowEnd);
                             await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, windowStart, windowEnd);
                         }
@@ -597,7 +599,9 @@ public partial class ServerTab : UserControl
             /* Full refresh: load all sub-tabs */
             var includeMonitorSnapshots = ActiveQueriesIncludeMonitor;
             var snapshotsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Snapshots", () => Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter, includeMonitor: includeMonitorSnapshots)));
-            var queryStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStats", () => ReadTopQueriesAsync(hoursBack, fromDate, toDate));
+            /* One pair of instants for the Top Queries grid read, its strip load, its comparison and its banner. */
+            var (queryStatsStart, queryStatsEnd) = QueriesWindowUtc(hoursBack, fromDate, toDate, DateTime.UtcNow);
+            var queryStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStats", () => ReadTopQueriesAsync(0, queryStatsStart, queryStatsEnd));
             var procStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcStats", () => ReadTopProceduresAsync(hoursBack, fromDate, toDate));
             var queryStoreTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStore", () => Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate, SelectedDatabaseFilter, tags: tags))));
             var planCorrectionTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.PlanCorrections", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetPlanCorrectionsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
@@ -630,12 +634,13 @@ public partial class ServerTab : UserControl
             }
 
             _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
+            UpdateQueryStatsEmptyMessage(queryStatsTask.Result.Count);
             SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
-            _ = LoadQueryStatsSlicerAsync();
+            _ = LoadQueryStatsSlicerAsync(queryStatsStart, queryStatsEnd);
             {
                 /* #4284: UTC comparison and banner window, computed once -- see the twin comment on the
                    sub-tab-switch case above. */
-                var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(0, queryStatsStart, queryStatsEnd);
                 await RefreshQueryStatsComparisonAsync(windowStart, windowEnd);
                 await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, windowStart, windowEnd);
             }
@@ -1332,14 +1337,23 @@ public partial class ServerTab : UserControl
             if (read.Jobs.Count == 0 && !bannerShows && read.LastGoodCollection is DateTime lastGood
                 && RunningJobsNoDataMessage.Tag is string ownText && RunningJobsNoDataMessage.Text == ownText)
             {
-                RunningJobsNoDataMessage.Text = RunningJobsCurrency.NotCurrentNote(lastGood);
-                RunningJobsNoDataMessage.Visibility = System.Windows.Visibility.Visible;
+                ShowRunningJobsNotCurrent(lastGood);
             }
         }
         catch (Exception ex)
         {
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshRunningJobsAsync failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// The Running Jobs empty text when the collector has not collected within its freshness bound: the last good collection, worded
+    /// the way the tab words its other times (#8307: the Collection Health format on the tab's server clock), in place of the jobs.
+    /// </summary>
+    internal void ShowRunningJobsNotCurrent(DateTime lastGoodCollectionUtc)
+    {
+        RunningJobsNoDataMessage.Text = RunningJobsCurrency.NotCurrentNote(lastGoodCollectionUtc, utc => CollectionHealthTime.Format(utc, _serverClock));
+        RunningJobsNoDataMessage.Visibility = System.Windows.Visibility.Visible;
     }
 
     /// <summary>Tab 11 — Configuration</summary>

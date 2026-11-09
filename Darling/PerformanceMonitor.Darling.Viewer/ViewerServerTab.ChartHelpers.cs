@@ -26,7 +26,7 @@ public partial class ViewerServerTab
         ViewerChartCards.AttachChart(chart); // #8151: the clear swapped in a new plot
     }
 
-    private void ShowChartLegend(ScottPlot.WPF.WpfPlot chart) => _chartHelper.ShowChartLegend(chart);
+    private void ShowChartLegend(ScottPlot.WPF.WpfPlot chart, bool oneRow = false) => _chartHelper.ShowChartLegend(chart, oneRow);
 
     private void RefreshEmptyChart(ScottPlot.WPF.WpfPlot chart, string legendText, string yAxisLabel)
         => _chartHelper.RefreshEmptyChart(chart, legendText, yAxisLabel);

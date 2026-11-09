@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -25,6 +26,18 @@ public static class PageScroll
 {
     /// <summary>The most height a grid takes inside a page that scrolls as one.</summary>
     public const double GridMaxHeight = 400;
+
+    /// <summary>The gap between a chart and the grid under it on a page that stacks the two.</summary>
+    public const double ChartOverGridGap = 8;
+
+    /// <summary>
+    /// #8307: the least height of a page that stacks one chart over one grid: the chart keeps <see cref="ChartLayout.MinPlotHeight"/>
+    /// over the grid at the height its rows take (<paramref name="gridHeight"/>, at most <see cref="GridMaxHeight"/>) and the gap
+    /// between them. Below this the page scrolls, instead of the grid shrinking to a few rows with a scroll bar of its own beside the
+    /// page's; at or above it the page fits with no scroll bar. The page sets it again whenever the grid's size changes.
+    /// </summary>
+    public static double ChartOverGridMinHeight(double gridHeight) =>
+        ChartLayout.MinPlotHeight + Math.Clamp(gridHeight, 0, GridMaxHeight) + ChartOverGridGap;
 
     /// <summary>
     /// For a page <see cref="ScrollViewer"/>'s <c>PreviewMouseWheel</c>: scrolls the page by the wheel and marks the event handled,

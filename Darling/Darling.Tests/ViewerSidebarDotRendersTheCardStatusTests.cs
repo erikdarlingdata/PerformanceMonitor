@@ -214,12 +214,14 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
             var dot = Dot(lastCollection);
             var lines = dot.DotTooltip.Split('\n');
 
-            Assert.Equal(dot.CardStatus.Headline(), lines[0]);
-            Assert.StartsWith(dot.DotStatus, lines[0], StringComparison.Ordinal);
+            /* The first line names the server, since a rail shows the dot with no name beside it; the headline follows. */
+            Assert.Equal(dot.DisplayName, lines[0]);
+            Assert.Equal(dot.CardStatus.Headline(), lines[1]);
+            Assert.StartsWith(dot.DotStatus, lines[1], StringComparison.Ordinal);
 
             /* And it ends on the gesture THIS surface supports. ServerList_MouseDoubleClick opens the tab;
                a single click only selects, so naming one would be naming a no-op. */
-            Assert.Equal("Double-click the row to open this server's tab", lines[^1]);
+            Assert.Equal("Double-click to open this server's tab", lines[^1]);
         }
 
         var xaml = ReadRepoFileLf(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml"));
