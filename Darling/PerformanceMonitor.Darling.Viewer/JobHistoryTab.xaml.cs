@@ -564,7 +564,7 @@ public partial class JobHistoryTab : UserControl
 
         ColumnFilterState? existingFilter = null;
         _filterManager?.Filters.TryGetValue(columnName, out existingFilter);
-        _filterPopupContent!.Initialize(columnName, existingFilter);
+        _filterPopupContent!.Initialize(columnName, existingFilter, columnHeader: ColumnFilterPopup.ColumnHeaderFor(button));
 
         _filterPopup.PlacementTarget = button;
         _filterPopup.IsOpen = true;

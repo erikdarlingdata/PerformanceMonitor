@@ -97,11 +97,14 @@
                     <ComboBoxItem Content="All Servers" Tag="" IsSelected="True"/>
                 </ComboBox>
             </StackPanel>
+            <!-- One panel, so Refresh and the Dismiss buttons wrap as a group instead of one at a time as the range label changes. -->
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
             <Button Content="Refresh" Click="RefreshButton_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
             <Button x:Name="DismissSelectedButton" Content="Dismiss Selected" Click="DismissSelected_Click"
                     Margin="8,0,0,0" Padding="10,4" MinWidth="90" IsEnabled="False"/>
             <Button x:Name="DismissAllButton" Content="Dismiss All" Click="DismissAll_Click"
                     Margin="4,0,0,0" Padding="10,4" MinWidth="70"/>
+            </StackPanel>
             <Button Content="Manage Mute Rules…" Click="ManageMuteRules_Click"
                     Margin="8,0,0,0" Padding="10,4" MinWidth="90"/>
             <Button Content="Alert Rules…" Click="AlertRules_Click"

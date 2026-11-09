@@ -344,7 +344,7 @@ public partial class QueryStoreHistoryWindow : Window
         _filterPopupContent.FilterCleared += FilterPopup_FilterCleared;
 
         _filterManager.Filters.TryGetValue(columnName, out var existingFilter);
-        _filterPopupContent.Initialize(columnName, existingFilter);
+        _filterPopupContent.Initialize(columnName, existingFilter, columnHeader: ColumnFilterPopup.ColumnHeaderFor(button));
 
         _filterPopup!.PlacementTarget = button;
         _filterPopup.IsOpen = true;

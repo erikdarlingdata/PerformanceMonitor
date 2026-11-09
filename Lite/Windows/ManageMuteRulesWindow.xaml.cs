@@ -29,7 +29,13 @@ public partial class ManageMuteRulesWindow : Window
         _muteRuleService = muteRuleService;
         _rules = new ObservableCollection<MuteRule>(_muteRuleService.GetRules());
         RulesGrid.ItemsSource = _rules;
+        _rules.CollectionChanged += (_, _) => ShowEmptyState();
+        ShowEmptyState();
     }
+
+    /// <summary>An empty grid says so, in place of a bare header row.</summary>
+    private void ShowEmptyState() =>
+        NoRulesMessage.Visibility = _rules.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
     private async void AddRule_Click(object sender, RoutedEventArgs e)
     {
