@@ -323,12 +323,21 @@ public partial class PlanViewerControl : UserControl
            or exception-terminated parse sets ParsedPlan.ParseError instead of throwing; see below. */
         var analyzerConfig = AnalyzerConfig;
         var serverMetadata = ServerMetadata;
-        _currentPlan = await System.Threading.Tasks.Task.Run(() =>
+        var parsedPlan = await System.Threading.Tasks.Task.Run(() =>
         {
             var plan = ShowPlanParser.Parse(planXml);
             PlanAnalysisPipeline.Run(plan, analyzerConfig, serverMetadata, System.Threading.CancellationToken.None);
             return plan;
         });
+
+        /* A paste (#8446) loads into the control that shows the previous plan, so what that plan put on screen goes
+           before this one's paths decide what to show: its statement list, its selected operator and the properties
+           panel showing it, its canvas, insights and minimap. The same Clear the withheld path uses, after the parse,
+           so the previous plan stays on screen while a large plan is read. The multi-statement path below reopens the
+           statement list for the plan it lists. */
+        Clear();
+        CapturedQueryText = queryText;
+        _currentPlan = parsedPlan;
 
         // #4551: a refused or exception-terminated parse still returns whatever parsed before the
         // failure. Surface the reason in the empty-state slot instead of showing the plain "No
