@@ -908,7 +908,7 @@ public partial class PlanViewerControl
                         Margin = new Thickness(16, 2, 0, 0)
                     });
                 }
-                PropertiesContent.Children.Add(warnPanel);
+                (_currentPropertySection ?? PropertiesContent).Children.Add(warnPanel);
                 RegisterBuiltWarningRow(opWarnHeaderText, w.Message, warnPanel);
             }
         }
@@ -1151,9 +1151,9 @@ public partial class PlanViewerControl
     }
 
     /// <summary>
-    /// Wraps a warning panel built directly under <see cref="PropertiesContent"/> (the plan-level
-    /// and per-operator warning lists, which are prose panels rather than label/value grids) as a
-    /// filterable, copyable row on the section most recently opened by <see cref="AddPropertySection"/>.
+    /// Wraps a warning panel built in the body of the section most recently opened by <see cref="AddPropertySection"/>
+    /// (the plan-level and per-operator warning lists, which are prose panels rather than label/value grids) as a
+    /// filterable, copyable row on that section.
     /// </summary>
     private void RegisterBuiltWarningRow(string header, string body, FrameworkElement panel)
     {
