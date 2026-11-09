@@ -30,9 +30,10 @@ namespace Darling.Tests;
 /// <para>The chain reads its own statements back from <c>pg_stat_statements</c>, whose hash table is cluster-wide and
 /// holds <c>pg_stat_statements.max</c> entries. When a new statement needs a slot in a full table, the module evicts
 /// the least-used five percent of the entries, and a statement run once is the least used there is: the chain's own
-/// entries can go between the statements and the read, and the read then finds nothing. The chain checks the module's
-/// eviction counter around its statements, so a pass that ran meanwhile is named instead of showing up as an empty
-/// read.</para>
+/// entries can go between the statements and the read, and the read then finds nothing. So the chain first makes sure
+/// the table has room for every entry it adds (nothing else runs beside this collection, so the room stays), and it
+/// checks the module's eviction counter around its statements, so a pass that ran meanwhile is named instead of
+/// showing up as an empty read.</para>
 /// </summary>
 /* #1776 own-store: not [Collection("live-postgres")]. The test migrates the store itself and cleans by server id, so it needs
    nothing from LivePostgresStoreFixture. */
@@ -110,6 +111,7 @@ public sealed class PgOwnStatementRoleLiveTests
                     await beforeStatements(target, ct);
                 }
 
+                await EnsureStatementTableHeadroomAsync(target, ct);
                 var deallocBefore = await DeallocAsync(target, ct);
 
                 /* The service's statement: marked, run by the connecting login. The application's: unmarked, run under another login.
@@ -253,6 +255,60 @@ public sealed class PgOwnStatementRoleLiveTests
             await admin.OpenAsync(ct);
             await DarlingMcpTestData.ExecAsync(admin, ct, "DROP ROLE IF EXISTS pm7567_app");
         }
+    }
+
+    /// <summary>
+    /// The free slots the chain secures before its statements: it adds about fifteen entries (the role setup, the four
+    /// statements under two logins, the fetch, the store's register and upsert, and the read), and the margin covers
+    /// whatever a background worker on the cluster runs meanwhile.
+    /// </summary>
+    private const int ChainEntries = 64;
+
+    /// <summary>
+    /// Makes sure <c>pg_stat_statements</c> has at least <see cref="ChainEntries"/> free slots. When it has fewer, runs
+    /// small batches of distinct shapes until the module's eviction pass frees five percent of the table; a cluster whose
+    /// pass frees less than the chain needs skips with its <c>pg_stat_statements.max</c>. The shapes are a family of
+    /// their own (differences, not sums), so none of them lands on an entry the one-free-slot filler already made.
+    /// </summary>
+    private static async Task EnsureStatementTableHeadroomAsync(NpgsqlConnection target, CancellationToken ct)
+    {
+        const int batchSize = 8;
+        var max = await MaxEntriesAsync(target, ct);
+        var free = max - await EntryCountAsync(target, ct);
+        var next = 0;
+        while (free < ChainEntries && next < ChainEntries + 2 * batchSize)
+        {
+            var batch = new StringBuilder();
+            for (var i = 0; i < batchSize; i++)
+            {
+                batch.Append(HeadroomStatement(next++)).Append(';');
+            }
+
+            await DarlingMcpTestData.ExecAsync(target, ct, batch.ToString());
+            free = max - await EntryCountAsync(target, ct);
+        }
+
+        Assert.SkipWhen(free < ChainEntries,
+            $"pg_stat_statements.max is {max}: an eviction pass leaves {free} free slots, fewer than the {ChainEntries} the chain needs.");
+    }
+
+    /// <summary>
+    /// The <paramref name="n"/>-th shape of the headroom family: two to nine columns, each <c>1</c> less one to eight more
+    /// <c>1</c>s, under one of eight WHERE/LIMIT/OFFSET suffixes. Every shape has at least one subtraction and two columns,
+    /// so the family shares no entry with <see cref="FillerStatement"/>'s sums, with a bare <c>SELECT 1</c>, or with the
+    /// chain's own single-column statements.
+    /// </summary>
+    private static string HeadroomStatement(int n)
+    {
+        var variant = n & 7;
+        var rest = n >> 3;
+        var items = rest / 8 + 2;
+        var terms = rest % 8 + 1;
+        var item = "1" + string.Concat(Enumerable.Repeat("-1", terms));
+        var suffix = ((variant & 1) != 0 ? " WHERE true" : string.Empty)
+            + ((variant & 2) != 0 ? " LIMIT 1" : string.Empty)
+            + ((variant & 4) != 0 ? " OFFSET 0" : string.Empty);
+        return "SELECT " + string.Join(",", Enumerable.Repeat(item, items)) + suffix;
     }
 
     /// <summary>The largest table the filler fills; a cluster set wider than this skips the one-free-slot test.</summary>
