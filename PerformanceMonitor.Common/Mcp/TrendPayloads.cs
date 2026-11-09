@@ -199,7 +199,7 @@ internal static class TrendPayloads
             ? "Each line is one file of the requested database"
             : "Each line is one database's data or log files, pooled (file_type ROWS or LOG); pass database_name to chart one database per file";
         var fold = folded > 0
-            ? $" The {charted.ToString(CultureInfo.InvariantCulture)} with the most I/O stall in the window (read + write ms) have their own line; the other {folded.ToString(CultureInfo.InvariantCulture)} are folded into one '{OtherLabel}' line, pooled collection by collection, so its latency is theirs combined."
+            ? $" The {charted.ToString(CultureInfo.InvariantCulture)} with the most I/O stall in the window (read + write ms) {(charted == 1 ? "has its" : "have their")} own line; the other {folded.ToString(CultureInfo.InvariantCulture)} {(folded == 1 ? "is" : "are")} folded into one '{OtherLabel}' line, pooled collection by collection, so its latency is theirs combined."
             : " Every line that did I/O in the window is shown, heaviest stall first.";
         return grain + "." + fold;
     }

@@ -849,7 +849,7 @@ public partial class MainWindow
             if (dialog.SkippedCount > 0) msg += $", skipped {CountText.Plural(dialog.SkippedCount, "duplicate")}";
             if (dialog.CollidedCount > 0) msg += $", {dialog.CollidedCount} collided (id matches another server)";
             if (dialog.FailedCount > 0) msg += $", {dialog.FailedCount} failed";
-            StatusText.Text = msg + ". The Darling service will start collecting them on its next reload.";
+            StatusText.Text = msg + $". The Darling service will start collecting {(dialog.AddedCount == 1 ? "it" : "them")} on its next reload.";
         }
     }
 

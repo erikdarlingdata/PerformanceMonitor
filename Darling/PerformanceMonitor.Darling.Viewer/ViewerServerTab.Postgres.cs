@@ -365,7 +365,7 @@ public partial class ViewerServerTab
                 : $"  {CountText.Plural(actionable, "extension")} this product can use {(actionable == 1 ? "is" : "are")} available on this server and NOT "
                   + "installed — each is one CREATE EXTENSION away."
                   + (outdated > 0
-                      ? $"  {outdated} are installed but behind the version the server offers, which is worth "
+                      ? $"  {outdated} {(outdated == 1 ? "is" : "are")} installed but behind the version the server offers, which is worth "
                         + "fixing with ALTER EXTENSION … UPDATE: a stale extension can be missing columns a "
                         + "collector reads, and that surfaces as a confusing error rather than as a gap."
                       : string.Empty)
@@ -481,12 +481,13 @@ public partial class ViewerServerTab
         var off = audit.Facets.Where(f => f.Verdict == DarlingPgLoggingAudit.Off).Select(f => f.Setting).ToList();
         var unknown = audit.Facets.Where(f => f.Verdict == DarlingPgLoggingAudit.Unknown).Select(f => f.Setting).ToList();
         var instrumented = audit.Facets.Count(f => f.Verdict == DarlingPgLoggingAudit.Instrumented);
+        var partial = audit.Facets.Count(f => f.Verdict == DarlingPgLoggingAudit.Partial);
         PgLoggingAuditNote.Text =
             $"From the newest configuration snapshot ({PgDisplay.SnapshotTime(audit.CapturedAt)}), not the live server. "
             + $"{CountText.Plural(instrumented, "setting")} {(instrumented == 1 ? "writes" : "write")} every line "
-            + $"{(instrumented == 1 ? "it" : "they")} can, {audit.Facets.Count(f => f.Verdict == DarlingPgLoggingAudit.Partial)} are partial (a threshold "
+            + $"{(instrumented == 1 ? "it" : "they")} can, {partial} {(partial == 1 ? "is" : "are")} partial (a threshold "
             + "is filtering, which is the recommended posture for log_min_duration_statement), "
-            + $"{off.Count} are off and {unknown.Count} are not in the snapshot."
+            + $"{off.Count} {(off.Count == 1 ? "is" : "are")} off and {unknown.Count} {(unknown.Count == 1 ? "is" : "are")} not in the snapshot."
             + (off.Count > 0 ? "  Off: " + string.Join(", ", off) + "." : string.Empty)
             + (unknown.Count > 0 ? "  Not in the snapshot: " + string.Join(", ", unknown) + "." : string.Empty);
     }
@@ -1439,7 +1440,7 @@ public partial class ViewerServerTab
               + "answer — pg_stat_replication is the primary-side view and reports nothing unless this "
               + "server is cascading to a downstream of its own. On a primary it means nothing is "
               + "replicating from it, which is either correct or the finding."
-            : $"{CountText.Plural(rows.Count, "standby connection")}. The worst any of them fell behind in this window was "
+            : $"{CountText.Plural(rows.Count, "standby connection")}. The worst {(rows.Count == 1 ? "it" : "any of them")} fell behind in this window was "
               + $"{worst:N0} bytes of unapplied WAL — that column, not the current one, is what catches a "
               + "replica that drifts far behind and recovers before anybody looks. Rank on BYTES rather than "
               + "the lag columns: measured against a stalled standby, the time lag read 2.8 seconds for a "

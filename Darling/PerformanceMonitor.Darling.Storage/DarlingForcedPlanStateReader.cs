@@ -392,11 +392,11 @@ LIMIT 50";
         if (notCollected > 0)
             text += unknowns.Count == 1
                 ? "it has no plan XML in the store yet (the Query Store collector has not fetched it)"
-                : $"{notCollected} of them have no plan XML in the store yet (the Query Store collector has not fetched it)";
+                : $"{notCollected} of them {(notCollected == 1 ? "has" : "have")} no plan XML in the store yet (the Query Store collector has not fetched it)";
         if (notChecked > 0)
             text += (notCollected > 0 ? "; " : "") + (unknowns.Count == 1
                 ? $"it was not looked up because more than {MaxStoredPlanChecks} later plans ran in this read"
-                : $"{notChecked} were not looked up because more than {MaxStoredPlanChecks} later plans ran in this read");
+                : $"{notChecked} {(notChecked == 1 ? "was" : "were")} not looked up because more than {MaxStoredPlanChecks} later plans ran in this read");
         return text + ".";
     }
 

@@ -239,7 +239,7 @@ public sealed class PgTargetWaitLiveTests
                 Assert.Contains("estimated from sampling", text, StringComparison.Ordinal);
                 Assert.Contains(" backend-samples at a 10 ms sampling period", text, StringComparison.Ordinal);
                 Assert.Contains("cannot see a wait shorter than 10 ms", text, StringComparison.Ordinal);
-                Assert.Contains("reset 1 time", text, StringComparison.Ordinal);
+                Assert.Contains("reset 1 time inside the window", text, StringComparison.Ordinal);
                 Assert.DoesNotContain("spent", text, StringComparison.OrdinalIgnoreCase);
                 Assert.DoesNotContain("the engine measured", text, StringComparison.Ordinal);
             }

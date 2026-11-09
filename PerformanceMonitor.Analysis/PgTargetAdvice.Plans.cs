@@ -444,7 +444,7 @@ public static partial class PgTargetAdvice
            side, then the qualstats witness), how big the relation is, then the gates and the co-fires. */
         var inv = new StringBuilder();
         inv.Append(CultureInfo.InvariantCulture,
-            $"Statement queryid {queryId} was captured {captures ?? 0:0} times in {observedHours:0.#} observed hours ({perHour ?? 0:0.#} per hour, a lower bound: only executions slower than auto_explain.log_min_duration are logged) with a Seq Scan over {relation} carrying a Filter");
+            $"Statement queryid {queryId} was captured {CountText.Plural((long)(captures ?? 0), "time")} in {observedHours:0.#} observed hours ({perHour ?? 0:0.#} per hour, a lower bound: only executions slower than auto_explain.log_min_duration are logged) with a Seq Scan over {relation} carrying a Filter");
         inv.Append(removedShare is { } share
             ? string.Format(CultureInfo.InvariantCulture, "; across those captures the filter removed {0:0.#}% of the rows the scan read (Rows Removed by Filter against Actual Rows).", share * 100)
             : "; the captured plans carry no Actual Rows (auto_explain.log_analyze is off), so how many rows the filter removed is not known from the plan.");

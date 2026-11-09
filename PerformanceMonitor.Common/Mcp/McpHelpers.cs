@@ -261,7 +261,7 @@ internal static class McpHelpers
 
         if (resolved < 2 * hoursBack)
         {
-            return Refusal("baseline_hours_back", $"The comparison window (the last {hoursBack} hours) and the baseline window (hours {resolved} to {resolved - hoursBack} back) would overlap: baseline_hours_back {resolved} is below 2 x hours_back ({2 * hoursBack}). Pass a baseline_hours_back of at least {2 * hoursBack}, or a smaller hours_back.");
+            return Refusal("baseline_hours_back", $"The comparison window (the last {CountText.Plural(hoursBack, "hour")}) and the baseline window (hours {resolved} to {resolved - hoursBack} back) would overlap: baseline_hours_back {resolved} is below 2 x hours_back ({2 * hoursBack}). Pass a baseline_hours_back of at least {2 * hoursBack}, or a smaller hours_back.");
         }
 
         return null;

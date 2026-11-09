@@ -6889,7 +6889,7 @@ public static partial class DarlingCliCommands
 
         if (result.VerifyFailures > 0)
         {
-            error.WriteLine(Inv($"  [WARN] {CountText.Plural(result.VerifyFailures, "row")} FAILED round-trip verification and kept their text unchanged."));
+            error.WriteLine(Inv($"  [WARN] {CountText.Plural(result.VerifyFailures, "row")} FAILED round-trip verification and kept {(result.VerifyFailures == 1 ? "its" : "their")} text unchanged."));
             error.WriteLine("  Investigate before re-running; those rows are readable exactly as before.");
             error.WriteLine("  VACUUM FULL was skipped — compaction can wait until the conversion is clean.");
             return 1;
