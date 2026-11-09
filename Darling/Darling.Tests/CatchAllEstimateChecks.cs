@@ -25,8 +25,8 @@ namespace Darling.Tests;
 /// </summary>
 internal static class CatchAllEstimateChecks
 {
-    private const string SeedTable = "public.tick6971_toasted";
-    private const string GrowerTable = "public.tick7303_grower";
+    internal const string SeedTable = "public.tick6971_toasted";
+    internal const string GrowerTable = "public.tick7303_grower";
 
     internal sealed record CatchAllRow(long TotalBytes, int ChunkCount, bool? SizeEstimated);
 

@@ -101,7 +101,7 @@ public class PlanStatement
     // Additional StmtSimple attributes
     public string? StatementOptmLevel { get; set; }
     public string? StatementOptmEarlyAbortReason { get; set; }
-    public int StatementParameterizationType { get; set; }
+    public int? StatementParameterizationType { get; set; }
     public string? StatementSqlHandle { get; set; }
     public long DatabaseContextSettingsId { get; set; }
     public int ParentObjectId { get; set; }

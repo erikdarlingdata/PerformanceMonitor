@@ -240,7 +240,10 @@ public sealed class PgLogNamedZoneTests
     /// (the repeat of those without any round trip), and the connection's session zone is as it was.
     /// </summary>
     [Fact]
-    public async Task TheZoneNameIsLookedUpOncePerSetting_AndTheConnectionKeepsItsZone()
+    public Task TheZoneNameIsLookedUpOncePerSetting_AndTheConnectionKeepsItsZone()
+        => ZoneNameLookedUpOnceAsync(forcePass: false);
+
+    internal async Task ZoneNameLookedUpOnceAsync(bool forcePass)
     {
         var ct = TestContext.Current.CancellationToken;
         await using var connection = await OpenPinnedAsync();
@@ -285,31 +288,57 @@ public sealed class PgLogNamedZoneTests
         }
 
         var before = await SessionZoneAsync();
-        PgLogNamedZone.ForgetZoneNames();
 
-        /* The case a log setting may be spelled in: the name is looked up case-insensitively, once. */
-        for (var read = 0; read < 3; read++)
+        /* The whole window, from the baseline to the last count, runs under PgStatementTable: the view is cluster-wide, and an
+           eviction pass from another session between a lookup and a count takes the scan's entry (run once, the least-used
+           kind there is), which a run the pass landed in is voided and run again for. Each run forgets the names first, so
+           its lookups scan again, and reads its own baseline. */
+        var run = await PgStatementTable.RunAsync(counter, ct, async pass =>
         {
-            var zones = await PgLogNamedZone.ResolveAsync(connection, "america/los_angeles", pairs, 30, ct);
-            Assert.NotNull(zones);
-            Assert.True(zones!.TryGet("2026-07-04 12:00:00", "PDT", out var utc));
-            Assert.Equal(expected, utc);
-        }
+            PgLogNamedZone.ForgetZoneNames();
+            baseline = ZoneScans();
 
-        Assert.Equal(baseline + 1, ZoneScans());
+            /* The case a log setting may be spelled in: the name is looked up case-insensitively, once. */
+            for (var read = 0; read < 3; read++)
+            {
+                var zones = await PgLogNamedZone.ResolveAsync(connection, "america/los_angeles", pairs, 30, ct);
+                Assert.NotNull(zones);
+                Assert.True(zones!.TryGet("2026-07-04 12:00:00", "PDT", out var utc));
+                Assert.Equal(expected, utc);
+            }
 
-        foreach (var notNamed in new[] { "-03", "Mars/Olympus_Mons" })
-        {
-            var scansBefore = ZoneScans();
-            Assert.Null(await PgLogNamedZone.ResolveAsync(connection, notNamed, pairs, 30, ct));
+            await pass.BeforeReadAsync(ct);
 
-            /* The repeat is answered from what the first found: no statement reaches the target, so a connection that
-               was never opened is not even noticed. */
-            await using var unopened = new NpgsqlConnection(connection.ConnectionString);
-            Assert.Null(await PgLogNamedZone.ResolveAsync(unopened, notNamed, pairs, 30, ct));
-            Assert.Equal(scansBefore + 1, ZoneScans());
-        }
+            Assert.Equal(baseline + 1, ZoneScans());
+
+            foreach (var notNamed in new[] { "-03", "Mars/Olympus_Mons" })
+            {
+                var scansBefore = ZoneScans();
+                Assert.Null(await PgLogNamedZone.ResolveAsync(connection, notNamed, pairs, 30, ct));
+
+                /* The repeat is answered from what the first found: no statement reaches the target, so a connection that
+                   was never opened is not even noticed. */
+                await using var unopened = new NpgsqlConnection(connection.ConnectionString);
+                Assert.Null(await PgLogNamedZone.ResolveAsync(unopened, notNamed, pairs, 30, ct));
+                Assert.Equal(scansBefore + 1, ZoneScans());
+            }
+        }, forcePass, forcePassDatabase: connection.Database);
+        PgStatementTable.AssertNoPassInside(run);
 
         Assert.Equal(before, await SessionZoneAsync());
     }
+}
+
+/* pg-cluster-roles, not the parallel own-store shape: the fact fills pg_stat_statements until eviction passes have taken the
+   body's own entries, on purpose, and in the parallel collections those passes take the other sessions' entries run once
+   as well. The collection runs alone, after the parallel collections, so the fill takes nobody else's entries. The body
+   is the one PgLogNamedZoneTests runs without the forced pass, and it mints its own scratch database. */
+
+/// <summary>The forcing run of <see cref="PgLogNamedZoneTests"/>'s counting body: an eviction pass between the lookups and the count, and the count is still of the scan the lookups shared.</summary>
+[Collection("pg-cluster-roles")]
+public sealed class PgLogNamedZoneForcedPassLiveTests
+{
+    [Fact]
+    public Task TheZoneNameIsLookedUpOncePerSetting_AndTheConnectionKeepsItsZone_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => new PgLogNamedZoneTests().ZoneNameLookedUpOnceAsync(forcePass: true);
 }

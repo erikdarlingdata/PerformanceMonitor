@@ -587,15 +587,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                    The key is the query string as sent, before the read below adds its own as_of. A hit skips admission. */
                 /* #6800: a whole-fleet read of get_resource_use_by_tag (no server) over a window of 24 hours or more is cached for its own TTL. */
                 var fleetRead = ReadAdmission.IsFleetRead(name, Server(context), WebWindowHours(name, key => First(context, key)));
-                if (readAdmission is { } admission && admission.IsCached(ReadSurface.Web, name, admissionBand, fleetRead))
+                /* The one-server form of a held view (get_finops view=optimization) is kept for the view's own TTL from the moment it is stored. */
+                var view = First(context, "view");
+                var serverHeld = ReadAdmission.IsServerHeldRead(name, Server(context), view);
+                if (readAdmission is { } admission && admission.IsCached(ReadSurface.Web, name, admissionBand, fleetRead, serverHeld))
                 {
                     var cache = admission.Cache;
-                    var ttl = ReadResultCache.TtlFor(name, admissionBand, fleetRead);
+                    var ttl = ReadResultCache.TtlFor(name, admissionBand, fleetRead, view, serverHeld);
                     /* Round 2, L4: each value of a repeated name is passed apart (StringValues.ToString() joins them with a comma,
                        which ?database=x%2Cy also gives); the key escapes every name and value. */
                     var key = ReadCacheKey.ForWeb(name,
                         context.Request.Query.SelectMany(q => q.Value.Select(v => new KeyValuePair<string, string?>(q.Key, v))),
-                        cache.Generation, cache, ttl, heldFromStore: ReadAdmission.FleetTtlApplies(name, fleetRead));
+                        cache.Generation, cache, ttl, heldFromStore: ReadAdmission.FleetTtlApplies(name, fleetRead) || serverHeld);
                     if (cache.TryGet(key, out var stored))
                     {
                         /* Round 2, L3: a hit runs no read, so it does not count as one in flight. */

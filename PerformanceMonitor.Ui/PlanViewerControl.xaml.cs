@@ -323,12 +323,21 @@ public partial class PlanViewerControl : UserControl
            or exception-terminated parse sets ParsedPlan.ParseError instead of throwing; see below. */
         var analyzerConfig = AnalyzerConfig;
         var serverMetadata = ServerMetadata;
-        _currentPlan = await System.Threading.Tasks.Task.Run(() =>
+        var parsedPlan = await System.Threading.Tasks.Task.Run(() =>
         {
             var plan = ShowPlanParser.Parse(planXml);
             PlanAnalysisPipeline.Run(plan, analyzerConfig, serverMetadata, System.Threading.CancellationToken.None);
             return plan;
         });
+
+        /* A paste (#8446) loads into the control that shows the previous plan, so what that plan put on screen goes
+           before this one's paths decide what to show: its statement list, its selected operator and the properties
+           panel showing it, its canvas, insights and minimap. The same Clear the withheld path uses, after the parse,
+           so the previous plan stays on screen while a large plan is read. The multi-statement path below reopens the
+           statement list for the plan it lists. */
+        Clear();
+        CapturedQueryText = queryText;
+        _currentPlan = parsedPlan;
 
         // #4551: a refused or exception-terminated parse still returns whatever parsed before the
         // failure. Surface the reason in the empty-state slot instead of showing the plain "No
@@ -398,17 +407,17 @@ public partial class PlanViewerControl : UserControl
         PlanScrollViewer.Visibility = Visibility.Collapsed;
         InsightsPanel.Visibility = Visibility.Collapsed;
         CloseStatementsPanel();
+        /* The list behind the closed panel, its count and the toolbar button that reopens it belong to the plan that is
+           going (#8446). CloseStatementsPanel keeps them, because the toggle hides the panel for a plan that stays on
+           screen; here the next plan populates and shows its own, or has none. */
+        StatementsGrid.ItemsSource = null;
+        StatementsHeader.Text = "Statements";
+        StatementsButton.Visibility = Visibility.Collapsed;
+        StatementsButtonSeparator.Visibility = Visibility.Collapsed;
         CostText.Text = "";
         CostText.Visibility = Visibility.Collapsed;
         ClosePropertiesPanel();
         CloseMinimapPanel();
-    }
-
-    private static void CollectWarnings(PlanNode node, List<PlanWarning> warnings)
-    {
-        warnings.AddRange(node.Warnings);
-        foreach (var child in node.Children)
-            CollectWarnings(child, warnings);
     }
 
     #region Save & Statement Selection
@@ -530,9 +539,8 @@ public partial class PlanViewerControl : UserControl
         for (int i = 0; i < statements.Count; i++)
         {
             var stmt = statements[i];
-            var allWarnings = stmt.PlanWarnings.ToList();
-            if (stmt.RootNode != null)
-                CollectWarnings(stmt.RootNode, allWarnings);
+            // The set the root badge counts: statement-level and operator warnings, at every severity.
+            var allWarnings = PlanWarningDisplay.StatementWarnings(stmt);
 
             var text = stmt.StatementText;
             if (string.IsNullOrWhiteSpace(text))
@@ -549,7 +557,8 @@ public partial class PlanViewerControl : UserControl
                 UdfMs = stmt.QueryUdfElapsedTimeMs,
                 EstCost = stmt.StatementSubTreeCost,
                 Critical = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Critical),
-                Warnings = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Warning),
+                // Every warning that is not critical, Info included, so Critical + Warnings is the root badge's count.
+                Warnings = allWarnings.Count(w => w.Severity != PlanWarningSeverity.Critical),
                 Statement = stmt
             });
         }
