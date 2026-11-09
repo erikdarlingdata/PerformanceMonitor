@@ -42,4 +42,15 @@ public class BlockingChainViewerProjectionTests
         Assert.Equal(apexTran.AddHours(7), shown.Roots[0].TranStarted);
         Assert.Equal(victimTran.AddHours(7), Assert.Single(shown.Roots[0].Children).TranStarted);
     }
+
+    /// <summary>
+    /// The empty-state text the Block Chain window shows when no chain holds the session reads with plain
+    /// punctuation: a comma after the time range, not a dash. Both apps show the same text.
+    /// </summary>
+    [Fact]
+    public void EmptyStateDetail_ReadsWithPlainPunctuation()
+    {
+        Assert.DoesNotContain("\u2014", BlockingChainViewerProjection.EmptyStateDetail, StringComparison.Ordinal);
+        Assert.Contains("in the selected time range, from either the", BlockingChainViewerProjection.EmptyStateDetail, StringComparison.Ordinal);
+    }
 }
