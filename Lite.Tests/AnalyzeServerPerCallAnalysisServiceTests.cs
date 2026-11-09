@@ -151,17 +151,11 @@ public sealed class AnalyzeServerOverlappingCallsTests : IClassFixture<SharedDuc
         var lockHeld = new ManualResetEventSlim(false);
         var releaseLock = new ManualResetEventSlim(false);
         Exception? holderFault = null;
-        /* The write lock is process-wide, and the classes running alongside park writers on it while they build their own stores. A
-           budgeted writer polls with no queue position for all but the last second of its budget (#7256), and those parked writers win
-           every handoff, so the holder here parks for its whole budget instead and holds as soon as the current holder releases (#8142).
-           The initializer is this test's own, so nothing puts the tail back. */
-        var holderBudget = TimeSpan.FromSeconds(30);
-        _duckDb.WriteLockParkTail = holderBudget;
         var holder = new Thread(() =>
         {
             try
             {
-                using (_duckDb.AcquireWriteLock(holderBudget))
+                using (_duckDb.AcquireWriteLock(TimeSpan.FromSeconds(30)))
                 {
                     lockHeld.Set();
                     /* A hang backstop, not a timing budget: the test signals the release itself. */

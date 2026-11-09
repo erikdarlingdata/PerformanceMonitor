@@ -599,6 +599,9 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(2, await CountAsync("SELECT COUNT(*) FROM query_tag_sightings"));
     }
 
+    /// <summary>How much longer than a holder's own budget the wait for its hold lasts, and how long a holder that gave up gets to report why.</summary>
+    private static readonly TimeSpan HoldMargin = TimeSpan.FromSeconds(5);
+
     /// <summary>
     /// Runs <paramref name="hold"/>, a writer that takes the fixture's write lock with <paramref name="budget"/> and sets
     /// <paramref name="held"/> once it has it, and waits for that signal for at most the same budget. The write lock is process-wide,
@@ -607,7 +610,9 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
     /// for its whole budget instead (#8142). The initializer is the fixture's, shared with this class's other tests and with the product
     /// writers under test, so the park tail goes back as soon as the hold is confirmed, or the wait fails. A holder whose budget ran out
     /// faulted with the StoreLockTimeoutException that names who held the lock, and that is what surfaces, not a wait on a signal that
-    /// never comes.
+    /// never comes. The holder's budget starts only when a pool thread picks the work up, after this wait has started, so the wait
+    /// outlasts the budget by <see cref="HoldMargin"/>: the holder's own deadline fires first, and a hold cannot land after the wait
+    /// has given up.
     /// </summary>
     private async Task<Task> HoldTheWriteLockAsync(TimeSpan budget, System.Threading.ManualResetEventSlim held, Action hold)
     {
@@ -616,9 +621,9 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         var holder = Task.Run(hold, TestContext.Current.CancellationToken);
         try
         {
-            if (!held.Wait(budget, TestContext.Current.CancellationToken))
+            if (!held.Wait(budget + HoldMargin, TestContext.Current.CancellationToken))
             {
-                await holder.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+                await holder.WaitAsync(HoldMargin, TestContext.Current.CancellationToken);
                 Assert.Fail("the write lock was not taken, and the holder did not say why");
             }
         }
@@ -642,7 +647,8 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         {
             using var writeLock = _fixture.DuckDb.AcquireWriteLock(timeout: holderBudget);
             held.Set();
-            release.Wait(TestContext.Current.CancellationToken);
+            /* A hang backstop, not a timing budget: the test signals the release itself, and a holder the test abandons lets go on its own. */
+            release.Wait(holderBudget, TestContext.Current.CancellationToken);
         });
         try
         {
