@@ -119,7 +119,7 @@ internal static class McpInstructions
     private static string InvestigationReads =>
         "\n\n### Investigation requests\n\n"
         + string.Join(" and ", McpInvestigationPolicy.ReadTools.Order(StringComparer.Ordinal).Select(name => "`" + name + "`"))
-        + " are reads, served in every configuration (no open request: an empty list). The claim and report tools need `mcp_allow_investigations` true and `mcp_allow_writes` false in settings.json (both on: off). A route set to Investigate (`agent_level` 1) opens a request per alert. `mcp_data_detail` masks briefs and reports too.";
+        + " are reads, served in every configuration (no open request: an empty list). The claim and report tools need `mcp_allow_investigations` true and `mcp_allow_writes` false in settings.json (both on: off). A route set to Investigate (`agent_level` 1) opens or joins a request for its alerts. `mcp_data_detail` masks briefs and reports too.";
 
     private const string InvestigationClaimFlow = """
 
