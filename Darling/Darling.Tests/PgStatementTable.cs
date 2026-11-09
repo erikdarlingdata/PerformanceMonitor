@@ -224,7 +224,7 @@ internal static class PgStatementTable
     /// so the family shares no entry with <see cref="Shape"/>'s sums, with a bare <c>SELECT 1</c>, or with a test's own
     /// single-column statements.
     /// </summary>
-    private static string HeadroomShape(int n)
+    internal static string HeadroomShape(int n)
     {
         var variant = n & 7;
         var rest = n >> 3;

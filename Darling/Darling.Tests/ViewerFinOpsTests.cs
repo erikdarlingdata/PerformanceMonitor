@@ -47,10 +47,13 @@ public sealed class ViewerFinOpsSqlTests
     public void ProvisioningTrendSql_DailyCpuAndMemoryRatio()
     {
         var sql = ViewerDataService.ProvisioningTrendSql;
-        Assert.Contains("CAST(collection_time AS DATE)", sql, StringComparison.Ordinal);
+        /* The days are the caller's buckets ($3 labels, $4 starts, $5 ends), never the UTC date of each sample: the Viewer passes the
+           selected time display's days and the MCP tools UTC days. */
+        Assert.Contains("unnest($3::date[], $4::timestamp[], $5::timestamp[])", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_cpu_utilization_stats", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_memory_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY CAST(collection_time AS DATE)", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY d.day", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("CAST(collection_time AS DATE)", sql, StringComparison.Ordinal);
     }
 
     [Fact]
