@@ -154,6 +154,13 @@
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding JobName}" Width="180">
+                        <!-- The cell trims a long name with an ellipsis; the tooltip carries the whole name. -->
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                <Setter Property="ToolTip" Value="{Binding JobName}"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="JobName" Click="FilterButton_Click" Margin="0,0,4,0"/>
@@ -170,6 +177,12 @@
                         </DataGridTextColumn.Header>
                     </DataGridTextColumn>
                     <DataGridTextColumn Binding="{Binding StepDisplay}" SortMemberPath="StepId" Width="150">
+                        <DataGridTextColumn.ElementStyle>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                <Setter Property="ToolTip" Value="{Binding StepDisplay}"/>
+                            </Style>
+                        </DataGridTextColumn.ElementStyle>
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
                                 <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StepDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
