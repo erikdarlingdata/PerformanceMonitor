@@ -29,7 +29,8 @@ public sealed class PgStatementFillerFamiliesTests
     public void TheOneFreeSlotFill_SharesNoShapeWithTheForcingFill_OrWithEitherHeadroomFamily(int max)
     {
         var side = (int)Math.Ceiling(Math.Sqrt((max + 1) / 8.0)) + 1;
-        var count = max + 2 * PgStatementTable.FillBatch;
+        /* A fill that carries on past eviction passes runs more shapes than the table is wide. */
+        var count = 2 * max;
         var forcing = Enumerable.Range(0, count).Select(n => PgStatementTable.Shape(n, side)).ToArray();
         var oneFreeSlot = Enumerable.Range(0, count).Select(n => PgOwnStatementRoleLiveTests.FillerStatement(n, side)).ToArray();
         var headroom = Enumerable.Range(0, PgStatementTable.Headroom + 16).Select(PgStatementTable.HeadroomShape)
