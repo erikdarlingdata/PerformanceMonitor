@@ -404,13 +404,6 @@ public partial class PlanViewerControl : UserControl
         CloseMinimapPanel();
     }
 
-    private static void CollectWarnings(PlanNode node, List<PlanWarning> warnings)
-    {
-        warnings.AddRange(node.Warnings);
-        foreach (var child in node.Children)
-            CollectWarnings(child, warnings);
-    }
-
     #region Save & Statement Selection
 
     private void SavePlan_Click(object sender, RoutedEventArgs e)
@@ -530,9 +523,8 @@ public partial class PlanViewerControl : UserControl
         for (int i = 0; i < statements.Count; i++)
         {
             var stmt = statements[i];
-            var allWarnings = stmt.PlanWarnings.ToList();
-            if (stmt.RootNode != null)
-                CollectWarnings(stmt.RootNode, allWarnings);
+            // The set the root badge counts: statement-level and operator warnings, at every severity.
+            var allWarnings = PlanWarningDisplay.StatementWarnings(stmt);
 
             var text = stmt.StatementText;
             if (string.IsNullOrWhiteSpace(text))
@@ -549,7 +541,8 @@ public partial class PlanViewerControl : UserControl
                 UdfMs = stmt.QueryUdfElapsedTimeMs,
                 EstCost = stmt.StatementSubTreeCost,
                 Critical = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Critical),
-                Warnings = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Warning),
+                // Every warning that is not critical, Info included, so Critical + Warnings is the root badge's count.
+                Warnings = allWarnings.Count(w => w.Severity != PlanWarningSeverity.Critical),
                 Statement = stmt
             });
         }

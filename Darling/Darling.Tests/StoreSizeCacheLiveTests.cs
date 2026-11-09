@@ -36,7 +36,10 @@ public sealed class StoreSizeCacheLiveTests
     /// <c>pg_stat_statements</c> against the actual product call path.
     /// </summary>
     [Fact]
-    public async Task TwoRefreshesInsideTheWindow_ReadPgDatabaseSizeOnce()
+    public Task TwoRefreshesInsideTheWindow_ReadPgDatabaseSizeOnce()
+        => TwoRefreshesAsync(forcePass: false);
+
+    internal async Task TwoRefreshesAsync(bool forcePass)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live store-size cache test.");
@@ -70,34 +73,49 @@ public sealed class StoreSizeCacheLiveTests
             await oidConn.OpenAsync(ct);
             using var oidCmd = new NpgsqlCommand("SELECT oid FROM pg_database WHERE datname = current_database()", oidConn);
             dbId = (uint)(await oidCmd.ExecuteScalarAsync(ct))!;
-
-            using var resetCmd = new NpgsqlCommand("SELECT pg_stat_statements_reset(0, $1, 0)", oidConn);
-            resetCmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
-            await resetCmd.ExecuteNonQueryAsync(ct);
         }
+
+        await using var table = new NpgsqlConnection(scratch.ConnectionString);
+        await table.OpenAsync(ct);
 
         var bodySucceeded = false;
         ViewerDataService? service = null;
         try
         {
-            service = new ViewerDataService(scratch.ConnectionString);
-
-            var first = await service.GetStoreSizeBytesAsync(ct);
-            var second = await service.GetStoreSizeBytesAsync(ct);
-            Assert.Equal(first, second);
-
-            long calls;
-            await using (var countConn = new NpgsqlConnection(scratch.ConnectionString))
+            /* The whole window, from the counter's reset to the count, runs under PgStatementTable: the view is cluster-wide,
+               and an eviction pass from another session between the refreshes and the count takes the one pg_database_size
+               entry (run once, the least-used kind there is), which a run the pass landed in is voided and run again for. Each
+               run starts a service of its own, since a reading is cached on the instance for StoreSizeCacheLifetime. */
+            var run = await PgStatementTable.RunAsync(table, ct, async pass =>
             {
-                await countConn.OpenAsync(ct);
-                using var countCmd = new NpgsqlCommand(
-                    "SELECT COALESCE(SUM(calls), 0)::bigint FROM pg_stat_statements WHERE dbid = $1 AND query LIKE '%pg_database_size%current_database%'",
-                    countConn);
-                countCmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
-                calls = (long)(await countCmd.ExecuteScalarAsync(ct))!;
-            }
+                if (service is not null)
+                {
+                    await service.DisposeAsync();
+                }
 
-            Assert.Equal(1, calls);
+                await ResetStatementCountAsync(table, dbId, ct);
+                service = new ViewerDataService(scratch.ConnectionString);
+
+                var first = await service.GetStoreSizeBytesAsync(ct);
+                var second = await service.GetStoreSizeBytesAsync(ct);
+                Assert.Equal(first, second);
+
+                await pass.BeforeReadAsync(ct);
+
+                long calls;
+                await using (var countConn = new NpgsqlConnection(scratch.ConnectionString))
+                {
+                    await countConn.OpenAsync(ct);
+                    using var countCmd = new NpgsqlCommand(
+                        "SELECT COALESCE(SUM(calls), 0)::bigint FROM pg_stat_statements WHERE dbid = $1 AND query LIKE '%pg_database_size%current_database%'",
+                        countConn);
+                    countCmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
+                    calls = (long)(await countCmd.ExecuteScalarAsync(ct))!;
+                }
+
+                Assert.Equal(1, calls);
+            }, forcePass);
+            PgStatementTable.AssertNoPassInside(run);
 
             bodySucceeded = true;
         }
@@ -111,4 +129,26 @@ public sealed class StoreSizeCacheLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
         }
     }
+
+    /// <summary>Clears the module's counters for this database, so the counts that follow are of this run's statements alone.</summary>
+    private static async Task ResetStatementCountAsync(NpgsqlConnection connection, long dbId, System.Threading.CancellationToken ct)
+    {
+        await using var reset = new NpgsqlCommand("SELECT pg_stat_statements_reset(0, $1, 0)", connection);
+        reset.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
+        await reset.ExecuteNonQueryAsync(ct);
+    }
+}
+
+/* pg-cluster-roles, not the parallel own-store shape: the fact fills pg_stat_statements until eviction passes have taken the
+   body's own entries, on purpose, and in the parallel collections those passes take the other sessions' entries run once
+   as well. The collection runs alone, after the parallel collections, so the fill takes nobody else's entries. The body
+   is the one StoreSizeCacheLiveTests runs without the forced pass, and it mints its own scratch database. */
+
+/// <summary>The forcing run of <see cref="StoreSizeCacheLiveTests"/>'s counting body: an eviction pass between the refreshes and the count, and the count is still of the call the refreshes made.</summary>
+[Collection("pg-cluster-roles")]
+public sealed class StoreSizeCacheForcedPassLiveTests
+{
+    [Fact]
+    public Task TwoRefreshesInsideTheWindow_ReadPgDatabaseSizeOnce_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => new StoreSizeCacheLiveTests().TwoRefreshesAsync(forcePass: true);
 }
