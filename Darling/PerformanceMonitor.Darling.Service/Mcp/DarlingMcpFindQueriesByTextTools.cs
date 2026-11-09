@@ -103,6 +103,10 @@ public sealed class DarlingMcpFindQueriesByTextTools
         /// <summary>#7849 test seam: called on the source's connection, in its transaction, just before the statement that follows a read in the same
         /// budget (the all-servers sample statement), once its <c>statement_timeout</c> is the remainder, so a test can read the setting back.</summary>
         public Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task>? BeforeStatement { get; init; }
+
+        /// <summary>#8408 test seam: called with the step and the statement's bound parameters just before it runs, so a test can read what
+        /// one step carries into the next (the one-server search binds the digests it has judged so far and their verdicts).</summary>
+        public Action<int, NpgsqlParameterCollection>? StatementBound { get; init; }
     }
 
     /// <summary>Query Store text. $1 server_id, $2 database or null, $3 the escaped pattern, $4 row cap + 1. The whole text comes back so the judge
@@ -131,13 +135,17 @@ LIMIT $4";
     /// <c>get_query_trend</c> takes), and a statement's first span, the newest it ran in, carries its newest sighting. The match and the page
     /// carry the digest only: the whole text (<c>query_text_dim.query_text</c> has no size cap) is read by primary key for the at most $4 rows
     /// of the page, so a common pattern never sorts every matching text.
-    /// <para>Each text is judged once per search, whichever spans it runs in. The digests this span sees for the first time (<c>judged</c>) are
-    /// tested against the pattern and written, with the verdict, to the transaction's <c>judged_text</c> table (<see cref="JudgedTextSql"/>) by a
-    /// data-modifying CTE, which runs once whatever the rest of the statement reads; the span's hits take their verdict from this span's
-    /// judgement or from an earlier span's, which the statement's snapshot already holds. A statement sampled in every span, which is most
+    /// <para>Each text is judged once per search, whichever spans it runs in, and the search carries the verdicts itself: the transaction is a
+    /// pure read, with no temp table, because the <c>mcp</c> role the read runs as has CONNECT on the managed store's database and nothing
+    /// else at the database level, TEMPORARY included. $9 and $10 are the digests the earlier spans judged and their verdicts (<c>known</c>),
+    /// bound the way $7 and $8 carry the found keys. The digests this span sees for the first time (<c>judged</c>) are tested against the
+    /// pattern, and the span's hits take their verdict from this span's judgement or from <c>known</c>. The statement hands back two kinds of
+    /// row, told apart by the first column: the page's <c>hit</c> rows first, in page order, then one <c>judged</c> row per digest this span
+    /// judged, with its verdict, which the search appends to what it binds to the next span. A statement sampled in every span, which is most
     /// procedure and parameterized text, therefore has its text tested in its newest span only, and a span whose distinct texts number in the
     /// tens of thousands, where the planner tests the pattern by scanning every text rather than reading each by key, pays that scan once per
-    /// search instead of once per span. Measured: see <see cref="RawTierSpanCount"/>. A digest with no text row is judged unmatched.</para>
+    /// search instead of once per span. The carried arrays grow to the server's distinct digests in the window, 32 bytes and a boolean each.
+    /// Measured: see <see cref="RawTierSpanCount"/>. A digest with no text row is judged unmatched.</para>
     /// <para>#7674: the match is <c>(d.query_text || '') ILIKE</c>, not <c>d.query_text ILIKE</c>, on purpose. With the opt-in trigram index on
     /// <c>query_text_dim.query_text</c> the planner would otherwise run a bitmap scan of that index over the whole table and join it to this server's
     /// digests, which the issue measured at 1.7 to 2.0 s cold for one server and one database against 0.2 to 0.7 s without the index. The concatenation is
@@ -154,24 +162,23 @@ WITH seen AS MATERIALIZED (
     AND   ($2::text IS NULL OR database_name = $2)
     GROUP BY query_hash, database_name, query_text_digest
 ),
+known AS MATERIALIZED (
+    SELECT digest, matched
+    FROM unnest($9::bytea[], $10::boolean[]) AS k(digest, matched)
+),
 judged AS MATERIALIZED (
     SELECT f.digest, COALESCE((d.query_text || '') ILIKE '%' || $3 || '%' ESCAPE '\', FALSE) AS matched
     FROM (SELECT DISTINCT s.query_text_digest AS digest
           FROM seen AS s
-          WHERE NOT EXISTS (SELECT 1 FROM pg_temp.judged_text AS t WHERE t.digest = s.query_text_digest)) AS f
+          WHERE NOT EXISTS (SELECT 1 FROM known AS k WHERE k.digest = s.query_text_digest)) AS f
     LEFT JOIN query_text_dim AS d ON d.digest = f.digest
-),
-remember AS (
-    INSERT INTO pg_temp.judged_text (digest, matched)
-    SELECT digest, matched FROM judged
-    ON CONFLICT (digest) DO NOTHING
 ),
 hits AS (
     SELECT DISTINCT ON (s.query_hash, s.database_name)
            s.query_hash, s.database_name, s.last_collected, s.query_text_digest
     FROM seen AS s
     WHERE (EXISTS (SELECT 1 FROM judged AS j WHERE j.digest = s.query_text_digest AND j.matched)
-           OR EXISTS (SELECT 1 FROM pg_temp.judged_text AS t WHERE t.digest = s.query_text_digest AND t.matched))
+           OR EXISTS (SELECT 1 FROM known AS k WHERE k.digest = s.query_text_digest AND k.matched))
     AND   NOT EXISTS (SELECT 1
                       FROM unnest($7::text[], $8::text[]) AS k(query_hash, database_name)
                       WHERE k.query_hash IS NOT DISTINCT FROM s.query_hash
@@ -184,14 +191,17 @@ page AS (
     ORDER BY last_collected DESC, query_hash, database_name
     LIMIT $4
 )
-SELECT p.query_hash, p.database_name, p.last_collected, d.query_text
+SELECT 'hit' AS kind, p.query_hash, p.database_name, p.last_collected, d.query_text, NULL::bytea AS digest, NULL::boolean AS matched
 FROM page AS p
 JOIN query_text_dim AS d ON d.digest = p.query_text_digest
-ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
+UNION ALL
+SELECT 'judged', NULL, NULL, NULL, NULL, j.digest, j.matched
+FROM judged AS j
+ORDER BY kind, last_collected DESC, query_hash, database_name";
 
-    /// <summary>The transaction's table of the texts one search has judged (<see cref="PlanCacheSql"/>): one row per digest with its verdict,
-    /// created before the first span's statement and dropped with the transaction, so a text is judged once however many spans it runs in.</summary>
-    internal const string JudgedTextSql = "CREATE TEMP TABLE judged_text (digest bytea PRIMARY KEY, matched boolean NOT NULL) ON COMMIT DROP";
+    /// <summary>The first column of a <see cref="PlanCacheSql"/> row: <c>hit</c> is a row of the page, <c>judged</c> a digest this span judged
+    /// and its verdict, carried to the spans after it.</summary>
+    internal const string PlanCacheJudgedRowKind = "judged";
 
     /// <summary>#7674: the plan-cache text of every enabled server, served by the trigram index on <c>query_text_dim.query_text</c>. Only offered when
     /// <see cref="QueryTextTrigramIndex"/> reports <c>Ready</c>. $1 the escaped pattern, $2 row cap + 1, $3 the raw-tier floor (naive UTC). The match is
@@ -244,9 +254,10 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
     /// statement takes twice the budget still answers from its newest two days. Each text is judged once per search whichever spans it
     /// runs in (see <see cref="PlanCacheSql"/>), which keeps the sixteen statements at about the cost of one. Measured warm on a seeded
     /// large store (330,000 texts; a server with 30,000 distinct texts in 970,000 samples over four days, the older half compressed): the
-    /// whole window in one statement takes 0.54 s, and in sixteen spans 0.59 s (0.41 s and 0.26 s with a database named), where sixteen
-    /// spans that each judge every text they see take 4.9 s, more than the budget, because a span with tens of thousands of distinct
-    /// texts judges them by scanning every text in the store and pays that scan once per span; seven coarser spans cut that only to 2.2 s.
+    /// whole window in one statement takes 0.50 s, and in sixteen spans carrying the judged digests 0.66 s (0.40 s and 0.24 s with a
+    /// database named; about 36 ms a span while carrying 20,000 to 30,000 digests), where sixteen spans that each judge every text they
+    /// see take 4.9 s, more than the budget, because a span with tens of thousands of distinct texts judges them by scanning every text in
+    /// the store and pays that scan once per span; seven coarser spans cut that only to 2.2 s.
     /// </summary>
     public const int RawTierSpanCount = 16;
 
@@ -449,33 +460,42 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
 
             /* The raw window newest span first, one statement per span inside the one transaction and budget (see RawTierSpanCount): the rows
                a span finds are kept whatever happens to the spans after it, a span already-found statements ran in again does not list them
-               twice, and the transaction's judged_text table carries each text's verdict from the span that judged it to the spans after. */
+               twice, and the digests each span judged, with their verdicts, are carried to the spans after it, so a text is judged once. */
             var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
             var spans = RawTierSpans(floor, now);
+            var judgedDigests = new List<byte[]>();
+            var judgedVerdicts = new List<bool>();
             var planCacheOutcome = await RunSourceAsync<PlanCacheHit, object>(
                 postgres, planCacheBudget, limit,
-                async (connection, transaction, step, collected, ct) =>
+                (_, _, step, collected, _) =>
                 {
                     if (step >= spans.Count || collected.Count > limit)
                     {
-                        return null;
-                    }
-
-                    if (step == 0)
-                    {
-                        await using var judged = new NpgsqlCommand(JudgedTextSql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
-                        await judged.ExecuteNonQueryAsync(ct);
+                        return Task.FromResult<SourceStatement?>(null);
                     }
 
                     var span = spans[step];
                     var wanted = limit + 1 - collected.Count;
-                    return new SourceStatement(PlanCacheSql, p => BindPlanCacheSpan(p, resolved.ServerId, database, escaped, wanted, span, collected));
+                    return Task.FromResult<SourceStatement?>(new SourceStatement(
+                        PlanCacheSql, p => BindPlanCacheSpan(p, resolved.ServerId, database, escaped, wanted, span, collected, judgedDigests, judgedVerdicts)));
                 },
                 StoppedAdvice(database),
                 completedSpans => completedSpans == 0
                     ? $"before the newest span of the {RawTierDays} raw tier had been searched"
                     : $"after the newest {DescribeSearched(completedSpans, floor, now)} of the {RawTierDays} raw tier had been searched, newest first, and the rest had not",
-                r => new PlanCacheHit(r.IsDBNull(0) ? null : r.GetString(0), r.IsDBNull(1) ? null : r.GetString(1), r.GetDateTime(2), r.IsDBNull(3) ? null : r.GetString(3)),
+                r => new PlanCacheHit(r.IsDBNull(1) ? null : r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2), r.GetDateTime(3), r.IsDBNull(4) ? null : r.GetString(4)),
+                r =>
+                {
+                    /* A judged row is a digest this span judged and its verdict, for the spans after it; it is not a row of the page. */
+                    if (!string.Equals(r.GetString(0), PlanCacheJudgedRowKind, StringComparison.Ordinal))
+                    {
+                        return false;
+                    }
+
+                    judgedDigests.Add((byte[])r[5]);
+                    judgedVerdicts.Add(r.GetBoolean(6));
+                    return true;
+                },
                 raw =>
                 {
                     var (textLength, excerpt) = Shape(raw.Stored, text);
@@ -585,6 +605,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
                 null,
                 r => (ServerId: r.GetInt32(0), Hash: r.IsDBNull(1) ? null : r.GetString(1), Database: r.IsDBNull(2) ? null : r.GetString(2), LastCollected: r.GetDateTime(3),
                     Stored: r.IsDBNull(4) ? null : r.GetString(4)),
+                null,
                 raw =>
                 {
                     var (textLength, excerpt) = Shape(raw.Stored, text);
@@ -686,10 +707,10 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
     private static string RawTierDays { get; } = ((int)TimescaleSupport.RawRetentionSpan.TotalDays).ToString(CultureInfo.InvariantCulture) + "-day";
 
     /// <summary><see cref="PlanCacheSql"/>'s parameters for one span: the server, the database filter, the pattern, the rows still wanted, the
-    /// span's floor and ceiling, and the keys of the rows earlier spans found.</summary>
+    /// span's floor and ceiling, the keys of the rows earlier spans found, and the digests earlier spans judged with their verdicts.</summary>
     private static void BindPlanCacheSpan(
         NpgsqlParameterCollection parameters, int serverId, string? database, string escaped, int wanted, (DateTime Floor, DateTime Ceiling) span,
-        IReadOnlyList<PlanCacheHit> found)
+        IReadOnlyList<PlanCacheHit> found, List<byte[]> judgedDigests, List<bool> judgedVerdicts)
     {
         parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
         parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)database ?? DBNull.Value });
@@ -707,6 +728,8 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
 
         parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = hashes });
         parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = databases });
+        parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = judgedDigests.ToArray() });
+        parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Boolean, Value = judgedVerdicts.ToArray() });
     }
 
     private static void BindOneServer(NpgsqlParameterCollection parameters, int serverId, string? database, string escaped, int limit, DateTime? floor)
@@ -733,7 +756,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
         string horizon, string stoppedAdvice, Func<NpgsqlDataReader, TRaw> read, Func<TRaw, TRow> shape, CancellationToken cancellationToken)
     {
         var outcome = await RunSourceAsync(
-            postgres, budget, limit, (_, _, step, _, _) => Task.FromResult(step == 0 ? new SourceStatement(sql, bind) : null), stoppedAdvice, null, read, shape, cancellationToken);
+            postgres, budget, limit, (_, _, step, _, _) => Task.FromResult(step == 0 ? new SourceStatement(sql, bind) : null), stoppedAdvice, null, read, null, shape, cancellationToken);
         return new
         {
             status = outcome.Status,
@@ -756,11 +779,14 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
     /// digests, then hands back the sample statement that fits them); null ends the source. <c>statement_timeout</c> starts at the budget, and each
     /// statement runs under what the steps before it left, so the source takes at most the budget before it is <c>stopped</c>, whichever
     /// statement runs out and even when a read spent it all. A source that stops keeps the rows the completed steps found: the stopped message
-    /// counts them and, when <paramref name="searched"/> is given, says what the completed steps covered.</summary>
+    /// counts them and, when <paramref name="searched"/> is given, says what the completed steps covered. <paramref name="aside"/>, when given,
+    /// sees each row first and takes the rows that are not rows of the page (the one-server search's judged digests, which it carries to the
+    /// next step itself); a row it returns true for is not read as a page row.</summary>
     private static async Task<SourceOutcome<TRow>> RunSourceAsync<TRaw, TRow>(
         NpgsqlDataSource postgres, SourceBudget budget, int limit,
         Func<NpgsqlConnection, NpgsqlTransaction, int, IReadOnlyList<TRaw>, CancellationToken, Task<SourceStatement?>> next,
-        string stoppedAdvice, Func<int, string>? searched, Func<NpgsqlDataReader, TRaw> read, Func<TRaw, TRow> shape, CancellationToken cancellationToken)
+        string stoppedAdvice, Func<int, string>? searched, Func<NpgsqlDataReader, TRaw> read, Func<NpgsqlDataReader, bool>? aside, Func<TRaw, TRow> shape,
+        CancellationToken cancellationToken)
     {
         var rows = new List<TRaw>();
         var completed = 0;
@@ -826,11 +852,17 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
                 await using var command = new NpgsqlCommand(statement.Sql, connection, transaction);
                 command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                 statement.Bind(command.Parameters);
+                budget.StatementBound?.Invoke(step, command.Parameters);
 
                 await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
                 {
                     while (await reader.ReadAsync(cancellationToken))
                     {
+                        if (aside is not null && aside(reader))
+                        {
+                            continue;
+                        }
+
                         rows.Add(read(reader));
                     }
                 }

@@ -114,15 +114,7 @@ public sealed class FindQueriesByTextIndexScopeLiveTests
             await analyze.ExecuteNonQueryAsync(ct);
         }
 
-        /* The one-server statement reads the transaction's table of judged texts, so the EXPLAIN runs in a transaction that has it. */
-        await using var transaction = await c.BeginTransactionAsync(ct);
-        if (withServer)
-        {
-            await using var judged = new NpgsqlCommand(DarlingMcpFindQueriesByTextTools.JudgedTextSql, c, transaction);
-            await judged.ExecuteNonQueryAsync(ct);
-        }
-
-        await using var explain = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + sql, c, transaction);
+        await using var explain = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + sql, c);
         var floor = LiveClock.Now() - TimescaleSupport.RawRetentionSpan;
         if (withServer)
         {
@@ -135,10 +127,13 @@ public sealed class FindQueriesByTextIndexScopeLiveTests
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floor });
         if (withServer)
         {
-            /* The one-server statement is one span of the raw window: its ceiling, and the keys of the rows earlier spans found (none here). */
+            /* The one-server statement is one span of the raw window: its ceiling, the keys of the rows earlier spans found and the digests they
+               judged with their verdicts (none here). */
             explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = LiveClock.Now().AddDays(1) });
             explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = Array.Empty<string?>() });
             explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = Array.Empty<string?>() });
+            explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = Array.Empty<byte[]>() });
+            explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Boolean, Value = Array.Empty<bool>() });
         }
 
         return Convert.ToString(await explain.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture)!;
