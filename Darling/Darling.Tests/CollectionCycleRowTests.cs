@@ -245,7 +245,9 @@ public sealed class CollectionCycleRowLiveTests
     private const int ServerB = -573503;
     private const int ReaderServerOld = -573504;   // a collector row, then a NEWER skip row
     private const int ReaderServerOnly = -573505;  // skip rows only
-    private static readonly int[] AllIds = [WriterServerId, ServerA, ServerB, ReaderServerOld, ReaderServerOnly];
+    private const int ReaderServerFailed = -573506;  // a collector SUCCESS, then NEWER failed attempts (#8464)
+    private const int ReaderServerDark = -573507;  // failed attempts only (#8464)
+    private static readonly int[] AllIds = [WriterServerId, ServerA, ServerB, ReaderServerOld, ReaderServerOnly, ReaderServerFailed, ReaderServerDark];
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -590,6 +592,58 @@ VALUES ($1, $2, $3, $4, $5, 100, $6, NULL, $7, 80, 20)",
         var firstCollected = reader.GetDateTime(reader.GetOrdinal("server_first_collected"));
         Assert.Equal(f.OldRun, lastCollected);
         Assert.Equal(f.OldRun, firstCollected);
+    });
+
+    /// <summary>#8464: the "last collected" reads answer with the newest SUCCESS, not a later failed attempt. Every attempt writes a
+    /// row, ERROR and PERMISSIONS included, so a server the service cannot read from writes one per collector per cycle, and the
+    /// Overview card's Last Collect, the sidebar dot, list_servers and get_server_summary must not move forward on them. A server
+    /// whose every attempt failed has no last collection at all. The two servers are seeded here, not in the shared fixture, so
+    /// the fleet-wide counts of Group 8 see only the rows they expect.</summary>
+    [Fact]
+    public Task Group4b_NewestRowReads_AnswerWithTheNewestSuccess_NotALaterFailedAttempt() => RunReaderAsync(async (f, connection, ct) =>
+    {
+        foreach (var (id, name) in new[] { (ReaderServerFailed, "cycle-reader-failed"), (ReaderServerDark, "cycle-reader-dark") })
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, id, name, ct);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, TRUE) ON CONFLICT (server_id) DO NOTHING", id, name);
+        }
+
+        /* A SUCCESS 30 minutes ago, then a PERMISSIONS attempt and an ERROR attempt after it; and a server whose every attempt failed. */
+        await InsertAsync(connection, ct, ReaderServerFailed, "cycle-reader-failed", "wait_stats", "SUCCESS", f.OldRun, 10);
+        await InsertAsync(connection, ct, ReaderServerFailed, "cycle-reader-failed", "query_stats", "PERMISSIONS", MinutesAgo(10), 0);
+        await InsertAsync(connection, ct, ReaderServerFailed, "cycle-reader-failed", "wait_stats", "ERROR", f.NewestSkip, 0);
+        await InsertAsync(connection, ct, ReaderServerDark, "cycle-reader-dark", "query_stats", "ERROR", MinutesAgo(10), 0);
+        await InsertAsync(connection, ct, ReaderServerDark, "cycle-reader-dark", "wait_stats", "ERROR", f.NewestSkip, 0);
+
+        /* list_servers */
+        var list = await DarlingDataReader.GetServerListAsync(f.Postgres, ct);
+        Assert.Equal(f.OldRun, list.Single(s => s.ServerId == ReaderServerFailed).LastCollection);
+        Assert.Null(list.Single(s => s.ServerId == ReaderServerDark).LastCollection);
+
+        /* get_server_summary */
+        var summary = await DarlingHealthReader.GetServerSummaryAsync(f.Postgres, ReaderServerFailed, cancellationToken: ct);
+        Assert.Equal(f.OldRun, summary.LastCollectionTime);
+        var dark = await DarlingHealthReader.GetServerSummaryAsync(f.Postgres, ReaderServerDark, cancellationToken: ct);
+        Assert.Null(dark.LastCollectionTime);
+
+        /* the Overview card's Last Collect */
+        Assert.Equal(f.OldRun, await ScalarAsync(f.Postgres, ViewerDataService.ServerSummaryLastCollectionSql, ct, ReaderServerFailed));
+        Assert.Null(await ScalarAsync(f.Postgres, ViewerDataService.ServerSummaryLastCollectionSql, ct, ReaderServerDark));
+
+        /* the sidebar dot */
+        var freshness = new Dictionary<int, DateTime>();
+        await using var command = f.Postgres.CreateCommand(ViewerDataService.ServerFreshnessSql);
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                freshness[reader.GetInt32(0)] = reader.GetDateTime(1);
+            }
+        }
+
+        Assert.Equal(f.OldRun, freshness[ReaderServerFailed]);
+        Assert.False(freshness.ContainsKey(ReaderServerDark), "a server whose every attempt failed has no freshness row");
     });
 
     /// <summary>Group 5: the per-day run count is made of collector runs only (text pin: the read takes seven parameters).</summary>
