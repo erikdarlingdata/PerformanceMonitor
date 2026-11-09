@@ -149,7 +149,15 @@ public sealed class ServerTabGridColumnLayoutTests
                 var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
                 /* Switching to a tab would start that tab's load against a server that is not there. */
                 typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", Instance)!.SetValue(tab, true);
-                return body(tab);
+                try
+                {
+                    return body(tab);
+                }
+                finally
+                {
+                    /* The tab is never shown, so no window's Closed stops its auto-refresh timer (#8367); stop it here. */
+                    tab.StopRefresh();
+                }
             }));
         }
         finally

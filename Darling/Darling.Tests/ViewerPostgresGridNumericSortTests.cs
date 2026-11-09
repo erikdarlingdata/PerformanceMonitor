@@ -56,9 +56,18 @@ public sealed class ViewerPostgresGridNumericSortTests
 
             try
             {
-                body(new ViewerServerTab(
+                var tab = new ViewerServerTab(
                     new ViewerDataService("Host=127.0.0.1;Port=1;Database=darling;Username=darling"),
-                    new DarlingServer(1, "pg-sort-test", "pg-sort-test", true, null, engineKind: "postgres")));
+                    new DarlingServer(1, "pg-sort-test", "pg-sort-test", true, null, engineKind: "postgres"));
+                try
+                {
+                    body(tab);
+                }
+                finally
+                {
+                    /* The tab is never shown, so no window's Closed stops its auto-refresh timer (#8367); dispose it here. */
+                    tab.Dispose();
+                }
             }
             finally
             {
