@@ -171,7 +171,10 @@ internal static class OversizedPlanBacklogSweep
     /// <summary>
     /// #8404: the most rows the given number of passes could have taken off one server's backlog, each pass claiming at
     /// most <see cref="MaxPlansPerServerPerTick"/>, captured and expired together. The figure a day's drain is held
-    /// against: a server drained at or near it with pending rows waiting was at the cap for the passes that ran.
+    /// against, for the passes that FINISHED in the day: the run record is written when a pass ends and captures are
+    /// stamped during it, so a pass in flight adds up to one claim to the drain with no record yet. The count is
+    /// store-wide and includes passes that reached no server, so this is an upper bound; a server drained at or near
+    /// it with pending rows waiting was at the cap for those passes, and with no pass finished nothing reads against it.
     /// </summary>
     internal static int ReachableRowsPerServer(int passes) => passes * MaxPlansPerServerPerTick;
 

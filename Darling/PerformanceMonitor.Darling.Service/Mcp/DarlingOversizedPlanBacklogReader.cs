@@ -302,12 +302,14 @@ LIMIT $2";
     }
 
     /// <summary>
-    /// #8404: how many sweep passes ran in the day before the read, from the run records the sweep writes under the
-    /// fleet sentinel, one per pass whatever the pass found (<c>DarlingObservability.LogOversizedPlanSweepRunAsync</c>).
-    /// <c>$1</c> is the sentinel id, <c>$2</c> the sweep's collector name and <c>$3</c> the instant the day starts at;
-    /// the statement reads no clock of its own. The worker launches a pass only after the previous one has finished,
-    /// so on a store whose passes outrun their interval this count sits below the interval's, and it is the count the
-    /// day's drain is held against.
+    /// #8404: how many sweep passes FINISHED in the day before the read, from the run records the sweep writes under
+    /// the fleet sentinel when a pass ends, one per pass whatever the pass found
+    /// (<c>DarlingObservability.LogOversizedPlanSweepRunAsync</c>). <c>$1</c> is the sentinel id, <c>$2</c> the sweep's
+    /// collector name and <c>$3</c> the instant the day starts at; the statement reads no clock of its own. The worker
+    /// launches a pass only after the previous one has finished, so on a store whose passes outrun their interval this
+    /// count sits below the interval's, and it is the count the day's drain is held against. A pass in flight at the
+    /// read has stamped its captures and has no record yet, and the count is store-wide, so it includes passes that
+    /// reached no server; the reader's text says both.
     /// </summary>
     public const string SweepPassesLastDaySql = @"
 SELECT count(*)
