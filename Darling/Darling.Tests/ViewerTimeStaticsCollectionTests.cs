@@ -32,28 +32,99 @@ public sealed class ViewerTimeStaticsCollectionTests
     private const string CollectionName = "viewer-time-statics";
 
     /// <summary>
-    /// An assignment to one of the statics: the member name, then a single <c>=</c>. <c>==</c> is excluded by the lookahead, and
-    /// <c>!=</c>, <c>&lt;=</c> and <c>&gt;=</c> put their operator character between the name and the <c>=</c>, where only
-    /// whitespace may sit. A read of the same member matches nothing here.
+    /// An assignment to one of the statics: the member name, then a single <c>=</c>. <c>==</c> and the <c>=&gt;</c> of a switch
+    /// arm or a lambda are excluded by the lookahead, and <c>!=</c>, <c>&lt;=</c> and <c>&gt;=</c> put their operator character
+    /// between the name and the <c>=</c>, where only whitespace may sit. A read of the same member matches nothing here.
     /// </summary>
     private static readonly Regex AssignsAStatic = new(
-        @"\bViewerTimeHelper\s*\.\s*(ActiveServerClock|UtcOffsetMinutes|CurrentDisplayMode)\s*=(?!=)",
+        @"\bViewerTimeHelper\s*\.\s*(ActiveServerClock|UtcOffsetMinutes|CurrentDisplayMode)\s*=(?![=>])",
         RegexOptions.CultureInvariant);
 
-    /// <summary>A line that applies the collection attribute to the class below it.</summary>
+    /// <summary>
+    /// Calls that write a static on the caller's behalf, so a file that makes one is a writer without naming the helper: the shell's
+    /// constructor applies the stored display mode (<c>MainWindow()</c> calls <c>ApplyTimeDisplayMode</c>); a server tab's
+    /// <c>ApplyServerClockToHelper</c> installs its clock; and two test helpers set the mode for a read and put it back
+    /// (<c>QueryGridSeed.ReadBanner</c>, <c>DataStartBannerReadout.For</c> and <c>.Since</c>). Each names the repo-relative file that
+    /// holds its assignment and the member around it, so <see cref="EveryWriterByCall_StillAssignsAStatic"/> fails when the rule
+    /// goes stale.
+    /// </summary>
+    private static readonly (Regex Call, string File, string Member)[] WritersByCall =
+    {
+        (new Regex(@"\bnew\s+MainWindow\s*[({]", RegexOptions.CultureInvariant),
+            "Darling/PerformanceMonitor.Darling.Viewer/MainWindow.xaml.cs", "ApplyTimeDisplayMode"),
+        (new Regex(@"\bApplyServerClockToHelper\s*\(", RegexOptions.CultureInvariant),
+            "Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.TimeRange.cs", "ApplyServerClockToHelper"),
+        (new Regex(@"\bQueryGridSeed\s*\.\s*ReadBanner\s*\(", RegexOptions.CultureInvariant),
+            "Darling/Darling.Tests/ViewerQueryGridsDataStartLiveTests.cs", "ReadBanner"),
+        (new Regex(@"\bDataStartBannerReadout\s*\.\s*(For|Since)\s*\(", RegexOptions.CultureInvariant),
+            "Darling/Darling.Tests/ViewerConfigChangesDataStartTests.cs", "DataStartBannerReadout"),
+    };
+
+    /// <summary>A line that applies the collection attribute to the class below it; group 1 is its <c>[</c>.</summary>
     private static readonly Regex CollectionAttributeLine = new(
-        @"^\s*\[Collection\(""" + CollectionName + @"""\)",
+        @"^\s*(\[)Collection\(""" + CollectionName + @"""\)",
         RegexOptions.CultureInvariant | RegexOptions.Multiline);
 
     /// <summary>Anti-vacuity: well over this many files write the statics, so a scan that stops seeing the sources fails.</summary>
     private const int WriterFloor = 10;
 
-    /// <summary>Whether a test source writes one of the statics, in code (comments and string literals do not count).</summary>
-    internal static bool WritesTheStatics(string source) =>
-        AssignsAStatic.IsMatch(CSharpSourceWalker.StripCommentsAndStrings(source));
+    /// <summary>
+    /// Whether a test source writes one of the statics, directly or through a call in <see cref="WritersByCall"/>, in code
+    /// (comments and string literals do not count).
+    /// </summary>
+    internal static bool WritesTheStatics(string source)
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+        return AssignsAStatic.IsMatch(code) || WritersByCall.Any(writer => writer.Call.IsMatch(code));
+    }
 
-    /// <summary>Whether a test source applies the collection attribute.</summary>
-    internal static bool CarriesTheCollection(string source) => CollectionAttributeLine.IsMatch(source);
+    /// <summary>
+    /// Whether a test source applies the collection attribute. The name is a string literal, so the line is matched on the raw text,
+    /// and the <c>[</c> must fall in code: a comment line that starts with the same text is prose.
+    /// </summary>
+    internal static bool CarriesTheCollection(string source)
+    {
+        var code = CSharpSourceWalker.CodeMask(source);
+        return CollectionAttributeLine.Matches(source).Any(match => code[match.Groups[1].Index]);
+    }
+
+    /// <summary>
+    /// Each call in <see cref="WritersByCall"/> stands for an assignment in another file. This reads that file and checks the member
+    /// is still there and the file still assigns a static in code, so the scan cannot keep treating a call as a write after the
+    /// write has moved.
+    /// </summary>
+    [Fact]
+    public void EveryWriterByCall_StillAssignsAStatic()
+    {
+        var repoRoot = FindRepoRoot();
+        Assert.True(repoRoot is not null, $"Could not find the directory holding PerformanceMonitor.sln, walking up from {AppContext.BaseDirectory}.");
+
+        var stale = new List<string>();
+        foreach (var (call, file, member) in WritersByCall)
+        {
+            var path = Path.Combine(repoRoot!, file.Replace('/', Path.DirectorySeparatorChar));
+            if (!File.Exists(path))
+            {
+                stale.Add($"{call}: {file} does not exist");
+                continue;
+            }
+
+            var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
+            if (!code.Contains(member, StringComparison.Ordinal))
+            {
+                stale.Add($"{call}: {file} no longer has {member}");
+            }
+            else if (!AssignsAStatic.IsMatch(code))
+            {
+                stale.Add($"{call}: {file} no longer assigns a ViewerTimeHelper static");
+            }
+        }
+
+        Assert.True(
+            stale.Count == 0,
+            "These calls are counted as writes of ViewerTimeHelper's statics, and the file that justified each has changed: "
+            + string.Join("; ", stale));
+    }
 
     /// <summary>
     /// The shapes the scan must read as a write: a direct assignment, the shell's constructor (<c>MainWindow()</c> applies the stored
