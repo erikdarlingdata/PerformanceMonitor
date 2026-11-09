@@ -35,6 +35,9 @@ public sealed class PlanViewerInsightsStripWidthTests
 
     private const double CardCap = 360;
 
+    /// <summary>Tall enough for the insights panel to start expanded (it starts collapsed under 640 px).</summary>
+    private const double HostHeight = 720;
+
     [Theory]
     [InlineData(1280)]
     [InlineData(1600)]
@@ -48,11 +51,10 @@ public sealed class PlanViewerInsightsStripWidthTests
             {
                 RenderInsights(control, LongStatement(), LongWaits());
 
-                // The CI screen is 1024x768, so the width comes from an explicitly sized host, not from a Window.
-                var host = new Border { Width = width, Height = 600, Child = control };
-                host.Measure(new Size(width, 600));
-                host.Arrange(new Rect(0, 0, width, 600));
-                host.UpdateLayout();
+                /* The CI screen is 1024x768, so the width comes from an explicitly sized host, not from a Window. The host is tall
+                   enough (640 px or more) for the insights panel to start expanded; a collapsed panel leaves the layout. */
+                var host = new Border { Width = width, Height = HostHeight, Child = control };
+                LayOut(host);
 
                 var strip = (ScrollViewer)control.FindName("InsightsStrip");
                 var panel = (Border)control.FindName("InsightsPanel");
@@ -60,6 +62,8 @@ public sealed class PlanViewerInsightsStripWidthTests
                 var cards = grid.Children.OfType<Border>().ToList();
                 var waitCard = cards.Single(card => Grid.GetColumn(card) == 4);
                 var found = new List<string>();
+                if (!((Expander)control.FindName("InsightsExpander")).IsExpanded)
+                    found.Add($"Plan Insights is collapsed in a {HostHeight} px tall viewer; the cards are measured open");
 
                 /* The grid's width is the strip's, or the four content-sized columns plus the Wait Stats column's minimum when the
                    strip is narrower than that; never the Wait Stats card's longest row. */
@@ -73,8 +77,8 @@ public sealed class PlanViewerInsightsStripWidthTests
                    right edge. */
                 var columnsFit = contentColumns + WaitStatsMinimum <= stripWidth + 0.5;
                 var waitCardRight = waitCard.TransformToAncestor(strip).TransformBounds(new Rect(waitCard.RenderSize)).Right;
-                if (columnsFit && strip.ScrollableWidth > 0.5)
-                    found.Add($"the strip scrolls by {strip.ScrollableWidth:F0} px (extent {strip.ExtentWidth:F0} px) in a {stripWidth:F0} px strip that holds its columns' minimums ({contentColumns:F0} + {WaitStatsMinimum} px)");
+                if (columnsFit && (strip.ScrollableWidth > 0 || strip.ComputedHorizontalScrollBarVisibility == Visibility.Visible))
+                    found.Add($"the strip scrolls by {strip.ScrollableWidth:F2} px (extent {strip.ExtentWidth:F2} px, scroll bar {strip.ComputedHorizontalScrollBarVisibility}) in a {stripWidth:F2} px strip that holds its columns' minimums ({contentColumns:F0} + {WaitStatsMinimum} px)");
                 if (columnsFit && Math.Abs(waitCardRight - stripWidth) > 0.5)
                     found.Add($"the Wait Stats card ends at {waitCardRight:F0} px in a strip {stripWidth:F0} px wide: it does not fill the remaining width");
                 if (!columnsFit && Math.Abs(strip.ScrollableWidth - (bound - stripWidth)) > 0.5)
@@ -131,6 +135,67 @@ public sealed class PlanViewerInsightsStripWidthTests
             ThemeManager.Apply(previous);
             ThemeManager.ThemeUriProvider = ThemeManager.ThemeUri;
         }
+    }
+
+    /// <summary>A strip whose width moves by a fraction of a pixel, as it does at a fractional display scale, takes the grid with it:
+    /// the grid is exactly as wide as the strip, so a sub-pixel difference never leaves a scroll bar showing.</summary>
+    [Fact]
+    public void TheInsightsGrid_FollowsAFractionalResize_Exactly()
+    {
+        var problems = StaTestThread.Run(() => WithTheme("Dark", () =>
+        {
+            var control = new PlanViewerControl { ServerMetadata = LongEditionMetadata() };
+            try
+            {
+                RenderInsights(control, LongStatement(), LongWaits());
+
+                var host = new Border { Width = 1920.4, Height = HostHeight, Child = control };
+                LayOut(host);
+                host.Width = 1920;
+                LayOut(host);
+
+                var strip = (ScrollViewer)control.FindName("InsightsStrip");
+                var panel = (Border)control.FindName("InsightsPanel");
+                var grid = Descendants(panel).OfType<Grid>().First(g => g.ColumnDefinitions.Count == 5);
+                var found = new List<string>();
+                if (!((Expander)control.FindName("InsightsExpander")).IsExpanded)
+                    found.Add($"Plan Insights is collapsed in a {HostHeight} px tall viewer; the cards are measured open");
+                if (strip.ViewportWidth != 1920)
+                    found.Add($"the strip's viewport is {strip.ViewportWidth:F2} px after the host narrowed to 1920 px");
+                if (grid.ActualWidth != strip.ViewportWidth)
+                    found.Add($"the insights grid is {grid.ActualWidth:F2} px wide in a strip whose viewport is {strip.ViewportWidth:F2} px after the strip narrowed from 1920.4 px to 1920 px: the grid follows the strip exactly");
+                if (strip.ScrollableWidth > 0 || strip.ComputedHorizontalScrollBarVisibility == Visibility.Visible)
+                    found.Add($"the strip scrolls by {strip.ScrollableWidth:F2} px (extent {strip.ExtentWidth:F2} px, scroll bar {strip.ComputedHorizontalScrollBarVisibility}) after it narrowed from 1920.4 px to 1920 px");
+                return found;
+            }
+            finally
+            {
+                control.Cleanup();
+            }
+        }));
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>Lays the host out at its own size and lets the layout settle: a width the plan viewer sets from a layout-updated
+    /// handler lands on the next pass, and the strip's scroll data refreshes on its own deferred handler, so the layout runs,
+    /// the dispatcher's pending work is pumped, and the layout runs again before anything is read.</summary>
+    private static void LayOut(Border host)
+    {
+        host.Measure(new Size(host.Width, host.Height));
+        host.Arrange(new Rect(0, 0, host.Width, host.Height));
+        host.UpdateLayout();
+        PumpDispatcher();
+        host.Measure(new Size(host.Width, host.Height));
+        host.Arrange(new Rect(0, 0, host.Width, host.Height));
+        host.UpdateLayout();
+    }
+
+    private static void PumpDispatcher()
+    {
+        var frame = new System.Windows.Threading.DispatcherFrame();
+        System.Windows.Threading.Dispatcher.CurrentDispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ContextIdle, new Action(() => frame.Continue = false));
+        System.Windows.Threading.Dispatcher.PushFrame(frame);
     }
 
     /// <summary>Renders the five insight cards for a statement as the plan viewer does when a statement is drawn, with the wait
