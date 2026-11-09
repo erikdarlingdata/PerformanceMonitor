@@ -39,7 +39,7 @@
                 </Grid.RowDefinitions>
 
         <!-- Header -->
-        <TextBlock Grid.Row="0" Text="Add SQL Server Connection" FontSize="18" FontWeight="Bold" Margin="0,0,0,15"
+        <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Add SQL Server Connection" FontSize="18" FontWeight="Bold" Margin="0,0,0,15"
                    Foreground="{DynamicResource ForegroundBrush}"/>
 
         <!-- Server Name -->

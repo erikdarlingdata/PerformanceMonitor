@@ -40,7 +40,7 @@
                       Foreground="{DynamicResource ForegroundBrush}">
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" IsReadOnly="True" Width="2*"/>
-                    <DataGridTextColumn Header="Current State" Binding="{Binding CurrentState}" IsReadOnly="True" Width="1.4*"/>
+                    <DataGridTextColumn Header="Last Known State" Binding="{Binding CurrentState}" IsReadOnly="True" Width="1.4*"/>
                     <DataGridComboBoxColumn x:Name="ExpectedColumn" Header="Expected State"
                                             SelectedItemBinding="{Binding ExpectedState}" Width="1.6*"/>
                     <DataGridTextColumn Header="Source" Binding="{Binding SourceLabel}" IsReadOnly="True" Width="1*"/>
