@@ -255,7 +255,7 @@ VALUES ('{id}', {(enabled ? "TRUE" : "FALSE")}, {(createdUtc is null ? "now() AT
     {
         await RunAsync(async c =>
         {
-            Assert.Equal("created", (string?)Parse(await Create(c, Legacy, action: "mute"))["status"]);
+            Assert.Equal("created", (string?)Parse(await Create(c, Legacy, metric: "High CPU", serverId: 7, action: "mute"))["status"]);
             Assert.Equal("2", await ScalarAsync(c, "SELECT count(*) FROM config.investigation_journal WHERE actor = 'agent:legacy-token'"));
         });
     }
@@ -541,34 +541,35 @@ CREATE TRIGGER fail_journal BEFORE INSERT ON config.investigation_journal FOR EA
     {
         await RunAsync(async c =>
         {
-            var first = Parse(await Create(c, Named));
+            /* A digest on one server and one metric, so the other-action variant below is a mute an agent may make (#8473: a mute names one server). */
+            var first = Parse(await Create(c, Named, metric: "High CPU", serverId: 7));
             var id = (string)first["mute_rule"]!["id"]!;
             Assert.Equal("deleted", (string?)Parse(await DarlingMcpAlertTools.DeleteMuteRule(c.Source, id, agentSeat: Named, reason: "storm over"))["status"]);
             var journal = await JournalCountAsync(c);
 
-            var again = Parse(await Create(c, Legacy));
+            var again = Parse(await Create(c, Legacy, metric: "High CPU", serverId: 7));
             Assert.Equal(DarlingMcpAgentMuteDirect.RepeatCode, (string?)again["reason"]);
             Assert.Contains("operator", (string?)again["message"], StringComparison.Ordinal);
             Assert.Equal("0", await RuleCountAsync(c));
             Assert.Equal(journal, await JournalCountAsync(c));
 
             /* Not the same match: another action, another server, another metric. */
-            Assert.Equal("created", (string?)Parse(await Create(c, Named, action: "mute"))["status"]);
-            Assert.Equal("created", (string?)Parse(await Create(c, Named, serverId: 7))["status"]);
-            Assert.Equal("created", (string?)Parse(await Create(c, Named, metric: "High CPU"))["status"]);
+            Assert.Equal("created", (string?)Parse(await Create(c, Named, metric: "High CPU", serverId: 7, action: "mute"))["status"]);
+            Assert.Equal("created", (string?)Parse(await Create(c, Named, metric: "High CPU", serverId: 8))["status"]);
+            Assert.Equal("created", (string?)Parse(await Create(c, Named, metric: "Deadlocks", serverId: 7))["status"]);
 
             /* The look-back is twice the 7 day lifetime: a match is off as long as it was on. At 8 days (the old rule's end) it is still refused,
                and the refusal says an operator can make a longer rule. Past 14 days it is allowed again. */
             await ExecAsync(c.Connection, "UPDATE config.investigation_journal SET event_time = event_time - interval '8 days'", c.Ct);
             await ExecAsync(c.Connection, "DELETE FROM config_mute_rules", c.Ct);
-            var eightDays = Parse(await Create(c, Named));
+            var eightDays = Parse(await Create(c, Named, metric: "High CPU", serverId: 7));
             Assert.Equal(DarlingMcpAgentMuteDirect.RepeatCode, (string?)eightDays["reason"]);
             Assert.Contains("14 days", (string?)eightDays["message"], StringComparison.Ordinal);
             Assert.Contains("operator can make", (string?)eightDays["message"], StringComparison.Ordinal);
             Assert.Equal("0", await RuleCountAsync(c));
 
             await ExecAsync(c.Connection, "UPDATE config.investigation_journal SET event_time = event_time - interval '7 days'", c.Ct);
-            Assert.Equal("created", (string?)Parse(await Create(c, Named))["status"]);
+            Assert.Equal("created", (string?)Parse(await Create(c, Named, metric: "High CPU", serverId: 7))["status"]);
         });
     }
 
@@ -601,10 +602,10 @@ CREATE TRIGGER fail_journal BEFORE INSERT ON config.investigation_journal FOR EA
             Assert.Equal(DarlingMcpAgentMuteDirect.RepeatCode, (string?)server["reason"]);
             Assert.Equal("7", await ScalarAsync(c, $"SELECT server_id FROM config_mute_rules WHERE id = '{onSeven}'"));
 
-            /* By action. */
-            var mute = (string)Parse(await Create(c, Named, metric: "Deadlocks", action: "mute"))["mute_rule"]!["id"]!;
+            /* By action, on one server: a mute an agent may make names a server (#8473). */
+            var mute = (string)Parse(await Create(c, Named, metric: "Deadlocks", serverId: 7, action: "mute"))["mute_rule"]!["id"]!;
             Assert.Equal("deleted", (string?)Parse(await DarlingMcpAlertTools.DeleteMuteRule(c.Source, mute, agentSeat: Named, reason: "storm over"))["status"]);
-            var digest = (string)Parse(await Create(c, Named, metric: "Deadlocks", action: "digest"))["mute_rule"]!["id"]!;
+            var digest = (string)Parse(await Create(c, Named, metric: "Deadlocks", serverId: 7, action: "digest"))["mute_rule"]!["id"]!;
             var action = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, digest, Move("action", "\"mute\""), agentSeat: Named));
             Assert.Equal(DarlingMcpAgentMuteDirect.RepeatCode, (string?)action["reason"]);
 
@@ -782,10 +783,10 @@ VALUES ('{id}', FALSE, now() AT TIME ZONE 'utc', 'operator rule', '{Iso(DateTime
             Assert.Equal("1", await RuleCountAsync(c));
             Assert.Equal("0", await JournalCountAsync(c));
 
-            /* The limit is a count of direct writes in the journal in the last hour, across tokens. 19 old-enough rows leave room for one, 20 do not. */
+            /* The limit is a count of this agent's direct writes in the journal in the last hour (#8473: per agent). 19 recent rows leave room for one, 20 do not. */
             for (var i = 0; i < DarlingMcpAgentMuteDirect.MaxWritesPerHour - 1; i++)
                 await ExecAsync(c.Connection, "INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor, reason, detail) " +
-                    "VALUES (now(), NULL, NULL, 'action_called', 'agent:other', 'x', '{}'::jsonb)", c.Ct);
+                    "VALUES (now(), NULL, NULL, 'action_called', 'agent:agent-a', 'x', '{}'::jsonb)", c.Ct);
             Assert.Equal("created", (string?)Parse(await Create(c, Named))["status"]);
             var rateRefused = Parse(await Create(c, Named, metric: "High CPU", serverId: 8, action: "mute"));
             Assert.Equal(DarlingMcpAgentMuteDirect.RateCode, (string?)rateRefused["reason"]);
