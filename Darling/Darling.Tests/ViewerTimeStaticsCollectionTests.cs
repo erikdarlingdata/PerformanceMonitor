@@ -12,7 +12,9 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text.RegularExpressions;
+using System.Windows;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
@@ -24,8 +26,10 @@ namespace Darling.Tests;
 /// parallelization disabled, so no class in another collection is mid-assertion while a static is swapped. A writer outside it
 /// runs beside the rest of the assembly, and either side can fail on a time text that has nothing to do with the code it tests.
 /// A class that only reads the statics needs no collection: the collection running alone is what keeps them still while it
-/// reads. Lite's <c>ServerTimeHelperCollectionTests</c> is the twin for <c>ServerTimeHelper</c>.
+/// reads. Lite's <c>ServerTimeHelperCollectionTests</c> is the twin for <c>ServerTimeHelper</c>. This class constructs the shell
+/// to prove the constructor writes, so it is in the collection too.
 /// </summary>
+[Collection("viewer-time-statics")]
 [Trait("Stage", "Guard")]
 public sealed class ViewerTimeStaticsCollectionTests
 {
@@ -41,19 +45,24 @@ public sealed class ViewerTimeStaticsCollectionTests
         RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// Calls that write a static on the caller's behalf, so a file that makes one is a writer without naming the helper: the shell's
-    /// constructor applies the stored display mode (<c>MainWindow()</c> calls <c>ApplyTimeDisplayMode</c>); a server tab's
-    /// <c>ApplyServerClockToHelper</c> installs its clock; and two test helpers set the mode for a read and put it back
-    /// (<c>QueryGridSeed.ReadBanner</c>, <c>DataStartBannerReadout.For</c> and <c>.Since</c>). Each names the repo-relative file that
-    /// holds its assignment and the member around it, so <see cref="EveryWriterByCall_StillAssignsAStatic"/> fails when the rule
-    /// goes stale.
+    /// Calls into product code that write a static on the caller's behalf, so a file that makes one is a writer without naming the
+    /// helper: the shell's constructor applies the stored display mode (<see cref="TheShellsConstructor_WritesTheDisplayMode"/>
+    /// proves it by constructing the shell), and a server tab's <c>ApplyServerClockToHelper</c> installs its clock (an internal
+    /// member that needs a tab with a clock; no class outside the collection calls it).
     /// </summary>
-    private static readonly (Regex Call, string File, string Member)[] WritersByCall =
+    private static readonly Regex[] ProductWritersByCall =
     {
-        (new Regex(@"\bnew\s+MainWindow\s*[({]", RegexOptions.CultureInvariant),
-            "Darling/PerformanceMonitor.Darling.Viewer/MainWindow.xaml.cs", "ApplyTimeDisplayMode"),
-        (new Regex(@"\bApplyServerClockToHelper\s*\(", RegexOptions.CultureInvariant),
-            "Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.TimeRange.cs", "ApplyServerClockToHelper"),
+        new(@"\bnew\s+MainWindow\s*[({]", RegexOptions.CultureInvariant),
+        new(@"\bApplyServerClockToHelper\s*\(", RegexOptions.CultureInvariant),
+    };
+
+    /// <summary>
+    /// Test helpers in other files that set the mode for a read and put it back: <c>QueryGridSeed.ReadBanner</c>, and
+    /// <c>DataStartBannerReadout.For</c> and <c>.Since</c>. Each names the test file that holds its assignment and the member around
+    /// it, so <see cref="EveryTestHelperWriter_StillAssignsAStatic"/> fails when the rule goes stale.
+    /// </summary>
+    private static readonly (Regex Call, string File, string Member)[] TestHelperWriters =
+    {
         (new Regex(@"\bQueryGridSeed\s*\.\s*ReadBanner\s*\(", RegexOptions.CultureInvariant),
             "Darling/Darling.Tests/ViewerQueryGridsDataStartLiveTests.cs", "ReadBanner"),
         (new Regex(@"\bDataStartBannerReadout\s*\.\s*(For|Since)\s*\(", RegexOptions.CultureInvariant),
@@ -69,13 +78,15 @@ public sealed class ViewerTimeStaticsCollectionTests
     private const int WriterFloor = 10;
 
     /// <summary>
-    /// Whether a test source writes one of the statics, directly or through a call in <see cref="WritersByCall"/>, in code
-    /// (comments and string literals do not count).
+    /// Whether a test source writes one of the statics, directly or through a call in <see cref="ProductWritersByCall"/> or
+    /// <see cref="TestHelperWriters"/>, in code (comments and string literals do not count).
     /// </summary>
     internal static bool WritesTheStatics(string source)
     {
         var code = CSharpSourceWalker.StripCommentsAndStrings(source);
-        return AssignsAStatic.IsMatch(code) || WritersByCall.Any(writer => writer.Call.IsMatch(code));
+        return AssignsAStatic.IsMatch(code)
+            || ProductWritersByCall.Any(call => call.IsMatch(code))
+            || TestHelperWriters.Any(writer => writer.Call.IsMatch(code));
     }
 
     /// <summary>
@@ -89,18 +100,70 @@ public sealed class ViewerTimeStaticsCollectionTests
     }
 
     /// <summary>
-    /// Each call in <see cref="WritersByCall"/> stands for an assignment in another file. This reads that file and checks the member
-    /// is still there and the file still assigns a static in code, so the scan cannot keep treating a call as a write after the
-    /// write has moved.
+    /// The shell's constructor applies the stored display mode to the static, which is why <c>new MainWindow()</c> counts as a
+    /// write. The stored value is whatever the machine's settings hold, so the proof presets two different modes and constructs the
+    /// shell once from each: a constructor that writes the static lands both on the one stored mode, and one that does not leaves
+    /// the two presets apart. The mode and the clock are put back afterwards.
     /// </summary>
     [Fact]
-    public void EveryWriterByCall_StillAssignsAStatic()
+    public void TheShellsConstructor_WritesTheDisplayMode()
+    {
+        var (afterUtcPreset, afterLocalPreset) = StaTestThread.Run(() =>
+        {
+            var savedMode = ViewerTimeHelper.CurrentDisplayMode;
+            var savedClock = ViewerTimeHelper.ActiveServerClock;
+            var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            var added = new List<ResourceDictionary>
+            {
+                new() { Source = new Uri("pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/Dark.xaml") },
+                new() { Source = ThemeManager.SharedStylesUri },
+            };
+            foreach (var dictionary in added)
+            {
+                app.Resources.MergedDictionaries.Add(dictionary);
+            }
+
+            try
+            {
+                ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+                _ = new MainWindow();
+                var first = ViewerTimeHelper.CurrentDisplayMode;
+                ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+                _ = new MainWindow();
+                return (first, ViewerTimeHelper.CurrentDisplayMode);
+            }
+            finally
+            {
+                foreach (var dictionary in added)
+                {
+                    app.Resources.MergedDictionaries.Remove(dictionary);
+                }
+
+                ViewerTimeHelper.CurrentDisplayMode = savedMode;
+                ViewerTimeHelper.ActiveServerClock = savedClock;
+            }
+        });
+
+        Assert.True(
+            afterUtcPreset == afterLocalPreset,
+            $"Constructing the shell from a preset of UTC left the display mode at {afterUtcPreset}, and from a preset of LocalTime "
+            + $"at {afterLocalPreset}: the constructor no longer applies the stored mode, so new MainWindow() is not a write and "
+            + "should leave ProductWritersByCall.");
+    }
+
+    /// <summary>
+    /// Each call in <see cref="TestHelperWriters"/> stands for an assignment in another test file. This reads that file and checks
+    /// the member is still there and the file still assigns a static in code, so the scan cannot keep treating a call as a write
+    /// after the write has moved.
+    /// </summary>
+    [Fact]
+    public void EveryTestHelperWriter_StillAssignsAStatic()
     {
         var repoRoot = FindRepoRoot();
         Assert.True(repoRoot is not null, $"Could not find the directory holding PerformanceMonitor.sln, walking up from {AppContext.BaseDirectory}.");
 
         var stale = new List<string>();
-        foreach (var (call, file, member) in WritersByCall)
+        foreach (var (call, file, member) in TestHelperWriters)
         {
             var path = Path.Combine(repoRoot!, file.Replace('/', Path.DirectorySeparatorChar));
             if (!File.Exists(path))
