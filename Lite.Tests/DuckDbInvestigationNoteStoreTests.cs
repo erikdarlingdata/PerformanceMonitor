@@ -154,6 +154,11 @@ WHERE event = 'note_rejected' AND actor = 'person:tester' AND request_id = '{rej
         using var held = new ManualResetEventSlim(false);
         using var release = new ManualResetEventSlim(false);
         using var returned = new ManualResetEventSlim(false);
+        /* The write lock is process-wide, and the classes running alongside take it while they build their own databases. A budgeted
+           writer polls for it with no queue position for all but the last second of its budget (#7256), and the writers those classes
+           park on the lock win every handoff, so the writer here parks for its whole budget instead: it holds the lock as soon as the
+           current holder releases, and its budget is the only bound on the wait (#8142). */
+        _db.WriteLockParkTail = DuckDbInvestigationStoreTests.TestLockBudget;
         var writer = Task.Factory.StartNew(() =>
         {
             using var writeLock = _db.AcquireWriteLock(DuckDbInvestigationStoreTests.TestLockBudget);

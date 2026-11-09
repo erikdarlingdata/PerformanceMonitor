@@ -989,7 +989,7 @@
                                                                FontSize="11" FontWeight="SemiBold" Width="58"
                                                                VerticalAlignment="Center" DockPanel.Dock="Left"/>
                                                     <TextBlock Text="{Binding DisplayName}" Foreground="{DynamicResource ForegroundBrush}"
-                                                               FontSize="11" FontWeight="SemiBold" Width="160"
+                                                               FontSize="11" FontWeight="SemiBold" Width="160" Margin="0,0,10,0"
                                                                VerticalAlignment="Center" TextTrimming="CharacterEllipsis" DockPanel.Dock="Left"/>
                                                     <TextBlock Text="{Binding Reason}" Foreground="{DynamicResource ForegroundMutedBrush}"
                                                                FontSize="11" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
@@ -1062,12 +1062,15 @@
                                             MouseLeftButtonDown="OverviewCard_MouseLeftButtonDown">
                                         <Grid>
                                             <StackPanel Margin="16">
+                                                <!-- The dot is docked first so a long name cannot push it off the card; the name takes
+                                                     the rest of the row and trims, with the whole name as its tooltip. -->
                                                 <DockPanel Margin="0,0,0,4">
-                                                    <TextBlock Text="{Binding DisplayName}" AutomationProperties.AutomationId="OverviewServerCardName"
-                                                               Style="{StaticResource PanelTitleText}"/>
                                                     <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}"
                                                              ToolTip="{Binding StatusTooltip}"
-                                                             HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                                             DockPanel.Dock="Right" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                                    <TextBlock Text="{Binding DisplayName}" AutomationProperties.AutomationId="OverviewServerCardName"
+                                                               Style="{StaticResource PanelTitleText}"
+                                                               TextTrimming="CharacterEllipsis" ToolTip="{Binding DisplayName}"/>
                                                 </DockPanel>
                                                 <!-- #2422: the status line carries the reason it is that colour. The
                                                      card already computed the sentence (FleetRollup.BuildReason, from
@@ -1407,7 +1410,7 @@
                                      would otherwise win. -->
                                 <Expander.HeaderTemplate>
                                     <DataTemplate>
-                                        <TextBlock Text="{Binding}" Foreground="{DynamicResource ForegroundBrush}"/>
+                                        <TextBlock Text="{Binding}" Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"/>
                                     </DataTemplate>
                                 </Expander.HeaderTemplate>
                                 <ItemsControl ItemsSource="{Binding Cards}"
@@ -1630,7 +1633,19 @@
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" x:Name="StatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextWrapping="Wrap"/>
+            <!-- The message keeps to one line; the whole text is its tooltip, and an empty bar opens none. -->
+            <TextBlock Grid.Column="0" x:Name="StatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis">
+                <TextBlock.Style>
+                    <Style TargetType="TextBlock">
+                        <Setter Property="ToolTip" Value="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+                        <Style.Triggers>
+                            <Trigger Property="Text" Value="">
+                                <Setter Property="ToolTip" Value="{x:Null}"/>
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </TextBlock.Style>
+            </TextBlock>
             <TextBlock Grid.Column="1" x:Name="SeatText" Text="Access: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
             <TextBlock Grid.Column="2" x:Name="CollectorHealthText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
             <TextBlock Grid.Column="3" x:Name="DatabaseSizeText" Text="Database: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>

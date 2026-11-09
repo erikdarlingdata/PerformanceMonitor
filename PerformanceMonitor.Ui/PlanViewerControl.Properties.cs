@@ -1626,6 +1626,7 @@ public partial class PlanViewerControl
 
             var labelText = new TextBlock
             {
+                TextWrapping = TextWrapping.Wrap,
                 Text = label,
                 FontSize = 11,
                 Foreground = labelBrush,
@@ -1638,6 +1639,7 @@ public partial class PlanViewerControl
 
             var valueText = new TextBlock
             {
+                TextWrapping = TextWrapping.Wrap,
                 Text = value,
                 FontSize = 11,
                 Foreground = colorKey == null ? valueBrush : (Brush)FindResource(colorKey),
@@ -1694,6 +1696,7 @@ public partial class PlanViewerControl
             var row = rows[rowIndex];
             var labelText = new TextBlock
             {
+                TextWrapping = TextWrapping.Wrap,
                 Text = row.Label,
                 FontSize = 11,
                 Foreground = labelBrush,
@@ -1706,6 +1709,7 @@ public partial class PlanViewerControl
 
             var valueText = new TextBlock
             {
+                TextWrapping = TextWrapping.Wrap,
                 Text = row.Value,
                 FontSize = 11,
                 Foreground = valueBrush,
@@ -1736,6 +1740,7 @@ public partial class PlanViewerControl
     {
         InsightsPanel.Visibility = Visibility.Visible;
         InsightsHeader.Text = "  Plan Insights";
+        FitInsightsToHeight();
     }
 
     #endregion

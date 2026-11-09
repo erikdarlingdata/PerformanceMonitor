@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// applies it, two cards from the Overview's own template (one offline, one healthy) are rendered at 900x600, and the pixels inside
 /// each card's padding are sampled beside the status line, the Last Collect row and the Memory row.
 /// </summary>
+[Collection("viewer-time-statics")]
 public sealed class ViewerOfflineCardThemeFillTests
 {
     private const double CardWidth = 300;

@@ -267,8 +267,10 @@ public sealed class DarlingMcpSessionTools
                 database_name = r.DatabaseName,
                 status = r.Status,
                 cpu_time_ms = r.CpuTimeMs,
-                elapsed_time_ms = r.TotalElapsedTimeMs,
-                elapsed_time_formatted = r.ElapsedTimeFormatted,
+                /* The engine's elapsed-time counter is a 32-bit int: a row at its ceiling is "at least this old", so both fields are null and the note says why. */
+                elapsed_time_ms = ElapsedTimeCeiling.IsAtCeiling(r.TotalElapsedTimeMs) ? (long?)null : r.TotalElapsedTimeMs,
+                elapsed_time_formatted = ElapsedTimeCeiling.IsAtCeiling(r.TotalElapsedTimeMs) ? null : r.ElapsedTimeFormatted,
+                elapsed_time_note = ElapsedTimeCeiling.IsAtCeiling(r.TotalElapsedTimeMs) ? ElapsedTimeCeiling.Note : null,
                 logical_reads = r.LogicalReads,
                 reads = r.Reads,
                 writes = r.Writes,

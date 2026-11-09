@@ -294,8 +294,8 @@ public sealed class ServerTabHeldRangeTests
         var refresh = CodeOnly(ReadControl("ServerTab.Refresh.cs"));
         var body = MethodBody(refresh, "private async System.Threading.Tasks.Task RefreshWindowTruncatedBannerAsync(");
 
-        /* #5562 R7: every relation feeds, keyed by its collector, and the tab shows the floor of the page on screen. */
-        Assert.Contains("FeedDataStart(LiteTimeRange.CollectorOfRelation(relation), floor);", body, StringComparison.Ordinal);
+        /* One probe per banner refresh. The picker's data-start note is not fed from it: a window-floor probe is bounded to the
+           window it was asked about, and the note names the server's oldest data (ServerTab.OldestRetainedUtc). */
         Assert.Single(Regex.Matches(body, @"GetQueryWindowFloorAsync\("));
     }
 

@@ -160,6 +160,31 @@ public partial class ServerTab : UserControl
     /// converts each time through <see cref="ServerClock"/> instead of adding this one value to all of them.</summary>
     public int UtcOffsetMinutes => _serverClock.OffsetMinutesAt(DateTime.UtcNow);
 
+    /// <summary>
+    /// The header's status line from the moment the tab opens until its server's first collection has run. It says where the
+    /// data comes from, so an Overview chart that finds no rows in the window meanwhile reads as loading, not as an empty
+    /// server. The refresh passes that show stored data in that time keep this line; an error replaces it.
+    /// </summary>
+    internal const string ConnectingStatusText = "Connecting... the charts fill after the first collection";
+
+    private bool _awaitingFirstCollection = true;
+
+    /// <summary>The host's word that the first collection for this tab has run (or will not). The header is worded from the refresh at
+    /// once, so a collection that fails with auto-refresh off does not leave it saying "Connecting".</summary>
+    internal void FirstCollectionFinished()
+    {
+        _awaitingFirstCollection = false;
+        if (ConnectionStatusText.Text == ConnectingStatusText)
+            ConnectionStatusText.Text = LastRefreshText();
+    }
+
+    /// <summary>
+    /// The Queries tab's window as two UTC instants, resolved once per refresh pass from <paramref name="nowUtc"/> and handed to the
+    /// grid read and the strip load alike, so the strip's window is the grid's window whatever the clock says when each read runs.
+    /// </summary>
+    internal static (DateTime StartUtc, DateTime EndUtc) QueriesWindowUtc(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime nowUtc)
+        => LocalDataService.GetTimeRange(hoursBack, fromDate, toDate, nowUtc);
+
     private readonly bool _hasMsdbAccess;
     /* The connection check's AWS RDS flag (the rdsadmin database exists). It stays false when that check failed. */
     private readonly AwsRdsKind _awsRdsKind;
@@ -219,7 +244,7 @@ public partial class ServerTab : UserControl
         ServerTimeHelper.ActiveServerClock = _serverClock;
 
         ShowServerName(server);
-        ConnectionStatusText.Text = "Connecting...";
+        ConnectionStatusText.Text = ConnectingStatusText;
 
         /* Apply default time range from settings */
         /* #5562: the shared picker. The zone is read lazily (display mode, this tab's own server clock), so a mode switch
@@ -326,7 +351,6 @@ public partial class ServerTab : UserControl
 
         /* Chart hover tooltips */
         CorrelatedLanes.Initialize(_dataService, _serverId, GetPickerZone);
-        CorrelatedLanes.DataStartFound += start => FeedDataStart("overview", start); /* #5562 R7: the Overview lanes' blocking note */
         /* #4766: the six slicers word their time axis and range caption in the tab's display zone. */
         foreach (var slicer in new[] { ActiveQueriesSlicer, QueryStatsSlicer, ProcStatsSlicer, QueryStoreSlicer, BlockingSlicer, DeadlockSlicer })
             slicer.DisplayZone = GetPickerZone;
@@ -659,7 +683,7 @@ public partial class ServerTab : UserControl
         {
             SessionId = Convert.ToInt32(reader.GetValue(0)),
             DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-            ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
+            ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : PerformanceMonitor.Common.ElapsedTimeText.WithoutZeroDays(reader.GetString(2)),
             QueryText = reader.IsDBNull(3) ? "" : scrub.Text(reader.GetString(3)) ?? "",
             QueryPlan = liveQueryPlan,
             LiveQueryPlan = liveActualPlan,

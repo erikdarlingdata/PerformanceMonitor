@@ -328,7 +328,7 @@ public partial class WaitDrillDownWindow : Window
         _filterPopupContent.FilterCleared += FilterPopup_FilterCleared;
 
         _filterManager.Filters.TryGetValue(columnName, out var existingFilter);
-        _filterPopupContent.Initialize(columnName, existingFilter);
+        _filterPopupContent.Initialize(columnName, existingFilter, columnHeader: ColumnFilterPopup.ColumnHeaderFor(button));
 
         _filterPopup!.PlacementTarget = button;
         _filterPopup.IsOpen = true;
@@ -379,9 +379,8 @@ public partial class WaitDrillDownWindow : Window
 
         if (string.IsNullOrEmpty(planXml))
         {
-            MessageBox.Show(this,
-                "No execution plan was captured for this snapshot row.",
-                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(this, "No Plan Available",
+                "No execution plan was captured for this snapshot row.");
             return;
         }
 

@@ -603,8 +603,12 @@ public static partial class DarlingWebEndpoints
     /// true is the generic-Exception catch's "Error running query: {ex.Message}", reclassified here exactly as
     /// <see cref="ToHttpResult"/>'s ServerError arm reclassifies a tool's envelope, since by this point the
     /// real Exception is equally gone — only the sentence survived the round trip through
-    /// <see cref="ComposeRunOutcome"/>.</summary>
-    internal static IResult ComposeRunFailureResult(ComposeRunOutcome outcome, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted)
+    /// <see cref="ComposeRunOutcome"/>. #8323: a cell the store stopped at the viewer role's statement timeout
+    /// (SQLSTATE 57014) is not the author's error, and a saved notebook's reader is usually not its author, so that one
+    /// arm answers <see cref="ComposeStatementTimeoutSentence"/> as <c>error</c>, built from <paramref name="body"/> (the
+    /// run's own window and server set), with the engine's text behind <c>detail</c>, where the author case still finds
+    /// it. Still 400, still the one Warning log line.</summary>
+    internal static IResult ComposeRunFailureResult(ComposeRunOutcome outcome, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted, JsonObject? body = null)
     {
         /* W13: an unknown server is a plain 404 with its message, never a quiet empty answer. */
         if (outcome.IsNotFound)
@@ -626,11 +630,46 @@ public static partial class DarlingWebEndpoints
             logger.LogWarning(
                 "{Route} answered a Custom View panel's query error at 400 after {ElapsedMs} ms (SQLSTATE {SqlState}): {Error}",
                 route, elapsedMs, sqlState, outcome.Error);
+
+            if (sqlState == QueryStoreComposeStamp.StatementTimeoutSqlState)
+            {
+                return JsonNodeResult(
+                    new JsonObject { ["error"] = ComposeStatementTimeoutSentence(body), ["detail"] = outcome.Error },
+                    StatusCodes.Status400BadRequest);
+            }
         }
 
         return outcome.IsServerError
             ? ServerErrorResult(outcome.Error!, route, logger, elapsedMs, requestAborted)
             : ErrorResult(outcome.Error!, StatusCodes.Status400BadRequest);
+    }
+
+    /// <summary>#8323: the plain sentence a composed cell answers when the store stopped it at its statement timeout: what
+    /// the cell was reading (<paramref name="body"/>'s <c>windowStart</c>/<c>windowEnd</c>, else its <c>hours</c>, else the
+    /// default window) and for how many servers, counted by the run's own scope rule
+    /// (<see cref="ComposePanelRunner.ServerScopeOf"/>: the top-level <c>server</c> name or list, else the bound server
+    /// variable; the literal "All" and blank entries are no server, so a fleet run reads every server), and what to do next.
+    /// The engine's own text rides beside it, in <c>detail</c>, not in this sentence.</summary>
+    internal static string ComposeStatementTimeoutSentence(JsonObject? body)
+    {
+        string window;
+        if (body is not null
+            && ComposeSpec.TryParseUtcInstant(body["windowStart"], out var start)
+            && ComposeSpec.TryParseUtcInstant(body["windowEnd"], out var end))
+        {
+            window = start.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " to " + end.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC";
+        }
+        else
+        {
+            var hours = body?["hours"] is JsonValue hoursValue && hoursValue.TryGetValue<int>(out var sent) ? sent : DefaultComposeHours;
+            window = hours == 1 ? "the past hour" : "the past " + hours.ToString(CultureInfo.InvariantCulture) + " hours";
+        }
+
+        var servers = body is null ? 0 : ComposePanelRunner.ServerScopeOf(body)?.Count ?? 0;
+        var scope = servers == 0 ? "every server" : servers == 1 ? "1 server" : servers.ToString(CultureInfo.InvariantCulture) + " servers";
+
+        return "The store stopped this cell at its statement timeout. It was reading " + window + " for " + scope
+            + ". Narrow the window or the server set, or run the cell again when fewer reads are running.";
     }
 
     internal static JsonValue? DbValueToJson(object value) => ComposePanelRunner.DbValueToJson(value);

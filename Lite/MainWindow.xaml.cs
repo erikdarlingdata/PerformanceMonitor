@@ -54,6 +54,23 @@ public partial class MainWindow : Window
        Switching to a server's tab words the status bar from this, so "Data loaded" is not lost on the way back (F19). */
     private readonly Dictionary<string, string> _serverStatusSuffix = new();
 
+    private const string ReadyCollectionActive = "Ready - Collection active";
+    private const string ReadyCollectionStarting = "Ready - Collection starting";
+
+    /// <summary>
+    /// The status bar's text once the window is up: "Collection active" when a collection cycle has run or is running, else
+    /// "Collection starting", so it agrees with the Collection segment beside it instead of calling collection active while that
+    /// segment still says it is starting.
+    /// </summary>
+    private string ReadyStatusText() =>
+        _backgroundService is { } service && (service.IsCollecting || service.LastCollectionTime.HasValue) ? ReadyCollectionActive : ReadyCollectionStarting;
+
+    /// <summary>The status timer's promotion of "Collection starting" to "Collection active" once the first cycle runs. Any other text in the bar is left as it is.</summary>
+    private void PromoteReadyStatus()
+    {
+        if (StatusText.Text == ReadyCollectionStarting) StatusText.Text = ReadyCollectionActive;
+    }
+
     /// <summary>
     /// The status bar text for a connected server tab: "Connected to X", plus " - Data loaded" (or the collection error)
     /// once the server's first collection has finished. One wording for the moment the tab opens and every later switch to it.
@@ -629,7 +646,7 @@ public partial class MainWindow : Window
             _statusTimer.Start();
 
             await RefreshOverviewAsync();
-            StatusText.Text = "Ready - Collection active";
+            StatusText.Text = ReadyStatusText();
 
             /* Now past the risky DuckDB init — open the single-instance "exit for upgrade" channel so a
                newer build can ask us to step aside cleanly (#single-instance-upgrade-handoff). */
@@ -1018,6 +1035,7 @@ public partial class MainWindow : Window
             if (_backgroundService.IsCollecting)
             {
                 CollectionStatusText.Text = "Collection: Running";
+                PromoteReadyStatus();
             }
             else if (_backgroundService.IsPaused)
             {
@@ -1027,6 +1045,7 @@ public partial class MainWindow : Window
             {
                 var ago = DateTime.UtcNow - _backgroundService.LastCollectionTime.Value;
                 CollectionStatusText.Text = $"Collection: {ago.TotalSeconds:F0}s ago";
+                PromoteReadyStatus();
             }
             else
             {
@@ -1613,6 +1632,11 @@ public partial class MainWindow : Window
             try
             {
                 await Task.Run(() => _collectorService.RunAllCollectorsForServerAsync(server));
+                serverTab.FirstCollectionFinished();
+                /* The collectors reached the server, so a connection status the cycle's check has not filled in yet is checked
+                   now: the status bar, the Overview card and the sidebar dot then say the same thing about this server. */
+                if (_serverManager.GetConnectionStatus(server.Id).IsOnline is null)
+                    await _serverManager.CheckConnectionAsync(server.Id);
                 _serverStatusSuffix[server.Id] = "Data loaded";
                 /* #8304: worded from the connection check, so a server the check could not reach is called offline, not connected:
                    its collectors just ran and reached nothing, and the tab shows stored data. When the person has moved to another
@@ -1631,12 +1655,15 @@ public partial class MainWindow : Window
             }
             catch (Exception ex)
             {
+                serverTab.FirstCollectionFinished();
+                serverTab.RefreshData();
                 _serverStatusSuffix[server.Id] = $"Collection error: {ex.Message}";
                 StatusText.Text = ConnectedStatusText(server.DisplayNameWithIntent, _serverStatusSuffix[server.Id]);
             }
         }
         else
         {
+            serverTab.FirstCollectionFinished();
             StatusText.Text = $"Connected to {server.DisplayNameWithIntent}";
         }
     }
@@ -2556,6 +2583,15 @@ public partial class MainWindow : Window
             ServerSearchRow.Visibility = Visibility.Visible;
             SidebarToggleButton.Content = "«";
         }
+
+        /* #8306: the rail is 40 px. The list and the footer draw closer to its edges, each server row keeps only the inset its status
+           dot needs and shows the dot alone, and the footer stacks its buttons as icons. The row template reads the two resources
+           through DynamicResource, so swapping them here restyles every row at once. */
+        ServerListView.Margin = collapsed ? new Thickness(4, 8, 4, 8) : new Thickness(8);
+        Resources["SidebarRowPadding"] = collapsed ? new Thickness(3, 6, 3, 6) : new Thickness(8, 6, 8, 6);
+        Resources["SidebarRowLabelVisibility"] = collapsed ? Visibility.Collapsed : Visibility.Visible;
+        SidebarFooterBorder.Padding = collapsed ? new Thickness(4, 8, 4, 8) : new Thickness(8, 8, 8, 8);
+        Sidebar.SetCompact(collapsed);
     }
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)

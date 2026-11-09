@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
 using PerformanceMonitor.PlanAnalysis;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Ui;
 
@@ -81,9 +82,8 @@ public sealed class PlanNavigationController
         if (string.IsNullOrWhiteSpace(planXml))
         {
             _setStatus?.Invoke("No plan available.");
-            MessageBox.Show(_owner,
-                "No query plan is available for this row. The plan may have been evicted from the plan cache since it was last collected.",
-                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(_owner, "No Plan Available",
+                "No query plan is available for this row. The plan may have been evicted from the plan cache since it was last collected.");
             return;
         }
 

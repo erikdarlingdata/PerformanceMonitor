@@ -362,6 +362,15 @@ internal static partial class AlertNotebookEndpoint
             var authoredContext = ShouldPrefetch(authored, kind)
                 ? await PrefetchAsync(kind, trimmedMetric!, serverId, anchor, postgres, analysis, logger, notes, ct)
                 : AuthoredContext.Empty;
+
+            /* #8323: a context template also learns the resolved server's engine, so the High CPU template emits that
+               engine's gauge and drill-downs only. One registry read by primary key; a failure leaves the engine
+               unknown and the template engine-blind, never a failed notebook. */
+            if (authored.BuildCellsWithContext is not null && serverId is { } engineServerId)
+            {
+                authoredContext = authoredContext with { EngineKind = await ReadEngineKindAsync(postgres, engineServerId, logger, ct) };
+            }
+
             var authoredCells = authored.Invoke(
                 metric, serverName, asOf, windowStart, windowEnd, matchedIncident, matchedRow, status, authoredContext);
             return (authoredCells, authored.Id, authored.Version);
@@ -380,6 +389,21 @@ internal static partial class AlertNotebookEndpoint
         }
 
         return (mechanicalCells, "mechanical/" + (trimmedMetric ?? "default"), MechanicalTemplateVersion);
+    }
+
+    /// <summary>#8323: the registry's engine kind for <paramref name="serverId"/>, or null when the registry has not
+    /// stamped one or the read fails (logged at Debug: the notebook still builds, engine-blind).</summary>
+    private static async Task<string?> ReadEngineKindAsync(NpgsqlDataSource postgres, int serverId, ILogger? logger, CancellationToken ct)
+    {
+        try
+        {
+            return (await DarlingEngineCapability.ReadServerEngineAsync(postgres, serverId, ct)).EngineKind;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(ex, "The alert notebook could not read server {ServerId}'s engine kind; the template keeps both engines' cells.", serverId);
+            return null;
+        }
     }
 
     /// <summary>The header cell every mechanical template opens with: a markdown-shaped read-only summary of
@@ -489,8 +513,11 @@ internal static partial class AlertNotebookEndpoint
 
     /// <summary>The pre-fetched, immutable data an authored template's context builder gets to read — never
     /// the store itself (#4223). A missing rule or finding (deleted since the firing) is an honest empty
-    /// context, per #2710's degrade rule: the missing flag is set, never an exception.</summary>
-    internal sealed record AuthoredContext(CustomAlertRule? CustomRule, bool CustomRuleMissing, AnalysisFinding? Finding, bool FindingMissing)
+    /// context, per #2710's degrade rule: the missing flag is set, never an exception. <paramref name="EngineKind"/> (#8323) is
+    /// the resolved server's engine kind (<c>MonitoredEngineKind</c>), read from the registry for every context template
+    /// when the notebook has a server; null for a fleet-level store, a server the registry has not stamped, or a registry
+    /// read that failed, and a template that reads it then keeps its engine-blind shape.</summary>
+    internal sealed record AuthoredContext(CustomAlertRule? CustomRule, bool CustomRuleMissing, AnalysisFinding? Finding, bool FindingMissing, string? EngineKind = null)
     {
         /// <summary>The context every no-context family gets — no rule, no finding, nothing missing.</summary>
         public static readonly AuthoredContext Empty = new(null, false, null, false);
@@ -577,7 +604,7 @@ internal static partial class AlertNotebookEndpoint
         (new[] { "Forced Plan Failing" },
             new AuthoredTemplateEntry("authored/forced-plan-failing", ForcedPlanFailingTemplateVersion, BuildForcedPlanFailingCells)),
         (new[] { "High CPU" },
-            new AuthoredTemplateEntry("authored/cpu", CpuTemplateVersion, BuildCpuCells)),
+            new AuthoredTemplateEntry("authored/cpu", CpuTemplateVersion, BuildCells: null, BuildCellsWithContext: BuildCpuCells)),
         (new[] { "Long-Running Query" },
             new AuthoredTemplateEntry("authored/long-running-query", LongRunningQueryTemplateVersion, BuildLongRunningQueryCells)),
         (new[] { "Poison Wait" },

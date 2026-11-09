@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using static PerformanceMonitor.Ui.DataGridHelpers;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -281,10 +282,9 @@ public partial class ViewerServerTab
     }
 
     private void ShowNoResolvableHandle(string what)
-        => MessageBox.Show(
-            $"The {what} has no resolvable sql_handle in its captured XML. This usually means the query ran as " +
-            "dynamic SQL or a system context — SQL Server records a zero handle there and the plan can't be recovered.",
-            "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+        => InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
+                $"The {what} has no resolvable sql_handle in its captured XML. This usually means the query ran as " +
+            "dynamic SQL or a system context — SQL Server records a zero handle there and the plan can't be recovered.");
 
     /// <summary>
     /// True (and shows an explanation) when the current seat is read-only: fetching a live plan enqueues a

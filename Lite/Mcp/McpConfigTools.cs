@@ -241,10 +241,15 @@ public sealed class McpConfigTools
                 wait_stats_capture_mode = r.WaitStatsCaptureMode,
             }).ToList();
 
+            /* A snapshot that predates a role change passes the tempdb-only check above, so a readable secondary's reason rides on
+               every data answer, with the capture's age when it is older than a few hourly cycles. */
+            var secondaryNote = await McpRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(dataService, resolved.ServerId, resolved.DisplayName);
+            var staleNote = QueryStoreSnapshotStaleness.Note(DateTime.SpecifyKind(capturedAt, DateTimeKind.Utc), DateTime.UtcNow, "query_store_health");
             return JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 captured_at = capturedAt.ToString("o"),
+                note = QueryStoreSnapshotStaleness.Join(secondaryNote, staleNote),
                 database_count = result.Count,
                 databases = result
             }, McpHelpers.JsonOptions);

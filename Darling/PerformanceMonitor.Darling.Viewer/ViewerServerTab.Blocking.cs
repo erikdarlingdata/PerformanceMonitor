@@ -426,7 +426,7 @@ public partial class ViewerServerTab
         if (data.Count == 0)
             BlockingSlicer.ShowEmpty("No blocked process reports in the selected time window.");
         else
-            BlockingSlicer.LoadData(data, "Blocking Events", startUtc, endUtc);
+            BlockingSlicer.LoadData(data, "Blocking Events", startUtc, endUtc, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(startUtc, endUtc));
     }
 
     private async Task LoadDeadlockSlicerAsync(DateTime startUtc, DateTime endUtc)

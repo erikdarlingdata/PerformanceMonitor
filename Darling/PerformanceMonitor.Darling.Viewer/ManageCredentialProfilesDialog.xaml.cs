@@ -39,6 +39,7 @@ public partial class ManageCredentialProfilesDialog : Window
         var profiles = _profileStore.GetAll();
         ProfilesGrid.ItemsSource = profiles;
         StatusText.Text = $"{profiles.Count} profile(s).";
+        NoProfilesMessage.Visibility = profiles.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void AddButton_Click(object sender, RoutedEventArgs e)

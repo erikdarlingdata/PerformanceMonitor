@@ -17,6 +17,12 @@
         <ResourceDictionary>
             <BooleanToVisibilityConverter x:Key="BoolToVisibility"/>
 
+            <!-- #8306: the server rows in the rail. The window swaps these when the sidebar collapses to its 40 px rail: the row keeps a
+                 3 px inset so its status dot stays whole, and the names, details, stars and group titles are hidden, since the rail has no
+                 room for them. -->
+            <Thickness x:Key="SidebarRowPadding">8,6</Thickness>
+            <Visibility x:Key="SidebarRowLabelVisibility">Visible</Visibility>
+
             <!-- Sidebar fleet-tree (#2020 2b-i-b): depth→indent + header/server row templates + selector -->
             <local:FleetDepthToIndentConverter x:Key="FleetDepthToIndent"/>
 
@@ -25,7 +31,7 @@
                 <Border BorderBrush="{DynamicResource BorderBrush}"
                         BorderThickness="1"
                         CornerRadius="4"
-                        Padding="8,6"
+                        Padding="{DynamicResource SidebarRowPadding}"
                         Background="{DynamicResource BackgroundLightBrush}"
                         Margin="{Binding Depth, Converter={StaticResource FleetDepthToIndent}}"
                         ContextMenuOpening="ServerRow_ContextMenuOpening">
@@ -124,46 +130,48 @@
                             </Viewbox>
                         </StackPanel>
 
-                        <!-- Server Name -->
-                        <TextBlock Grid.Column="1" Grid.Row="0"
-                                   Text="{Binding Server.Connection.DisplayNameWithIntent}"
-                                   FontSize="13"
-                                   FontWeight="SemiBold"
-                                   Foreground="{DynamicResource ForegroundBrush}"/>
+                        <!-- Server Name and Details: hidden in the rail (#8306). -->
+                        <StackPanel Grid.Column="1" Grid.RowSpan="2" VerticalAlignment="Center"
+                                    Visibility="{DynamicResource SidebarRowLabelVisibility}">
+                            <TextBlock Text="{Binding Server.Connection.DisplayNameWithIntent}"
+                                       FontSize="13"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource ForegroundBrush}"/>
 
-                        <!-- Server Details: the server name, shown only when it differs from the display name above it (#8226). -->
-                        <TextBlock Grid.Column="1" Grid.Row="1"
-                                   Text="{Binding Server.Connection.SidebarDetail}"
-                                   FontSize="11"
-                                   Foreground="{DynamicResource ForegroundMutedBrush}">
-                            <TextBlock.Style>
-                                <Style TargetType="TextBlock">
-                                    <Style.Triggers>
-                                        <Trigger Property="Text" Value="">
-                                            <Setter Property="Visibility" Value="Collapsed"/>
-                                        </Trigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </TextBlock.Style>
-                        </TextBlock>
+                            <!-- Server Details: the server name, shown only when it differs from the display name above it (#8226). -->
+                            <TextBlock Text="{Binding Server.Connection.SidebarDetail}"
+                                       FontSize="11"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Style.Triggers>
+                                            <Trigger Property="Text" Value="">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                            </Trigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </StackPanel>
 
-                        <!-- Favorite Star -->
-                        <TextBlock Grid.Column="2" Grid.RowSpan="2"
-                                   Text="★" FontSize="16"
-                                   VerticalAlignment="Center"
-                                   Foreground="#FFD700"
-                                   Margin="4,0,0,0">
-                            <TextBlock.Style>
-                                <Style TargetType="TextBlock">
-                                    <Setter Property="Visibility" Value="Collapsed"/>
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding Server.Connection.IsFavorite}" Value="True">
-                                            <Setter Property="Visibility" Value="Visible"/>
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </TextBlock.Style>
-                        </TextBlock>
+                        <!-- Favorite Star: hidden in the rail (#8306). -->
+                        <Border Grid.Column="2" Grid.RowSpan="2" Visibility="{DynamicResource SidebarRowLabelVisibility}">
+                            <TextBlock Text="★" FontSize="16"
+                                       VerticalAlignment="Center"
+                                       Foreground="#FFD700"
+                                       Margin="4,0,0,0">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Server.Connection.IsFavorite}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </Border>
                     </Grid>
                 </Border>
             </DataTemplate>
@@ -211,23 +219,26 @@
                                 </Style>
                             </TextBlock.Style>
                         </TextBlock>
-                        <TextBlock Text="{Binding Title}" FontWeight="Bold" FontSize="12"
-                                   Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
-                        <!-- "(n)" count badge, hidden when ServerCount == 0 -->
-                        <TextBlock Text="{Binding ServerCount, StringFormat='({0})'}"
-                                   FontSize="11" Margin="6,0,0,0" VerticalAlignment="Center"
-                                   Foreground="{DynamicResource ForegroundMutedBrush}">
-                            <TextBlock.Style>
-                                <Style TargetType="TextBlock">
-                                    <Setter Property="Visibility" Value="Visible"/>
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding ServerCount}" Value="0">
-                                            <Setter Property="Visibility" Value="Collapsed"/>
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </TextBlock.Style>
-                        </TextBlock>
+                        <!-- The title and its count: hidden in the rail (#8306). -->
+                        <StackPanel Orientation="Horizontal" Visibility="{DynamicResource SidebarRowLabelVisibility}">
+                            <TextBlock Text="{Binding Title}" FontWeight="Bold" FontSize="12"
+                                       Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"/>
+                            <!-- "(n)" count badge, hidden when ServerCount == 0 -->
+                            <TextBlock Text="{Binding ServerCount, StringFormat='({0})'}"
+                                       FontSize="11" Margin="6,0,0,0" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding ServerCount}" Value="0">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </StackPanel>
                     </StackPanel>
                 </Border>
             </DataTemplate>
@@ -263,11 +274,14 @@
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0">
-                                <TextBlock x:Name="SidebarTitle" Text="SQL Servers" FontSize="16" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}"/>
-                                <TextBlock x:Name="SidebarSubtitle" Text="Double-click or press Enter to open a server tab" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,0,0"/>
-                            </StackPanel>
-                            <Button Grid.Column="1" x:Name="SidebarToggleButton" AutomationProperties.AutomationId="SidebarToggleButton" Content="«" Click="ToggleSidebar_Click"
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Grid.Column="0" x:Name="SidebarTitle" Text="SQL Servers" FontSize="16" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}"/>
+                            <!-- #8306: under the title and the toggle button, across the header's whole width, so it keeps to one line at the sidebar's 280 px. -->
+                            <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" x:Name="SidebarSubtitle" Text="Double-click or press Enter to open a server tab" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,0,0"/>
+                            <Button Grid.Row="0" Grid.Column="1" x:Name="SidebarToggleButton" AutomationProperties.AutomationId="SidebarToggleButton" Content="«" Click="ToggleSidebar_Click"
                                     ToolTip="Toggle sidebar" VerticalAlignment="Top"
                                     Width="24" Height="24" Padding="0" FontSize="14"/>
                         </Grid>
@@ -323,7 +337,7 @@
                 </ui:InvokableListBox>
 
                 <!-- Sidebar Footer -->
-                <Border Grid.Row="2" Padding="8,8" Background="{DynamicResource BackgroundLightBrush}"
+                <Border Grid.Row="2" x:Name="SidebarFooterBorder" Padding="8,8" Background="{DynamicResource BackgroundLightBrush}"
                         BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0">
                     <controls:SidebarFooter x:Name="Sidebar"
                                             AddServerClick="AddServerButton_Click"
@@ -472,8 +486,19 @@
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
 
-                    <TextBlock Grid.Column="0" x:Name="StatusText" Text="Ready" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
-                               ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+                    <!-- The message keeps to one line; the whole text is its tooltip, and an empty bar opens none. -->
+                    <TextBlock Grid.Column="0" x:Name="StatusText" Text="Ready" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="ToolTip" Value="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+                                <Style.Triggers>
+                                    <Trigger Property="Text" Value="">
+                                        <Setter Property="ToolTip" Value="{x:Null}"/>
+                                    </Trigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
                     <!-- Lite's own database after a fatal error: why collection stopped, or when it was reopened. -->
                     <TextBlock Grid.Column="1" x:Name="LocalDatabaseStatusText" Text="" Visibility="Collapsed" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" Margin="12,0,0,0" VerticalAlignment="Center"/>
                     <TextBlock Grid.Column="2" x:Name="CollectorHealthText" Text="" Foreground="{DynamicResource ForegroundBrush}" Margin="12,0,0,0" VerticalAlignment="Center"/>

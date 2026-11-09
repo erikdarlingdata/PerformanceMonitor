@@ -247,8 +247,8 @@ public partial class ProcedureHistoryWindow : Window
 
         if (string.IsNullOrEmpty(planXml))
         {
-            MessageBox.Show(this, "No plan was captured in the collected data for this procedure.",
-                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(this, "No Plan Available",
+                "No plan was captured in the collected data for this procedure.");
             return;
         }
 
@@ -368,7 +368,7 @@ public partial class ProcedureHistoryWindow : Window
         _filterPopupContent.FilterCleared += FilterPopup_FilterCleared;
 
         _filterManager.Filters.TryGetValue(columnName, out var existingFilter);
-        _filterPopupContent.Initialize(columnName, existingFilter);
+        _filterPopupContent.Initialize(columnName, existingFilter, columnHeader: ColumnFilterPopup.ColumnHeaderFor(button));
 
         _filterPopup!.PlacementTarget = button;
         _filterPopup.IsOpen = true;

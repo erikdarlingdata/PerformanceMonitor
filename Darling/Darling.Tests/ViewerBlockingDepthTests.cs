@@ -109,12 +109,12 @@ public sealed class ViewerBlockingDepthSqlTests
     }
 
     [Fact]
-    public void BlockingSlicerSql_XePreferred_DmvFallbackOnlyWhenNoXe_HourlyBuckets()
+    public void BlockingSlicerSql_XePreferred_DmvFallbackOnlyWhenNoXe_WindowWidthBuckets()
     {
         Assert.Contains("FROM v_blocked_process_reports", ViewerDataService.BlockingSlicerSql, StringComparison.Ordinal);
         Assert.Contains("FROM v_dmv_blocking_snapshots", ViewerDataService.BlockingSlicerSql, StringComparison.Ordinal);
         Assert.Contains("WHERE NOT EXISTS (SELECT 1 FROM bpr)", ViewerDataService.BlockingSlicerSql, StringComparison.Ordinal);
-        Assert.Contains("date_trunc('hour', collection_time)", ViewerDataService.BlockingSlicerSql, StringComparison.Ordinal);
+        Assert.Contains("date_bin(CAST($6 AS integer) * INTERVAL '1 minute', collection_time,", ViewerDataService.BlockingSlicerSql, StringComparison.Ordinal);
         Assert.Contains("COUNT(DISTINCT blocking_spid)", ViewerDataService.BlockingSlicerSql, StringComparison.Ordinal);
     }
 

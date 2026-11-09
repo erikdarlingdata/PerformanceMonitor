@@ -108,7 +108,7 @@ public partial class ViewerServerTab
         if (data.Count == 0)
             ActiveQueriesSlicer.ShowEmpty("No active query samples in the selected time window.");
         else
-            ActiveQueriesSlicer.LoadData(data, "Sessions", startUtc, endUtc);
+            ActiveQueriesSlicer.LoadData(data, "Sessions", startUtc, endUtc, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(startUtc, endUtc));
     }
 
     private async void OnActiveQueriesSlicerChanged(object? sender, SlicerRangeEventArgs e)
@@ -310,12 +310,9 @@ public partial class ViewerServerTab
             if (string.IsNullOrEmpty(planXml))
             {
                 HidePlanLoading();
-                MessageBox.Show(
-                    "No execution plan was captured for this row. The plan may not have been collected yet, " +
-                    "or it aged out of the store's retention window.",
-                    "No Plan Available",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Information);
+                InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
+                "No execution plan was captured for this row. The plan may not have been collected yet, " +
+                    "or it aged out of the store's retention window.");
                 return;
             }
         }

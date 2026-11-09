@@ -75,7 +75,8 @@ public partial class ViewerServerTab : UserControl
         EmptyState.SetText(ProcedureStatsGrid, "No procedure executions in the selected time window.");
         EmptyState.SetText(BlockedProcessReportGrid, "No blocked process reports in the selected time window.");
         EmptyState.SetText(DeadlockGrid, "No deadlocks in the selected time window.");
-        EmptyState.SetText(PlanCorrectionGrid, "No plan corrections in the selected time window.");
+        /* The two plan-correction grids are worded by the server's registered version. */
+        ApplyPlanCorrectionEmptyTexts(PlanCorrectionTarget());
         EmptyState.SetText(QueryStoreRegressionsGrid, QueryStoreRegressionsEmptyText);
         _querySnapshotsFilterMgr = new DataGridFilterManager<ViewerQuerySnapshotRow>(QuerySnapshotsGrid);
         _queryStatsFilterMgr = new DataGridFilterManager<ViewerQueryStatsRow>(QueryStatsGrid);

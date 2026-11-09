@@ -105,9 +105,18 @@ public partial class ServerTab : UserControl
     /// known, and then the axis stays as picked.</summary>
     internal DateTime? ServerDataStartUtc { get; set; }
 
-    /// <summary>Reads the server's data start for the charts (#7386), once for the whole tab, with the refresh that is about to
-    /// draw them. The read is kept per server for <see cref="LocalDataService.ServerDataStartMaxAge"/> and never opens the Parquet
-    /// archive (<see cref="LocalDataService.GetServerDataStartAsync"/>). A failed read leaves the axis as picked.</summary>
+    /// <summary>The oldest instant the store holds data from for this server (<see cref="LocalDataService.GetOldestRetainedAsync"/>):
+    /// its oldest <c>collection_log</c> row, archived or hot, which is what the time range picker's "Data starts" note names. Null
+    /// until the first read, or when the server has no row yet, and the note then falls back to the archive's static retention
+    /// edge.</summary>
+    internal DateTime? OldestRetainedUtc { get; set; }
+
+    /// <summary>Reads the server's data start for the charts (#7386) and the oldest instant the store holds data from for the
+    /// picker's note, once for the whole tab, with the refresh that is about to draw them. Both reads are kept per server for
+    /// <see cref="LocalDataService.ServerDataStartMaxAge"/>. The charts' read never opens the Parquet archive
+    /// (<see cref="LocalDataService.GetServerDataStartAsync"/>); the note's read opens it once per archive view generation
+    /// (<see cref="LocalDataService.GetOldestRetainedAsync"/>). A failed read leaves the axis as picked and the note at the
+    /// retention edge.</summary>
     private async System.Threading.Tasks.Task RefreshServerDataStartAsync(int hoursBack, DateTime? fromDate)
     {
         try
@@ -115,13 +124,18 @@ public partial class ServerTab : UserControl
             var windowStartUtc = fromDate ?? DateTime.UtcNow.AddHours(-hoursBack);
             ServerDataStartUtc = await Task.Run(() => _dataService.GetServerDataStartAsync(_serverId, windowStartUtc));
             CorrelatedLanes.ServerDataStartUtc = ServerDataStartUtc;
+            OldestRetainedUtc = await Task.Run(() => _dataService.GetOldestRetainedAsync(_serverId));
         }
         catch (Exception ex)
         {
             ServerDataStartUtc = null;
             CorrelatedLanes.ServerDataStartUtc = null;
+            OldestRetainedUtc = null;
             AppLogger.Debug("ServerTab", $"[{_server.DisplayName}] server data start read failed, the charts keep the picked range: {ex.Message}");
         }
+
+        ApplyDataStart();
+        RangePicker.Refresh();
     }
 
     /// <summary>The X axis start of a time chart over [start, end] (#7386), in the charts' OLE automation dates.</summary>
@@ -250,7 +264,7 @@ public partial class ServerTab : UserControl
                 LastRefreshText,
                 ct);
             if (status is not null)
-                ConnectionStatusText.Text = status;
+                ConnectionStatusText.Text = _awaitingFirstCollection && !status.StartsWith("Error", StringComparison.Ordinal) ? ConnectingStatusText : status;
         }
         catch (Exception ex)
         {
@@ -347,21 +361,32 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// Fills in the engine edition when the connection check could not read it (<see cref="ResolveEngineEditionAsync"/>).
-    /// Awaited before every tab load, so the Azure SQL Database texts never depend on that one check, and a no-op once
-    /// the edition is known.
+    /// Fills in the engine edition when the connection check could not read it (<see cref="ResolveEngineEditionAsync"/>), then the
+    /// server's major version, and words the plan-correction grids once both are known. Awaited before every tab load, so the Azure SQL
+    /// Database texts never depend on that one check, and a no-op once both facts are known.
     /// </summary>
     private async System.Threading.Tasks.Task RefreshEngineEditionAsync()
     {
-        if (_engineEdition != CollectorEngineCapability.UnknownEngineEdition)
+        var knownEdition = _engineEdition;
+        var knownVersion = _sqlMajorVersion;
+
+        if (_engineEdition == CollectorEngineCapability.UnknownEngineEdition)
         {
-            return;
+            _engineEdition = await ResolveEngineEditionAsync(_engineEdition, () => Task.Run(() => _dataService.GetSqlEngineEditionAsync(_serverId)));
+
+            /* The constructor decided the msdb warning from the connection check's edition, which was unknown. */
+            RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _awsRdsKind);
         }
 
-        _engineEdition = await ResolveEngineEditionAsync(_engineEdition, () => Task.Run(() => _dataService.GetSqlEngineEditionAsync(_serverId)));
+        /* The version is the other engine fact the plan-correction grids word themselves by, read from the same stored row. The grids
+           are worded after both reads: an Azure SQL Database or Managed Instance stores product version 12.0.x, so a tab opened while
+           its connection check failed would otherwise take the version alone for SQL Server 2014, and nothing re-words the grids later. */
+        await RefreshSqlMajorVersionAsync();
 
-        /* The constructor decided the msdb warning from the connection check's edition, which was unknown. */
-        RunningJobsMsdbWarning.Visibility = RunningJobsMsdbWarningVisibility(_hasMsdbAccess, _isAzureSqlDatabase, _awsRdsKind);
+        if (_engineEdition != knownEdition || _sqlMajorVersion != knownVersion)
+        {
+            ApplyPlanCorrectionEmptyTexts(PlanCorrectionTarget());
+        }
     }
 
     /// <summary>Reads the tab now showing. Returns the Overview lane reads that failed, named for the status line, and otherwise null.</summary>
@@ -520,15 +545,17 @@ public partial class ServerTab : UserControl
                         }
                         break;
                     case TopQueriesByDurationSubTabIndex: // Top Queries by Duration
-                        var queryStats = await ReadTopQueriesAsync(hoursBack, fromDate, toDate);
+                        /* One pair of instants for the grid read, the strip load, the comparison and the banner. */
+                        var (topQueriesStart, topQueriesEnd) = QueriesWindowUtc(hoursBack, fromDate, toDate, DateTime.UtcNow);
+                        var queryStats = await ReadTopQueriesAsync(0, topQueriesStart, topQueriesEnd);
                         _queryStatsFilterMgr!.UpdateData(queryStats);
+                        UpdateQueryStatsEmptyMessage(queryStats.Count);
                         SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
-                        _ = LoadQueryStatsSlicerAsync();
+                        _ = LoadQueryStatsSlicerAsync(topQueriesStart, topQueriesEnd);
                         {
                             /* #4284: the comparison and the banner both read UTC collection_time, so they
-                               share the SAME UTC window GetTopQueriesByCpuAsync just read
-                               (LocalDataService.GetQueriesTabWindowUtc) -- computed once and handed to both. */
-                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                               share the SAME UTC window GetTopQueriesByCpuAsync just read -- computed once and handed to both. */
+                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(0, topQueriesStart, topQueriesEnd);
                             await RefreshQueryStatsComparisonAsync(windowStart, windowEnd);
                             await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, windowStart, windowEnd);
                         }
@@ -583,7 +610,9 @@ public partial class ServerTab : UserControl
             /* Full refresh: load all sub-tabs */
             var includeMonitorSnapshots = ActiveQueriesIncludeMonitor;
             var snapshotsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Snapshots", () => Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter, includeMonitor: includeMonitorSnapshots)));
-            var queryStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStats", () => ReadTopQueriesAsync(hoursBack, fromDate, toDate));
+            /* One pair of instants for the Top Queries grid read, its strip load, its comparison and its banner. */
+            var (queryStatsStart, queryStatsEnd) = QueriesWindowUtc(hoursBack, fromDate, toDate, DateTime.UtcNow);
+            var queryStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStats", () => ReadTopQueriesAsync(0, queryStatsStart, queryStatsEnd));
             var procStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcStats", () => ReadTopProceduresAsync(hoursBack, fromDate, toDate));
             var queryStoreTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStore", () => Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate, SelectedDatabaseFilter, tags: tags))));
             var planCorrectionTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.PlanCorrections", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetPlanCorrectionsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
@@ -616,12 +645,13 @@ public partial class ServerTab : UserControl
             }
 
             _queryStatsFilterMgr!.UpdateData(queryStatsTask.Result);
+            UpdateQueryStatsEmptyMessage(queryStatsTask.Result.Count);
             SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
-            _ = LoadQueryStatsSlicerAsync();
+            _ = LoadQueryStatsSlicerAsync(queryStatsStart, queryStatsEnd);
             {
                 /* #4284: UTC comparison and banner window, computed once -- see the twin comment on the
                    sub-tab-switch case above. */
-                var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
+                var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(0, queryStatsStart, queryStatsEnd);
                 await RefreshQueryStatsComparisonAsync(windowStart, windowEnd);
                 await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, windowStart, windowEnd);
             }
@@ -709,10 +739,6 @@ public partial class ServerTab : UserControl
             () => Task.Run(() => _dataService.GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc, includeAlsoCovered: includeAlsoCovered, cancellationToken: ct)),
             $"[{_server.DisplayName}] {relation}", startUtc, endUtc, ct);
         ApplyWindowFloorToBanner(banner, EarlierOfFloorAndRowShown(floor, earliestRowShownUtc), startUtc, GetPickerZone());
-
-        /* #5562 R7: the picker's 'Data starts ...' note takes its start from the probe this site already awaited, for the page
-           on screen (every relation, not only the Queries grid's), else the archive's static retention edge. No new query. */
-        FeedDataStart(LiteTimeRange.CollectorOfRelation(relation), floor);
     }
 
     /// <summary>
@@ -1242,7 +1268,7 @@ public partial class ServerTab : UserControl
             if (data.Count == 0)
                 BlockingSlicer.ShowEmpty("No blocked process reports in the selected time window.");
             else
-                BlockingSlicer.LoadData(data, "Blocking Events", slicerStart, slicerEnd);
+                BlockingSlicer.LoadData(data, "Blocking Events", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
         }
         catch (Exception ex)
         {
@@ -1322,14 +1348,23 @@ public partial class ServerTab : UserControl
             if (read.Jobs.Count == 0 && !bannerShows && read.LastGoodCollection is DateTime lastGood
                 && RunningJobsNoDataMessage.Tag is string ownText && RunningJobsNoDataMessage.Text == ownText)
             {
-                RunningJobsNoDataMessage.Text = RunningJobsCurrency.NotCurrentNote(lastGood);
-                RunningJobsNoDataMessage.Visibility = System.Windows.Visibility.Visible;
+                ShowRunningJobsNotCurrent(lastGood);
             }
         }
         catch (Exception ex)
         {
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshRunningJobsAsync failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// The Running Jobs empty text when the collector has not collected within its freshness bound: the last good collection, worded
+    /// the way the tab words its other times (#8307: the Collection Health format on the tab's server clock), in place of the jobs.
+    /// </summary>
+    internal void ShowRunningJobsNotCurrent(DateTime lastGoodCollectionUtc)
+    {
+        RunningJobsNoDataMessage.Text = RunningJobsCurrency.NotCurrentNote(lastGoodCollectionUtc, utc => CollectionHealthTime.Format(utc, _serverClock));
+        RunningJobsNoDataMessage.Visibility = System.Windows.Visibility.Visible;
     }
 
     /// <summary>Tab 11 — Configuration</summary>

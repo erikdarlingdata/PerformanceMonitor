@@ -58,6 +58,33 @@ public partial class PlanViewerControl : UserControl
     private static readonly SolidColorBrush EdgeLightBlueBrush = new(Color.FromRgb(0x64, 0xB5, 0xF6));
     private static readonly SolidColorBrush EdgeFluoBlueBrush = new(Color.FromRgb(0x00, 0xE5, 0xFF));
 
+    private bool _insightsFitPending;
+    private bool _insightsSetByUser;
+    private bool _applyingInsightsFit;
+
+    /// <summary>
+    /// Opens or collapses the insights panel by the viewer's height (<see cref="PlanInsightsLayout.StartsExpanded"/>) as a plan shows it: in a
+    /// small window the plan graph keeps most of the height and the panel starts collapsed. A panel the person has opened or closed
+    /// themselves stays as they left it. Before the first layout pass the fit waits for the first real height.
+    /// </summary>
+    private void FitInsightsToHeight()
+    {
+        if (_insightsSetByUser)
+            return;
+        if (ActualHeight > 0)
+            ApplyInsightsFit(ActualHeight);
+        else
+            _insightsFitPending = true;
+    }
+
+    private void ApplyInsightsFit(double height)
+    {
+        _insightsFitPending = false;
+        _applyingInsightsFit = true;
+        InsightsExpander.IsExpanded = PlanInsightsLayout.StartsExpanded(height);
+        _applyingInsightsFit = false;
+    }
+
     /// <summary>
     /// How far a child operator's actual row count may diverge from its estimate before the edge feeding
     /// it is colored; matches PerformanceStudio's <c>AccuracyRatioDivergenceLimit</c> setting (default 10,
@@ -153,6 +180,16 @@ public partial class PlanViewerControl : UserControl
            fires Unloaded when you switch tabs, which would permanently detach this handler.
            Hosts call Cleanup() when the plan tab/window is actually closed. */
         ThemeManager.ThemeChanged += OnThemeChanged;
+
+        /* A plan shown before the first layout pass fits its insights panel on the first real height. A toggle of the expander that is
+           not this fit is the person's choice, and the fit then leaves the panel alone. */
+        SizeChanged += (_, e) =>
+        {
+            if (_insightsFitPending && e.NewSize.Height > 0)
+                ApplyInsightsFit(e.NewSize.Height);
+        };
+        InsightsExpander.Expanded += (_, _) => { if (!_applyingInsightsFit) _insightsSetByUser = true; };
+        InsightsExpander.Collapsed += (_, _) => { if (!_applyingInsightsFit) _insightsSetByUser = true; };
 
         // The splitter writes the dragged size straight onto the column, so that is where the
         // remembered width (#4574) comes from - no drag tracking of our own.

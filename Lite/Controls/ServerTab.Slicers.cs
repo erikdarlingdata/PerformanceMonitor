@@ -91,7 +91,7 @@ public partial class ServerTab : UserControl
             if (data.Count == 0)
                 ActiveQueriesSlicer.ShowEmpty("No active query samples in the selected time window.");
             else
-                ActiveQueriesSlicer.LoadData(data, "Sessions", slicerStart, slicerEnd);
+                ActiveQueriesSlicer.LoadData(data, "Sessions", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
         }
         catch (Exception ex)
         {
@@ -123,21 +123,39 @@ public partial class ServerTab : UserControl
 
     private string _queryStatsSlicerMetric = "TotalCpu";
     private List<TimeSliceBucket>? _queryStatsSlicerData;
+    private int _queryStatsRowCount;
 
-    private async System.Threading.Tasks.Task LoadQueryStatsSlicerAsync()
+    /// <summary>
+    /// The Top Queries grid's own empty sentence (<see cref="PerformanceMonitor.Ui.TopQueriesEmptyText"/>): the strip above it has
+    /// samples, so its sentence is not showing, and the ranking returned no row. Called after each grid read with the row count,
+    /// and after each strip load, which decides whether the strip's sentence or the grid's shows. The strip's own sentence stands
+    /// when the window holds no samples, and nothing shows over the comparison grid.
+    /// </summary>
+    private void UpdateQueryStatsEmptyMessage(int? rowCount = null)
+    {
+        if (rowCount.HasValue) _queryStatsRowCount = rowCount.Value;
+        if (QueryStatsSlicer.EmptyText is not null) return;
+        var text = QueryStatsGrid.Visibility == Visibility.Visible
+            ? PerformanceMonitor.Ui.TopQueriesEmptyText.Text(_queryStatsRowCount, QueryStatsSlicer.HasData)
+            : null;
+        QueryStatsEmptyMessage.Text = text ?? "";
+        QueryStatsEmptyMessage.Visibility = text is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>Loads the strip over the two instants the grid read took, so its window is the grid's window.</summary>
+    private async System.Threading.Tasks.Task LoadQueryStatsSlicerAsync(DateTime startUtc, DateTime endUtc)
     {
         try
         {
-            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
-
-            var data = await Task.Run(() => _dataService.GetQueryStatsSlicerDataAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
+            var data = await Task.Run(() => _dataService.GetQueryStatsSlicerDataAsync(_serverId, 0, startUtc, endUtc, SelectedDatabaseFilter));
             _queryStatsSlicerData = data;
             _queryStatsSlicerMetric = "TotalCpu";
-            var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
+            var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(0, startUtc, endUtc, DateTime.UtcNow);
             if (data.Count == 0)
                 QueryStatsSlicer.ShowEmpty("No query statistics in the selected time window.");
             else
                 QueryStatsSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd);
+            UpdateQueryStatsEmptyMessage();
         }
         catch (Exception ex)
         {
@@ -151,6 +169,7 @@ public partial class ServerTab : UserControl
         {
             var queryStats = await ReadTopQueriesAsync(0, e.StartUtc, e.EndUtc);
             _queryStatsFilterMgr!.UpdateData(queryStats);
+            UpdateQueryStatsEmptyMessage(queryStats.Count);
             /* #4284: the comparison reads UTC collection_time directly, with no offset conversion of its own
                (same as the banner below), so it takes e.StartUtc/e.EndUtc -- the same pair the grid read above takes. */
             await RefreshQueryStatsComparisonAsync(e.StartUtc, e.EndUtc);

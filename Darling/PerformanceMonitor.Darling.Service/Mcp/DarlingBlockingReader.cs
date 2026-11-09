@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -477,7 +478,7 @@ internal static class DarlingBlockingReader
     /// variant cannot drift a column from the unfiltered one.</summary>
     internal static BlockedProcessReadRow MapXeRow(DbDataReader reader, ServerClock clock)
     {
-        return new BlockedProcessReadRow
+        var row = new BlockedProcessReadRow
         {
             EventTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
             DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
@@ -519,6 +520,23 @@ internal static class DarlingBlockingReader
             /* #7497: the report's own trancount for the blocking process. NULL on a row stored before V241 and on a report without the attribute. */
             BlockingOpenTransactionCount = reader.IsDBNull(37) ? null : reader.GetInt32(37),
         };
+        ClearSentinelStamps(row);
+        return row;
+    }
+
+    /// <summary>
+    /// The report writes 1900-01-01T00:00:00, in the server's clock, for a session with no last batch or no open transaction
+    /// (<see cref="BlockedProcessReportSentinel"/>). Shifted to UTC it is still a day inside the floor, so each of the six stamps
+    /// is nulled here rather than answered as a date near 1900 that reads as measured.
+    /// </summary>
+    private static void ClearSentinelStamps(BlockedProcessReadRow row)
+    {
+        row.BlockedLastTranStartedUtc = BlockedProcessReportSentinel.OrNull(row.BlockedLastTranStartedUtc);
+        row.BlockingLastTranStartedUtc = BlockedProcessReportSentinel.OrNull(row.BlockingLastTranStartedUtc);
+        row.BlockedLastBatchStartedUtc = BlockedProcessReportSentinel.OrNull(row.BlockedLastBatchStartedUtc);
+        row.BlockingLastBatchStartedUtc = BlockedProcessReportSentinel.OrNull(row.BlockingLastBatchStartedUtc);
+        row.BlockedLastBatchCompletedUtc = BlockedProcessReportSentinel.OrNull(row.BlockedLastBatchCompletedUtc);
+        row.BlockingLastBatchCompletedUtc = BlockedProcessReportSentinel.OrNull(row.BlockingLastBatchCompletedUtc);
     }
 
     /// <summary>
