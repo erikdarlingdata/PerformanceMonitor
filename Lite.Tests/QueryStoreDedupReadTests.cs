@@ -1052,9 +1052,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Contains("interval_start_time_utc AS point_time", source, StringComparison.Ordinal);
         Assert.Contains("collection_time AS point_time", source, StringComparison.Ordinal);
 
-        /* Both bucketed reads place work at the interval start when there is one — the slicer's
-           one-bucket lag fix. COALESCE, not a bare column, so legacy rows keep collection_time. */
-        Assert.Equal(2, Regex.Matches(source, @"date_trunc\('hour', COALESCE\(interval_start_time_utc, collection_time\)\)").Count);
+        /* The slicer places work at the interval start when there is one — its one-bucket lag fix. COALESCE, not a bare
+           column, so legacy rows keep collection_time. The bucket is the window's width in minutes (SlicerBuckets), built
+           once and used by both the SELECT and the GROUP BY. */
+        Assert.Single(Regex.Matches(source, @"time_bucket\(to_minutes\(CAST\(\$4 AS INTEGER\)\), COALESCE\(interval_start_time_utc, collection_time\)"));
     }
 
     /// <summary>Walks up from the test binary to the repo root so the pin works from any run directory.</summary>

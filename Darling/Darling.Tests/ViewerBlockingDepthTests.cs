@@ -119,10 +119,11 @@ public sealed class ViewerBlockingDepthSqlTests
     }
 
     [Fact]
-    public void DeadlockSlicerSql_HourlyBuckets_OverDeadlocksView()
+    public void DeadlockSlicerSql_BucketsAtTheWindowsWidth_OverDeadlocksView()
     {
         Assert.Contains("FROM v_deadlocks", ViewerDataService.DeadlockSlicerSql, StringComparison.Ordinal);
-        Assert.Contains("date_trunc('hour', deadlock_time)", ViewerDataService.DeadlockSlicerSql, StringComparison.Ordinal);
+        /* $5 is the bucket width in minutes: a minute over a short window, an hour over a day (SlicerBuckets). */
+        Assert.Contains("date_bin(CAST($5 AS integer) * INTERVAL '1 minute', deadlock_time", ViewerDataService.DeadlockSlicerSql, StringComparison.Ordinal);
         Assert.Contains("COUNT(*) AS deadlock_count", ViewerDataService.DeadlockSlicerSql, StringComparison.Ordinal);
     }
 

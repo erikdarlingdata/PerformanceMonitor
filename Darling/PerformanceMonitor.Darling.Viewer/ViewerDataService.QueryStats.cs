@@ -948,16 +948,17 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// Hourly query-stats buckets for the Top-Queries slicer — Lite's <c>GetQueryStatsSlicerDataAsync</c>
-    /// ported. Buckets by <c>date_trunc('hour', collection_time)</c> into the shared
+    /// Query-stats buckets for the Top-Queries slicer — Lite's <c>GetQueryStatsSlicerDataAsync</c>
+    /// ported. Buckets at the width <see cref="SlicerBuckets"/> picks for the window ($5 minutes, on the grid every
+    /// width of it divides: a minute over a short window, an hour over a day) into the shared
     /// <see cref="TimeSliceBucket"/>; the columns feed the slicer's sort-driven metric overlay
     /// (CPU / duration / reads / writes / physical reads). PG dialect: <c>COUNT(DISTINCT …)</c> is bigint
     /// and <c>SUM(…)/1000.0</c> is numeric, so the reads go through <c>Convert</c> tolerantly.
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
-    public const string QueryStatsSlicerSql = """
+    public const string QueryStatsSlicerSql = $"""
         SELECT
-            date_trunc('hour', collection_time) AS bucket,
+            date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}) AS bucket,
             COUNT(DISTINCT query_hash) AS query_count,
             COALESCE(SUM(delta_worker_time), 0) / 1000.0 AS total_cpu_ms,
             COALESCE(SUM(delta_elapsed_time), 0) / 1000.0 AS total_elapsed_ms,
@@ -969,18 +970,19 @@ public sealed partial class ViewerDataService
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        GROUP BY date_trunc('hour', collection_time)
+        GROUP BY 1
         ORDER BY bucket
         """;
 
-    /// <summary>Hourly query-stats slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>].</summary>
+    /// <summary>Query-stats slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>], at the width <see cref="SlicerBuckets"/> picks for it.</summary>
     public async Task<List<TimeSliceBucket>> GetQueryStatsSlicerDataAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
         => await ReadQueryStatsSlicerAsync(QueryStatsSlicerSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
 
     /// <summary>
-    /// Shared reader for the query-stats / procedure-stats hourly slicer buckets (same column shape:
-    /// bucket, count, cpu_ms, elapsed_ms, reads, writes, physical_reads). The default slicer metric is
+    /// Shared reader for the query-stats / procedure-stats / Query Store slicer buckets (same column shape:
+    /// bucket, count, cpu_ms, elapsed_ms, reads, writes, physical_reads). $5 is the bucket width in minutes,
+    /// <see cref="SlicerBuckets.MinutesFor(DateTime, DateTime)"/> for the window. The default slicer metric is
     /// total CPU (Value = TotalCpu), matching Lite's initial "Total CPU (ms)" label.
     /// </summary>
     internal async Task<List<TimeSliceBucket>> ReadQueryStatsSlicerAsync(
@@ -992,6 +994,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = SlicerBuckets.MinutesFor(startUtc, endUtc) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
