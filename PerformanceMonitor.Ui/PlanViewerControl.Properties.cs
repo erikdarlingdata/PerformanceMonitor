@@ -579,7 +579,8 @@ public partial class PlanViewerControl
             AddPropertyRow("Retrieved From Cache", s.RetrievedFromCache ? "True" : "False");
             AddPropertyRow("Batch Mode On RowStore", s.BatchModeOnRowStoreUsed ? "True" : "False");
             AddPropertyRow("Security Policy", s.SecurityPolicyApplied ? "True" : "False");
-            AddPropertyRow("Parameterization Type", PropertyRows.ParameterizationTypeName(s.StatementParameterizationType));
+            if (s.StatementParameterizationType is int parameterizationType)
+                AddPropertyRow("Parameterization Type", PropertyRows.ParameterizationTypeName(parameterizationType, s.Parameters.Select(p => p.Name)));
             if (!string.IsNullOrEmpty(s.QueryHash))
                 AddPropertyRow("Query Hash", s.QueryHash, isCode: true);
             if (!string.IsNullOrEmpty(s.QueryPlanHash))

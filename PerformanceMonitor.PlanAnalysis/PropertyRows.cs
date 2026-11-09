@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 
 namespace PerformanceMonitor.PlanAnalysis;
@@ -102,15 +103,30 @@ public static class PropertyRows
     /// engine also records in <c>sys.query_store_query.query_parameterization_type</c>, whose documented values are
     /// 0 None, 1 User (explicit parameters), 2 Simple and 3 Forced. A code outside that list is given as its number,
     /// so a value a later engine adds stays visible.
+    /// A 0 is not a plain "None": the engine writes 0 for a parameterized statement whenever the database's Query
+    /// Store is not READ_WRITE. When every name in the statement's parameter list is numbered (<c>@1</c>, <c>@2</c>),
+    /// the engine named the parameters itself, so the shape proves auto-parameterization: simple parameterization
+    /// numbers from <c>@1</c> and forced parameterization from <c>@0</c>. Any other 0 is "None or not recorded".
     /// </summary>
-    public static string ParameterizationTypeName(int code) => code switch
+    public static string ParameterizationTypeName(int code, IEnumerable<string> parameterNames) => code switch
     {
-        0 => "None",
+        0 => AutoParameterizationByShape(parameterNames) ?? "None or not recorded",
         1 => "User",
         2 => "Simple",
         3 => "Forced",
         _ => code.ToString(CultureInfo.InvariantCulture),
     };
+
+    private static string? AutoParameterizationByShape(IEnumerable<string> parameterNames)
+    {
+        var names = parameterNames.ToList();
+        if (names.Count == 0 || !names.All(IsNumberedParameter))
+            return null;
+        return names.Contains("@0") ? "Forced (by its @0-style parameters)" : "Simple (by its @1-style parameters)";
+    }
+
+    private static bool IsNumberedParameter(string name) =>
+        name.Length > 1 && name[0] == '@' && name.Skip(1).All(char.IsAsciiDigit);
 
     /// <summary>
     /// The whole panel as plain text, for "Copy all properties": the operator header, then a

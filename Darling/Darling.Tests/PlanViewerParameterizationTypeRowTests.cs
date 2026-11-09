@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Windows;
@@ -22,7 +23,10 @@ namespace Darling.Tests;
 /// <summary>
 /// #8460: the Properties panel's Parameterization Type row names the statement's parameterization instead of printing the
 /// showplan attribute's code. The codes are the ones <c>sys.query_store_query.query_parameterization_type</c> documents:
-/// 0 None, 1 User, 2 Simple, 3 Forced. A code outside that list stays visible as its number. The row is read from the
+/// 1 User, 2 Simple, 3 Forced. A code outside that list stays visible as its number. A 0 reads "None or not recorded",
+/// since the engine writes 0 for a parameterized statement whenever Query Store is not READ_WRITE, unless the statement's
+/// parameters are all numbered, the shape only auto-parameterization produces, which then names it; and a plan with no
+/// attribute at all has no row, as a plan with no optimization level has no Optimization Level row. The row is read from the
 /// rendered panel: a plan carrying the code is loaded on the shared STA thread, the panel is opened for the root node
 /// through the control's private builder, as <see cref="PlanViewerEstimatedExecutionsTests"/> does, and the row's value
 /// text is read back; nothing reads source text (#5833). The plan canvas reads the theme's brushes, so the Viewer's theme
@@ -34,13 +38,13 @@ public sealed class PlanViewerParameterizationTypeRowTests
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
 
     [Theory]
-    [InlineData(0, "None")]
+    [InlineData(0, "None or not recorded")]
     [InlineData(1, "User")]
     [InlineData(2, "Simple")]
     [InlineData(3, "Forced")]
     public void ThePropertiesPanel_NamesTheStatementsParameterizationType(int code, string expected)
     {
-        Assert.Equal(expected, ParameterizationTypeRow(code));
+        Assert.Equal(expected, ParameterizationTypeRow(Plan(code)));
     }
 
     [Theory]
@@ -48,12 +52,31 @@ public sealed class PlanViewerParameterizationTypeRowTests
     [InlineData(17)]
     public void ThePropertiesPanel_LeavesAnUnknownParameterizationCodeAsItsNumber(int code)
     {
-        Assert.Equal(code.ToString(CultureInfo.InvariantCulture), ParameterizationTypeRow(code));
+        Assert.Equal(code.ToString(CultureInfo.InvariantCulture), ParameterizationTypeRow(Plan(code)));
     }
 
-    /// <summary>Loads a plan whose statement carries <paramref name="code"/>, opens the Properties panel for its root
-    /// node and returns the Parameterization Type row's value text.</summary>
-    private static string ParameterizationTypeRow(int code)
+    /// <summary>An actual plan captured while Query Store was not READ_WRITE: its statement is
+    /// <c>WHERE [u].[Reputation]=@1 AND [u].[DisplayName]=@2</c> with a parameter list of <c>@1</c> and <c>@2</c>, the
+    /// shape simple parameterization produces, and it carries <c>StatementParameterizationType="0"</c>.</summary>
+    [Fact]
+    public void ThePropertiesPanel_NamesSimpleParameterizationByItsNumberedParameters_WhenTheCodeIsZero()
+    {
+        var xml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "OriginPlans", "key_lookup_plan.sqlplan"));
+        Assert.Equal("Simple (by its @1-style parameters)", ParameterizationTypeRow(xml));
+    }
+
+    /// <summary>A SQL Server 2019 capture of a prepared auto-parameterized plan with no
+    /// <c>StatementParameterizationType</c> attribute at all: the row is left out rather than printed as a 0.</summary>
+    [Fact]
+    public void ThePropertiesPanel_HasNoParameterizationTypeRow_WhenThePlanCarriesNoAttribute()
+    {
+        var xml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "StatementScrub", "autoparam_select_prepared.xml"));
+        Assert.Null(ParameterizationTypeRow(xml));
+    }
+
+    /// <summary>Loads <paramref name="planXml"/>, opens the Properties panel for its root node and returns the
+    /// Parameterization Type row's value text, or null when the Statement Info section has no such row.</summary>
+    private static string? ParameterizationTypeRow(string planXml)
     {
         string? value = null;
         StaTestThread.Run(async () =>
@@ -70,15 +93,15 @@ public sealed class PlanViewerParameterizationTypeRowTests
             var control = new PlanViewerControl();
             try
             {
-                StaTestThread.Step($"LoadPlan: StatementParameterizationType {code}");
-                await control.LoadPlan(Plan(code), "plan");
+                StaTestThread.Step("LoadPlan");
+                await control.LoadPlan(planXml, "plan");
 
                 StaTestThread.Step("opening the Properties panel for the root node");
                 ShowProperties(control, new PlanNode { NodeId = 0, PhysicalOp = "Clustered Index Seek", LogicalOp = "Clustered Index Seek" });
 
                 var rows = PanelRows(control);
-                Assert.True(rows.ContainsKey("Parameterization Type"), "the Statement Info section has no Parameterization Type row");
-                value = rows["Parameterization Type"];
+                Assert.True(rows.Count > 0, "the Properties panel rendered no rows");
+                value = rows.TryGetValue("Parameterization Type", out var text) ? text : null;
             }
             finally
             {
@@ -87,7 +110,7 @@ public sealed class PlanViewerParameterizationTypeRowTests
                 if (added is not null) app.Resources.MergedDictionaries.Remove(added);
             }
         });
-        return value!;
+        return value;
     }
 
     private static void ShowProperties(PlanViewerControl control, PlanNode node)
