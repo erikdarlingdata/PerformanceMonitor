@@ -58,7 +58,14 @@ public sealed class ConnectTimeStatusWordsTests
             {
                 var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "connect-time-test", DisplayName = "connect-time-test", IsEnabled = true };
                 var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
-                return ((TextBlock)tab.FindName("ConnectionStatusText")).Text;
+                try
+                {
+                    return ((TextBlock)tab.FindName("ConnectionStatusText")).Text;
+                }
+                finally
+                {
+                    tab.StopRefresh();
+                }
             }));
 
             Assert.StartsWith("Connecting", text, StringComparison.Ordinal);
@@ -84,8 +91,15 @@ public sealed class ConnectTimeStatusWordsTests
             {
                 var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "connect-finished-test", DisplayName = "connect-finished-test", IsEnabled = true };
                 var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
-                tab.FirstCollectionFinished();
-                return ((TextBlock)tab.FindName("ConnectionStatusText")).Text;
+                try
+                {
+                    tab.FirstCollectionFinished();
+                    return ((TextBlock)tab.FindName("ConnectionStatusText")).Text;
+                }
+                finally
+                {
+                    tab.StopRefresh();
+                }
             }));
 
             Assert.DoesNotContain("Connecting", text, StringComparison.Ordinal);
