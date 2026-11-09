@@ -65,6 +65,24 @@ public partial class ViewerServerTab
 
     private string _queryStatsSlicerMetric = "TotalCpu";
     private List<TimeSliceBucket>? _queryStatsSlicerData;
+    private int _queryStatsRowCount;
+
+    /// <summary>
+    /// The Top Queries grid's own empty sentence (<see cref="TopQueriesEmptyText"/>): the strip above it has samples, so its sentence
+    /// is not showing, and the ranking returned no row. The range load records the count and the strip load words the sentence;
+    /// the slicer handler does both. The strip's own sentence stands when the window holds no samples, and nothing shows over the
+    /// comparison grid.
+    /// </summary>
+    private void UpdateQueryStatsEmptyMessage(int? rowCount = null)
+    {
+        if (rowCount.HasValue) _queryStatsRowCount = rowCount.Value;
+        if (QueryStatsSlicer.EmptyText is not null) return;
+        var text = QueryStatsGrid.Visibility == Visibility.Visible
+            ? TopQueriesEmptyText.Text(_queryStatsRowCount, QueryStatsSlicer.HasData)
+            : null;
+        QueryStatsEmptyMessage.Text = text ?? "";
+        QueryStatsEmptyMessage.Visibility = text is null ? Visibility.Collapsed : Visibility.Visible;
+    }
     private string _procStatsSlicerMetric = "TotalCpu";
     private List<TimeSliceBucket>? _procStatsSlicerData;
     private string _queryStoreSlicerMetric = "TotalCpu";
@@ -195,6 +213,7 @@ public partial class ViewerServerTab
             var read = dataReadTask.Result;
             var rows = read.Rows;
             _queryStatsFilterMgr!.UpdateData(rows);
+            _queryStatsRowCount = rows.Count;
             SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
             /* #4231 stage 3: an hourly-routed page holds no per-caller detail (see
                ViewerDataService.GetTopQueriesByCpuTierAsync) — the raw-floor banner (#4231 stage 1/2) and this
@@ -620,6 +639,7 @@ public partial class ViewerServerTab
             QueryStatsSlicer.ShowEmpty("No query statistics in the selected time window.");
         else
             QueryStatsSlicer.LoadData(data, "Total CPU (ms)", startUtc, endUtc);
+        UpdateQueryStatsEmptyMessage();
     }
 
     private async void OnQueryStatsSlicerChanged(object? sender, SlicerRangeEventArgs e)
@@ -633,6 +653,7 @@ public partial class ViewerServerTab
             var read = dataReadTask.Result;
             var rows = read.Rows;
             _queryStatsFilterMgr!.UpdateData(rows);
+            UpdateQueryStatsEmptyMessage(rows.Count);
             UpdateTruncationBanner(QueryStatsTruncationBanner, await DataStartOrNullAsync(floorTask, "Query Stats"), e.StartUtc, HourlyBannerSuffix(read.Tier, read.IoRoute, read.HourlyEdgesNote), HourlyServedOf(read.Tier, read.HourlyFirstBucket));
             await RefreshQueryStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }

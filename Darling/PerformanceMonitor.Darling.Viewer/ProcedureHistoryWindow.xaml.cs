@@ -247,8 +247,8 @@ public partial class ProcedureHistoryWindow : Window
 
         if (string.IsNullOrEmpty(planXml))
         {
-            MessageBox.Show(this, "No plan was captured in the collected data for this procedure.",
-                "No Plan Available", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(this, "No Plan Available",
+                "No plan was captured in the collected data for this procedure.");
             return;
         }
 
