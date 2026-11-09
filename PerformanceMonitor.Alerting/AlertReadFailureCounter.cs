@@ -720,7 +720,7 @@ public sealed class AlertReadFailureCounter
                         + "deadline on its store reads, an elapsed at or about that bound means this "
                         + "process stopped waiting while the statement was still running on the store, "
                         + "and one well below it means the store returned a fault. A figure well ABOVE "
-                        + "that bound means the failure was not a single bounded read at all — some "
+                        + "that bound means the failure was not a single bounded read at all: some "
                         + "entries cover a whole alert pass rather than one command, so read the elapsed "
                         + "against what the named read actually is",
                         reading.LastFailureElapsedMs.Value)
@@ -730,7 +730,7 @@ public sealed class AlertReadFailureCounter
             CultureInfo.InvariantCulture,
             "{9} for this server failed and {12} logged but reached no health "
             + "surface{1}, over {10} since {3:yyyy-MM-dd HH:mm}Z. Each one is a condition this "
-            + "server was not judged on for that pass — not a fired alert that was lost, and not a collector "
+            + "server was not judged on for that pass, not a fired alert that was lost, and not a collector "
             + "failure.{4} Across this whole service {11} failed: {0} here, {6} on "
             + "store self-alerts that belong to no server, and {7} on other servers.{8}",
             reading.ServerReadFailures,

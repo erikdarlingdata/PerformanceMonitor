@@ -65,7 +65,7 @@ public sealed class DarlingMcpFleetSweepTools
         "pre-computed, plus its would-have-paged ledger when one was taken), and the watch-item worklist with " +
         "its hysteresis position; pass sweep_id (as a STRING - the ids are too large for a JSON number to " +
         "round-trip) to fetch one sweep in full instead. SIZE: the newest sweep's document ships once, under latest; " +
-        "its timeline entry keeps the row counts (report.fleet.bands, report.watch, report.would_have_paged) and says " +
+        "its timeline entry keeps the row counts (report.fleet.bands, report.watch with carried as a count, report.would_have_paged) and says " +
         "report_under: latest. The reply is cut to the shared 32 KB response budget in two steps - the timeline loses " +
         "its oldest sweeps first (the newest entry always rides), then the worklist loses items by standing (carried " +
         "before open, oldest first, so the open items and the newest survive; the items kept ride in the worklist's " +
