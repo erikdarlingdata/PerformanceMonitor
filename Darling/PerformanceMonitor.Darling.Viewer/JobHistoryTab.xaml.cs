@@ -251,6 +251,10 @@ public partial class JobHistoryTab : UserControl
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
 
+            /* The rows are on screen, so the tab is refreshed. The agent-status, data-start and choices reads below are best effort
+               and report their own failures; a failure line one of them raises after this stamp stands. */
+            StatusChanged?.Invoke($"job history — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+
             await UpdateAgentStatusAsync(serverId);
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 

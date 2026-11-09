@@ -95,6 +95,7 @@ public partial class AgentAlertsTab : UserControl
 
             Show(read, clock);
             LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.RefreshedStamp();
+            StatusChanged?.Invoke($"agent alerts — refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
