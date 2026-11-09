@@ -64,8 +64,9 @@ internal static class ApplicationThemeGuard
     }
 
     /// <summary>
-    /// Watches the application's merged-dictionary collection, once per collection instance. The <see cref="Application"/> is created
-    /// lazily by whichever test body first needs one, so this is called before and after every STA body and around every test.
+    /// Watches the application's merged-dictionary collection, once per collection instance. The shared STA host creates the
+    /// <see cref="Application"/> before its first body and calls this then (#8433), so the hook exists before any body can merge; the calls
+    /// before and after every STA body and around every test re-hook if the collection instance changes, and do nothing while it is the same.
     /// </summary>
     internal static void Observe()
     {
@@ -98,7 +99,8 @@ internal static class ApplicationThemeGuard
 
     /// <summary>
     /// After an STA body: when the body itself created the <see cref="Application"/>, every dictionary merged into it so far was merged by
-    /// that body before the collection could be watched, so the merge is recorded here against the running test.
+    /// that body before the collection could be watched, so the merge is recorded here against the running test. The shared host creates the
+    /// <see cref="Application"/> ahead of its first body (#8433), so for it the body never creates one; this covers a host that does not.
     /// </summary>
     internal static void ObserveAfterBody(bool applicationExistedBefore)
     {

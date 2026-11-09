@@ -41,7 +41,8 @@ public readonly record struct AppPaths(string DatabasePath, string ConfigDirecto
 /// Points the app's three store paths at a folder of the test's own for as long as the scope lives, and puts back what they held
 /// when it is disposed (#8434). The statics are process-wide: a test that set them and did not put them back left every later test
 /// that builds a <see cref="MainWindow"/> in the same process reading and writing a folder the earlier test had deleted. Dispose the
-/// scope before the folder is deleted, so no window is ever pointed at a folder that is gone.
+/// scope before the folder is deleted, so no window is ever pointed at a folder that is gone. <see cref="AppPathsGuardAttribute"/>
+/// fails a test that leaves the paths changed.
 /// </summary>
 public sealed class AppPathsScope : IDisposable
 {
