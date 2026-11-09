@@ -62,6 +62,8 @@ The session cookie carries the token's name; the service obtains its role and ta
 
 Collector-service health describes the shared monitoring service. Sweep server lists and totals are scoped, while the shared collector-health indicator is explicitly labelled. Scoped tokens are supported on a store's direct dashboard; the front-door proxy does not forward their grants and refuses their API requests. The standalone Viewer continues to use its own store login, and MCP token permissions are unchanged.
 
+Administrators configure scoped tokens in the service configuration. Viewer-managed named groups and the advanced web access switch are planned as a separate follow-up. Repeatable token export needs a separate design.
+
 ```jsonc
 "web": {
   "network": {
