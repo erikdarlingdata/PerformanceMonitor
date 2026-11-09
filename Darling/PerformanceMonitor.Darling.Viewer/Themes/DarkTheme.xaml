@@ -852,6 +852,8 @@
         <Setter Property="helpers:DataGridSortBehavior.SortDescendingFirst" Value="True"/>
         <Setter Property="helpers:DataGridFillColumn.Enabled" Value="True"/>
         <Setter Property="helpers:DataGridHeaderFit.Enabled" Value="True"/>
+        <!-- A text column with no element style of its own ends a too-long text with an ellipsis, as DataGridCellText does. -->
+        <Setter Property="helpers:DataGridCellTrimming.Enabled" Value="True"/>
         <Setter Property="helpers:ScrollPanBehavior.EnableMiddleClickPanning" Value="True"/>
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
@@ -977,6 +979,8 @@
          derived style and let this base trigger override it during row selection. -->
     <Style x:Key="DataGridCellText" TargetType="TextBlock">
         <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
+        <!-- A cell too narrow for its text ends it with an ellipsis instead of cutting it at the cell's edge. -->
+        <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
         <Style.Triggers>
             <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=DataGridRow, AncestorLevel=1}, FallbackValue=False}" Value="True">
                 <Setter Property="Foreground" Value="{DynamicResource GridSelectionForegroundBrush}"/>

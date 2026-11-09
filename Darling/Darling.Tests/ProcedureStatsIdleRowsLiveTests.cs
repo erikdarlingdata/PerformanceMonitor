@@ -117,6 +117,8 @@ public sealed class ProcedureStatsIdleRowsLiveTests
         command.Parameters.AddWithValue(DateTime.SpecifyKind(store.WorkStart.AddHours(-1), DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(store.WorkStart.AddHours(2), DateTimeKind.Unspecified));
         command.Parameters.Add(new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text });
+        /* $5: the bucket width in minutes; a three-hour window keeps the hour (SlicerBuckets). */
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 60 });
         var rows = new List<(DateTime, long)>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))

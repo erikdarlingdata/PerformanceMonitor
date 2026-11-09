@@ -229,7 +229,7 @@ public partial class SettingsWindow : Window
 
         if (customCount == 0)
         {
-            MessageBox.Show("All servers are already using the default schedule.", "Apply Default", MessageBoxButton.OK, MessageBoxImage.Information);
+            InAppMessage.Show(this, "Apply Default", "All servers are already using the default schedule.");
             return;
         }
 
@@ -518,14 +518,13 @@ public partial class SettingsWindow : Window
                 return;
 
             case SettingsSaveOutcome.SavedAndMcpNeedsRestart:
-                MessageBox.Show(
+                InAppMessage.Show(this, "Settings",
                     "Settings saved. MCP changes take effect after restarting the application."
-                    + MemoryLimitRestartNote(),
-                    "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+                    + MemoryLimitRestartNote());
                 return;
 
             default:
-                MessageBox.Show("Settings saved." + MemoryLimitRestartNote(), "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Settings", "Settings saved." + MemoryLimitRestartNote());
                 return;
         }
     }
@@ -1637,7 +1636,7 @@ public partial class SettingsWindow : Window
             var error = await EmailSendCore.SendTestEmailAsync(new AppAlertSettings(), Services.EmailAlertService.Branding);
             if (error == null)
             {
-                MessageBox.Show("Test email sent successfully!", "Test Email", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Email", "Test email sent successfully!");
             }
             else
             {
@@ -1961,7 +1960,7 @@ public partial class SettingsWindow : Window
 
             if (error == null)
             {
-                MessageBox.Show("PagerDuty test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Webhook", "PagerDuty test notification sent successfully!");
             }
             else
             {
@@ -1992,7 +1991,7 @@ public partial class SettingsWindow : Window
 
             if (error == null)
             {
-                MessageBox.Show("Teams test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Webhook", "Teams test notification sent successfully!");
             }
             else
             {
@@ -2023,7 +2022,7 @@ public partial class SettingsWindow : Window
 
             if (error == null)
             {
-                MessageBox.Show("Slack test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Webhook", "Slack test notification sent successfully!");
             }
             else
             {
@@ -2090,7 +2089,7 @@ public partial class SettingsWindow : Window
 
             if (error == null)
             {
-                MessageBox.Show("Generic webhook test notification sent successfully!", "Test Webhook", MessageBoxButton.OK, MessageBoxImage.Information);
+                InAppMessage.Show(this, "Test Webhook", "Generic webhook test notification sent successfully!");
             }
             else
             {

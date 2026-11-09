@@ -1292,7 +1292,7 @@ public partial class ServerTab : UserControl
             if (data.Count == 0)
                 DeadlockSlicer.ShowEmpty("No deadlocks in the selected time window.");
             else
-                DeadlockSlicer.LoadData(data, "Deadlocks", slicerStart, slicerEnd);
+                DeadlockSlicer.LoadData(data, "Deadlocks", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
         }
         catch (Exception ex)
         {
