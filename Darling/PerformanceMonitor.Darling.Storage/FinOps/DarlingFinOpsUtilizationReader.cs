@@ -482,8 +482,8 @@ ORDER BY d.day";
         return days;
     }
 
-    /// <summary>$3, $4 and $5 of a per-day read: the days' labels, starts and ends as three arrays, one element per day.</summary>
-    private static void AddDayBuckets(NpgsqlCommand command, IReadOnlyList<DayBucket> days)
+    /// <summary>The days of a per-day read as its next three parameters: the days' labels, starts and ends as three arrays, one element per day.</summary>
+    internal static void AddDayBuckets(NpgsqlCommand command, IReadOnlyList<DayBucket> days)
     {
         var labels = new DateOnly[days.Count];
         var starts = new DateTime[days.Count];
