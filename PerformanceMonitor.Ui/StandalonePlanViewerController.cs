@@ -409,7 +409,7 @@ public sealed class StandalonePlanViewerController
         emptyState!.Visibility = Visibility.Collapsed;
         viewer.Visibility = Visibility.Visible;
 
-        var uniqueLabel = GetUniqueSubTabLabel(label);
+        var uniqueLabel = GetUniqueSubTabLabel(label, subTab);
         if (subTab.Header is StackPanel headerPanel &&
             headerPanel.Children[0] is TextBlock headerLabel)
         {
@@ -419,15 +419,18 @@ public sealed class StandalonePlanViewerController
     }
 
     /// <summary>
-    /// Returns a label that is unique among current inner plan sub-tab headers.
+    /// Returns a label that is unique among the other inner plan sub-tab headers.
     /// If <paramref name="baseLabel"/> is already taken, appends " (1)", " (2)", \u2026
+    /// <paramref name="labelled"/> is the sub-tab the label is for, so its own current label does not count as
+    /// taken: a plan loaded into a tab that already holds one replaces it, and the tab keeps the plain label.
     /// </summary>
-    private string GetUniqueSubTabLabel(string baseLabel)
+    private string GetUniqueSubTabLabel(string baseLabel, TabItem? labelled = null)
     {
         var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var item in _planTabControl.Items)
         {
             if (item is TabItem { Tag: string t } && t == PlanAddTabId) continue;
+            if (ReferenceEquals(item, labelled)) continue;
             if (item is TabItem subTab &&
                 subTab.Header is StackPanel sp &&
                 sp.Children[0] is TextBlock tb)
@@ -524,7 +527,12 @@ public sealed class StandalonePlanViewerController
         try
         {
             var (ok, xml) = await ClipboardText.TryReadAsync();
-            if (ok && !string.IsNullOrWhiteSpace(xml) && !CallerPlanXmlPrompt.Refuse(xml))
+            if (!ok)
+            {
+                ShowClipboardUnavailable();
+                return;
+            }
+            if (!string.IsNullOrWhiteSpace(xml) && !CallerPlanXmlPrompt.Refuse(xml))
             {
                 // Await so the guard spans the off-thread parse, not just the clipboard read (#2870).
                 await LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");
@@ -533,9 +541,9 @@ public sealed class StandalonePlanViewerController
         finally { _pasteInProgress = false; }
     }
 
-    /// <summary>The notice the Paste XML button gives when the clipboard cannot be opened within the retry budget:
-    /// another app holds it (a clipboard manager, Office, a browser or an RDP session), so the read is worth trying
-    /// again.</summary>
+    /// <summary>The notice both paste entry points, the Paste XML button and Ctrl+V, give when the clipboard cannot be
+    /// opened within the retry budget: another app holds it (a clipboard manager, Office, a browser or an RDP session),
+    /// so the read is worth trying again.</summary>
     private void ShowClipboardUnavailable() =>
         ShowNotice("Couldn't read the clipboard. It may be in use by another app. Try again.",
             "Paste Plan XML", MessageBoxButton.OK, MessageBoxImage.Warning);
