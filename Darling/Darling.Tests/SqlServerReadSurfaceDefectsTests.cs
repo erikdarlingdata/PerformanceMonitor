@@ -166,6 +166,53 @@ public sealed class SqlServerReadSurfaceDefectsLiveTests
         });
     }
 
+    /// <summary>A rule scoped to two registered servers, the second disabled after the save, with the store's current version.</summary>
+    private static async Task<(long RuleId, int Version, string A, string B)> TwoServerRuleWithTheSecondDisabledAsync(NpgsqlConnection c, NpgsqlDataSource postgres, CancellationToken ct)
+    {
+        const string a = "PRODSQL04\\CORE", b = "PRODSQL05\\CORE";
+        var idA = ServerIdHelper.GetDeterministicHashCode(a);
+        var idB = ServerIdHelper.GetDeterministicHashCode(b);
+        await DarlingMcpTestData.RegisterServerAsync(c, idA, a, ct);
+        await DarlingMcpTestData.RegisterServerAsync(c, idB, b, ct);
+        var saved = Root(await DarlingMcpCustomAlertTools.CreateCustomAlertRule(postgres, "two-server-scope", TwoServerDefinition(a, b, 1000)));
+        Assert.False(saved.TryGetProperty("status", out _), "a scope of two registry names was refused: " + saved);
+        var ruleId = saved.EnumerateObject().First(p => p.Name is "rule_id" or "id" && p.Value.ValueKind == JsonValueKind.Number).Value.GetInt64();
+        await DarlingMcpTestData.ExecAsync(c, ct, "UPDATE servers SET is_enabled = false WHERE server_id = $1", idB);
+        var got = await new CustomAlertRuleStore(postgres, 30).GetAsync(ruleId);
+        var version = Assert.IsType<CustomAlertRuleResult.Ok>(got).Rule!.Version;
+        return (ruleId, version, a, b);
+    }
+
+    private static string TwoServerDefinition(string a, string b, int warnThreshold, string? extra = null) =>
+        "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"hours\":1}," +
+        "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":" + warnThreshold + "}," +
+        "\"scope\":{\"mode\":\"servers\",\"servers\":[\"" + a.Replace("\\", "\\\\") + "\",\"" + b.Replace("\\", "\\\\") + "\"" + (extra is null ? "" : ",\"" + extra + "\"") + "]}}";
+
+    [Fact]
+    public async Task Update_WithAnUnchangedScopeNamingADisabledServer_Saves()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            var (ruleId, version, a, b) = await TwoServerRuleWithTheSecondDisabledAsync(c, postgres, ct);
+            /* Only the threshold changes; the scope still names the disabled server, which is a registered one. */
+            var updated = Root(await DarlingMcpCustomAlertTools.UpdateCustomAlertRule(postgres, ruleId, version, definition: TwoServerDefinition(a, b, 2000)));
+            Assert.False(updated.TryGetProperty("status", out _), "a threshold edit on a rule naming a disabled server was refused: " + updated);
+        });
+    }
+
+    [Fact]
+    public async Task Update_ThatAddsAnEntryMatchingNothing_IsRefused_NamingOnlyThatEntry()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            var (ruleId, version, a, b) = await TwoServerRuleWithTheSecondDisabledAsync(c, postgres, ct);
+            var refused = Root(await DarlingMcpCustomAlertTools.UpdateCustomAlertRule(postgres, ruleId, version, definition: TwoServerDefinition(a, b, 1000, extra: "nowhere")));
+            Assert.Equal("invalid", StringOrNull(refused, "status"));
+            Assert.Equal("nowhere", Assert.Single(refused.GetProperty("unmatched_servers").EnumerateArray()).GetProperty("entry").GetString());
+            Assert.Contains("will not evaluate on those servers", StringOrNull(refused, "message"), StringComparison.Ordinal);
+        });
+    }
+
     [Fact]
     public async Task TheFleetBacklogAnswer_FitsTheResponseBudget_WorstFirst_AndSaysWhatItCut()
     {
@@ -349,7 +396,7 @@ public sealed class CustomAlertScopeValidationTests
         Assert.False(answer.GetProperty("valid").GetBoolean());
         var error = answer.GetProperty("error").GetString()!;
         Assert.Contains("matches several servers", error, StringComparison.Ordinal);
-        Assert.Contains("matches no monitored server", error, StringComparison.Ordinal);
+        Assert.Contains("matches no registered server", error, StringComparison.Ordinal);
 
         var entries = answer.GetProperty("unmatched_servers").EnumerateArray().ToDictionary(e => e.GetProperty("entry").GetString()!, e => e);
         Assert.Equal(4, entries.Count);
@@ -361,6 +408,20 @@ public sealed class CustomAlertScopeValidationTests
         Assert.Equal(
             new[] { "PRODSQL01\\CORE", "PRODSQL02\\CORE" },
             entries["PRODSQL"].GetProperty("registry_names").EnumerateArray().Select(x => x.GetString()).OrderBy(x => x, StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
+    public async Task APartialMiss_SaysTheRuleWillNotEvaluateOnThoseServers_AndATotalMissSaysItWouldNeverFire()
+    {
+        const string head = "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"hours\":1},\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1000},";
+        var partial = JsonDocument.Parse(await DarlingMcpCustomAlertTools.ValidateCustomAlertRule(head + "\"scope\":{\"mode\":\"servers\",\"servers\":[\"PRODSQL01\\\\CORE\",\"nowhere\"]}}", Registry)).RootElement;
+        var partialError = partial.GetProperty("error").GetString()!;
+        Assert.Contains("will not evaluate on those servers", partialError, StringComparison.Ordinal);
+        Assert.DoesNotContain("would never fire", partialError, StringComparison.Ordinal);
+        Assert.Equal("nowhere", Assert.Single(partial.GetProperty("unmatched_servers").EnumerateArray()).GetProperty("entry").GetString());
+
+        var total = JsonDocument.Parse(await DarlingMcpCustomAlertTools.ValidateCustomAlertRule(head + "\"scope\":{\"mode\":\"servers\",\"servers\":[\"nowhere\",\"nope\"]}}", Registry)).RootElement;
+        Assert.Contains("would never fire", total.GetProperty("error").GetString()!, StringComparison.Ordinal);
     }
 
     [Fact]
