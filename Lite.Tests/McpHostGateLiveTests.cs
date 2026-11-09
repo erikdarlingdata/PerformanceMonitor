@@ -365,6 +365,7 @@ public sealed class McpHostGateLiveTests : IDisposable
     [Theory]
     [InlineData("short-token-12")]
     [InlineData("aaaaaaaaaaaaaaaaaaaa")]
+    [InlineData("                ")]
     public async Task NewToken_UnderTheFloor_IsRefused_AndTheOldTokenKeepsWorking(string unusable)
     {
         var host = await StartAsync(Token, allowTokenless: false, allowWrites: true);

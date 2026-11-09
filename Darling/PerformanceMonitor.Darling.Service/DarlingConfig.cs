@@ -1661,8 +1661,9 @@ public sealed class McpConfig
     /// start, and the log names the settings to add. On, a loopback-only server with no token serves local clients
     /// without one, with the write and investigation tools off (they need the token), and every start logs one line
     /// saying so. This applies only to a start with no token configured: a configured token is still resolved and gates
-    /// every request, and the write and investigation tools are served as their settings say, whatever this says. Lite's
-    /// <c>mcp_allow_tokenless_loopback</c> differs: on, Lite does not read its stored token at all and serves reads only.
+    /// every request, and a token that clears the floor serves the write and investigation tools as their settings say,
+    /// whatever this says. Lite's <c>mcp_allow_tokenless_loopback</c> differs: on, Lite does not read its stored token at
+    /// all and serves reads only.
     /// File-only and restart-only.
     /// </summary>
     [JsonPropertyName("allowTokenlessLoopback")]

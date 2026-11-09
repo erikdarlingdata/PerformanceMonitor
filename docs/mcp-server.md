@@ -53,7 +53,7 @@ The MCP token gates the entire read surface. It also gates `analyze_server`, whi
 
    On Windows, use `encryptedToken`, which holds the output of `--encrypt-password`. `mcp.network.token` takes the token itself, or an `env:NAME` or `file:PATH` reference, and suits Linux and the compose container, where there is no DPAPI. Leave `mcp.network.listen` out to keep the server on loopback. `--configure-network` makes a 32-character token, and the [Darling network endpoints page](darling/network-endpoints.md#mcp-endpoint-assistant-over-the-lan) has a PowerShell command that makes one. If you lose the token, run `--print-mcp-token` elevated on the service host.
 
-   To serve local clients with no token, set `mcp.allowTokenlessLoopback` to `true` and leave the token out. Darling then serves the read tools only, and logs a line at every start saying so. The setting applies only when no token is configured: with a token in `darling.json` it changes nothing, the token gates every request, and the write and investigation tools are served as `mcp.allowWrites` and `mcp.allowInvestigations` say.
+   To serve local clients with no token, set `mcp.allowTokenlessLoopback` to `true` and leave the token out. Darling then serves the read tools only, and logs a line at every start saying so. The setting applies only when no token is configured: with a token in `darling.json` it changes nothing, the token gates every request, and a token that clears the floor (at least 16 characters, with at least 6 different ones) serves the write and investigation tools as `mcp.allowWrites` and `mcp.allowInvestigations` say.
 3. Register with Claude Code. Send the token as a header on every request:
 
 ```
