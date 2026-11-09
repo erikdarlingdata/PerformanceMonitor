@@ -133,7 +133,11 @@ SELECT
     max(b.expired_at)                                                        AS last_expired_at,
     min(b.observed_bytes)                                                    AS min_observed_bytes,
     percentile_disc(0.5) WITHIN GROUP (ORDER BY b.observed_bytes)            AS median_observed_bytes,
-    max(b.observed_bytes)                                                    AS max_observed_bytes
+    max(b.observed_bytes)                                                    AS max_observed_bytes,
+    count(*) FILTER (WHERE b.first_seen_at >= $2)                            AS rows_added_last_day,
+    count(*) FILTER (WHERE b.captured_at >= $2)                              AS rows_captured_last_day,
+    count(*) FILTER (WHERE b.captured_at IS NULL
+                     AND   b.expired_at >= $2)                               AS rows_expired_last_day
 FROM " + OversizedPlanBacklog.TableName + @" AS b
 LEFT JOIN servers AS s
   ON s.server_id = b.server_id
@@ -256,7 +260,10 @@ LIMIT $2";
         DateTime? LastExpiredAt,
         long MinObservedBytes,
         long MedianObservedBytes,
-        long MaxObservedBytes);
+        long MaxObservedBytes,
+        long RowsAddedLastDay,
+        long RowsCapturedLastDay,
+        long RowsExpiredLastDay);
 
     /// <summary>One collector's share of the scope.</summary>
     public sealed record BacklogCollectorCensus(
@@ -294,14 +301,20 @@ LIMIT $2";
         public string Verdict => VerdictOf(CapturedAt, ExpiredAt);
     }
 
+    /// <param name="lastDaySince">
+    /// #8404: the naive-UTC instant the three last-day counts start at, one day before the read as the caller's clock
+    /// has it. A parameter rather than <c>now()</c> in the statement, so the read has one clock, the caller's, and the
+    /// statement takes no time of its own.
+    /// </param>
     public static async Task<List<BacklogServerRollup>> GetPerServerRollupAsync(
-        NpgsqlDataSource postgres, int? serverId, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int? serverId, DateTime lastDaySince, CancellationToken cancellationToken = default)
     {
         var rows = new List<BacklogServerRollup>();
 
         await using var command = postgres.CreateCommand(PerServerRollupSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(serverId.HasValue ? serverId.Value : (object)DBNull.Value);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(lastDaySince, DateTimeKind.Unspecified));
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -326,7 +339,10 @@ LIMIT $2";
                 reader.IsDBNull(16) ? null : reader.GetDateTime(16),
                 reader.GetInt64(17),
                 reader.GetInt64(18),
-                reader.GetInt64(19)));
+                reader.GetInt64(19),
+                reader.GetInt64(20),
+                reader.GetInt64(21),
+                reader.GetInt64(22)));
         }
 
         return rows;

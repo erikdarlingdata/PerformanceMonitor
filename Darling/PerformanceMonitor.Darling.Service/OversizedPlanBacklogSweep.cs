@@ -158,6 +158,15 @@ internal static class OversizedPlanBacklogSweep
     internal const int MaxPlansPerServerPerTick = 10;
 
     /// <summary>
+    /// #8404: the most rows the sweep can take off one server's backlog in a day, <see cref="MaxPlansPerServerPerTick"/>
+    /// times the passes a day holds at <see cref="SweepInterval"/>. Reported by <c>get_oversized_plan_backlog</c> beside
+    /// each server's rows captured over the last day, so a drain running at this figure reads as the cap doing what it
+    /// is for, and a drain below it with pending rows waiting reads as something else. Derived from the two constants,
+    /// so it moves with them.
+    /// </summary>
+    internal static int RowsPerServerPerDayCeiling => MaxPlansPerServerPerTick * (int)(TimeSpan.FromDays(1) / SweepInterval);
+
+    /// <summary>
     /// WALL-CLOCK ceiling for one plan's fetch — connect, execute AND drain. It is the binding constraint,
     /// for the reason <c>ICollectorSchemaInfo.PerItemWallClockBudget</c> records: a command timeout bounds the
     /// wait for a network read and SqlClient RESETS it on every read that arrives, so a large result that
