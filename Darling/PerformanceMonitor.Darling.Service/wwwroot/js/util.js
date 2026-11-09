@@ -1843,6 +1843,13 @@ export function busyRetryStrip(seconds) {
  * #7942: the wait counts as a read of the page, on the scope current when it starts, so the poll loop neither stamps the page updated
  * nor plans the next poll while the second read has not run. The hold ends as the second read starts and counts itself.
  */
+/** #8417: the timer the Retry-After wait of retryOnceWhenBusy runs on. The page's own setTimeout and clearTimeout; a test harness puts
+ *  its own in their place and advances the wait itself, so nothing in a test waits on wall-clock time. */
+export const busyRetryClock = {
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (timer) => clearTimeout(timer),
+};
+
 export async function retryOnceWhenBusy(read, onBusy, signal) {
   const first = await read();
   const seconds = busyRetryAfter(first);
@@ -1855,13 +1862,13 @@ export async function retryOnceWhenBusy(read, onBusy, signal) {
   try {
     waited = await new Promise((resolve) => {
       let onAbort = null;
-      const timer = setTimeout(() => {
+      const timer = busyRetryClock.setTimeout(() => {
         if (signal && onAbort) signal.removeEventListener("abort", onAbort);
         resolve(true);
       }, seconds * 1000);
       if (signal) {
         onAbort = () => {
-          clearTimeout(timer);
+          busyRetryClock.clearTimeout(timer);
           resolve(false);
         };
         signal.addEventListener("abort", onAbort, { once: true });

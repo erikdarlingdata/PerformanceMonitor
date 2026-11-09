@@ -130,8 +130,15 @@ try {
 
 const all = (n, out = []) => { out.push(n); for (const c of n.children) all(c, out); return out; };
 const flush = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 0)); };
-/* The page's Retry-After wait (retryOnceWhenBusy, util.js) before the refused read is sent once more, then the turns that follow it. */
-const advanceBusyRetry = async () => { await new Promise((r) => setTimeout(r, 1300)); await flush(); };
+/* #8417: the page's Retry-After wait (retryOnceWhenBusy, util.js) runs on util's busyRetryClock, which the harness drives: a timer is held
+   until advanceBusyRetry fires every timer due within the Retry-After, then the turns that follow it run. Nothing waits on wall-clock time. */
+const busyRetryTimers = [];
+modules.util.busyRetryClock.setTimeout = (fn, ms) => { const timer = { fn, ms, cleared: false }; busyRetryTimers.push(timer); return timer; };
+modules.util.busyRetryClock.clearTimeout = (timer) => { if (timer) timer.cleared = true; };
+const advanceBusyRetry = async (ms = 1000) => {
+  for (const timer of busyRetryTimers.splice(0)) if (!timer.cleared && timer.ms <= ms) timer.fn();
+  await flush();
+};
 const readsOf = (name) => asks.filter((a) => a.name === name).map((a) => a.q);
 const out = {};
 
