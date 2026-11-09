@@ -265,7 +265,7 @@ public partial class JobHistoryTab : UserControl
                applied in the read, ahead of the row cap (#5703), so a full page of matching runs names its oldest run and the cap label
                counts the same rows. A probe that fails costs the note and never the grid. */
             await ShowDataStartNoteAsync(serverId, readClocks, startUtc, rangeEndUtc ?? nowUtc, all, gen);
-            await RefreshPickerDataStartAsync(serverId, gen);
+            await RefreshPickerDataStartAsync(serverId, openTabClocks, gen);
             await choicesApplied;
         }
         catch (Exception ex)
@@ -315,15 +315,16 @@ public partial class JobHistoryTab : UserControl
     /// where the data starts. The read is cached per scope, so a refresh costs nothing until the archive changes. A read that
     /// fails leaves the retention edge; a load a newer one has superseded writes nothing.
     /// </summary>
-    private async System.Threading.Tasks.Task RefreshPickerDataStartAsync(int? serverId, int gen)
+    private async System.Threading.Tasks.Task RefreshPickerDataStartAsync(int? serverId, IReadOnlyDictionary<int, ServerClock>? openTabClocks, int gen)
     {
         if (_dataService == null) return;
         var service = _dataService;
 
+        /* openTabClocks is the load's one snapshot of the open tabs' clocks, the one the grid's read took. */
         DateTime? oldest = null;
         try
         {
-            oldest = await System.Threading.Tasks.Task.Run(() => service.GetOldestJobHistoryAsync(serverId));
+            oldest = await System.Threading.Tasks.Task.Run(() => service.GetOldestJobHistoryAsync(serverId, openTabClocks));
         }
         catch (Exception ex)
         {
