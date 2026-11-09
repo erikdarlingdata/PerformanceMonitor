@@ -60,15 +60,20 @@
                 </Expander.Header>
                 <!-- The cards size to their content, and a 900 px window is narrower than four of them with text: the strip scrolls
                      sideways to the rest, and each card stops growing at 360 px (the cap sits on the card itself, since a column's
-                     MaxWidth does not constrain a card measured in a strip of unbounded width), so a card's text wraps inside it. -->
+                     MaxWidth does not constrain a card measured in a strip of unbounded width), so a card's text wraps inside it.
+                     A strip that scrolls sideways measures its grid with no width limit, and a star column measured that way sizes
+                     to its content, so the code-behind bounds the grid's width (BoundInsightsGridToStrip): the strip's width, or the
+                     four content-sized columns plus the Wait Stats column's minimum when the strip is narrower than that. In a wide
+                     window the Wait Stats column then fills the remaining width and its rows ellipsize; in a narrow one the grid
+                     keeps its minimums and the strip scrolls. -->
                 <ScrollViewer x:Name="InsightsStrip" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
-                <Grid MaxHeight="220">
+                <Grid x:Name="InsightsGrid" MaxHeight="220">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition x:Name="ServerContextColumn" Width="Auto" MinWidth="180" MaxWidth="360"/>
                         <ColumnDefinition Width="Auto" MinWidth="180" MaxWidth="360"/>
                         <ColumnDefinition Width="Auto" MinWidth="200" MaxWidth="360"/>
                         <ColumnDefinition Width="Auto" MinWidth="200" MaxWidth="360"/>
-                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*" MinWidth="280"/>
                     </Grid.ColumnDefinitions>
 
                     <!--

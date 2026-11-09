@@ -1516,12 +1516,14 @@ public static class ShowPlanParser
             long totalUdfCpu = 0, maxUdfElapsed = 0;
             long maxInputMemoryGrant = 0, maxOutputMemoryGrant = 0, maxUsedMemoryGrant = 0;
             string? actualExecMode = null;
+            bool hasRowsRead = false;
 
             foreach (var thread in runtimeEl.Elements(Ns + "RunTimeCountersPerThread"))
             {
                 totalRows += ParseLong(thread.Attribute("ActualRows")?.Value);
                 totalExecutions += ParseLong(thread.Attribute("ActualExecutions")?.Value);
                 totalRowsRead += ParseLong(thread.Attribute("ActualRowsRead")?.Value);
+                hasRowsRead |= thread.Attribute("ActualRowsRead") != null;
                 totalRebinds += ParseLong(thread.Attribute("ActualRebinds")?.Value);
                 totalRewinds += ParseLong(thread.Attribute("ActualRewinds")?.Value);
                 totalCpu += ParseLong(thread.Attribute("ActualCPUms")?.Value);
@@ -1559,6 +1561,7 @@ public static class ShowPlanParser
             node.ActualRows = totalRows;
             node.ActualExecutions = totalExecutions;
             node.ActualRowsRead = totalRowsRead;
+            node.HasActualRowsRead = hasRowsRead;
             node.ActualRebinds = totalRebinds;
             node.ActualRewinds = totalRewinds;
             node.ActualElapsedMs = maxElapsed;
