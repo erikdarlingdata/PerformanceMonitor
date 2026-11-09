@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using Darling.Tests;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Controls;
@@ -157,6 +158,85 @@ public sealed class FinOpsInventoryColumnWidthTests
                 if (Math.Abs(note.ActualWidth - 600) > 1)
                 {
                     found.Add($"the Hardware Note column is {note.ActualWidth:F0} px wide after it was set to 600 px");
+                }
+
+                return found;
+            }
+            finally
+            {
+                window.Close();
+            }
+        }));
+
+        Assert.True(findings.Count == 0, string.Join(Environment.NewLine, findings));
+    }
+
+    /// <summary>A filter on the Hardware Note column itself (IsEmpty hides every noted row) must not collapse the column, or its own funnel
+    /// goes with it and the filter can never be cleared: the column and its filter button stay on screen, and clearing shows both rows.</summary>
+    [Fact]
+    public void AFilterOnTheHardwareNoteColumn_KeepsTheColumnAndItsFilterButtonOnScreen_AndClearingShowsEveryRow()
+    {
+        var findings = StaTestThread.Run(() => WithTheme(() =>
+        {
+            var tab = new FinOpsTab();
+            var wide = new Border { Child = tab, Width = GridWidth, Height = 700, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
+            var window = new Window { Content = wide, Width = 1000, Height = 700, Left = 0, Top = 0, WindowStartupLocation = WindowStartupLocation.Manual, ShowInTaskbar = false };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                var grid = (DataGrid)tab.FindName("ServerInventoryDataGrid");
+                ShowTabOf(grid);
+                var filters = tab.ServerInventoryFilters ?? throw new InvalidOperationException("the inventory grid has no filter manager");
+                filters.UpdateData(new List<ServerPropertyRow>
+                {
+                    new() { ServerName = "srv-a", Edition = LongEdition, ProductVersion = LongVersion, HostOsVersion = LongHostOs, EngineEdition = 3, CpuCount = 16, PhysicalMemoryMb = 131072, SocketCount = 2, CoresPerSocket = 8 },
+                    new() { ServerName = "srv-b", Edition = "Standard Edition (64-bit)", ProductVersion = "15.0.4345.5 - CU25", HostOsVersion = "Windows Server 2022 Standard (10.0.20348)", EngineEdition = 3, HardwareUnavailableReason = ServerHardwareScope.InventoryHardwareNote },
+                });
+                ClippedTextProbe.Settle(window);
+
+                var found = new List<string>();
+                var note = ColumnHeaded(grid, "Hardware Note");
+                if (note.Visibility != Visibility.Visible)
+                {
+                    found.Add("the Hardware Note column is not on screen before the filter, with a noted row bound");
+                    return found;
+                }
+
+                filters.SetFilter(new ColumnFilterState { ColumnName = nameof(ServerPropertyRow.HardwareUnavailableReason), Operator = FilterOperator.IsEmpty });
+                ClippedTextProbe.Settle(window);
+                if (!filters.AnyFilterActive)
+                {
+                    found.Add("the IsEmpty filter did not take, so nothing is under test");
+                    return found;
+                }
+
+                if (grid.Items.Count != 1)
+                {
+                    found.Add($"the filter left {grid.Items.Count} rows on screen, not the one blank row");
+                }
+
+                if (note.Visibility != Visibility.Visible)
+                {
+                    found.Add("the Hardware Note column left the screen under its own filter");
+                }
+
+                var funnel = ClippedTextProbe.Descendants(grid).OfType<DataGridColumnHeader>().Where(h => h.Column == note)
+                    .SelectMany(h => ClippedTextProbe.Descendants(h).OfType<Button>()).FirstOrDefault();
+                if (funnel is null || !funnel.IsVisible)
+                {
+                    found.Add("the Hardware Note column's filter button is not on screen under its own filter");
+                }
+
+                filters.ClearFilters();
+                ClippedTextProbe.Settle(window);
+                if (grid.Items.Count != 2)
+                {
+                    found.Add($"clearing the filter left {grid.Items.Count} rows on screen, not both");
+                }
+
+                if (note.Visibility != Visibility.Visible)
+                {
+                    found.Add("the Hardware Note column is not on screen after the filter was cleared");
                 }
 
                 return found;

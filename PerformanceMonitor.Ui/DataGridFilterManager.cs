@@ -64,6 +64,12 @@ public class DataGridFilterManager<T> : IDataGridFilterManager
 
     public bool AnyFilterActive => HasActiveFilters();
 
+    /// <summary>Every row the grid was last given through <see cref="UpdateData"/>, before any filter; null before the first load.</summary>
+    public IReadOnlyList<T>? UnfilteredRows => _unfilteredData;
+
+    /// <summary>Whether an active filter is set on the named column.</summary>
+    public bool HasActiveFilterOn(string columnName) => _filters.TryGetValue(columnName, out var filter) && filter.IsActive;
+
     /// <summary>The server scope the stored filters were last loaded for; null until the first scoped refresh.</summary>
     private string? _loadedScope;
 

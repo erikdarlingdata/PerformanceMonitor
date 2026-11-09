@@ -56,12 +56,19 @@ public partial class FinOpsTab : UserControl
     /// </summary>
     public event Action<string, string, string?>? PlanRequested;
 
+    /// <summary>The Server Inventory grid's filters, for the tests that drive a column filter the way the funnel does.</summary>
+    internal DataGridFilterManager<ServerPropertyRow>? ServerInventoryFilters => _finopsServerInventoryFilterMgr;
+
     /// <summary>#8474: the Hardware Note column is on screen only while a bound inventory row carries a note (a server whose hardware
     /// read was denied), so a column blank on every server takes no width from the text columns beside it. The rows are re-read on every
-    /// reload and filter, because each one binds the grid again.</summary>
+    /// reload and filter, because each one binds the grid again. It reads the unfiltered rows, not the grid's filtered items, and keeps the
+    /// column while a filter is set on it: a filter on the column itself (IsEmpty hides every noted row) must not collapse the column and
+    /// with it the funnel that clears the filter. Before the first load the grid's own items are all there is.</summary>
     private void ShowHardwareNoteColumnWhenAnyRowHasANote()
     {
-        var any = FinOpsServerInventoryDataGrid.Items.OfType<ServerPropertyRow>().Any(r => !string.IsNullOrEmpty(r.HardwareUnavailableReason));
+        var rows = _finopsServerInventoryFilterMgr?.UnfilteredRows ?? FinOpsServerInventoryDataGrid.Items.OfType<ServerPropertyRow>().ToList();
+        var any = rows.Any(r => !string.IsNullOrEmpty(r.HardwareUnavailableReason))
+            || (_finopsServerInventoryFilterMgr?.HasActiveFilterOn(nameof(ServerPropertyRow.HardwareUnavailableReason)) ?? false);
         FinOpsHardwareNoteColumn.Visibility = any ? Visibility.Visible : Visibility.Collapsed;
     }
 
