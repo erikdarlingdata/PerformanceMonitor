@@ -107,7 +107,7 @@ public sealed class McpToolsListBudgetTests
     }
 
     /// <summary>
-    /// #5820 L5c: the four investigation tools are in the served <c>tools/list</c> only with the gate on (the setting on and
+    /// #5820 L5c, #8461: the two state-changing investigation tools are in the served <c>tools/list</c> only with the gate on (the setting on and
     /// the writes off) and absent otherwise, and what they add stays inside a byte budget. Measured through the real policies
     /// over the real tool classes, so a fifth tool, a longer head or a gate that stops filtering fails here.
     /// </summary>
@@ -125,10 +125,10 @@ public sealed class McpToolsListBudgetTests
 
         var added = on.Bytes - off.Bytes;
         Assert.True(added > 0 && added <= InvestigationToolsBytesBudget,
-            $"the four investigation tools add {added} bytes to tools/list; the budget is {InvestigationToolsBytesBudget}");
+            $"the two state-changing investigation tools add {added} bytes to tools/list; the budget is {InvestigationToolsBytesBudget}");
     }
 
-    /// <summary>What the four investigation tools may add to the served <c>tools/list</c> (heads, parameter descriptions and
+    /// <summary>What the two state-changing investigation tools may add to the served <c>tools/list</c> (heads, parameter descriptions and
     /// schemas), measured at 3,280 bytes when L5c landed and 3,922 at the 3.11.0 release (the ceiling is that plus about 15%).</summary>
     private const int InvestigationToolsBytesBudget = 4_500;
 
