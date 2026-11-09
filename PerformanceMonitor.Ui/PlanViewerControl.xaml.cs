@@ -227,7 +227,10 @@ public partial class PlanViewerControl : UserControl
         for (var i = 0; i < columns.Count - 1; i++)
             contentColumns += columns[i].ActualWidth;
         var width = Math.Max(stripWidth, contentColumns + columns[columns.Count - 1].MinWidth);
-        if (double.IsNaN(InsightsGrid.Width) || Math.Abs(InsightsGrid.Width - width) > 0.5)
+        /* An exact comparison: the bound's inputs do not depend on the grid's own width, so the pass that applies it is the last,
+           and a tolerance would leave the grid a fraction of a pixel wider than the strip at a fractional display scale, which
+           shows a scroll bar. A Width that is not yet set (NaN) compares unequal and is set. */
+        if (InsightsGrid.Width != width)
             InsightsGrid.Width = width;
     }
 
