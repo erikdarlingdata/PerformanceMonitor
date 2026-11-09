@@ -3801,7 +3801,7 @@
                             <Grid Grid.Row="1" ui:ChartGroup.IsAligned="True">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                 <Border Grid.Column="0" Margin="2"><ui:ChartPanel Title="Sick Spinlocks"><scottplot:WpfPlot x:Name="SickSpinlocksChart"/></ui:ChartPanel></Border>
-                                <Border Grid.Column="1" Margin="2"><ui:ChartPanel Title="CPU Comparison"><scottplot:WpfPlot x:Name="CpuComparisonChart"/></ui:ChartPanel></Border>
+                                <Border Grid.Column="1" Margin="2"><ui:ChartPanel Title="CPU: SQL Server and Other"><scottplot:WpfPlot x:Name="CpuComparisonChart"/></ui:ChartPanel></Border>
                             </Grid>
                         </Grid></ScrollViewer>
                         <TextBlock Grid.Row="1" x:Name="ContentionEventsNoDataMessage" Style="{StaticResource EmptyHint}"/>
