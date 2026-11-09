@@ -240,7 +240,15 @@ public sealed class PgLogNamedZoneTests
     /// (the repeat of those without any round trip), and the connection's session zone is as it was.
     /// </summary>
     [Fact]
-    public async Task TheZoneNameIsLookedUpOncePerSetting_AndTheConnectionKeepsItsZone()
+    public Task TheZoneNameIsLookedUpOncePerSetting_AndTheConnectionKeepsItsZone()
+        => ZoneNameLookedUpOnceAsync(forcePass: false);
+
+    /// <summary>The same run with an eviction pass forced between the lookups and the count: the count is of the scan the lookups ran.</summary>
+    [Fact]
+    public Task TheZoneNameIsLookedUpOncePerSetting_AndTheConnectionKeepsItsZone_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => ZoneNameLookedUpOnceAsync(forcePass: true);
+
+    private async Task ZoneNameLookedUpOnceAsync(bool forcePass)
     {
         var ct = TestContext.Current.CancellationToken;
         await using var connection = await OpenPinnedAsync();
@@ -294,6 +302,11 @@ public sealed class PgLogNamedZoneTests
             Assert.NotNull(zones);
             Assert.True(zones!.TryGet("2026-07-04 12:00:00", "PDT", out var utc));
             Assert.Equal(expected, utc);
+        }
+
+        if (forcePass)
+        {
+            await PgStatementTable.ForcePassAsync(counter, ct);
         }
 
         Assert.Equal(baseline + 1, ZoneScans());

@@ -392,7 +392,15 @@ public sealed class ViewerQueryTabLoadTests
     }
 
     [Fact]
-    public async Task HourlyTextLookup_IsOneStatement_ForAnyNumberOfRows_AndAnswersEachRowsOwnText()
+    public Task HourlyTextLookup_IsOneStatement_ForAnyNumberOfRows_AndAnswersEachRowsOwnText()
+        => HourlyTextLookupIsOneStatementAsync(forcePass: false);
+
+    /// <summary>The same run with an eviction pass forced between the lookup and the count: the count is of the statement the lookup ran.</summary>
+    [Fact]
+    public Task HourlyTextLookup_IsOneStatement_ForAnyNumberOfRows_AndAnswersEachRowsOwnText_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => HourlyTextLookupIsOneStatementAsync(forcePass: true);
+
+    private async Task HourlyTextLookupIsOneStatementAsync(bool forcePass)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the live query-tab load pins.");
         var ct = TestContext.Current.CancellationToken;
@@ -425,6 +433,13 @@ FROM generate_series(1, 30) q", setup);
             Assert.Equal("SELECT 30", texts[29]);
             Assert.Equal("", texts[6]);   /* q = 7 has no text anywhere */
             Assert.Equal("", texts[30]);  /* q = 31 has no row at all */
+
+            if (forcePass)
+            {
+                await using var table = new NpgsqlConnection(scratch.ConnectionString);
+                await table.OpenAsync(ct);
+                await PgStatementTable.ForcePassAsync(table, ct);
+            }
 
             var calls = await CountCallsAsync(scratch.ConnectionString, dbId, "%v_query_stats%", ct);
             Assert.True(calls == 1, $"31 rows' text must take ONE store call, not one each; saw {calls}");
@@ -511,7 +526,15 @@ FROM (VALUES
     }
 
     [Fact]
-    public async Task StatusBarStoreSize_MeasuresTheLiveDirectoryOnce_WhenNoSizeIsRecorded()
+    public Task StatusBarStoreSize_MeasuresTheLiveDirectoryOnce_WhenNoSizeIsRecorded()
+        => StatusBarMeasuresOnceAsync(forcePass: false);
+
+    /// <summary>The same run with an eviction pass forced between the size read and the count: the count is of the walk the read made.</summary>
+    [Fact]
+    public Task StatusBarStoreSize_MeasuresTheLiveDirectoryOnce_WhenNoSizeIsRecorded_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => StatusBarMeasuresOnceAsync(forcePass: true);
+
+    private async Task StatusBarMeasuresOnceAsync(bool forcePass)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the live query-tab load pins.");
         var ct = TestContext.Current.CancellationToken;
@@ -529,6 +552,13 @@ FROM (VALUES
         {
             var size = await service.GetStoreSizeBytesAsync(ct);
             Assert.True(size > 0, "a store with no recorded size reads its live size");
+            if (forcePass)
+            {
+                await using var table = new NpgsqlConnection(scratch.ConnectionString);
+                await table.OpenAsync(ct);
+                await PgStatementTable.ForcePassAsync(table, ct);
+            }
+
             var live = await CountCallsAsync(scratch.ConnectionString, dbId, "%pg_database_size%current_database%", ct);
             Assert.True(live == 1, $"one live directory walk expected; saw {live}");
             bodySucceeded = true;

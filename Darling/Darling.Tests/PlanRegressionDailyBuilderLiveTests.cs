@@ -459,7 +459,15 @@ ANALYZE collect.plan_regression_daily_built;", ct);
     }
 
     [Fact]
-    public async Task TheGc_ProbesTheTotalsByIndex_NeverScansThem_AndRemovesExpiredDaysWhileLiveDaysStay()
+    public Task TheGc_ProbesTheTotalsByIndex_NeverScansThem_AndRemovesExpiredDaysWhileLiveDaysStay()
+        => GcProbesTheTotalsAsync(forcePass: false);
+
+    /// <summary>The same run with an eviction pass forced between the cleanup and its count: the count is of the deletes the cleanup ran.</summary>
+    [Fact]
+    public Task TheGc_ProbesTheTotalsByIndex_NeverScansThem_AndRemovesExpiredDaysWhileLiveDaysStay_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => GcProbesTheTotalsAsync(forcePass: true);
+
+    private async Task GcProbesTheTotalsAsync(bool forcePass)
     {
         await RunLiveAsync(async (scratch, connection, ct) =>
         {
@@ -501,6 +509,11 @@ ANALYZE collect.plan_regression_daily_built;", ct);
                nothing due runs no totals delete at all. */
             var counted = await StartStatementCountAsync(connection, ct);
             Assert.Equal(1L, await PlanRegressionDaily.GcAsync(connection, Now, ct));
+            if (forcePass)
+            {
+                await PgStatementTable.ForcePassAsync(connection, ct);
+            }
+
             if (counted)
             {
                 var (calls, blocks) = await TotalsDeleteStatementsAsync(connection, ct);

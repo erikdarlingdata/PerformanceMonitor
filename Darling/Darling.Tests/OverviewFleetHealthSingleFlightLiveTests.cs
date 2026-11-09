@@ -43,7 +43,15 @@ public sealed class OverviewFleetHealthSingleFlightLiveTests
     /// for it.
     /// </summary>
     [Fact]
-    public async Task ConcurrentOverviewCards_ShareOneFleetWideRead_NotOnePerCard()
+    public Task ConcurrentOverviewCards_ShareOneFleetWideRead_NotOnePerCard()
+        => ConcurrentCardsAsync(forcePass: false);
+
+    /// <summary>The same run with an eviction pass forced between the racers and the count: the count is of the read the racers shared.</summary>
+    [Fact]
+    public Task ConcurrentOverviewCards_ShareOneFleetWideRead_NotOnePerCard_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => ConcurrentCardsAsync(forcePass: true);
+
+    private async Task ConcurrentCardsAsync(bool forcePass)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live Overview fleet-health single-flight test.");
@@ -89,6 +97,9 @@ public sealed class OverviewFleetHealthSingleFlightLiveTests
             await resetCmd.ExecuteNonQueryAsync(ct);
         }
 
+        await using var table = new NpgsqlConnection(scratch.ConnectionString);
+        await table.OpenAsync(ct);
+
         var bodySucceeded = false;
         ViewerDataService? service = null;
         try
@@ -123,6 +134,11 @@ public sealed class OverviewFleetHealthSingleFlightLiveTests
                 .Select(_ => service.GetFleetCollectionHealthByServerAsync(ct))
                 .ToArray();
             await Task.WhenAll(racers);
+
+            if (forcePass)
+            {
+                await PgStatementTable.ForcePassAsync(table, ct);
+            }
 
             long calls;
             await using (var countConn = new NpgsqlConnection(scratch.ConnectionString))

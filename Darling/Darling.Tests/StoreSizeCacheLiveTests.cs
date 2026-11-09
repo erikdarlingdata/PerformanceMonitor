@@ -36,7 +36,15 @@ public sealed class StoreSizeCacheLiveTests
     /// <c>pg_stat_statements</c> against the actual product call path.
     /// </summary>
     [Fact]
-    public async Task TwoRefreshesInsideTheWindow_ReadPgDatabaseSizeOnce()
+    public Task TwoRefreshesInsideTheWindow_ReadPgDatabaseSizeOnce()
+        => TwoRefreshesAsync(forcePass: false);
+
+    /// <summary>The same run with an eviction pass forced between the refreshes and the count: the count is of the call the refreshes made.</summary>
+    [Fact]
+    public Task TwoRefreshesInsideTheWindow_ReadPgDatabaseSizeOnce_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => TwoRefreshesAsync(forcePass: true);
+
+    private async Task TwoRefreshesAsync(bool forcePass)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live store-size cache test.");
@@ -76,6 +84,9 @@ public sealed class StoreSizeCacheLiveTests
             await resetCmd.ExecuteNonQueryAsync(ct);
         }
 
+        await using var table = new NpgsqlConnection(scratch.ConnectionString);
+        await table.OpenAsync(ct);
+
         var bodySucceeded = false;
         ViewerDataService? service = null;
         try
@@ -85,6 +96,11 @@ public sealed class StoreSizeCacheLiveTests
             var first = await service.GetStoreSizeBytesAsync(ct);
             var second = await service.GetStoreSizeBytesAsync(ct);
             Assert.Equal(first, second);
+
+            if (forcePass)
+            {
+                await PgStatementTable.ForcePassAsync(table, ct);
+            }
 
             long calls;
             await using (var countConn = new NpgsqlConnection(scratch.ConnectionString))

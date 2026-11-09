@@ -906,7 +906,15 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
     /// a server whose first batch has no anchor and once for a later batch with an anchor and an empty range.
     /// </summary>
     [Fact]
-    public async Task AnEmptyGap_CostsOneProbeStatement_NoSavepointNoTimeoutNoGapStatement()
+    public Task AnEmptyGap_CostsOneProbeStatement_NoSavepointNoTimeoutNoGapStatement()
+        => EmptyGapAsync(forcePass: false);
+
+    /// <summary>The same run with an eviction pass forced between the batches and the counts: the counts are of the statements the batches ran.</summary>
+    [Fact]
+    public Task AnEmptyGap_CostsOneProbeStatement_NoSavepointNoTimeoutNoGapStatement_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => EmptyGapAsync(forcePass: true);
+
+    private async Task EmptyGapAsync(bool forcePass)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
@@ -931,6 +939,11 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
             /* The server's first batch (no totals row, so no anchor) and a second one (an anchor, an empty range between it and the batch). */
             Assert.Equal(1, await rig.WriteAsync(T0, new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 10, 1, 60) }, ct));
             Assert.Equal(1, await rig.WriteAsync(T0.AddMinutes(1), new List<ProcedureStatsCollector.Row> { Row("DbA", "p1", 11, 1, 60) }, ct));
+
+            if (forcePass)
+            {
+                await PgStatementTable.ForcePassAsync(rig.Connection, ct);
+            }
 
             Assert.Equal(2L, await CallsAsync("%a.anchor IS NOT NULL%"));
             Assert.Equal(0L, await CallsAsync("%pst_gap%"));

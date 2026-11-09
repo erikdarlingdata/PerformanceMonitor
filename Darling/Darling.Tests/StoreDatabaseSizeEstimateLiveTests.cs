@@ -71,7 +71,15 @@ public sealed class StoreDatabaseSizeEstimateLiveTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task Sweep_HourlyWritesTheCatalogEstimateWithoutPgDatabaseSize_AndTheDailySweepIsExact(bool timescale)
+    public Task Sweep_HourlyWritesTheCatalogEstimateWithoutPgDatabaseSize_AndTheDailySweepIsExact(bool timescale)
+        => SweepAsync(timescale, forcePass: false);
+
+    /// <summary>The plain-store run with an eviction pass forced between the first sweep and its count: every count is of the sweeps' own calls.</summary>
+    [Fact]
+    public Task Sweep_HourlyWritesTheCatalogEstimateWithoutPgDatabaseSize_AndTheDailySweepIsExact_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => SweepAsync(timescale: false, forcePass: true);
+
+    private async Task SweepAsync(bool timescale, bool forcePass)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live store database-size estimate test.");
@@ -138,6 +146,11 @@ public sealed class StoreDatabaseSizeEstimateLiveTests
             var firstRow = await ReadStoreRowAsync(connection, first, ct);
             Assert.False(firstRow.SizeEstimated, "the first sweep of a store has no exact row in the last 23 hours, so it is exact");
             Assert.True(firstRow.TotalBytes > 0);
+            if (forcePass)
+            {
+                await PgStatementTable.ForcePassAsync(connection, ct);
+            }
+
             var callsAfterFirst = await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct);
             Assert.True(callsAfterFirst >= 1, "the exact sweep calls pg_database_size");
 
@@ -197,7 +210,15 @@ public sealed class StoreDatabaseSizeEstimateLiveTests
     /// sweep itself made no call. This runs such callers and shows the unscoped count moves while the sweep-scoped one does not.
     /// </summary>
     [Fact]
-    public async Task CallCount_IgnoresAPgDatabaseSizeCallFromAnotherCaller()
+    public Task CallCount_IgnoresAPgDatabaseSizeCallFromAnotherCaller()
+        => CallCountAsync(forcePass: false);
+
+    /// <summary>The same run with an eviction pass forced between the sweep and its count: the counts are of the sweep's own call and the other callers'.</summary>
+    [Fact]
+    public Task CallCount_IgnoresAPgDatabaseSizeCallFromAnotherCaller_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => CallCountAsync(forcePass: true);
+
+    private async Task CallCountAsync(bool forcePass)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live store database-size estimate test.");
@@ -238,6 +259,11 @@ public sealed class StoreDatabaseSizeEstimateLiveTests
             }
 
             await StoreSelfMetrics.SweepAsync(connection, false, DateTime.UtcNow, null, null, null, ct);
+            if (forcePass)
+            {
+                await PgStatementTable.ForcePassAsync(connection, ct);
+            }
+
             var sweepBefore = await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct);
             var anyBefore = await CountPgDatabaseSizeCallsAsync(scratch.ConnectionString, dbId, ct, sweepStatementOnly: false);
             Assert.Equal(1, sweepBefore);
