@@ -295,7 +295,7 @@ public sealed class PgOwnStatementRoleLiveTests
     /// <summary>
     /// The <paramref name="n"/>-th shape of the headroom family: two to nine columns, each <c>1</c> less one to eight more
     /// <c>1</c>s, under one of eight WHERE/LIMIT/OFFSET suffixes. Every shape has at least one subtraction and two columns,
-    /// so the family shares no entry with <see cref="FillerStatement"/>'s sums, with a bare <c>SELECT 1</c>, or with the
+    /// so the family shares no entry with <see cref="FillerStatement"/>'s products, with a bare <c>SELECT 1</c>, or with the
     /// chain's own single-column statements.
     /// </summary>
     internal static string HeadroomStatement(int n)
@@ -340,12 +340,13 @@ public sealed class PgOwnStatementRoleLiveTests
             await DarlingMcpTestData.ExecAsync(target, ct, batch.ToString());
 
             /* A batch of new shapes that leaves the count where it was means the module is not tracking this session's
-               statements (pg_stat_statements.track is none for the cluster or for this login); the next batch would add
-               nothing either, so the fill stops here instead of running until the job's timeout. */
+               statements (pg_stat_statements.track is none for the cluster or for this login), or that the batch's shapes
+               were in the table already; the next batch would add nothing either, so the fill stops here instead of running
+               until the job's timeout. */
             var afterBatch = max - await EntryCountAsync(target, ct);
             if (afterBatch == free)
             {
-                Assert.Fail($"A batch of {size} new statement shapes left pg_stat_statements at {max - free} of {max} entries: the module is not tracking this session's statements.");
+                Assert.Fail($"A batch of {size} new statement shapes left pg_stat_statements at {max - free} of {max} entries: the module is not tracking this session's statements, or the batch's shapes were already in the table.");
             }
 
             free = afterBatch;
@@ -354,10 +355,12 @@ public sealed class PgOwnStatementRoleLiveTests
 
     /// <summary>
     /// The <paramref name="n"/>-th distinct statement shape of the filler's family: two or more columns of <c>1</c>, each a
-    /// sum of some more, under one of eight WHERE/LIMIT/OFFSET suffixes. Constants and aliases do not enter the module's
-    /// query id, so a shape has to differ in structure to get an entry of its own, and a single-column shape would be the
-    /// chain's own <c>SELECT $1 + $2</c>; <paramref name="side"/> bounds the columns and the terms, and the family holds
-    /// <c>8 * side * (side + 1)</c> shapes.
+    /// product of one or more <c>1</c>s, under one of eight WHERE/LIMIT/OFFSET suffixes. Constants and aliases do not enter
+    /// the module's query id, so a shape has to differ in structure to get an entry of its own, and a single-column shape
+    /// would be the chain's own <c>SELECT $1 * $2</c>; <paramref name="side"/> bounds the columns and the terms, and the
+    /// family holds <c>8 * side * (side + 1)</c> shapes. The operator keeps the family apart from the other fills in the
+    /// collection: <see cref="PgStatementTable.Shape"/> builds sums and the headroom families build differences, and the
+    /// table is not reset between the collection's classes, so a shape another fill made would add no entry here.
     /// </summary>
     internal static string FillerStatement(int n, int side)
     {
@@ -365,7 +368,7 @@ public sealed class PgOwnStatementRoleLiveTests
         var rest = n >> 3;
         var items = rest / (side + 1) + 2;
         var terms = rest % (side + 1);
-        var item = "1" + string.Concat(Enumerable.Repeat("+1", terms));
+        var item = "1" + string.Concat(Enumerable.Repeat("*1", terms + 1));
         var suffix = ((variant & 1) != 0 ? " WHERE true" : string.Empty)
             + ((variant & 2) != 0 ? " LIMIT 1" : string.Empty)
             + ((variant & 4) != 0 ? " OFFSET 0" : string.Empty);
