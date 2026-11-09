@@ -11,6 +11,7 @@ using System.Linq;
 using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Media;
 using System.Windows.Shapes;
 using PerformanceMonitorLite.Services;
@@ -21,9 +22,10 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// Settings, rendered with the Dark theme at the window's own size: the Client Timeouts row keeps its two baseline multiples
-/// together on one line; the Analysis card's heading is sized and placed like the Delivery card's and its note points at the
-/// Delivery tab; and, from the theme itself, a disabled PasswordBox keeps the fill a disabled TextBox has, while a chosen radio
-/// button marks itself with the accent the CheckBox mark uses.
+/// together on one line; the Analysis and Alert Muting card headings are sized and placed like the Delivery card's, the Analysis
+/// description sits under its heading as the Teams description does, and the Analysis note points at the Delivery tab; the
+/// Database State Overrides reset button names the column it copies from; and, from the theme itself, a disabled PasswordBox
+/// keeps the fill a disabled TextBox has, while a chosen radio button marks itself with the accent the CheckBox mark uses.
 /// </summary>
 [Collection("credential-manager")]
 public sealed class SettingsDialogWalkTests
@@ -75,6 +77,67 @@ public sealed class SettingsDialogWalkTests
 
         Assert.Equal(delivery.FontSize, analysis.FontSize);
         Assert.Equal(delivery.Item2, analysis.Item2);
+    }
+
+    [Fact]
+    public void TheAlertMutingHeading_IsSizedAndPlacedLikeTheDeliveryCardHeading()
+    {
+        var (muting, delivery) = WithSettings(window =>
+        {
+            var deliveryHeading = DialogWalkTestHost.TextBlocks(SelectTab(window, "DeliveryTab")).First(t => t.Text == "Alert Delivery");
+            var deliveryAt = HeadingPlacement(deliveryHeading);
+
+            var mutingHeading = DialogWalkTestHost.TextBlocks(SelectTab(window, "MutingTriageTab")).Single(t => t.Text == "Alert Muting");
+            return (HeadingPlacement(mutingHeading), deliveryAt);
+        });
+
+        Assert.True(muting == delivery, $"Alert Muting is {Describe(muting)}; the Delivery card's heading is {Describe(delivery)}");
+    }
+
+    [Fact]
+    public void TheAutomatedAnalysisDescription_SitsUnderItsHeading_AsTheTeamsDescriptionDoes()
+    {
+        var (analysis, teams) = WithSettings(window =>
+        {
+            var delivery = SelectTab(window, "DeliveryTab");
+            var teamsAt = DescriptionPlacement(
+                DialogWalkTestHost.TextBlocks(delivery).Single(t => t.Text == "Microsoft Teams Notifications"),
+                DialogWalkTestHost.TextBlocks(delivery).Single(t => t.Text.StartsWith("Send alert notifications to a Teams channel", StringComparison.Ordinal)));
+
+            var analysisTab = SelectTab(window, "AnalysisTab");
+            var analysisAt = DescriptionPlacement(
+                DialogWalkTestHost.TextBlocks(analysisTab).Single(t => t.Text == "Automated Analysis"),
+                DialogWalkTestHost.TextBlocks(analysisTab).Single(t => t.Text.StartsWith("Periodically run the triage engine", StringComparison.Ordinal)));
+            return (analysisAt, teamsAt);
+        });
+
+        Assert.True(analysis == teams, $"the Analysis description sits {Describe(analysis)}; the Teams description sits {Describe(teams)}");
+    }
+
+    [Fact]
+    public void DatabaseStateOverrides_ResetButton_NamesTheColumnItCopiesFrom()
+    {
+        var dir = DialogWalkTestHost.ScratchDir("OverridesWalk");
+        try
+        {
+            var (column, button) = StaTestThread.Run(() => DialogWalkTestHost.WithTheme(() =>
+            {
+                /* Laid out unshown: the window has no server to load, and the button and the column are what the XAML renders. */
+                var window = new DatabaseStateOverridesWindow(new ServerManager(dir));
+                var root = DialogWalkTestHost.LayOutUnshown(window);
+                var stateColumn = ((DataGrid)window.FindName("StatesGrid")).Columns.OfType<DataGridBoundColumn>()
+                    .Single(c => c.Binding is Binding b && b.Path.Path == "CurrentState");
+                var reset = ClippedTextProbe.Descendants(root).OfType<Button>()
+                    .Single(b => b.Content is string s && s.StartsWith("Reset Selected", StringComparison.Ordinal));
+                return ((string)stateColumn.Header, (string)reset.Content);
+            }));
+
+            Assert.EndsWith(column, button, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DialogWalkTestHost.Delete(dir);
+        }
     }
 
     [Fact]
@@ -153,4 +216,23 @@ public sealed class SettingsDialogWalkTests
         ClippedTextProbe.Settle(window);
         return (DependencyObject)tab.Content;
     }
+
+    /// <summary>A card heading's font size and where it sits in its card: its left and top offsets from the card's edge.</summary>
+    private static (double FontSize, double Left, double Top) HeadingPlacement(TextBlock heading)
+    {
+        var card = DialogWalkTestHost.CardOf(heading);
+        return (heading.FontSize, Math.Round(DialogWalkTestHost.LeftIn(heading, card), 1), Math.Round(DialogWalkTestHost.TopIn(heading, card), 1));
+    }
+
+    private static string Describe((double FontSize, double Left, double Top) at) => $"{at.FontSize} px at ({at.Left}, {at.Top}) in its card";
+
+    /// <summary>Where a card's description sits against its heading: its left offset from the card's edge, and the gap below the heading.</summary>
+    private static (double Left, double Gap) DescriptionPlacement(TextBlock heading, TextBlock description)
+    {
+        var card = DialogWalkTestHost.CardOf(heading);
+        var gap = DialogWalkTestHost.TopIn(description, card) - (DialogWalkTestHost.TopIn(heading, card) + heading.ActualHeight);
+        return (Math.Round(DialogWalkTestHost.LeftIn(description, card), 1), Math.Round(gap, 1));
+    }
+
+    private static string Describe((double Left, double Gap) at) => $"{at.Left} px in from the card's edge, {at.Gap} px below the heading";
 }
