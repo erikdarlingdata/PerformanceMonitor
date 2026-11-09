@@ -683,7 +683,7 @@ public partial class ServerTab : UserControl
         {
             SessionId = Convert.ToInt32(reader.GetValue(0)),
             DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-            ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
+            ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : PerformanceMonitor.Common.ElapsedTimeText.WithoutZeroDays(reader.GetString(2)),
             QueryText = reader.IsDBNull(3) ? "" : scrub.Text(reader.GetString(3)) ?? "",
             QueryPlan = liveQueryPlan,
             LiveQueryPlan = liveActualPlan,
