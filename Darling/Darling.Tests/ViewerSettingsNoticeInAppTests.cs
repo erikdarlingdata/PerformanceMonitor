@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// the system theme. Its one such notice is the signing key's "save the URL first", reached by typing a webhook URL and asking for
 /// a key before saving: the window the click opens is read while it is up and closed from the dialog's own message loop.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerSettingsNoticeInAppTests
 {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
