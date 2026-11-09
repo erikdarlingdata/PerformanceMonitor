@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -26,6 +27,12 @@ namespace Darling.Tests;
 /// The one own-statement test that needs a login other than the service's (#7567). It creates and drops the role
 /// <c>pm7567_app</c>, a cluster-wide object under a fixed name, so it runs in the <c>pg-cluster-roles</c> collection
 /// that runs alone (<see cref="PgClusterObjectCensusTests"/>). The seeding helpers are the sibling class's.
+/// <para>The chain reads its own statements back from <c>pg_stat_statements</c>, whose hash table is cluster-wide and
+/// holds <c>pg_stat_statements.max</c> entries. When a new statement needs a slot in a full table, the module evicts
+/// the least-used five percent of the entries, and a statement run once is the least used there is: the chain's own
+/// entries can go between the statements and the read, and the read then finds nothing. The chain checks the module's
+/// eviction counter around its statements, so a pass that ran meanwhile is named instead of showing up as an empty
+/// read.</para>
 /// </summary>
 /* #1776 own-store: not [Collection("live-postgres")]. The test migrates the store itself and cleans by server id, so it needs
    nothing from LivePostgresStoreFixture. */
@@ -46,16 +53,37 @@ public sealed class PgOwnStatementRoleLiveTests
     {
         var cs = PgOwnStatementLiveTests.ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the own-statement tests.");
-        var ct = TestContext.Current.CancellationToken;
+        await RunChainAsync(cs!, TestContext.Current.CancellationToken, beforeStatements: null);
+    }
 
+    /// <summary>
+    /// The same chain on a statement table with one free slot, the state a long test run leaves the shared cluster in: the
+    /// chain's entries must survive its own statements, and no eviction pass may run between the statements and the read.
+    /// Fills the table with statements run twice each, so every filler is better used than the chain's once-run
+    /// statements and an eviction pass would take the chain's entries first.
+    /// </summary>
+    [Fact]
+    public async Task TheRealTextFetch_OnAStatementTableWithOneFreeSlot_RunsWithoutAnEvictionPass_AndStillMatches()
+    {
+        var cs = PgOwnStatementLiveTests.ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the own-statement tests.");
+        await RunChainAsync(cs!, TestContext.Current.CancellationToken, beforeStatements: FillToOneFreeSlotAsync);
+    }
+
+    /// <summary>
+    /// Runs the chain against the store at <paramref name="cs"/> and a scratch target of its own. <paramref name="beforeStatements"/>
+    /// runs on the target after the extension and the role are in place and before the marked statements.
+    /// </summary>
+    private static async Task RunChainAsync(string cs, CancellationToken ct, Func<NpgsqlConnection, CancellationToken, Task>? beforeStatements)
+    {
         /* #1776 own-store: the target is a scratch database of its own (CREATE EXTENSION would leave residue in the shared
            store); the store tables the fetch writes and the readers read are the shared store's, cleaned by server id. */
-        var scratch = await ScratchPostgres.CreateAsync(cs!, ct, emptyStore: true);
+        var scratch = await ScratchPostgres.CreateAsync(cs, ct, emptyStore: true);
         await using var store = new NpgsqlConnection(cs);
         await store.OpenAsync(ct);
         await PgMigrations.MigrateAsync(store, ct);
         await PgOwnStatementLiveTests.DeleteRowsAsync(store, ct);
-        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        await using var dataSource = NpgsqlDataSource.Create(cs);
         var bodySucceeded = false;
         try
         {
@@ -76,6 +104,13 @@ public sealed class PgOwnStatementRoleLiveTests
                 {
                     Assert.Skip("pg_stat_statements or role setup is not available on this server: " + ex.Message);
                 }
+
+                if (beforeStatements is not null)
+                {
+                    await beforeStatements(target, ct);
+                }
+
+                var deallocBefore = await DeallocAsync(target, ct);
 
                 /* The service's statement: marked, run by the connecting login. The application's: unmarked, run under another login.
                    The shared one is both: the same statement shape (one queryid) from both logins, two entries. */
@@ -147,6 +182,11 @@ public sealed class PgOwnStatementRoleLiveTests
                     }
                 }
 
+                /* An eviction pass between the statements and the read takes the least-used entries, the chain's own among them. */
+                var deallocAfter = await DeallocAsync(target, ct);
+                Assert.True(deallocBefore == deallocAfter,
+                    $"pg_stat_statements ran {deallocAfter - deallocBefore} eviction pass(es) between the chain's statements and its read (dealloc {deallocBefore} -> {deallocAfter}); the read found {entries.Count} of its entries.");
+
                 var service = Assert.Single(entries, e => e.Name == "pm7567own_service");
                 var app = Assert.Single(entries, e => e.Name == "pm7567own_app");
                 var shared = entries.Where(e => e.Name == "pm7567own_shared").ToArray();
@@ -205,7 +245,7 @@ public sealed class PgOwnStatementRoleLiveTests
         }
         finally
         {
-            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            await LiveStoreCleanup.RunAsync(cs, bodySucceeded, async (cleanup, cleanupCt) =>
                 await PgOwnStatementLiveTests.DeleteRowsAsync(cleanup, cleanupCt));
             await scratch.DisposeAsync();
             /* Roles are cluster-wide, so the scratch database going does not take it. */
@@ -213,5 +253,74 @@ public sealed class PgOwnStatementRoleLiveTests
             await admin.OpenAsync(ct);
             await DarlingMcpTestData.ExecAsync(admin, ct, "DROP ROLE IF EXISTS pm7567_app");
         }
+    }
+
+    /// <summary>The largest table the filler fills; a cluster set wider than this skips the one-free-slot test.</summary>
+    private const int MaxEntriesTheFillerCanFill = 20_000;
+
+    /// <summary>
+    /// Fills <c>pg_stat_statements</c> until one slot is free, with a distinct statement shape per entry, each batch run
+    /// twice so that every filler is better used than a statement run once.
+    /// </summary>
+    private static async Task FillToOneFreeSlotAsync(NpgsqlConnection target, CancellationToken ct)
+    {
+        var max = await MaxEntriesAsync(target, ct);
+        Assert.SkipWhen(max > MaxEntriesTheFillerCanFill,
+            $"pg_stat_statements.max is {max}, more than the {MaxEntriesTheFillerCanFill} the one-free-slot test fills.");
+
+        var side = (int)Math.Ceiling(Math.Sqrt((max + 1) / 8.0)) + 1;
+        var next = 0;
+        for (var free = max - await EntryCountAsync(target, ct); free > 1; free = max - await EntryCountAsync(target, ct))
+        {
+            var batch = new StringBuilder();
+            for (var i = Math.Min(free - 1, 400); i > 0; i--)
+            {
+                batch.Append(FillerStatement(next++, side)).Append(';');
+            }
+
+            await DarlingMcpTestData.ExecAsync(target, ct, batch.ToString());
+            await DarlingMcpTestData.ExecAsync(target, ct, batch.ToString());
+        }
+    }
+
+    /// <summary>
+    /// The <paramref name="n"/>-th distinct statement shape of the filler's family: two or more columns of <c>1</c>, each a
+    /// sum of some more, under one of eight WHERE/LIMIT/OFFSET suffixes. Constants and aliases do not enter the module's
+    /// query id, so a shape has to differ in structure to get an entry of its own, and a single-column shape would be the
+    /// chain's own <c>SELECT $1 + $2</c>; <paramref name="side"/> bounds the columns and the terms, and the family holds
+    /// <c>8 * side * (side + 1)</c> shapes.
+    /// </summary>
+    private static string FillerStatement(int n, int side)
+    {
+        var variant = n & 7;
+        var rest = n >> 3;
+        var items = rest / (side + 1) + 2;
+        var terms = rest % (side + 1);
+        var item = "1" + string.Concat(Enumerable.Repeat("+1", terms));
+        var suffix = ((variant & 1) != 0 ? " WHERE true" : string.Empty)
+            + ((variant & 2) != 0 ? " LIMIT 1" : string.Empty)
+            + ((variant & 4) != 0 ? " OFFSET 0" : string.Empty);
+        return "SELECT " + string.Join(",", Enumerable.Repeat(item, items)) + suffix;
+    }
+
+    /// <summary><c>pg_stat_statements.max</c>, a server setting readable from any database once the library is preloaded.</summary>
+    private static async Task<int> MaxEntriesAsync(NpgsqlConnection target, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT current_setting('pg_stat_statements.max')::int", target);
+        return (int)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>How many entries the module's hash table holds right now, without loading the query texts.</summary>
+    private static async Task<int> EntryCountAsync(NpgsqlConnection target, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT count(*)::int FROM pg_stat_statements(false)", target);
+        return (int)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>The module's eviction counter, <c>pg_stat_statements_info.dealloc</c>: how many passes have run since the last full reset.</summary>
+    private static async Task<long> DeallocAsync(NpgsqlConnection target, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT dealloc FROM pg_stat_statements_info", target);
+        return (long)(await command.ExecuteScalarAsync(ct))!;
     }
 }
