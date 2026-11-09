@@ -175,7 +175,7 @@ public sealed class PlanSync8387PlainPunctuationTests
 
                 var tooltips = texts.Select(t => t.ToolTip as string).Where(t => t != null).Select(t => t!).ToList();
                 // #8455: a sniffed cell's tooltip leads with its value, so the note is one line of it.
-                Assert.Contains(tooltips, t => t.Contains("Runtime value differs from compiled: possible parameter sniffing", StringComparison.Ordinal));
+                Assert.Contains(tooltips, t => t.Split(Environment.NewLine).Contains("Runtime value differs from compiled: possible parameter sniffing", StringComparer.Ordinal));
 
                 var lines = texts.Select(t => t.Text).ToList();
                 Assert.Contains("Unresolved variables: @extra, not in parameter list", lines);
