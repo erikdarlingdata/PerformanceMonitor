@@ -70,6 +70,33 @@ public sealed class ConnectTimeStatusWordsTests
         }
     }
 
+    /// <summary>When the host says the first collection has finished, with or without a collection error, the header stops saying
+    /// "Connecting" at once and words itself from the refresh, instead of waiting for the next refresh pass.</summary>
+    [Fact]
+    public void TheServerTabHeader_StopsSayingConnecting_WhenTheFirstCollectionFinishes()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "ConnectTimeFinished_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        try
+        {
+            using var duckDb = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
+            var text = StaTestThread.Run(() => WithTheme(() =>
+            {
+                var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "connect-finished-test", DisplayName = "connect-finished-test", IsEnabled = true };
+                var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
+                tab.FirstCollectionFinished();
+                return ((TextBlock)tab.FindName("ConnectionStatusText")).Text;
+            }));
+
+            Assert.DoesNotContain("Connecting", text, StringComparison.Ordinal);
+            Assert.StartsWith("Last refresh:", text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
+        }
+    }
+
     /// <summary>The tab's markup names the theme's static resources, so the theme is merged for the build and removed after it.</summary>
     private static T WithTheme<T>(Func<T> body)
     {

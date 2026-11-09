@@ -39,9 +39,9 @@ public sealed class ViewerLiveScreenTextTests
         Assert.DoesNotContain("'View Plan'", text, StringComparison.Ordinal);
     }
 
-    /// <summary>The Server Context card's text is as long as the server's edition string makes it, and the strip's columns size to
-    /// their content, so at a 900 px window the cards after it ran past the right edge with nothing to reach them by. Every card is
-    /// inside the control's width, or the strip scrolls to it.</summary>
+    /// <summary>The Server Context card's text is as long as the server's edition string makes it. Every card is inside the control's
+    /// width or the strip scrolls to it, the Server Context card stops at its 360 px cap, and the Server row's text wraps inside the
+    /// card instead of being cut off at its edge.</summary>
     [Fact]
     public void TheInsightCards_StayReachable_InA900PixelWindow()
     {
@@ -74,11 +74,26 @@ public sealed class ViewerLiveScreenTextTests
             var cards = Descendants(panel).OfType<Grid>().First(g => g.ColumnDefinitions.Count == 5).Children.OfType<Border>().ToList();
             Assert.True(cards.Count >= 4, $"{cards.Count} insight cards found");
 
-            return cards
+            var problems = cards
                 .Select(card => card.TransformToAncestor(control).TransformBounds(new Rect(card.RenderSize)))
                 .Where(bounds => bounds.Right > control.ActualWidth + 0.5 && (strip is null || strip.ScrollableWidth <= 0))
                 .Select(bounds => $"a card ends at {bounds.Right:F0} px in a {control.ActualWidth:F0} px viewer with no way to scroll to it")
                 .ToList();
+
+            /* The Server row's text is as long as the edition makes it. Inside the card it is shown whole: on one line when the line
+               fits the card, else wrapped onto more lines, never cut off where the card ends. A line longer than the card that stays
+               one line tall is drawn past the card's edge and clipped there. */
+            var serverRow = Descendants(panel).OfType<TextBlock>().Single(t => t.Text.StartsWith("SQL01", StringComparison.Ordinal));
+            var oneLine = new TextBlock { Text = serverRow.Text, FontFamily = serverRow.FontFamily, FontSize = serverRow.FontSize, FontWeight = serverRow.FontWeight, FontStyle = serverRow.FontStyle };
+            oneLine.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            var cardWidth = cards[0].ActualWidth;
+            var staysOneLine = serverRow.ActualHeight < oneLine.DesiredSize.Height * 1.5;
+            if (cardWidth > 360.5)
+                problems.Add($"the Server Context card is {cardWidth:F0} px wide; a card stops at 360 px so that its text wraps inside it instead of widening the strip");
+            if (oneLine.DesiredSize.Width > cardWidth + 0.5 && staysOneLine)
+                problems.Add($"the Server row needs {oneLine.DesiredSize.Width:F0} px on one line in a {cardWidth:F0} px card and does not wrap (text {serverRow.ActualWidth:F0}x{serverRow.ActualHeight:F0} px): its tail is cut off");
+
+            return problems;
         });
 
         Assert.True(unreachable.Count == 0, string.Join(Environment.NewLine, unreachable));
