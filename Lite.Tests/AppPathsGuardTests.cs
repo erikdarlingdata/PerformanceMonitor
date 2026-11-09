@@ -18,10 +18,12 @@ namespace Lite.Tests;
 
 /// <summary>
 /// #8434: <see cref="AppPathsScope"/> points the app's three store paths at a folder and puts them back when it is disposed, and
-/// <see cref="AppPathsGuardAttribute"/> fails a test that leaves them changed, naming the class and the property, and puts them back
-/// itself. The guard is driven directly here, with this test as the test under judgement, so a failing verdict is observed rather than
-/// suffered.
+/// <see cref="AppPathsGuardAttribute"/> fails a test that finds them changed before its body or leaves them changed after it, naming
+/// the class and the property, and puts them back itself. The guard is driven directly here, with this test as the test under
+/// judgement, so a failing verdict is observed rather than suffered. The facts write the process-wide statics, so the class runs in
+/// the collection that runs alone: a parallel test's own before or after check must never read a folder of this class's.
 /// </summary>
+[Collection("credential-manager")]
 public sealed class AppPathsGuardTests
 {
     [Fact]
@@ -53,12 +55,39 @@ public sealed class AppPathsGuardTests
         AppPaths.InFolder(folder).Apply();
         var failure = Assert.Throws<XunitException>(() => guard.After(method, test));
 
-        Assert.Contains(nameof(AppPathsGuardTests), failure.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(AppPathsGuardTests) + " left", failure.Message, StringComparison.Ordinal);
         Assert.Contains("App.DatabasePath changed", failure.Message, StringComparison.Ordinal);
         Assert.Contains("App.ConfigDirectory changed", failure.Message, StringComparison.Ordinal);
         Assert.Contains("App.SharedConfigDirectory changed", failure.Message, StringComparison.Ordinal);
         Assert.Contains(folder, failure.Message, StringComparison.Ordinal);
+        Assert.Contains("a restore in Dispose is too late", failure.Message, StringComparison.Ordinal);
         Assert.Equal(before, AppPaths.Current);
+    }
+
+    [Fact]
+    public void ATestWhosePathsWereChangedBeforeItsBody_IsFailedBeforeTheBodyRuns_AndThePathsArePutBack()
+    {
+        var guard = new AppPathsGuardAttribute();
+        var (method, test) = ThisTest();
+        var before = AppPaths.Current;
+        var folder = Folder();
+
+        /* What a scope opened in a constructor, or a path set by a fixture, leaves for the before check to find. */
+        AppPaths.InFolder(folder).Apply();
+        try
+        {
+            var failure = Assert.Throws<XunitException>(() => guard.Before(method, test));
+
+            Assert.Contains(nameof(AppPathsGuardTests) + "'s test body was about to run with", failure.Message, StringComparison.Ordinal);
+            Assert.Contains("App.DatabasePath changed", failure.Message, StringComparison.Ordinal);
+            Assert.Contains(folder, failure.Message, StringComparison.Ordinal);
+            Assert.Contains("this class's constructor, a class or collection fixture, or an earlier test's Dispose", failure.Message, StringComparison.Ordinal);
+            Assert.Equal(before, AppPaths.Current);
+        }
+        finally
+        {
+            before.Apply();
+        }
     }
 
     [Fact]
@@ -76,16 +105,23 @@ public sealed class AppPathsGuardTests
     }
 
     [Fact]
-    public void TheVerdict_NamesOnlyThePropertyThatChanged()
+    public void TheVerdicts_NameOnlyThePropertyThatChanged()
     {
-        var before = new AppPaths(@"C:\store\monitor.duckdb", @"C:\config", @"C:\shared");
+        var resting = new AppPaths(@"C:\store\monitor.duckdb", @"C:\config", @"C:\shared");
+        var changed = resting with { ConfigDirectory = @"C:\gone" };
 
-        var verdict = AppPathsGuard.Verdict("SomeTests", before, before with { ConfigDirectory = @"C:\gone" });
+        var after = AppPathsGuard.VerdictAfterBody("SomeTests", resting, changed);
+        var before = AppPathsGuard.VerdictBeforeBody("SomeTests", resting, changed);
 
-        Assert.NotNull(verdict);
-        Assert.StartsWith("SomeTests left App.ConfigDirectory changed (was \"C:\\config\", now \"C:\\gone\")", verdict, StringComparison.Ordinal);
-        Assert.DoesNotContain("App.DatabasePath", verdict, StringComparison.Ordinal);
-        Assert.DoesNotContain("App.SharedConfigDirectory", verdict, StringComparison.Ordinal);
+        Assert.NotNull(after);
+        Assert.StartsWith("SomeTests left App.ConfigDirectory changed (was \"C:\\config\", now \"C:\\gone\")", after, StringComparison.Ordinal);
+        Assert.NotNull(before);
+        Assert.StartsWith("SomeTests's test body was about to run with App.ConfigDirectory changed (was \"C:\\config\", now \"C:\\gone\")", before, StringComparison.Ordinal);
+        foreach (var verdict in new[] { after, before })
+        {
+            Assert.DoesNotContain("App.DatabasePath", verdict, StringComparison.Ordinal);
+            Assert.DoesNotContain("App.SharedConfigDirectory", verdict, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -93,7 +129,8 @@ public sealed class AppPathsGuardTests
     {
         var paths = new AppPaths(@"C:\store\monitor.duckdb", @"C:\config", @"C:\shared");
 
-        Assert.Null(AppPathsGuard.Verdict("SomeTests", paths, paths));
+        Assert.Null(AppPathsGuard.VerdictBeforeBody("SomeTests", paths, paths));
+        Assert.Null(AppPathsGuard.VerdictAfterBody("SomeTests", paths, paths));
     }
 
     private static string Folder() => Path.Combine(Path.GetTempPath(), "AppPathsGuard_" + Guid.NewGuid().ToString("N")[..8]);
