@@ -48,15 +48,20 @@ Rules, in order:
      Only documentation: docs-only. Otherwise Darling files give the Darling suite, Lite files the Lite suite, and
      each side keeps its cross-reading classes of the other.
   6. Areas classes (#6734): every changed file is documentation or a .cs file under Darling/Darling.Tests or Lite.Tests
-     whose every class holds tests and is no base class. Only those classes run. Any other file (a product file, a
-     helper, a fixture, a .csproj, a lock file), a file the test map does not know, or a missing map: rule 5.
+     whose every class holds tests and is no base class. Those classes run, with the Stage=Guard classes of each suite
+     in its scope (#8355: most Guard classes scan the test sources, so a change to a test file is one that can trip
+     them; the selection is already narrow, so they only add to it). Any other file (a product file, a helper, a
+     fixture, a .csproj, a lock file), a file the test map does not know, or a missing map: rule 5.
   7. A draft that changes product files (#7727): rule 5 would give the full Darling suite (12 to 15 legs), so a draft
-     runs only the test classes in the test files it changed (the rule 6 file table) plus the Darling Stage=Guard
-     classes, as areas classes. A draft that changed no test file runs the build and the Guard classes only. When a
-     changed test file is not safe in the file table (a helper, a fixture, a base class, a .csproj, a file the map does
+     runs only the test classes in the test files it changed (the rule 6 file table) plus the Stage=Guard classes of
+     each suite whose scope is not none (Darling's, and Lite's, #8355), as areas classes. A draft that changed no test
+     file runs the build and the Guard classes only. The Lite Guard classes join only a selection that is already narrow
+     (a changed class, a named class or a Darling pick) and never narrow a draft on their own: a draft that changes only
+     a Lite file no test class or Darling class answers for (a manifest, a config file) runs the Lite suite in full. When
+     a changed test file is not safe in the file table (a helper, a fixture, a base class, a .csproj, a file the map does
      not know), the whole pull request runs as rule 5 says, and `why` says so. The full suite runs when the pull
      request is marked ready for review (`ready_for_review` starts a run), so every merge still has a full green run
-     behind it. A dev push, a docs-only change and a test-only change are as before.
+     behind it. A dev push and a docs-only change are as before; a test-only change is rule 6.
   8. A pull request that is ready for review and changes product files (#7728): the test classes the newest nightly
      `test-map` selects (ci-select.py's map_select), plus the classes of its changed test files, plus the Darling
      Stage=Guard classes, as areas classes. FULL (rule 5) instead, with `why` saying which: the map is missing or cannot be
@@ -221,15 +226,25 @@ def changed_test_classes(rules, files: "list[str]", catalog: "dict | None") -> "
     return picks if any(picks.values()) else None
 
 
+def guard_classes(catalog: "dict | None", suite: str) -> "list[str]":
+    """The suite's Stage=Guard classes that hold a test and that the test host lists (#7739)."""
+    classes = (catalog or {}).get("classes") or {}
+    return _real(catalog, suite, [c for c, t in classes.get(suite, {}).items() if "Stage=Guard" in t and _CS.NO_TESTS_TRAIT not in t])
+
+
 def draft_picks(files: "list[str]", catalog: "dict | None", darling_scope: str, lite_scope: str,
                 named: "dict[str, list[str]] | None" = None) -> "tuple[dict[str, list[str]] | None, str, int]":
     """(picks, why, added) for a draft that changed product files (#7727): the test classes of the changed test files, plus the
-    Darling Stage=Guard classes, plus (#7734) `named`: the classes whose source names a changed product file by path or file
-    name (ci-select.py classes_naming_files). A named class runs whatever the suite's scope is: a pin that reads the file
-    as text is what the rule is for. picks is None when a changed test file is not safe in the file table (its suite then
-    runs as today, and so does the whole pull request: areas classes cannot mix a narrowed suite with a full one). A named
-    class passes the same `listed` check as a changed one (#7744: DarlingWorker.cs names the private fixtures FixtureCensus
-    and FixtureOtherClass, which the host does not list). added counts the named classes the plan adds to the rest."""
+    Stage=Guard classes that hold a test of each suite whose scope is not none (#8355: Lite's as well as Darling's; the
+    CiSelect*GuardTests and the source scans of Lite.Tests carry the trait), plus (#7734) `named`: the classes whose source
+    names a changed product file by path or file name (ci-select.py classes_naming_files). A named class runs whatever the
+    suite's scope is: a pin that reads the file as text is what the rule is for. picks is None when a changed test file is
+    not safe in the file table (its suite then runs as today, and so does the whole pull request: areas classes cannot mix a
+    narrowed suite with a full one), and when nothing but the Lite Guard classes would be picked: they join a selection that
+    is already narrow and never narrow a draft on their own, so such a draft runs its areas in full. A Guard class and a
+    named class pass the same `listed` check as a changed one (#7744: DarlingWorker.cs names the private fixtures
+    FixtureCensus and FixtureOtherClass, which the host does not list). added counts the named classes the plan adds to the
+    rest."""
     table = (catalog or {}).get("files") or {}
     classes = (catalog or {}).get("classes") or {}
     if not table or not classes.get("darling"):
@@ -243,8 +258,8 @@ def draft_picks(files: "list[str]", catalog: "dict | None", darling_scope: str, 
             if not row or row["suite"] != suite or not row["safe"]:
                 return None, f"{f} is not a plain test class file, so its suite runs in full", 0
             changed[suite] += [c for c in _real(catalog, suite, row["tests"]) if c not in changed[suite]]
-    guard = [c for c, t in classes["darling"].items() if "Stage=Guard" in t and _CS.NO_TESTS_TRAIT not in t]
-    picks = {"darling": (changed["darling"] + [c for c in guard if c not in changed["darling"]]) if darling_scope != "none" else [],
+    guard = {s: guard_classes(catalog, s) for s in ("darling", "lite")}
+    picks = {"darling": (changed["darling"] + [c for c in guard["darling"] if c not in changed["darling"]]) if darling_scope != "none" else [],
              "lite": changed["lite"] if lite_scope != "none" else []}
     added = 0
     for suite in ("darling", "lite"):
@@ -253,7 +268,14 @@ def draft_picks(files: "list[str]", catalog: "dict | None", darling_scope: str, 
                 if c not in picks[suite]]
         picks[suite] += more
         added += len(more)
-    return (picks, "", added) if any(picks.values()) else (None, "no class is selected", 0)
+    if not any(picks.values()):
+        return None, "no class is selected", 0
+    # #8355: the Lite Guard classes join a selection that is already narrow (a changed class, a named class or a Darling pick) and
+    # never narrow a draft on their own: a draft that changes only a Lite file no test class or Darling class answers for (a manifest,
+    # a config file the app reads at run time) runs the Lite suite in full, as it does when it is ready for review.
+    if lite_scope != "none":
+        picks["lite"] += [c for c in guard["lite"] if c not in picks["lite"]]
+    return picks, "", added
 
 
 def scripts_only_picks(catalog: "dict | None") -> "dict[str, list[str]] | None":
@@ -387,13 +409,6 @@ def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | 
                 "reason": "only documentation changed."}
 
     cs = _CS
-    if any(f.endswith(".cs") and f.startswith(tuple(TEST_TREES.values())) for f in files):
-        picks = changed_test_classes(rules, files, catalog if catalog is not None else load_catalog())
-        if picks:
-            return {"areas": "classes", "darling_scope": "classes" if picks["darling"] else "none",
-                    "lite_scope": "classes" if picks["lite"] else "none",
-                    "darling_classes": picks["darling"], "lite_classes": picks["lite"],
-                    "reason": "only documentation and test classes changed, so only those classes run."}
     darling_full = a["gate_darling"] or a["darling_full"] or a["core"] or a["root"]
     lite_mode = cs.lite_scope("pull_request", a["lite_shard"], a["core_shard"], a["root_shard"],
                               a["darling_reads_shard"], a["lite_linked_shard"])
@@ -403,6 +418,20 @@ def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | 
         darling_scope = "reads-lite"
     else:
         darling_scope = "none"
+    if any(f.endswith(".cs") and f.startswith(tuple(TEST_TREES.values())) for f in files):
+        cat = catalog if catalog is not None else load_catalog()
+        picks = changed_test_classes(rules, files, cat)
+        if picks:
+            # #8355: the Stage=Guard classes of each suite in scope run too. Most of them scan the test sources, so a change to a test
+            # file is one that can trip them. The selection is already narrow, so they only add to it.
+            for suite, scope in (("darling", darling_scope), ("lite", lite_mode)):
+                if scope != "none":
+                    picks[suite] += [c for c in guard_classes(cat, suite) if c not in picks[suite]]
+            return {"areas": "classes", "darling_scope": "classes" if picks["darling"] else "none",
+                    "lite_scope": "classes" if picks["lite"] else "none",
+                    "darling_classes": picks["darling"], "lite_classes": picks["lite"],
+                    "reason": "only documentation and test classes changed, so those classes run with the Stage=Guard classes of each "
+                              "suite in its scope."}
     if darling_scope == "full" and lite_mode == "full":
         areas = "all"
     elif darling_scope == "full":
@@ -420,7 +449,7 @@ def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | 
             return {"areas": "classes", "darling_scope": "classes" if picks["darling"] else "none",
                     "lite_scope": "classes" if picks["lite"] else "none",
                     "darling_classes": picks["darling"], "lite_classes": picks["lite"],
-                    "reason": "a draft runs only its own test classes and the Guard classes"
+                    "reason": "a draft runs only its own test classes and the Stage=Guard classes of each suite in its scope"
                               + (f", and the {extra} classes whose source names a changed file (#7734)" if extra else "")
                               + "; the full suite runs when it is marked ready for review."}
         reason += f" It is a draft, but {why}, so it runs as a pull request that is ready for review."
