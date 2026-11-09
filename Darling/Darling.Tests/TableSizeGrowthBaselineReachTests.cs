@@ -7,8 +7,10 @@
  */
 
 using System;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Storage.FinOps;
 using Xunit;
 
 namespace Darling.Tests;
@@ -17,11 +19,13 @@ namespace Darling.Tests;
 /// get_table_index_sizes' nominal-window figures span about the window they are named for. Each baseline is
 /// the newest snapshot at or before its cutoff, and a store whose snapshots are sparse (a collector that
 /// stalled, a server that was out of scope for a while) can put that snapshot weeks past the cutoff: a
-/// "7-day" figure measured from a 41-day-old snapshot is the 30-day figure under another name, and the two
+/// "7-day" figure measured from a 30-day-old snapshot is the 30-day figure under another name, and the two
 /// read identical on every steadily growing table. A figure is kept only when the span from its baseline to
-/// the latest snapshot is within half the window of the window itself (3.5 to 10.5 days for 7, 15 to 45 for
-/// 30), so the two windows can never resolve to one measurement, and the row's note says which baseline was
-/// out of reach instead of blaming the table.
+/// the latest snapshot is within a day of the window (6 to 8 days for 7, 29 to 31 for 30), the same one-day
+/// rule get_storage_growth judges its database baselines by, so the two windows can never resolve to one
+/// measurement, and the row's note says which baseline was out of reach instead of blaming the table. Two
+/// figures that agree because the table held the same size at two different snapshots are two real
+/// measurements, and both stand.
 /// </summary>
 public sealed class TableSizeGrowthBaselineReachTests
 {
@@ -35,14 +39,42 @@ public sealed class TableSizeGrowthBaselineReachTests
             EarliestSnapshotTime: Latest.AddDays(-daysOfData), LatestSnapshotTime: Latest, DaysOfData: daysOfData);
 
     [Fact]
+    public void TheReachRule_IsTheStorageGrowthReadersOneDayRule()
+    {
+        /* One rule for both readers: a table's baseline may sit as far from its mark as a database's may. */
+        Assert.Equal(TimeSpan.FromDays(7) - DarlingFinOpsStorageGrowthReader.BaselineTolerance, GrowthBaselineReach.ShortestSpan(7));
+        Assert.Equal(TimeSpan.FromDays(7) + DarlingFinOpsStorageGrowthReader.BaselineTolerance, GrowthBaselineReach.LongestSpan(7));
+        Assert.Equal(TimeSpan.FromDays(30) - DarlingFinOpsStorageGrowthReader.BaselineTolerance, GrowthBaselineReach.ShortestSpan(30));
+        Assert.Equal(TimeSpan.FromDays(30) + DarlingFinOpsStorageGrowthReader.BaselineTolerance, GrowthBaselineReach.LongestSpan(30));
+        Assert.Equal("6 to 8 days", GrowthBaselineReach.DescribeRange(7));
+        Assert.Equal("29 to 31 days", GrowthBaselineReach.DescribeRange(30));
+    }
+
+    [Fact]
+    public void TwoBaselinesThatHeldTheSameSize_AreTwoRealMeasurements_AndBothStand()
+    {
+        /* Daily snapshots, and the table held 315.61 MB at both the 7-day and the 30-day snapshot: it did not change between
+           them and grew 36.39 MB since. The two figures agree because the measurements agree, not because one baseline stood
+           in for the other, so neither is refused and the row carries no note. */
+        var row = Row(current: 352, at7d: 315.61, at30d: 315.61, snapshot7d: Latest.AddDays(-7), snapshot30d: Latest.AddDays(-30));
+
+        Assert.True(row.Covers7d);
+        Assert.True(row.Covers30d);
+        Assert.Equal(36.39, row.Growth7dMb!.Value, 9);
+        Assert.Equal(36.39, row.Growth30dMb!.Value, 9);
+        Assert.Null(DarlingMcpObjectStatsTools.GrowthNote(row));
+        Assert.Null(DarlingMcpObjectStatsTools.HistoryNote(row));
+    }
+
+    [Fact]
     public void AGapThatLeavesOneSnapshotForBothCutoffs_KeepsThe30DayFigure_AndRefusesThe7DayOne()
     {
-        /* Snapshots exist for the last five days and from 41 days back; nothing between. Both cutoffs resolve to the
-           41-day-old snapshot, where the table held 229 MB; it holds 352 MB now. */
-        var gap = Latest.AddDays(-41);
-        var row = Row(current: 352, at7d: 229, at30d: 229, snapshot7d: gap, snapshot30d: gap);
+        /* Snapshots exist for the last five days and from 30 days back; nothing between. Both cutoffs resolve to the
+           30-day-old snapshot, where the table held 262 MB; it holds 352 MB now. */
+        var gap = Latest.AddDays(-30);
+        var row = Row(current: 352, at7d: 262, at30d: 262, snapshot7d: gap, snapshot30d: gap);
 
-        Assert.Equal(123, row.Growth30dMb);
+        Assert.Equal(90, row.Growth30dMb);
         Assert.Null(row.Growth7dMb);
         Assert.Equal(252, row.GrowthOverAvailableHistoryMb);
 
@@ -51,12 +83,17 @@ public sealed class TableSizeGrowthBaselineReachTests
         Assert.Contains("growth_7d_mb is null", note, StringComparison.Ordinal);
         Assert.DoesNotContain("created since", note, StringComparison.Ordinal);
         Assert.DoesNotContain("no snapshot 7+ days old exists", note, StringComparison.Ordinal);
+
+        var history = DarlingMcpObjectStatsTools.HistoryNote(row)!;
+        Assert.Contains(gap.ToString("o"), history, StringComparison.Ordinal);
+        Assert.Contains("30 days before the latest snapshot", history, StringComparison.Ordinal);
+        Assert.Contains("outside the 6 to 8 days a 7-day figure may span", history, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void SparseSnapshots_A12DayOldBaselineIsNotA7DayOne_ButA33DayOldOneIsA30DayOne()
+    public void SparseSnapshots_A12DayOldBaselineIsNotA7DayOne_ButA31DayOldOneIsA30DayOne()
     {
-        var row = Row(current: 352, at7d: 316, at30d: 253, snapshot7d: Latest.AddDays(-12), snapshot30d: Latest.AddDays(-33));
+        var row = Row(current: 352, at7d: 316, at30d: 253, snapshot7d: Latest.AddDays(-12), snapshot30d: Latest.AddDays(-31));
 
         Assert.Null(row.Growth7dMb);
         Assert.Equal(99, row.Growth30dMb);
@@ -75,15 +112,15 @@ public sealed class TableSizeGrowthBaselineReachTests
     }
 
     [Theory]
-    [InlineData(7, 3.5, true)]
-    [InlineData(7, 10.5, true)]
-    [InlineData(7, 10.5 + 1.0 / 1440, false)]
-    [InlineData(7, 3.5 - 1.0 / 1440, false)]
-    [InlineData(30, 15, true)]
-    [InlineData(30, 45, true)]
-    [InlineData(30, 45 + 1.0 / 1440, false)]
-    [InlineData(30, 15 - 1.0 / 1440, false)]
-    public void AFigureStands_OnlyWhenItsSpanIsWithinHalfTheWindowOfTheWindow(int window, double spanDays, bool stands)
+    [InlineData(7, 6, true)]
+    [InlineData(7, 8, true)]
+    [InlineData(7, 8 + 1.0 / 1440, false)]
+    [InlineData(7, 6 - 1.0 / 1440, false)]
+    [InlineData(30, 29, true)]
+    [InlineData(30, 31, true)]
+    [InlineData(30, 31 + 1.0 / 1440, false)]
+    [InlineData(30, 29 - 1.0 / 1440, false)]
+    public void AFigureStands_OnlyWhenItsSpanIsWithinADayOfTheWindow(int window, double spanDays, bool stands)
     {
         var snapshot = Latest.AddDays(-spanDays);
         var row = window == 7
@@ -100,9 +137,9 @@ public sealed class TableSizeGrowthBaselineReachTests
     [Fact]
     public void ATableYoungerThanTheGap_IsNotToldItsWholeSizeIsNewerThan7Days()
     {
-        /* The table was created 20 days ago. The only snapshot at or before either cutoff is 41 days old, so it is in
+        /* The table was created 20 days ago. The only snapshot at or before either cutoff is 30 days old, so it is in
            neither: the 30-day verdict (created since) is true of it, the 7-day one is not. */
-        var gap = Latest.AddDays(-41);
+        var gap = Latest.AddDays(-30);
         var row = Row(current: 30, at7d: null, at30d: null, snapshot7d: gap, snapshot30d: gap, oldest: null);
 
         Assert.Null(row.Growth7dMb);

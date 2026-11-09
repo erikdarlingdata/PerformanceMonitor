@@ -26,7 +26,9 @@ namespace Darling.Tests;
 /// of its history resolves both the 7-day and the 30-day cutoff to the same old snapshot, and the reply must then
 /// refuse the 7-day figure (covers_7d false, growth_7d_mb null, the history note naming the snapshot) while the
 /// 30-day one, whose baseline is within reach, stands. A store with a snapshot every day reports the two figures
-/// over their own windows.
+/// over their own windows. In every case the history block names the snapshot each baseline was read from
+/// (baseline_7d_snapshot, baseline_30d_snapshot; null when the store holds none that old), so a reader can see
+/// whether two agreeing figures were measured from two snapshots or one.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class TableSizeGrowthBaselineReachLiveTests
@@ -55,10 +57,10 @@ public sealed class TableSizeGrowthBaselineReachLiveTests
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
             var latest = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddHours(-2);
 
-            /* Snapshots for the last five days and from 41 days back to 84; nothing in between. TableA grows 3 MB a
+            /* Snapshots for the last five days and from 30 days back to 84; nothing in between. TableA grows 3 MB a
                day from 100 MB at the earliest snapshot; Young was created 20 days ago, so it is in no snapshot older
-               than that. */
-            await SeedAsync(connection, ct, latest, Enumerable.Range(0, 85).Where(age => age < 5 || age > 40));
+               than that. Both cutoffs resolve to the 30-day-old snapshot. */
+            await SeedAsync(connection, ct, latest, Enumerable.Range(0, 85).Where(age => age < 5 || age >= 30));
 
             using (var doc = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, ServerName, Db, ct)))
             {
@@ -66,14 +68,17 @@ public sealed class TableSizeGrowthBaselineReachLiveTests
                 Assert.False(history.GetProperty("covers_7d").GetBoolean());
                 Assert.True(history.GetProperty("covers_30d").GetBoolean());
                 Assert.Equal(84, history.GetProperty("history_days_available").GetInt32());
+                /* The two figures were read from one snapshot, and the reply says so. */
+                Assert.Equal(latest.AddDays(-30).ToString("o"), BaselineSnapshot(history, "baseline_7d_snapshot"));
+                Assert.Equal(latest.AddDays(-30).ToString("o"), BaselineSnapshot(history, "baseline_30d_snapshot"));
                 var note = history.GetProperty("note").GetString();
                 Assert.NotNull(note);
-                Assert.Contains(latest.AddDays(-41).ToString("o"), note, StringComparison.Ordinal);
+                Assert.Contains(latest.AddDays(-30).ToString("o"), note, StringComparison.Ordinal);
                 Assert.Contains("growth_7d_mb", note, StringComparison.Ordinal);
 
                 var a = Table(doc, "TableA");
                 Assert.Equal(JsonValueKind.Null, a.GetProperty("growth_7d_mb").ValueKind);
-                Assert.Equal(123, a.GetProperty("growth_30d_mb").GetDouble());
+                Assert.Equal(90, a.GetProperty("growth_30d_mb").GetDouble());
                 Assert.Equal(252, a.GetProperty("growth_over_available_history_mb").GetDouble());
                 Assert.Equal(84, a.GetProperty("growth_window_days").GetInt32());
                 Assert.Contains("growth_7d_mb is null", a.GetProperty("growth_note").GetString(), StringComparison.Ordinal);
@@ -96,6 +101,9 @@ public sealed class TableSizeGrowthBaselineReachLiveTests
                 Assert.True(history.GetProperty("covers_7d").GetBoolean());
                 Assert.True(history.GetProperty("covers_30d").GetBoolean());
                 Assert.Equal(JsonValueKind.Null, history.GetProperty("note").ValueKind);
+                /* Two figures, two snapshots: a reader can see how far apart the two baselines sit. */
+                Assert.Equal(latest.AddDays(-7).ToString("o"), BaselineSnapshot(history, "baseline_7d_snapshot"));
+                Assert.Equal(latest.AddDays(-30).ToString("o"), BaselineSnapshot(history, "baseline_30d_snapshot"));
 
                 var a = Table(doc, "TableA");
                 Assert.Equal(21, a.GetProperty("growth_7d_mb").GetDouble());
@@ -106,6 +114,19 @@ public sealed class TableSizeGrowthBaselineReachLiveTests
                 Assert.Equal(7, young.GetProperty("growth_7d_mb").GetDouble());
                 Assert.Equal(JsonValueKind.Null, young.GetProperty("growth_30d_mb").ValueKind);
                 Assert.Contains("created since", young.GetProperty("growth_note").GetString(), StringComparison.Ordinal);
+            }
+
+            /* A store three days old holds no snapshot as old as either cutoff: both baselines are null, not absent. */
+            await DeleteRowsAsync(connection, ct, keepServer: true);
+            await SeedAsync(connection, ct, latest, Enumerable.Range(0, 3));
+
+            using (var doc = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, ServerName, Db, ct)))
+            {
+                var history = doc.RootElement.GetProperty("history");
+                Assert.False(history.GetProperty("covers_7d").GetBoolean());
+                Assert.False(history.GetProperty("covers_30d").GetBoolean());
+                Assert.Null(BaselineSnapshot(history, "baseline_7d_snapshot"));
+                Assert.Null(BaselineSnapshot(history, "baseline_30d_snapshot"));
             }
 
             bodySucceeded = true;
@@ -119,6 +140,13 @@ public sealed class TableSizeGrowthBaselineReachLiveTests
 
     private static JsonElement Table(JsonDocument doc, string name) =>
         doc.RootElement.GetProperty("tables").EnumerateArray().Single(t => t.GetProperty("table_name").GetString() == name);
+
+    /// <summary>The named baseline snapshot stamp from the history block, which must carry the key even when its value is null.</summary>
+    private static string? BaselineSnapshot(JsonElement history, string key)
+    {
+        Assert.True(history.TryGetProperty(key, out var value), $"history has no {key}");
+        return value.ValueKind == JsonValueKind.Null ? null : value.GetString();
+    }
 
     private static async Task SeedAsync(NpgsqlConnection connection, CancellationToken ct, DateTime latest, IEnumerable<int> agesInDays)
     {

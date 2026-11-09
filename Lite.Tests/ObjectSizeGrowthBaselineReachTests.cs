@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -15,9 +16,11 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// Lite's get_table_index_sizes row judges its baselines the way Darling's does: a nominal-window figure stands only
-/// when the span from its baseline snapshot to the latest snapshot is within half the window of the window itself
-/// (3.5 to 10.5 days for 7, 15 to 45 for 30). A store whose snapshots are sparse resolves both cutoffs to one old
-/// snapshot, and without the rule the "7-day" figure is the 30-day one under another name.
+/// when the span from its baseline snapshot to the latest snapshot is within a day of the window (6 to 8 days for 7,
+/// 29 to 31 for 30), the one-day rule the storage-growth reader already applies to database baselines. A store whose
+/// snapshots are sparse resolves both cutoffs to one old snapshot, and without the rule the "7-day" figure is the
+/// 30-day one under another name. Two figures that agree because the table held the same size at two different
+/// snapshots are two real measurements, and both stand.
 /// </summary>
 public sealed class ObjectSizeGrowthBaselineReachTests
 {
@@ -35,12 +38,34 @@ public sealed class ObjectSizeGrowthBaselineReachTests
         };
 
     [Fact]
+    public void TheReachRule_IsOneDayEitherSideOfTheWindow()
+    {
+        Assert.Equal(TimeSpan.FromDays(6), GrowthBaselineReach.ShortestSpan(7));
+        Assert.Equal(TimeSpan.FromDays(8), GrowthBaselineReach.LongestSpan(7));
+        Assert.Equal(TimeSpan.FromDays(29), GrowthBaselineReach.ShortestSpan(30));
+        Assert.Equal(TimeSpan.FromDays(31), GrowthBaselineReach.LongestSpan(30));
+    }
+
+    [Fact]
+    public void TwoBaselinesThatHeldTheSameSize_AreTwoRealMeasurements_AndBothStand()
+    {
+        var row = Row(current: 352m, at7d: 315.61m, at30d: 315.61m, snapshot7d: Latest.AddDays(-7), snapshot30d: Latest.AddDays(-30));
+
+        Assert.True(row.Covers7d);
+        Assert.True(row.Covers30d);
+        Assert.Equal(36.39m, row.Growth7dMb);
+        Assert.Equal(36.39m, row.Growth30dMb);
+        Assert.Null(McpObjectStatsTools.GrowthNote(row));
+        Assert.Null(McpObjectStatsTools.HistoryNote(row));
+    }
+
+    [Fact]
     public void AGapThatLeavesOneSnapshotForBothCutoffs_KeepsThe30DayFigure_AndRefusesThe7DayOne()
     {
-        var gap = Latest.AddDays(-41);
-        var row = Row(current: 352, at7d: 229, at30d: 229, snapshot7d: gap, snapshot30d: gap);
+        var gap = Latest.AddDays(-30);
+        var row = Row(current: 352, at7d: 262, at30d: 262, snapshot7d: gap, snapshot30d: gap);
 
-        Assert.Equal(123m, row.Growth30dMb);
+        Assert.Equal(90m, row.Growth30dMb);
         Assert.Null(row.Growth7dMb);
         Assert.Equal(252m, row.GrowthOverAvailableHistoryMb);
 
@@ -49,6 +74,10 @@ public sealed class ObjectSizeGrowthBaselineReachTests
         Assert.Contains("growth_7d_mb is null", note, StringComparison.Ordinal);
         Assert.DoesNotContain("created since", note, StringComparison.Ordinal);
         Assert.DoesNotContain("no snapshot 7+ days old exists", note, StringComparison.Ordinal);
+
+        var history = McpObjectStatsTools.HistoryNote(row)!;
+        Assert.Contains(gap.ToString("o"), history, StringComparison.Ordinal);
+        Assert.Contains("outside the 6 to 8 days a 7-day figure may span", history, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -62,15 +91,15 @@ public sealed class ObjectSizeGrowthBaselineReachTests
     }
 
     [Theory]
-    [InlineData(7, 3.5, true)]
-    [InlineData(7, 10.5, true)]
-    [InlineData(7, 10.5 + 1.0 / 1440, false)]
-    [InlineData(7, 3.5 - 1.0 / 1440, false)]
-    [InlineData(30, 15, true)]
-    [InlineData(30, 45, true)]
-    [InlineData(30, 45 + 1.0 / 1440, false)]
-    [InlineData(30, 15 - 1.0 / 1440, false)]
-    public void AFigureStands_OnlyWhenItsSpanIsWithinHalfTheWindowOfTheWindow(int window, double spanDays, bool stands)
+    [InlineData(7, 6, true)]
+    [InlineData(7, 8, true)]
+    [InlineData(7, 8 + 1.0 / 1440, false)]
+    [InlineData(7, 6 - 1.0 / 1440, false)]
+    [InlineData(30, 29, true)]
+    [InlineData(30, 31, true)]
+    [InlineData(30, 31 + 1.0 / 1440, false)]
+    [InlineData(30, 29 - 1.0 / 1440, false)]
+    public void AFigureStands_OnlyWhenItsSpanIsWithinADayOfTheWindow(int window, double spanDays, bool stands)
     {
         var snapshot = Latest.AddDays(-spanDays);
         var row = window == 7
@@ -87,7 +116,7 @@ public sealed class ObjectSizeGrowthBaselineReachTests
     [Fact]
     public void ATableYoungerThanTheGap_IsNotToldItsWholeSizeIsNewerThan7Days()
     {
-        var gap = Latest.AddDays(-41);
+        var gap = Latest.AddDays(-30);
         var row = Row(current: 30, at7d: null, at30d: null, snapshot7d: gap, snapshot30d: gap, oldest: null);
 
         var note = McpObjectStatsTools.GrowthNote(row)!;
