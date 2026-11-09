@@ -154,7 +154,7 @@ public sealed class OfflineServerCardTests
             return (
                 Blocking: blocking.Value.Text, BlockingDot: Hex(blocking.Dot?.Fill), BlockingText: Hex(blocking.Value.Foreground),
                 Deadlocks: deadlocks.Value.Text, DeadlockDot: Hex(deadlocks.Dot?.Fill), DeadlockText: Hex(deadlocks.Value.Foreground),
-                CpuDot: Hex(cpu.Dot?.Fill));
+                Cpu: cpu.Value.Text, CpuDot: Hex(cpu.Dot?.Fill), CpuText: Hex(cpu.Value.Foreground));
         });
 
         Assert.Equal("--", rows.Blocking);
@@ -163,6 +163,13 @@ public sealed class OfflineServerCardTests
         Assert.Equal("--", rows.Deadlocks);
         Assert.Equal(UnknownGrey, rows.DeadlockDot);
         Assert.Equal(UnknownGrey, rows.DeadlockText);
+
+        /* #8465: the CPU row reads "--" on a dark server too, and its dot and text take the same grey whatever the last reading
+           was. The reading stays inside its freshness bound for a while after the server goes dark, so the card's own figure, a
+           20% here, would otherwise paint the "--" healthy green. */
+        Assert.Equal("--", rows.Cpu);
+        Assert.Equal(UnknownGrey, rows.CpuDot);
+        Assert.Equal(UnknownGrey, rows.CpuText);
     }
 
     [Fact]

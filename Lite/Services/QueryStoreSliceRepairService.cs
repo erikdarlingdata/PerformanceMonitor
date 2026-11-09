@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -726,7 +727,7 @@ HAVING COUNT(*) > 1";
             }
 
             transaction.Commit();
-            progress?.Report($"Hot store: {survey.HotRowsRemoved:N0} row(s) removed from {survey.HotGroups:N0} split interval(s).");
+            progress?.Report($"Hot store: {CountText.Plural(survey.HotRowsRemoved, "row")} removed from {CountText.Plural(survey.HotGroups, "split interval")}.");
         }
 
         /* PER-FILE ISOLATION. One archive file that cannot be repaired must not stop the others: each file is
@@ -1053,7 +1054,7 @@ COPY (
 
         var afterBytes = new FileInfo(file.Path).Length;
 
-        progress?.Report($"Archive {name}: {file.RowsRemoved:N0} row(s) removed ({FormatBytes(beforeBytes)} -> {FormatBytes(afterBytes)}).");
+        progress?.Report($"Archive {name}: {CountText.Plural(file.RowsRemoved, "row")} removed ({FormatBytes(beforeBytes)} -> {FormatBytes(afterBytes)}).");
 
         /* The rewrite keeps the file's row order and its column types (#5653), so a repaired file is not expected to
            be bigger than the original. Before that, it could be: the old rewrite returned rows in hash order and

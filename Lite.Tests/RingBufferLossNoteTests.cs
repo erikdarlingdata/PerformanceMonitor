@@ -170,9 +170,9 @@ public sealed class RingBufferLossNoteTests
         var payload = window.ToPayload();
         var note = (string)payload["note"]!;
 
-        Assert.Contains("12 event(s) were evicted from the ring buffer before collection", note, StringComparison.Ordinal);
-        Assert.Contains("4 event(s) were dropped by the session before they reached its targets", note, StringComparison.Ordinal);
-        Assert.Contains("1 span(s) after a session restart could not be counted", note, StringComparison.Ordinal);
+        Assert.Contains("12 events were evicted from the ring buffer before collection", note, StringComparison.Ordinal);
+        Assert.Contains("4 events were dropped by the session before they reached its targets", note, StringComparison.Ordinal);
+        Assert.Contains("1 span after a session restart could not be counted", note, StringComparison.Ordinal);
         Assert.Contains("between 2026-11-07 10:00 and 2026-11-07 10:01 UTC", note, StringComparison.Ordinal);
         Assert.Contains(". Latest: ", note, StringComparison.Ordinal);
         Assert.Contains(RingBufferLossNote.SettingHint, note, StringComparison.Ordinal);

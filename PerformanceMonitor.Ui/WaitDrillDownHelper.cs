@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Ui;
 
@@ -138,7 +139,7 @@ public static class WaitDrillDownHelper
                 hb.Info.CollectionTime,
                 hb.Info.SessionId,
                 hb.BlockedSessions.Count,
-                $"Head SPID {hb.Info.SessionId} blocking {hb.BlockedSessions.Count} session(s)"))
+                $"Head SPID {hb.Info.SessionId} blocking {CountText.Plural(hb.BlockedSessions.Count, "session")}"))
             .OrderByDescending(r => r.BlockedSessionCount)
             .ThenByDescending(r => r.CollectionTime)
             .ToList();

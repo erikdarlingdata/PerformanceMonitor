@@ -9,6 +9,7 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -147,8 +148,8 @@ public static partial class PgTargetAdvice
           .Append(" intervals");
         if (resets > 0 || rewinds > 0)
         {
-            sb.Append("; the counters were reset ").Append(TempCount(resets)).Append(" time(s) in the window (")
-              .Append(TempCount(rewinds)).Append(" rewind(s) seen), each clamped to zero rather than read as a negative rate, so the total under-counts by the clamped intervals");
+            sb.Append("; the counters were reset ").Append(CountText.Plural((long)resets, "time")).Append(" in the window (")
+              .Append(CountText.Plural((long)rewinds, "rewind")).Append(" seen), each clamped to zero rather than read as a negative rate, so the total under-counts by the clamped intervals");
         }
 
         sb.Append(". ");

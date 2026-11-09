@@ -1629,7 +1629,7 @@ internal static class PgDisplay
     {
         ArgumentNullException.ThrowIfNull(rows);
 
-        return $"{rows.Count:N0} wait event(s), {WaitSamplingAttributedCount(rows):N0} attributed to a query. "
+        return $"{CountText.Plural(rows.Count, "wait event")}, {WaitSamplingAttributedCount(rows):N0} attributed to a query. "
             + (serviceTier
                 ? $"Instrument: SERVICE SAMPLER, the service polling pg_stat_activity {cadence}. "
                   + PgWaitInstrument.ServiceSampledCaveat + " "

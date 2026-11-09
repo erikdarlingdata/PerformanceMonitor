@@ -59,25 +59,21 @@ internal sealed class McpTokenStore
     /// <summary>Random bytes in a token. The token is their lowercase hex text, 64 characters (Darling's minimum is 16).</summary>
     internal const int TokenBytes = 32;
 
-    /// <summary>A token counts only at this length or longer (Darling's floor). A shorter one still gates every request, but
-    /// the write and investigation tools stay off (<see cref="McpHostService.DecideServing"/>).</summary>
-    internal const int MinimumTokenLength = 16;
+    /// <summary>A token counts only at this length or longer (<see cref="McpTokenFloor.MinimumLength"/>, the floor both apps share).
+    /// A shorter one still gates every request, but the write and investigation tools stay off (<see cref="McpHostService.DecideServing"/>).</summary>
+    internal const int MinimumTokenLength = McpTokenFloor.MinimumLength;
 
-    /// <summary>The fewest different characters a usable token has (Darling's <c>DarlingHostBinding.MinimumDistinctTokenCharacters</c>).
+    /// <summary>The fewest different characters a usable token has (<see cref="McpTokenFloor.MinimumDistinctCharacters"/>).
     /// Sixteen copies of one letter meet the length alone, so a token with fewer than this many different characters is not used
     /// for the write or investigation tools.</summary>
-    internal const int MinimumDistinctTokenCharacters = 6;
+    internal const int MinimumDistinctTokenCharacters = McpTokenFloor.MinimumDistinctCharacters;
 
     /// <summary>
-    /// True when <paramref name="token"/> is usable for the write and investigation tools: at least <see cref="MinimumTokenLength"/>
-    /// characters and at least <see cref="MinimumDistinctTokenCharacters"/> different characters. The same two conditions as Darling's
-    /// <c>DarlingHostBinding.DescribeTokenProblem(token) is null</c>, which <c>DarlingMcpWritePolicy.ResolveForStart</c> applies
-    /// (Lite does not reference the Darling service project, so the rule is mirrored here).
+    /// True when <paramref name="token"/> is usable for the write and investigation tools: it clears <see cref="McpTokenFloor"/>,
+    /// the one rule Darling's <c>DarlingHostBinding.DescribeTokenProblem</c> also decides by, so the two apps serve the write and
+    /// investigation tools behind the same floor.
     /// </summary>
-    internal static bool IsUsableToken(string? token) =>
-        !string.IsNullOrWhiteSpace(token)
-        && token.Length >= MinimumTokenLength
-        && token.Distinct().Count() >= MinimumDistinctTokenCharacters;
+    internal static bool IsUsableToken(string? token) => McpTokenFloor.Clears(token);
 
     /// <summary>The requirement in words, for the startup lines.</summary>
     internal static readonly string TokenRequirement =

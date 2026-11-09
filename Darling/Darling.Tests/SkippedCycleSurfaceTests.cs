@@ -347,7 +347,7 @@ public sealed class SkippedCycleSurfaceShapeTests
             LastSlowestStep = "gate_wait",
             LastSlowestStepMs = 90_000,
         });
-        Assert.StartsWith("Skipped collection slots in 24 h: 8 slot(s) in 2 late stretch(es). Last ", line, StringComparison.Ordinal);
+        Assert.StartsWith("Skipped collection slots in 24 h: 8 slots in 2 late stretches. Last ", line, StringComparison.Ordinal);
         Assert.EndsWith(": cause gate_wait, 90 s.", line, StringComparison.Ordinal);
     }
 

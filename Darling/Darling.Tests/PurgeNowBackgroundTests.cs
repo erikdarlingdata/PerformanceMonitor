@@ -629,7 +629,7 @@ public sealed class PurgeNowBackgroundTests
         var text = ViewerServerTab.FormatPurgeSummary(
             "{\"success\":true,\"tablesPurged\":3,\"rowsPurged\":42,\"rowsDeleted\":40,\"chunksDropped\":2}", out var finished);
 
-        Assert.Equal("Purged 42 row(s)/chunk(s) across 3 table(s)", text);
+        Assert.Equal("Purged 42 rows/chunks across 3 tables", text);
         Assert.True(finished);
     }
 
