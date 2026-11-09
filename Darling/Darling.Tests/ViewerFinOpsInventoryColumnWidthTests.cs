@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -18,7 +19,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #8474: the FinOps Server Inventory grid shows a server's Edition, Version and Host OS whole, and a Hardware Note column that is blank
-/// on every row takes no fixed width from them. The real tab is built on the shared STA thread with the app's theme, its inventory
+/// on every row is collapsed, while a noted row shows it open to a drag. The real tab is built on the shared STA thread with the app's theme, its inventory
 /// sub-tab is shown at the width a maximized 1920 px window gives the grid, two rows are bound, and the realized cells and column
 /// widths are read. Lite's twin is FinOpsInventoryColumnWidthTests.
 /// </summary>
@@ -27,7 +28,7 @@ public sealed class ViewerFinOpsInventoryColumnWidthTests
 {
     private const string ThemeUri = "pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml";
 
-    /// <summary>The grid's width in a maximized 1920 px window, and the fixed widths the three text columns and the note column had.</summary>
+    /// <summary>The grid's width in a maximized 1920 px window, the fixed widths the three text columns had, and the note column's width.</summary>
     private const double GridWidth = 1580;
     private const double EditionWidth = 140;
     private const double VersionWidth = 100;
@@ -40,7 +41,7 @@ public sealed class ViewerFinOpsInventoryColumnWidthTests
     private const string LongHostOs = "Windows Server 2019 Datacenter (10.0.17763)";
 
     [Fact]
-    public void ServerInventory_ShowsEditionVersionAndHostOsWhole_AndABlankHardwareNoteTakesNoFixedWidth()
+    public void ServerInventory_ShowsEditionVersionAndHostOsWhole_AndCollapsesABlankHardwareNoteColumn()
     {
         var findings = StaTestThread.Run(() => WithTheme(() =>
         {
@@ -76,9 +77,86 @@ public sealed class ViewerFinOpsInventoryColumnWidthTests
                 }
 
                 var note = ColumnHeaded(grid, "Hardware Note");
-                if (note.ActualWidth >= HardwareNoteWidth)
+                if (note.Visibility != Visibility.Collapsed)
                 {
-                    found.Add($"the Hardware Note column is {note.ActualWidth:F0} px wide with every row blank");
+                    found.Add($"the Hardware Note column is on screen, {note.ActualWidth:F0} px wide, with every row blank");
+                }
+
+                return found;
+            }
+            finally
+            {
+                window.Close();
+            }
+        }));
+
+        Assert.True(findings.Count == 0, string.Join(Environment.NewLine, findings));
+    }
+
+    /// <summary>A server whose hardware read was denied carries a note: the column is on screen at its 220 px, the note trims with an
+    /// ellipsis and keeps the whole sentence in its tooltip, and a reader can widen the column past 220 px to read it in place.</summary>
+    [Fact]
+    public void ServerInventory_ShowsTheHardwareNoteColumn_WhenARowCarriesANote_TrimmedAtItsWidth_AndOpenToADrag()
+    {
+        var findings = StaTestThread.Run(() => WithTheme(() =>
+        {
+            var tab = new FinOpsTab();
+            var wide = new Border { Child = tab, Width = GridWidth, Height = 700, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
+            var window = new Window { Content = wide, Width = 1000, Height = 700, Left = 0, Top = 0, WindowStartupLocation = WindowStartupLocation.Manual, ShowInTaskbar = false };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                var grid = (DataGrid)tab.FindName("FinOpsServerInventoryDataGrid");
+                ShowTabOf(grid);
+                grid.ItemsSource = new List<ServerPropertyRow>
+                {
+                    new() { ServerId = 1, ServerName = "srv-a", Edition = LongEdition, ProductVersion = LongVersion, HostOsVersion = LongHostOs, EngineEdition = 3, CpuCount = 16, PhysicalMemoryMb = 131072, SocketCount = 2, CoresPerSocket = 8, ProvisioningStatus = "RIGHT_SIZED" },
+                    new() { ServerId = 2, ServerName = "srv-b", Edition = "Standard Edition (64-bit)", ProductVersion = "15.0.4345.5 - CU25", HostOsVersion = "Windows Server 2022 Standard (10.0.20348)", EngineEdition = 3, HardwareUnavailableReason = ServerHardwareScope.InventoryHardwareNote },
+                };
+                ClippedTextProbe.Settle(window);
+
+                var found = new List<string>();
+                var note = ColumnHeaded(grid, "Hardware Note");
+                if (note.Visibility != Visibility.Visible)
+                {
+                    found.Add("the Hardware Note column is not on screen with a row that carries a note");
+                    return found;
+                }
+
+                if (Math.Abs(note.ActualWidth - HardwareNoteWidth) > 1)
+                {
+                    found.Add($"the Hardware Note column is {note.ActualWidth:F0} px wide, not its {HardwareNoteWidth} px");
+                }
+
+                var block = ClippedTextProbe.Descendants(grid).OfType<TextBlock>().FirstOrDefault(b => b.Text == ServerHardwareScope.InventoryHardwareNote);
+                if (block is null)
+                {
+                    found.Add("the note cell was not realized");
+                }
+                else
+                {
+                    if (ClippedTextProbe.NaturalWidth(block) <= HardwareNoteWidth)
+                    {
+                        found.Add($"the note fits {HardwareNoteWidth} px, so nothing is under test");
+                    }
+
+                    if (block.TextTrimming != TextTrimming.CharacterEllipsis)
+                    {
+                        found.Add($"the note trims with {block.TextTrimming}, not an ellipsis");
+                    }
+
+                    if (!Equals(block.ToolTip, ServerHardwareScope.InventoryHardwareNote))
+                    {
+                        found.Add("the note's tooltip does not carry the whole note");
+                    }
+                }
+
+                /* A reader drags the column open to read the sentence: the width is not capped. */
+                note.Width = new DataGridLength(600);
+                ClippedTextProbe.Settle(window);
+                if (Math.Abs(note.ActualWidth - 600) > 1)
+                {
+                    found.Add($"the Hardware Note column is {note.ActualWidth:F0} px wide after it was set to 600 px");
                 }
 
                 return found;

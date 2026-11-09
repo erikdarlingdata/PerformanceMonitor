@@ -1065,9 +1065,10 @@
                                     <!-- #1591: non-alarming note when the collector's sys.dm_os_sys_info read was denied
                                          (e.g. an Azure SQL DB login without VIEW DATABASE STATE). Empty for servers whose
                                          hardware inventory is available. Mirrors Lite's Hardware Note column.
-                                         #8474: sized to its content up to 220, so a column blank on every row takes no
-                                         width from the text columns beside it. -->
-                                    <DataGridTextColumn Binding="{Binding HardwareUnavailableReason}" Width="Auto" MaxWidth="220">
+                                         #8474: on screen only while a bound row carries a note (ShowHardwareNoteColumnWhenAnyRowHasANote
+                                         collapses it otherwise), so a column blank on every server takes no width from the text
+                                         columns beside it. No maximum: a reader drags it open to read a whole note. -->
+                                    <DataGridTextColumn x:Name="FinOpsHardwareNoteColumn" Binding="{Binding HardwareUnavailableReason}" Width="220">
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HardwareUnavailableReason" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Hardware Note" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle>
                                             <Style TargetType="TextBlock">

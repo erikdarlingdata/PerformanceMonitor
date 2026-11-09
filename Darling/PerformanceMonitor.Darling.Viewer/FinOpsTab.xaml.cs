@@ -56,9 +56,20 @@ public partial class FinOpsTab : UserControl
     /// </summary>
     public event Action<string, string, string?>? PlanRequested;
 
+    /// <summary>#8474: the Hardware Note column is on screen only while a bound inventory row carries a note (a server whose hardware
+    /// read was denied), so a column blank on every server takes no width from the text columns beside it. The rows are re-read on every
+    /// reload and filter, because each one binds the grid again.</summary>
+    private void ShowHardwareNoteColumnWhenAnyRowHasANote()
+    {
+        var any = FinOpsServerInventoryDataGrid.Items.OfType<ServerPropertyRow>().Any(r => !string.IsNullOrEmpty(r.HardwareUnavailableReason));
+        FinOpsHardwareNoteColumn.Visibility = any ? Visibility.Visible : Visibility.Collapsed;
+    }
+
     public FinOpsTab()
     {
         InitializeComponent();
+        ((System.Collections.Specialized.INotifyCollectionChanged)FinOpsServerInventoryDataGrid.Items).CollectionChanged += (_, _) => ShowHardwareNoteColumnWhenAnyRowHasANote();
+        ShowHardwareNoteColumnWhenAnyRowHasANote();
         DataGridNumberHeaders.Apply(this); // #8223: a number column's header on the same edge as its values
         ViewerChartCards.Attach(this); // #8151: "0 throughout" in a card whose chart plots only zeros
 

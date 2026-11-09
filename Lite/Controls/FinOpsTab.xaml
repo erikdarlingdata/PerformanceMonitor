@@ -3149,9 +3149,10 @@
                             </DataGridTextColumn>
                             <!-- Non-alarming note when the sys.dm_os_sys_info hardware read was denied (e.g. Azure SQL DB
                                  login without VIEW DATABASE STATE). Empty for servers whose hardware inventory is available. (#1535) -->
-                            <!-- #8474: sized to its content up to 220, so a column blank on every row takes no width from the text
-                                 columns beside it. -->
-                            <DataGridTextColumn Binding="{Binding HardwareUnavailableReason}" Width="Auto" MaxWidth="220">
+                            <!-- #8474: on screen only while a bound row carries a note (ShowHardwareNoteColumnWhenAnyRowHasANote collapses it
+                                 otherwise), so a column blank on every server takes no width from the text columns beside it. No maximum: a
+                                 reader drags it open to read a whole note. -->
+                            <DataGridTextColumn x:Name="HardwareNoteColumn" Binding="{Binding HardwareUnavailableReason}" Width="220">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HardwareUnavailableReason" Click="FilterButton_Click" Margin="0,0,4,0"/>

@@ -81,9 +81,20 @@ public partial class FinOpsTab : UserControl
        _perfmonPickerGen); this is that idiom with the key spelled once. */
     private readonly ScopedLoadGenerations _loads = new();
 
+    /// <summary>#8474: the Hardware Note column is on screen only while a bound inventory row carries a note (a server whose hardware
+    /// read was denied), so a column blank on every server takes no width from the text columns beside it. The rows are re-read on every
+    /// reload and filter, because each one binds the grid again.</summary>
+    private void ShowHardwareNoteColumnWhenAnyRowHasANote()
+    {
+        var any = ServerInventoryDataGrid.Items.OfType<ServerPropertyRow>().Any(r => !string.IsNullOrEmpty(r.HardwareUnavailableReason));
+        HardwareNoteColumn.Visibility = any ? Visibility.Visible : Visibility.Collapsed;
+    }
+
     public FinOpsTab()
     {
         InitializeComponent();
+        ((System.Collections.Specialized.INotifyCollectionChanged)ServerInventoryDataGrid.Items).CollectionChanged += (_, _) => ShowHardwareNoteColumnWhenAnyRowHasANote();
+        ShowHardwareNoteColumnWhenAnyRowHasANote();
         DataGridNumberHeaders.Apply(this); // #8223: a number column's header on the same edge as its values
         /* #5562: every list opened on the last 24 hours (1d); the heatmap on 30 days (1mo). */
         /* R5: the lists and the heatmap read "hours back from now", so each picker is rolling only (the heatmap in whole days). */
