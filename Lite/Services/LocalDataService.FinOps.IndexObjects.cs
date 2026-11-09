@@ -510,6 +510,30 @@ ORDER BY lower(database_name), database_name";
         var objects = new List<ObjectSizeGrowthRow>();
         var samples = new List<FinOpsObjectDaySample>();
 
+        /* The window's newest sample, read first so the days table runs through it: the collector can stamp a sample after this
+           read took its clock, and a sample at or after the last day's end would otherwise match no day and leave the heatmap while
+           the summary's bounds already count it. A trailing day with no sample adds no column. */
+        DateTime? latestTime;
+        using (var boundsCommand = connection.CreateCommand())
+        {
+            boundsCommand.CommandText = @"
+SELECT MAX(collection_time)
+FROM v_index_object_stats
+WHERE server_id = $1 AND database_name = $2 AND collection_time >= $3";
+            boundsCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
+            boundsCommand.Parameters.Add(new DuckDBParameter { Value = databaseName });
+            boundsCommand.Parameters.Add(new DuckDBParameter { Value = windowStart });
+            latestTime = await boundsCommand.ExecuteScalarAsync() is DateTime latest ? latest : null;
+        }
+
+        /* No row in the window: both reads below would match nothing. */
+        if (latestTime is not DateTime newest)
+        {
+            return (objects, samples);
+        }
+
+        var daysEnd = newest > nowUtc ? newest : nowUtc;
+
         // Query 1 — ranked top-N summary (drives the companion grid).
         using (var command = connection.CreateCommand())
         {
@@ -607,7 +631,7 @@ ranked AS (
     LIMIT {topN}
 ),
 days(day, start_utc, end_utc) AS (
-    VALUES {DayBucketValues(DisplayDays(windowStart, nowUtc, dayZone))}
+    VALUES {DayBucketValues(DisplayDays(windowStart, daysEnd, dayZone))}
 )
 SELECT
     ios.schema_name,
