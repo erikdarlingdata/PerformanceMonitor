@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.ExceptionServices;
 using System.Text;
@@ -57,14 +58,29 @@ internal sealed class PgStatementTableAttempt
     /// <summary>How many eviction passes ran inside the body: 0 where the counter is unavailable.</summary>
     public long PassesInside => (DeallocAtEnd ?? 0) - (DeallocAtStart ?? 0);
 
-    /// <summary>Called by the body between its statements and its first read. On a forcing run, fills the table until a pass runs.</summary>
+    /// <summary>Called by the body between its statements and its first read. On a forcing run, fills the table until eviction passes have taken the database's entries run once, the body's own among them.</summary>
     public async Task BeforeReadAsync(CancellationToken ct)
     {
         if (_forcePass)
         {
-            await PgStatementTable.ForcePassAsync(Connection, ct);
+            try
+            {
+                await PgStatementTable.ForcePassAsync(Connection, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException and not Xunit.Sdk.SkipException)
+            {
+                ForcingFailed = true;
+                throw;
+            }
         }
     }
+
+    /// <summary>
+    /// True when the forcing fill itself failed inside this run: the module is not tracking the session's statements, or a
+    /// table's worth of passes left the database's entries run once in place. That failure is not the reads' doing, and the
+    /// passes the fill brought on are no reason to void the run and go round again.
+    /// </summary>
+    internal bool ForcingFailed { get; private set; }
 
     internal void Finish(long? deallocAtEnd) => DeallocAtEnd = deallocAtEnd;
 }
@@ -125,7 +141,7 @@ internal static class PgStatementTable
             {
                 await body(attempt);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException and not Xunit.Sdk.SkipException)
+            catch (Exception ex) when (ex is not OperationCanceledException and not Xunit.Sdk.SkipException && !attempt.ForcingFailed)
             {
                 /* The reads look for the entries the statements made; a pass inside the run takes them, and the reads fail
                    on what is left. The counter, read next, says whether this failure is the pass's or the body's own. */
@@ -235,12 +251,16 @@ internal static class PgStatementTable
     }
 
     /// <summary>
-    /// Fills <c>pg_stat_statements</c> with distinct statement shapes until the eviction counter moves. The shapes go in
-    /// batches of <see cref="FillBatch"/>, and each batch runs twice: a pass removes the entries with the least usage, an
-    /// entry run once has less than one run twice, so the pass the fill brings on takes the entries run once first (a body's
-    /// own, and at most one batch of the fill) and leaves the rest of the fill in place. Skips where the counter is
-    /// unavailable or the table is wider than <see cref="MaxEntriesTheFillerCanFill"/>, and fails if the whole table's
-    /// worth of shapes moved nothing (the module is not tracking this session's statements).
+    /// Fills <c>pg_stat_statements</c> with distinct statement shapes until eviction passes have taken every entry run once
+    /// in the connection's database, the body's own among them, read back after each pass. The shapes go in batches of
+    /// <see cref="FillBatch"/>, and each batch runs twice: a pass removes the entries with the least usage, an entry run once
+    /// has less than one run twice, so each pass the fill brings on takes entries run once (a body's own, and at most one
+    /// batch of the fill) and leaves the rest of the fill in place. One pass is not enough on its own: the module lowers the
+    /// usage of every entry a pass leaves, so entries run once before an earlier pass (another database's, or a migration's)
+    /// sort below the body's and go first, and with more of them than one pass removes the body's own entry stays. The fill
+    /// goes on until the database's entries run once are gone, and a whole table's worth of passes that leave one in place is
+    /// a failure. Skips where the counter is unavailable or the table is wider than <see cref="MaxEntriesTheFillerCanFill"/>,
+    /// and fails if the shapes a pass needs moved nothing (the module is not tracking this session's statements).
     /// </summary>
     public static async Task ForcePassAsync(NpgsqlConnection connection, CancellationToken ct)
     {
@@ -250,26 +270,80 @@ internal static class PgStatementTable
         Assert.SkipWhen(max > MaxEntriesTheFillerCanFill,
             $"pg_stat_statements.max is {max}, more than the {MaxEntriesTheFillerCanFill} the forcing test fills.");
 
-        var side = (int)Math.Ceiling(Math.Sqrt((max + 1) / 8.0)) + 1;
+        /* A pass removes five percent of the table, so this many passes take every entry that was in it when the fill began;
+           the family of shapes is sized for the table plus what each of those passes needs to come on. */
+        var passSize = Math.Max(1, max * 5 / 100);
+        var maxPasses = (max + passSize - 1) / passSize + 1;
+        var shapes = max + FillBatch + maxPasses * (passSize + FillBatch);
+        var side = (int)Math.Ceiling(Math.Sqrt(shapes / 8.0)) + 1;
         var next = 0;
-        while (next <= max + FillBatch)
+        var dealloc = start;
+        for (var passes = 1; ; passes++)
         {
-            var batch = new StringBuilder();
-            for (var i = 0; i < FillBatch; i++)
+            var before = dealloc;
+            var from = next;
+            while (dealloc == before)
             {
-                batch.Append(Shape(next++, side)).Append(';');
+                Assert.True(next < shapes,
+                    $"{next - from} new statement shapes moved pg_stat_statements_info.dealloc from {before} on a table of {max} entries: the module is not tracking this session's statements.");
+                var batch = new StringBuilder();
+                for (var i = 0; i < FillBatch; i++)
+                {
+                    batch.Append(Shape(next++, side)).Append(';');
+                }
+
+                var statements = batch.ToString();
+                await DarlingMcpTestData.ExecAsync(connection, ct, statements);
+                await DarlingMcpTestData.ExecAsync(connection, ct, statements);
+                dealloc = await DeallocAsync(connection, ct);
+                if (dealloc != before)
+                {
+                    /* The pass fired inside this batch and took some of its shapes: those run once by then, which the rest
+                       of the second run made entries run once again, and on a table with few entries run once some run
+                       twice, which are gone. Two more runs of the batch put every shape of it back with the rest of the fill,
+                       at two runs or more, so the count below is of the database's other entries run once, the body's own
+                       among them. The table has a pass's worth of room, so these runs bring no pass on. */
+                    await DarlingMcpTestData.ExecAsync(connection, ct, statements);
+                    await DarlingMcpTestData.ExecAsync(connection, ct, statements);
+                }
             }
 
-            var statements = batch.ToString();
-            await DarlingMcpTestData.ExecAsync(connection, ct, statements);
-            await DarlingMcpTestData.ExecAsync(connection, ct, statements);
-            if (await DeallocAsync(connection, ct) != start)
+            var left = await EntriesRunOnceAsync(connection, ct);
+            if (left.Count == 0)
             {
                 return;
             }
+
+            Assert.True(passes < maxPasses,
+                $"{passes} eviction passes (dealloc {start} -> {dealloc}) left {left.Count} entries run once in this database in place on a table of {max} entries: "
+                + string.Join(" | ", left.Take(5)));
+        }
+    }
+
+    /// <summary>
+    /// The entries run once the connection's database has in the table, this read's own aside: the entries a pass takes
+    /// first, a body's own among them. Each as the first 120 characters of its text. Empty where this database has no
+    /// <c>pg_stat_statements</c> view.
+    /// </summary>
+    private static async Task<IReadOnlyList<string>> EntriesRunOnceAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var texts = new List<string>();
+        if (await ViewSchemaAsync(connection, "pg_stat_statements", ct) is not string schema)
+        {
+            return texts;
         }
 
-        Assert.Fail($"{next} new statement shapes moved pg_stat_statements_info.dealloc from {start} on a table of {max} entries: the module is not tracking this session's statements.");
+        await using var command = new NpgsqlCommand(
+            "SELECT left(query, 120) AS pgss_entries_run_once FROM " + Quote(schema) + ".pg_stat_statements "
+            + "WHERE dbid = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()) AND calls = 1 "
+            + "AND query NOT LIKE '%pgss\\_entries\\_run\\_once%'", connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            texts.Add(reader.GetString(0));
+        }
+
+        return texts;
     }
 
     /// <summary><c>pg_stat_statements.max</c>, a server setting readable from any database once the library is preloaded.</summary>

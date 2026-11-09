@@ -23,8 +23,14 @@ namespace Darling.Tests;
 /// store. The hourly sweep now writes a catalog estimate (<c>relpages</c> times the block size) marked
 /// <c>size_estimated = true</c>, and one sweep a day (the first without an exact row in the last
 /// <see cref="StoreSelfMetrics.ExactSizeIntervalHours"/> hours, the same decision #5857 made for hypertables) writes the exact
-/// figure. Each test mints its own scratch store (#1776 own-store).
+/// figure. Each test mints its own scratch store.
 /// </summary>
+/* pg-cluster-roles, not the parallel own-store shape: each counting body runs three self-metrics sweeps and the catch-all
+   checks, and counts the sweep's pg_database_size call back from the cluster-wide pg_stat_statements across all of it, the
+   longest window of the classes that count their own calls. In the parallel collections another session's eviction pass
+   can land in every run the bracket gives such a body. The collection runs alone, after the parallel collections, so
+   nothing else moves the counter under the bracket. The tests still mint their own scratch stores through ScratchPostgres. */
+[Collection("pg-cluster-roles")]
 public sealed class StoreDatabaseSizeEstimateLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
