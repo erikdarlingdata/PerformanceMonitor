@@ -76,7 +76,7 @@ internal static class PgStatementTable
     private const int MaxEntriesTheFillerCanFill = 20_000;
 
     /// <summary>The free slots a run secures before its statements: the bodies add a few dozen entries at most, and the margin covers what a background worker on the cluster runs meanwhile.</summary>
-    private const int Headroom = 64;
+    internal const int Headroom = 64;
 
     /// <summary>The runs a body gets before a pass inside every one of them is a failure.</summary>
     private const int MaxAttempts = 5;
@@ -86,7 +86,7 @@ internal static class PgStatementTable
     /// entries of the default 5000), so at the pass the entries run once are a body's own plus part of one batch, and the
     /// pass has room for all of them.
     /// </summary>
-    private const int FillBatch = 100;
+    internal const int FillBatch = 100;
 
     /// <summary>
     /// Runs <paramref name="body"/> until no eviction pass lands inside it, up to <see cref="MaxAttempts"/> times. Before
@@ -99,14 +99,25 @@ internal static class PgStatementTable
     /// <see cref="PgStatementTableAttempt.PassesInside"/> is 0 unless every run had a pass inside it; when the last of
     /// those runs failed as well, fails with the pass count and the reads' failure.
     /// </summary>
-    public static async Task<PgStatementTableAttempt> RunAsync(
+    public static Task<PgStatementTableAttempt> RunAsync(
         NpgsqlConnection connection, CancellationToken ct, Func<PgStatementTableAttempt, Task> body, bool forcePass = false)
+        => RunAsync(connection, ct, body, forcePass, EnsureHeadroomAsync, DeallocAsync);
+
+    /// <summary>
+    /// <see cref="RunAsync(NpgsqlConnection, CancellationToken, Func{PgStatementTableAttempt, Task}, bool)"/> with the two
+    /// reads it makes around the body supplied: <paramref name="ensureHeadroom"/> runs before each run and
+    /// <paramref name="dealloc"/> reads the counter before and after it. A test supplies reads of its own to drive the
+    /// run's own logic with no server behind the connection.
+    /// </summary>
+    internal static async Task<PgStatementTableAttempt> RunAsync(
+        NpgsqlConnection connection, CancellationToken ct, Func<PgStatementTableAttempt, Task> body, bool forcePass,
+        Func<NpgsqlConnection, CancellationToken, Task> ensureHeadroom, Func<NpgsqlConnection, CancellationToken, Task<long?>> dealloc)
     {
         PgStatementTableAttempt attempt;
         for (var number = 1; ; number++)
         {
-            await EnsureHeadroomAsync(connection, ct);
-            attempt = new PgStatementTableAttempt(connection, number, forcePass && number == 1, await DeallocAsync(connection, ct));
+            await ensureHeadroom(connection, ct);
+            attempt = new PgStatementTableAttempt(connection, number, forcePass && number == 1, await dealloc(connection, ct));
             ExceptionDispatchInfo? failure = null;
             try
             {
@@ -119,7 +130,7 @@ internal static class PgStatementTable
                 failure = ExceptionDispatchInfo.Capture(ex);
             }
 
-            attempt.Finish(await DeallocAsync(connection, ct));
+            attempt.Finish(await dealloc(connection, ct));
             if (attempt.PassesInside == 0)
             {
                 failure?.Throw();

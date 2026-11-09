@@ -18,7 +18,8 @@ namespace Darling.Tests;
 /// #8400: the run <see cref="PgStatementTable.RunAsync"/> returns is one the eviction pass missed. The pass a forcing run
 /// brings on between a body's statements and its first read takes the entries run once first, the body's own among them,
 /// so the body's read of its own entry fails inside the run. That failure is the pass's doing: the run is voided, the body
-/// runs again, and the run returned read the entry its statement made.
+/// runs again, and the run returned read the entry its statement made. The read's count on each run is recorded, so a
+/// pass that left the body's entry in place fails the test instead of passing it on a voided run that finished.
 /// </summary>
 /* pg-cluster-roles, not live-postgres: the test resets the cluster-wide pg_stat_statements first, so that every entry in
    the table at the forced pass is the test's own and the pass takes the body's entry for certain. The collection runs
@@ -49,7 +50,15 @@ public sealed class PgStatementTableLiveTests
             Assert.Skip("pg_stat_statements is not available on this server: " + ex.Message);
         }
 
+        /* The pass takes the least-used five percent of the table, the entries run once before any run twice. At the pass a
+           forcing run brings on, the entries run once are the body's own and part of one fill batch; with the pass bigger
+           than that, the body's own is among the entries it takes for certain, and otherwise only sometimes. */
+        var max = await PgStatementTable.MaxEntriesAsync(connection, ct);
+        Assert.SkipWhen(max * 5 / 100 < PgStatementTable.FillBatch + PgStatementTable.Headroom,
+            $"pg_stat_statements.max is {max}: a pass takes {max * 5 / 100} entries, not comfortably more than the {PgStatementTable.FillBatch} shapes of a fill batch, so the forced pass does not take the body's own entry for certain.");
+
         var runs = new List<int>();
+        var reads = new List<int>();
         var run = await PgStatementTable.RunAsync(connection, ct, async pass =>
         {
             runs.Add(pass.Number);
@@ -70,11 +79,15 @@ public sealed class PgStatementTableLiveTests
             }
 
             /* The read of the entry the statement above made; on the run the pass landed in, the entry is gone. */
+            reads.Add(texts.Count);
             Assert.Single(texts);
         }, forcePass: true);
 
         PgStatementTable.AssertNoPassInside(run);
         Assert.Equal(new[] { 1, 2 }, runs);
+        /* The first run's read found nothing, so the second run is the retry after a read that failed; a first read that
+           found the entry would mean the pass missed it, and the run was voided for the pass alone. */
+        Assert.Equal(new[] { 0, 1 }, reads);
         Assert.Equal(2, run.Number);
     }
 }
