@@ -502,7 +502,9 @@ public partial class FinOpsTab : UserControl
                 dbSizeSummary = await Task.Run(() => _dataService.GetDatabaseSizeSummaryAsync(serverId, 10, sizeChartFilter));
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
 
-                provisioningTrend = await Task.Run(() => _dataService.GetProvisioningTrendAsync(serverId));
+                var dayZone = await SelectedServerDayZoneAsync(serverId);
+                if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
+                provisioningTrend = await Task.Run(() => _dataService.GetProvisioningTrendAsync(serverId, dayZone));
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
             }
 
@@ -701,6 +703,20 @@ public partial class FinOpsTab : UserControl
         {
             AppLogger.Error("FinOps", $"Failed to load database resources: {ex.Message}", ex);
         }
+    }
+
+    /// <summary>
+    /// The zone the selected server's days are counted in for the 7-Day Provisioning Trend and Memory Grant Efficiency: the
+    /// selected time display on that server's clock (its own collected clock, else its open tab's, else the machine's), the rule
+    /// the Application Connections rows and the PVS trend use. The open tab is asked here, on the UI thread, because the tabs are
+    /// UI objects.
+    /// </summary>
+    private async System.Threading.Tasks.Task<TimeZoneInfo> SelectedServerDayZoneAsync(int serverId)
+    {
+        var openTab = _openTabClock.Invoke(serverId);
+        var dataService = _dataService!;
+        var collected = await Task.Run(() => dataService.GetServerClockAsync(serverId));
+        return ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, ServerTimeHelper.ClockForServer(collected, openTab));
     }
 
     private async System.Threading.Tasks.Task LoadApplicationConnectionsAsync(int serverId)
@@ -1173,7 +1189,9 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await Task.Run(() => _dataService.GetMemoryGrantEfficiencyAsync(serverId));
+            var dayZone = await SelectedServerDayZoneAsync(serverId);
+            if (_loads.Superseded(nameof(LoadMemoryGrantEfficiencyAsync), gen)) return;
+            var data = await Task.Run(() => _dataService.GetMemoryGrantEfficiencyAsync(serverId, dayZone: dayZone));
             if (_loads.Superseded(nameof(LoadMemoryGrantEfficiencyAsync), gen)) return;
             _memoryGrantFilterMgr!.UpdateData(data);
             MemoryGrantEfficiencyNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -1227,6 +1245,7 @@ public partial class FinOpsTab : UserControl
         _pvsStatsFilterMgr?.UpdateData(new List<PvsStatsRow>());
         _storageGrowthFilterMgr?.UpdateData(new List<StorageGrowthRow>());
         _indexLockingFilterMgr?.UpdateData(new List<IndexLockingRow>());
+        IndexLockingDataGrid.HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden;
         _idleDbsFilterMgr?.UpdateData(new List<IdleDatabaseRow>());
         _tempdbFilterMgr?.UpdateData(new List<TempdbSummaryRow>());
         _waitCategoryFilterMgr?.UpdateData(new List<WaitCategorySummaryRow>());

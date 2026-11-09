@@ -329,13 +329,13 @@
                                     </TextBlock.Style>
                                 </TextBlock>
                             </Grid>
-                            <ListBox Grid.Row="3" x:Name="WaitTypesList" AutomationProperties.AutomationId="WaitStatsTypeList" Background="Transparent" BorderThickness="0">
+                            <ListBox Grid.Row="3" x:Name="WaitTypesList" AutomationProperties.AutomationId="WaitStatsTypeList" Background="Transparent" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                                   Checked="WaitType_CheckChanged" Unchecked="WaitType_CheckChanged"
                                                   Foreground="{DynamicResource ForegroundBrush}" FontSize="11">
-                                            <TextBlock Text="{Binding DisplayName}"/>
+                                            <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" ToolTip="{Binding DisplayName}"/>
                                         </CheckBox>
                                     </DataTemplate>
                                 </ListBox.ItemTemplate>
@@ -3086,13 +3086,21 @@
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                             </StackPanel>
                             <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Grid.Row="1"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
-                            <Grid ui:ChartGroup.IsAligned="True" x:Name="ContentionEventsCharts" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
+                            <!-- Each row is its own aligned group. A group's plots share one rectangle, and the Sick Spinlocks and CPU Comparison legends sit
+                                 under their plots, so in one group of four the two counter charts above them would carry a legend-high band of nothing
+                                 under their axes. -->
+                            <Grid x:Name="ContentionEventsCharts" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
                                 <Grid.RowDefinitions><RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/><RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/></Grid.RowDefinitions>
-                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                <Border Grid.Row="0" Grid.Column="0" Margin="2"><ui:ChartPanel Title="Non-Yielding Tasks"><ScottPlot:WpfPlot x:Name="NonYieldingTasksChart"/></ui:ChartPanel></Border>
-                                <Border Grid.Row="0" Grid.Column="1" Margin="2"><ui:ChartPanel Title="Latch Warnings"><ScottPlot:WpfPlot x:Name="LatchWarningsChart"/></ui:ChartPanel></Border>
-                                <Border Grid.Row="1" Grid.Column="0" Margin="2"><ui:ChartPanel Title="Sick Spinlocks"><ScottPlot:WpfPlot x:Name="SickSpinlocksChart"/></ui:ChartPanel></Border>
-                                <Border Grid.Row="1" Grid.Column="1" Margin="2"><ui:ChartPanel Title="CPU Comparison"><ScottPlot:WpfPlot x:Name="CpuComparisonChart"/></ui:ChartPanel></Border>
+                                <Grid Grid.Row="0" ui:ChartGroup.IsAligned="True">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <Border Grid.Column="0" Margin="2"><ui:ChartPanel Title="Non-Yielding Tasks"><ScottPlot:WpfPlot x:Name="NonYieldingTasksChart"/></ui:ChartPanel></Border>
+                                    <Border Grid.Column="1" Margin="2"><ui:ChartPanel Title="Latch Warnings"><ScottPlot:WpfPlot x:Name="LatchWarningsChart"/></ui:ChartPanel></Border>
+                                </Grid>
+                                <Grid Grid.Row="1" ui:ChartGroup.IsAligned="True">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <Border Grid.Column="0" Margin="2"><ui:ChartPanel Title="Sick Spinlocks"><ScottPlot:WpfPlot x:Name="SickSpinlocksChart"/></ui:ChartPanel></Border>
+                                    <Border Grid.Column="1" Margin="2"><ui:ChartPanel Title="CPU Comparison"><ScottPlot:WpfPlot x:Name="CpuComparisonChart"/></ui:ChartPanel></Border>
+                                </Grid>
                             </Grid></ScrollViewer>
                             <TextBlock Style="{DynamicResource EmptyHint}" Grid.Row="1" x:Name="ContentionEventsNoDataMessage" Visibility="Collapsed"/>
                         </Grid>
