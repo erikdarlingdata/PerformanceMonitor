@@ -399,6 +399,9 @@ try {
       const rip = await load("refresh-in-place.js");
       const panels = await load("panels.js");
       const util = await load("util.js");
+      const busyRetryTimers = [];
+      util.busyRetryClock.setTimeout = (fn, ms) => { const timer = { fn, ms, cleared: false }; busyRetryTimers.push(timer); return timer; };
+      util.busyRetryClock.clearTimeout = (timer) => { if (timer) timer.cleared = true; };
       const gate = (start) => start(); /* a saved view's read gate with every slot free */
       const desc = { read: "get_stub", params: { server: "SRV1" }, title: "Stub panel", render: (d) => util.el("div", { class: "stub-result", text: d.value }) };
       const live = new FakeNode("div"); live.className = "panel-grid"; live.isRoot = true;
@@ -413,7 +416,10 @@ try {
       out.samePanel = live.children[0] === livePanel;
       out.textDuringWait = text(livePanel);
       out.inFlightDuringWait = util.hasInFlightReads();
-      await new Promise((r) => setTimeout(r, 1300));
+      /* #8417: the Retry-After wait runs on util's busyRetryClock, which this scenario put its own timer under before the refused read; the
+         harness fires it here, in place of waiting on wall-clock time. */
+      for (const timer of busyRetryTimers.splice(0)) if (!timer.cleared) timer.fn();
+      await settle();
       out.textAfter = text(livePanel);
       out.inFlightAfter = util.hasInFlightReads();
       out.loadingAfter = loadingStrips(live);

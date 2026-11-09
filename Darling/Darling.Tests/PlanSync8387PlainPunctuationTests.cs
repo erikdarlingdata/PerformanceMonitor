@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// name-and-figure separators keep their dash, as PerformanceStudio's viewer prints them: the "Wait Stats — N ms
 /// total" header and the missing index row's " — Impact: " lead.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class PlanSync8387PlainPunctuationTests
 {
     private const string EmDash = "—";

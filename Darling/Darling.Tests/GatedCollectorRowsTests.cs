@@ -225,18 +225,19 @@ public sealed class GatedCollectorRowsLiveTests
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task LogAsync(NpgsqlConnection c, int id, string server, string collector, int minutesAgo, CancellationToken ct)
+    private static async Task LogAsync(NpgsqlConnection c, int id, string server, string collector, int minutesAgo, CancellationToken ct, int rows = 10)
     {
         await using var cmd = new NpgsqlCommand(
             """
             INSERT INTO collection_log (log_id, collection_time, server_id, server_name, collector_name, status, duration_ms, rows_collected)
-            VALUES ($1, $2, $3, $4, $5, 'SUCCESS', 100, 10)
+            VALUES ($1, $2, $3, $4, $5, 'SUCCESS', 100, $6)
             """, c);
         cmd.Parameters.AddWithValue(CollectionIdGenerator.Next());
         cmd.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-minutesAgo), DateTimeKind.Unspecified));
         cmd.Parameters.AddWithValue(id);
         cmd.Parameters.AddWithValue(server);
         cmd.Parameters.AddWithValue(collector);
+        cmd.Parameters.AddWithValue(rows);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -643,6 +644,46 @@ public sealed class GatedCollectorRowsLiveTests
                 var row = refreshing.RootElement.GetProperty("collectors").EnumerateArray().Single(r => r.GetProperty("collector").GetString() == "query_store_hints");
                 Assert.Equal("not_collected", row.GetProperty("status").GetString());
             }
+        });
+    }
+
+    [Fact]
+    public async Task AFrozenCaptureOnAReadableStandby_WhoseRoleCarriesNoAvailabilityGroupAnswer_ListsTheHintsRowAsNotCollected_ForOneServerAndAcrossTheFleet()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* A readable standby outside any availability group: query_store_health disabled, its capture frozen weeks ago with every
+               database a readable secondary, and no Availability Group role in server_properties. The capture is the only evidence,
+               the Query Store reads judge it, and the gate holds the collector, so the row says so: for the server alone (which has a
+               logged run in the window) and under the fleet form (where a server with no run is asked). */
+            var old = TimeSpan.FromDays(19);
+            const int rowId = 524_926;
+            await RegisterAsync(connection, rowId, "qs-standby", MonitoredEngineKind.SqlServer, null, ct);
+            await LogAsync(connection, rowId, "qs-standby", "query_store_hints", 5, ct);
+            await LogAsync(connection, rowId, "qs-standby", "query_store", 2, ct, rows: 0);
+            await CaptureAsync(connection, rowId, "qs-standby", DateTime.UtcNow - old, "db1", 8, ct);
+            await CaptureAsync(connection, rowId, "qs-standby", DateTime.UtcNow - old, "db2", 8, ct);
+            await DisableAsync(connection, rowId, "query_store_health", ct);
+
+            const int fleetId = 524_927;
+            await RegisterAsync(connection, fleetId, "qs-standby-fleet", MonitoredEngineKind.SqlServer, null, ct);
+            await LogAsync(connection, fleetId, "qs-standby-fleet", "query_store", 2, ct, rows: 0);
+            await CaptureAsync(connection, fleetId, "qs-standby-fleet", DateTime.UtcNow - old, "db1", 8, ct);
+            await DisableAsync(connection, fleetId, "query_store_health", ct);
+
+            var (_, single) = await HealthAsync(postgres, "qs-standby", false, ct);
+            using (single)
+            {
+                var row = single.RootElement.GetProperty("collectors").EnumerateArray().Single(r => r.GetProperty("collector").GetString() == "query_store_hints");
+                Assert.Equal("not_collected", row.GetProperty("status").GetString());
+                Assert.Contains("readable secondary", row.GetProperty("message").GetString(), StringComparison.Ordinal);
+            }
+
+            var json = await DarlingMcpDataTools.GetCollectionHealth(postgres, "*", collector_name: "query_store_hints", hours_back: 24, cancellationToken: ct);
+            using var doc = JsonDocument.Parse(json);
+            Assert.DoesNotContain(doc.RootElement.GetProperty("servers").EnumerateArray(), s => s.GetProperty("server_name").GetString() == "qs-standby-fleet");
+            var fleet = Assert.Single(doc.RootElement.GetProperty("not_applicable").EnumerateArray(), s => s.GetProperty("server_name").GetString() == "qs-standby-fleet");
+            Assert.Contains("readable secondary", fleet.GetProperty("reason").GetString(), StringComparison.Ordinal);
         });
     }
 

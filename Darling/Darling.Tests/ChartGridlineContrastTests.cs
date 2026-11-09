@@ -20,6 +20,7 @@ namespace Darling.Tests;
 /// #8266: a chart's gridlines read against the plot in every Viewer theme. A themed chart is rendered and its pixels sampled: the
 /// gridline's contrast against the plot background has a floor Dark's grid clears, and the grid stays quieter than the axis text.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ChartGridlineContrastTests
 {
     /* A 1 px gridline rendered over the plot; Dark's (white at alpha 40 over #111217) measures about 1.57. */

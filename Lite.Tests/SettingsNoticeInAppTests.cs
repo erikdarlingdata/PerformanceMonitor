@@ -25,6 +25,7 @@ namespace PerformanceMonitorLite.Tests;
 /// system theme. Apply Default to All with no server on a custom schedule is one of them, and the one a test can reach with no
 /// server, no SMTP and no webhook: the window the click opens is read while it is up and closed from the dialog's own message loop.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class SettingsNoticeInAppTests
 {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]

@@ -26,6 +26,7 @@ namespace PerformanceMonitorLite.Tests;
 /// server. The alert gate's input is NOT bounded: the item keeps the raw reading in the properties
 /// MainWindow.AlertEngine reads (CpuPercent, TotalCpuPercent, CpuSampleTimeUtc, CpuSampleTime).
 /// </summary>
+[Collection("application-theme")] // #8395: reads a card brush off the STA thread
 public sealed class StaleSqlServerCpuOverviewTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const string ServerName = "TestServer";

@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// header (also with no rows), an empty window shows one muted sentence in the grid area with the slicer band gone, and the Memory
 /// Broker panel does not repeat its tab's name as a title.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerGridPolishTests
 {
     [Theory]

@@ -20,6 +20,7 @@ namespace Darling.Tests;
 /// The in-app message the plan code shows in place of the native "No Plan Available" box: it is drawn from the theme's brushes, it
 /// carries the sentence, and it has one OK button. Built with the Viewer's dark theme merged, the way the apps run it.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class InAppMessageTests
 {
     [Fact]

@@ -30,6 +30,7 @@ namespace Darling.Tests;
 /// the layout of its sibling sub-tabs: a title row with Refresh over a full-width grid whose Broker column fits its names and whose
 /// every column header is named.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerLatchSpinlockPageReachTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

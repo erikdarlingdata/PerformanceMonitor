@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// every theme (#8306). Each sets no colour of its own, so it paints whatever the theme gives a splitter; the test renders the tab on
 /// the tab strip's page colour and reads the handles back.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerFleetSweepsSplitterRenderTests
 {
     public static TheoryData<string> Themes => new() { "Dark", "Light", "CoolBreeze" };

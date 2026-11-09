@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// on screen. A menu separator spans the menu in the theme's brush. Controls are built on the shared STA thread, themed as the
 /// app themes them, shown at 900x600 on a monitor (a popup is placed against the screen) and read from what rendered.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerRangePickerAndMenuAt900Tests
 {
     /// <summary>A Sunday early in a month, so a calendar that hides the days after today shows only two week rows of six.</summary>

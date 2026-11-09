@@ -18,6 +18,7 @@ namespace PerformanceMonitorLite.Tests;
 /// which makes each row taller, so fewer rows fit the 300 px window on every scroll step. The test's grid must not take any
 /// style the process left at application scope: the row count and the names it reads are the same with the theme as without.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public class ScreenReaderRowNamesThemeIsolationTests
 {
     private static readonly Uri DarkTheme = new("pack://application:,,,/PerformanceMonitorLite;component/Themes/DarkTheme.xaml");
