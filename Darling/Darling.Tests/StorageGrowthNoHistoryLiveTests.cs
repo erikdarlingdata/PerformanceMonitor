@@ -221,7 +221,7 @@ public sealed class StorageGrowthNoHistoryLiveTests
 
             /* One snapshot: nothing earlier to compare with. */
             await SeedTableAsync(connection, "OnlyNow", now, 100m, ct);
-            var (single, _) = await viewer.GetObjectGrowthHeatmapDataAsync(ServerId, "drilldb", 30, 20, ct);
+            var (single, _) = await viewer.GetObjectGrowthHeatmapDataAsync(ServerId, "drilldb", TimeZoneInfo.Utc, 30, 20, ct);
             var only = Assert.Single(single);
             Assert.Null(only.Growth30dMb);
             Assert.Null(only.DailyGrowthRateMb);
@@ -231,7 +231,7 @@ public sealed class StorageGrowthNoHistoryLiveTests
             await SeedTableAsync(connection, "Old", now.AddDays(-10), 100m, ct);
             await SeedTableAsync(connection, "Old", now, 150m, ct);
             await SeedTableAsync(connection, "NewTable", now, 30m, ct);
-            var (objects, _) = await viewer.GetObjectGrowthHeatmapDataAsync(ServerId, "drilldb", 30, 20, ct);
+            var (objects, _) = await viewer.GetObjectGrowthHeatmapDataAsync(ServerId, "drilldb", TimeZoneInfo.Utc, 30, 20, ct);
             var old = Assert.Single(objects, o => o.TableName == "Old");
             Assert.Equal(50m, old.Growth30dMb!.Value);
             Assert.Equal(50m / 30m, old.DailyGrowthRateMb!.Value, 4);
