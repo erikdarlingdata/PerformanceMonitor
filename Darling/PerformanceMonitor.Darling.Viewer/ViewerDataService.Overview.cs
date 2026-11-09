@@ -1694,15 +1694,9 @@ public sealed class ServerSummaryItem
         _ => s_unknownBrush,
     };
 
-    /// <summary>Human "N ago" rendering of an elapsed minutes count — verbatim from ServerHealthStatus.</summary>
-    private static string FormatMinutesAgo(int minutes)
-    {
-        if (minutes < 1) return "just now";
-        if (minutes < 60) return $"{minutes}m ago";
-        if (minutes < 1440) return $"{minutes / 60}h ago";   // 24 hours
-        if (minutes < 10080) return $"{minutes / 1440}d ago"; // 7 days
-        return $"{minutes / 10080}w ago";
-    }
+    /// <summary>Human "N ago" rendering of an elapsed minutes count: <see cref="MinutesAgoText"/>, the wording Lite's card
+    /// shares (#8465).</summary>
+    private static string FormatMinutesAgo(int minutes) => MinutesAgoText.Format(minutes);
 
     private static SolidColorBrush MakeBrush(string hex)
     {
