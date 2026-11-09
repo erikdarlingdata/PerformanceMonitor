@@ -81,6 +81,13 @@ internal static class PgStatementTable
     private const int MaxAttempts = 5;
 
     /// <summary>
+    /// The shapes <see cref="ForcePassAsync"/> runs per batch: well under the five percent of the table a pass removes (250
+    /// entries of the default 5000), so at the pass the entries run once are a body's own plus part of one batch, and the
+    /// pass has room for all of them.
+    /// </summary>
+    private const int FillBatch = 100;
+
+    /// <summary>
     /// Runs <paramref name="body"/> until no eviction pass lands inside it, up to <see cref="MaxAttempts"/> times. Before
     /// each run, <see cref="EnsureHeadroomAsync"/> makes sure the table has room for the body's entries, so a pass inside
     /// the run can only come from another session; a run that a pass did land in is voided and the body runs again. With
@@ -178,9 +185,12 @@ internal static class PgStatementTable
     }
 
     /// <summary>
-    /// Fills <c>pg_stat_statements</c> with distinct statement shapes, in batches, until the eviction counter moves. Skips
-    /// where the counter is unavailable or the table is wider than <see cref="MaxEntriesTheFillerCanFill"/>, and fails if
-    /// the whole table's worth of shapes moved nothing (the module is not tracking this session's statements).
+    /// Fills <c>pg_stat_statements</c> with distinct statement shapes until the eviction counter moves. The shapes go in
+    /// batches of <see cref="FillBatch"/>, and each batch runs twice: a pass removes the entries with the least usage, an
+    /// entry run once has less than one run twice, so the pass the fill brings on takes the entries run once first (a body's
+    /// own, and at most one batch of the fill) and leaves the rest of the fill in place. Skips where the counter is
+    /// unavailable or the table is wider than <see cref="MaxEntriesTheFillerCanFill"/>, and fails if the whole table's
+    /// worth of shapes moved nothing (the module is not tracking this session's statements).
     /// </summary>
     public static async Task ForcePassAsync(NpgsqlConnection connection, CancellationToken ct)
     {
@@ -192,15 +202,17 @@ internal static class PgStatementTable
 
         var side = (int)Math.Ceiling(Math.Sqrt((max + 1) / 8.0)) + 1;
         var next = 0;
-        while (next <= max + 400)
+        while (next <= max + FillBatch)
         {
             var batch = new StringBuilder();
-            for (var i = 0; i < 400; i++)
+            for (var i = 0; i < FillBatch; i++)
             {
                 batch.Append(Shape(next++, side)).Append(';');
             }
 
-            await DarlingMcpTestData.ExecAsync(connection, ct, batch.ToString());
+            var statements = batch.ToString();
+            await DarlingMcpTestData.ExecAsync(connection, ct, statements);
+            await DarlingMcpTestData.ExecAsync(connection, ct, statements);
             if (await DeallocAsync(connection, ct) != start)
             {
                 return;

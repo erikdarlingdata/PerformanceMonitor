@@ -183,9 +183,34 @@ public sealed class PgCollectorSearchPathLiveTests
             await using var bracketConnection = new NpgsqlConnection(
                 new NpgsqlConnectionStringBuilder(adminConnectionString!) { Database = Database, Options = "-c search_path=pg_catalog,pg_temp" }.ConnectionString);
             await bracketConnection.OpenAsync(ct);
+            long ownedOid;
+            await using (var oid = new NpgsqlCommand("SELECT d.oid::bigint FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database()", bracketConnection))
+            {
+                ownedOid = (long)(await oid.ExecuteScalarAsync(ct))!;
+            }
+
             var bracket = await PgStatementTable.RunAsync(bracketConnection, ct, async pass =>
             {
+                /* A statement of the scenario's own inside the bracket, before its first read: the entry a forcing run's pass
+                   lands on, and the row the statements collector has to return for this database. The bracket's own reads make
+                   rows for the database too, so the count alone would hold without it. */
+                await DarlingMcpTestData.ExecAsync(bracketConnection, ct, "SELECT 614300 + 1 AS pm6143_marker");
+
                 await pass.BeforeReadAsync(ct);
+
+                long markerQueryId;
+                await using (var marker = new NpgsqlCommand(
+                    "SELECT s.queryid FROM " + ExtSchema + ".pg_stat_statements AS s WHERE s.dbid = (SELECT d.oid FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database()) AND s.query LIKE '%pm6143\\_marker%'",
+                    bracketConnection))
+                {
+                    var value = await marker.ExecuteScalarAsync(ct);
+                    Assert.True(value is long, "the marker statement's entry is not in pg_stat_statements");
+                    markerQueryId = (long)value!;
+                }
+
+                var statementRows = await runner.FetchRowsAsync(PgStatementStatsCollector.Instance, runtime, 60, ct);
+                Assert.Contains(statementRows, r => r.DatabaseId == ownedOid && r.QueryId == markerQueryId);
+
                 counts = new Dictionary<string, int>(StringComparer.Ordinal)
                 {
                     /* Per-database collectors, read here from the configured database (the owned one). */
@@ -202,7 +227,7 @@ public sealed class PgCollectorSearchPathLiveTests
                     ["pg_server_config"] = (await runner.FetchRowsAsync(PgServerConfigCollector.Instance, runtime, 60, ct)).Count,
                     /* Extensions created in a schema whose name needs quoting: named by that schema. */
                     ["pg_buffer_usage"] = (await runner.FetchRowsAsync(PgBufferUsageCollector.Instance, runtime, 60, ct)).Count,
-                    ["pg_statement_stats"] = (await runner.FetchRowsAsync(PgStatementStatsCollector.Instance, runtime, 60, ct)).Count,
+                    ["pg_statement_stats"] = statementRows.Count,
                     /* The scheduled path: per database (the query rebuilt on each database's connection), then server-scoped. */
                     ["run: pg_index_usage_stats"] = (await runner.RunAsync(PgIndexUsageStatsCollector.Instance, runtime, ct)).Rows,
                     ["run: pg_buffer_usage"] = (await runner.RunAsync(PgBufferUsageCollector.Instance, runtime, ct)).Rows,
