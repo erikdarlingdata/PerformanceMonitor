@@ -344,6 +344,97 @@ public sealed partial class ViewerDataService
                 _dataSource, [source], null, startUtc, endUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
     }
 
+    /// <summary>One server's oldest <c>job_history</c> row by collection: an ordered one-row read on <c>idx_job_history_time</c>
+    /// <c>(server_id, collection_time)</c>, as <see cref="ServerDataStart.SqlServerSql"/> does for the charts. $1 server_id.</summary>
+    public const string JobHistoryOldestCollectionServerSql =
+        "SELECT collection_time FROM job_history WHERE server_id = $1 ORDER BY collection_time ASC LIMIT 1";
+
+    /// <summary>The All Servers twin of <see cref="JobHistoryOldestCollectionServerSql"/>: the oldest collection of any server.</summary>
+    public const string JobHistoryOldestCollectionFleetSql =
+        "SELECT collection_time FROM job_history ORDER BY collection_time ASC LIMIT 1";
+
+    /// <summary>One server's oldest run, on the server's wall clock as stored: an ordered one-row read on <c>idx_job_history_server_run</c>
+    /// <c>(server_id, run_datetime)</c>. The caller takes it to UTC on the server's clock, as the grid takes each row. $1 server_id.</summary>
+    public const string JobHistoryOldestRunServerSql =
+        "SELECT server_id, run_datetime FROM job_history WHERE server_id = $1 ORDER BY run_datetime ASC LIMIT 1";
+
+    /// <summary>The All Servers twin of <see cref="JobHistoryOldestRunServerSql"/>: every server's oldest run, each found by its own
+    /// ordered one-row read, on each server's wall clock as stored.</summary>
+    public const string JobHistoryOldestRunsFleetSql = @"
+SELECT s.server_id, r.run_datetime
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT run_datetime FROM job_history WHERE server_id = s.server_id ORDER BY run_datetime ASC LIMIT 1
+) AS r";
+
+    /// <summary>
+    /// The oldest instant the store holds job history from, for the Job History tab's time range picker's "Data starts" note: the
+    /// earlier of the oldest <c>job_history</c> row's collection and the oldest run it holds, for <paramref name="serverId"/>, or for
+    /// every server with a null <paramref name="serverId"/> (the tab's All Servers view), as naive UTC, or null when the scope has no
+    /// row yet. A first collection copies the history msdb already holds, so a run can sit long before the collection that stored
+    /// it, and the grid shows it: the note names that run. The note previews whatever range a reader types, so it cannot take the
+    /// grid's window-bounded coverage probe (<see cref="GetJobHistoryDataStartAsync"/>): a probe answers the oldest row inside the
+    /// window it was asked about, which for a covered window is the window's own start. Each server's oldest run is read on its wall
+    /// clock as stored and taken to UTC here, on the clock the grid takes that server's rows to UTC with
+    /// (<see cref="ViewerTimeHelper.ClockForServerOrMachine"/> over <see cref="GetServerClocksAsync"/>): the clock follows the
+    /// server's time zone across a daylight-saving change, which one fixed offset cannot. Two indexed one-row reads per scope and
+    /// the clocks; the tab caches the answer per scope. A read that fails throws; the caller keeps what it had.
+    /// </summary>
+    public async Task<DateTime?> GetJobHistoryOldestRetainedAsync(int? serverId, CancellationToken cancellationToken = default)
+    {
+        DateTime? oldest = null;
+        await using (var command = _dataSource.CreateCommand(serverId is null ? JobHistoryOldestCollectionFleetSql : JobHistoryOldestCollectionServerSql))
+        {
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            if (serverId is int id)
+            {
+                command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = id });
+            }
+
+            if (await command.ExecuteScalarAsync(cancellationToken) is DateTime collected)
+            {
+                oldest = DateTime.SpecifyKind(collected, DateTimeKind.Utc);
+            }
+        }
+
+        var runs = new List<(int ServerId, DateTime RunWall)>();
+        await using (var command = _dataSource.CreateCommand(serverId is null ? JobHistoryOldestRunsFleetSql : JobHistoryOldestRunServerSql))
+        {
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            if (serverId is int id)
+            {
+                command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = id });
+            }
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (!reader.IsDBNull(1))
+                {
+                    runs.Add((reader.GetInt32(0), reader.GetDateTime(1)));
+                }
+            }
+        }
+
+        if (runs.Count > 0)
+        {
+            var clocks = await GetServerClocksAsync(serverId, cancellationToken);
+            var nowUtc = DateTime.UtcNow;
+            foreach (var (id, runWall) in runs)
+            {
+                var runUtc = DateTime.SpecifyKind(
+                    ViewerTimeHelper.ClockForServerOrMachine(clocks, id, TimeZoneInfo.Local, nowUtc).ToUtc(runWall), DateTimeKind.Utc);
+                if (oldest is null || runUtc < oldest.Value)
+                {
+                    oldest = runUtc;
+                }
+            }
+        }
+
+        return oldest;
+    }
+
     /// <summary>
     /// Each server's clock from its newest <c>server_properties</c> row that has an offset (the time zone id
     /// alongside it where the store has the V134 column, else the offset alone), keyed by server id. A server

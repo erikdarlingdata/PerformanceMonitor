@@ -195,11 +195,15 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
         var ct = TestContext.Current.CancellationToken;
         await using var dataSource = await MigrateAndOpenAsync(connectionString, ct);
 
+        const int serverId = 996236;
+        var storage = "car_expt_srv_" + Guid.NewGuid().ToString("N");
         var prefix = "car_expt_" + Guid.NewGuid().ToString("N") + "_";
-        var definition = DefinitionFor("no_such_server_" + prefix);
+        var definition = DefinitionFor(storage);
         var bodySucceeded = false;
         try
         {
+            await RegisterServerAsync(dataSource, serverId, storage, ct);
+
             // An expiry in the past is refused on create, and nothing is saved.
             var refused = JsonNode.Parse(await DarlingMcpCustomAlertTools.CreateCustomAlertRule(
                 dataSource, prefix + "past", definition, expires_at_utc: DateTime.UtcNow.AddMinutes(-5).ToString("o", CultureInfo.InvariantCulture)))!;
@@ -269,7 +273,7 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
         }
         finally
         {
-            await CleanAsync(connectionString, bodySucceeded, prefix, 0);
+            await CleanAsync(connectionString, bodySucceeded, prefix, serverId);
         }
     }
 
@@ -283,11 +287,15 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
         var ct = TestContext.Current.CancellationToken;
         await using var dataSource = await MigrateAndOpenAsync(connectionString, ct);
 
+        const int serverId = 996237;
+        var storage = "car_expu_srv_" + Guid.NewGuid().ToString("N");
         var prefix = "car_expu_" + Guid.NewGuid().ToString("N") + "_";
-        var definition = DefinitionFor("no_such_server_" + prefix);
+        var definition = DefinitionFor(storage);
         var bodySucceeded = false;
         try
         {
+            await RegisterServerAsync(dataSource, serverId, storage, ct);
+
             var created = JsonNode.Parse(await DarlingMcpCustomAlertTools.CreateCustomAlertRule(
                 dataSource, prefix + "resend", definition,
                 expires_at_utc: DateTime.UtcNow.AddDays(3).ToString("o", CultureInfo.InvariantCulture)))!;
@@ -324,7 +332,7 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
         }
         finally
         {
-            await CleanAsync(connectionString, bodySucceeded, prefix, 0);
+            await CleanAsync(connectionString, bodySucceeded, prefix, serverId);
         }
     }
 

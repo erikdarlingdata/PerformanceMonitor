@@ -169,7 +169,7 @@ public sealed partial class ViewerDataService
             {
                 SessionId = r.SessionId,
                 DatabaseName = r.DatabaseName ?? "",
-                ElapsedTimeFormatted = r.ElapsedTimeFormatted ?? "",
+                ElapsedTimeFormatted = PerformanceMonitor.Common.ElapsedTimeText.WithoutZeroDays(r.ElapsedTimeFormatted),
                 QueryText = r.QueryText ?? "",
                 Status = r.Status ?? "",
                 BlockingSessionId = r.BlockingSessionId,
