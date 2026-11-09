@@ -8,6 +8,7 @@
 
 using System;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Common;
 using Xunit;
 
 namespace Lite.Tests;
@@ -21,12 +22,14 @@ namespace Lite.Tests;
 /// carry the per-plan provenance shape rather than the old hash-folded <c>MAX(max_dop)</c>, and that an
 /// unknown DOP is projected as null rather than 0 — and meta-pins Darling's guard, so weakening the byte-
 /// identity comparison over there fails here, under the <c>lite</c> filter that reaches Darling's test tree.
+/// #8470: both reads are one text, <c>PerformanceMonitor.Common.DrillDownSql</c>; <see cref="LiteInlineSql"/>
+/// resolves the constant each Lite method assigns, so a method that re-inlines a copy fails here.
 ///
 /// <para><b>Why not read Darling's SQL from here.</b> The <c>lite</c> filter does not reach
 /// <c>Darling/PerformanceMonitor.Darling.Analysis</c>, and <c>CrossAppGuardCiGateTests</c> fails any Lite
 /// guard whose source read PR CI cannot run (#2839): a guard that compares the two apps cannot live behind a
 /// filter that fires for only one of them. Darling's constants are public, so its suite compares them against
-/// Lite's inline text without parsing its own file.</para>
+/// the Common constant Lite's methods name without parsing its own file.</para>
 /// </summary>
 public sealed class DrillDownDopProvenanceParityTests
 {
@@ -87,18 +90,26 @@ public sealed class DrillDownDopProvenanceParityTests
     }
 
     /// <summary>
-    /// Lite's inline SQL: the first <c>cmd.CommandText = @"..."</c> verbatim literal after the named method's
-    /// declaration. The two reads under test contain no doubled quotes, so the literal ends at the first
-    /// <c>";</c>.
+    /// The SQL Lite's method runs: the <c>PerformanceMonitor.Common.DrillDownSql</c> constant that the first
+    /// <c>cmd.CommandText = ...;</c> assignment after the method's declaration names (#8470). A method that assigns
+    /// anything else, an inline literal or another constant, fails here naming what it assigns.
     /// </summary>
     private static string LiteInlineSql(string methodName)
     {
         var source = ParitySource.ReadFile(LiteFile);
         var start = source.IndexOf($"Task {methodName}(", StringComparison.Ordinal);
         Assert.True(start >= 0, $"{methodName} not found in {LiteFile}");
-        const string Marker = "cmd.CommandText = @\"";
-        var literalStart = source.IndexOf(Marker, start, StringComparison.Ordinal) + Marker.Length;
-        var literalEnd = source.IndexOf("\";", literalStart, StringComparison.Ordinal);
-        return source[literalStart..literalEnd];
+        const string Marker = "cmd.CommandText = ";
+        var expressionStart = source.IndexOf(Marker, start, StringComparison.Ordinal) + Marker.Length;
+        var expressionEnd = source.IndexOf(";", expressionStart, StringComparison.Ordinal);
+        var expression = source[expressionStart..expressionEnd].Trim();
+        var text = expression switch
+        {
+            "DrillDownSql.TopCpuQueries" => DrillDownSql.TopCpuQueries,
+            "DrillDownSql.BadActorDetail" => DrillDownSql.BadActorDetail,
+            _ => null,
+        };
+        Assert.True(text is not null, $"{methodName} runs {expression}, not a PerformanceMonitor.Common.DrillDownSql constant");
+        return text!;
     }
 }

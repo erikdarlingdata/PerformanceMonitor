@@ -7,7 +7,6 @@
  */
 
 using System;
-using System.Reflection;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
@@ -23,20 +22,15 @@ namespace Darling.Tests;
 /// use; Lite's <c>CollectTopCpuQueries</c> and <c>CollectBadActorDetail</c> assign it to their command, which its
 /// half of <c>DrillDownDopProvenanceParityTests</c> resolves. The rules the text carries, the #3648 per-plan
 /// <c>max_dop</c> provenance and the #8317 <c>$5</c> database filter, are pinned here on the one text.
-///
-/// <para>The constant is reached by name, so this class compiles against a Common that lacks it and fails at its
-/// first assert naming what is missing.</para>
 /// </summary>
 public sealed class DrillDownSqlTests
 {
-    private static string CommonText(string name)
+    private static string CommonText(string name) => name switch
     {
-        var type = typeof(QueryDopProvenance).Assembly.GetType("PerformanceMonitor.Common.DrillDownSql");
-        Assert.True(type is not null, "PerformanceMonitor.Common has no DrillDownSql: the two drill-down reads are not written once in Common.");
-        var field = type!.GetField(name, BindingFlags.Public | BindingFlags.Static);
-        Assert.True(field is { IsLiteral: true } && field.FieldType == typeof(string), $"DrillDownSql.{name} is not a public const string.");
-        return (string)field!.GetRawConstantValue()!;
-    }
+        "TopCpuQueries" => DrillDownSql.TopCpuQueries,
+        "BadActorDetail" => DrillDownSql.BadActorDetail,
+        _ => throw new ArgumentOutOfRangeException(nameof(name), name, "not a DrillDownSql constant"),
+    };
 
     [Fact]
     public void Darling_RunsTheCommonText_UnderItsOwnNames()

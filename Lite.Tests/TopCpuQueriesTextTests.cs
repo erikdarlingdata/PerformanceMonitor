@@ -15,6 +15,7 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Tests;
@@ -290,17 +291,26 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, 10, $10, $11, $12)";
     }
 
     /// <summary>
-    /// Lite's inline SQL: the first <c>cmd.CommandText = @"..."</c> verbatim literal after the named method's
-    /// declaration (the read contains no doubled quotes, so the literal ends at the first <c>";</c>).
+    /// The SQL Lite's method runs: the <c>PerformanceMonitor.Common.DrillDownSql</c> constant that the first
+    /// <c>cmd.CommandText = ...;</c> assignment after the method's declaration names (#8470). A method that assigns
+    /// anything else, an inline literal or another constant, fails here naming what it assigns.
     /// </summary>
     private static string LiteInlineSql(string methodName)
     {
         var source = ParitySource.ReadFile(LiteFile);
         var start = source.IndexOf($"Task {methodName}(", StringComparison.Ordinal);
         Assert.True(start >= 0, $"{methodName} not found in {LiteFile}");
-        const string Marker = "cmd.CommandText = @\"";
-        var literalStart = source.IndexOf(Marker, start, StringComparison.Ordinal) + Marker.Length;
-        var literalEnd = source.IndexOf("\";", literalStart, StringComparison.Ordinal);
-        return source[literalStart..literalEnd];
+        const string Marker = "cmd.CommandText = ";
+        var expressionStart = source.IndexOf(Marker, start, StringComparison.Ordinal) + Marker.Length;
+        var expressionEnd = source.IndexOf(";", expressionStart, StringComparison.Ordinal);
+        var expression = source[expressionStart..expressionEnd].Trim();
+        var text = expression switch
+        {
+            "DrillDownSql.TopCpuQueries" => DrillDownSql.TopCpuQueries,
+            "DrillDownSql.BadActorDetail" => DrillDownSql.BadActorDetail,
+            _ => null,
+        };
+        Assert.True(text is not null, $"{methodName} runs {expression}, not a PerformanceMonitor.Common.DrillDownSql constant");
+        return text!;
     }
 }

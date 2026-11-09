@@ -8,6 +8,7 @@
 
 using System;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using Xunit;
 
@@ -15,16 +16,18 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Darling's half of the cross-SKU text guard for #3648: the <c>top_cpu_queries</c> and <c>bad_actor_query</c>
-/// drill-down SQL must be BYTE-IDENTICAL between Lite's inline <c>cmd.CommandText</c> and Darling's
-/// <see cref="PgDrillDownCollector.TopCpuQueriesSql"/> / <see cref="PgDrillDownCollector.BadActorDetailSql"/>,
-/// and both must carry the per-plan provenance shape rather than the old hash-folded <c>MAX(max_dop)</c>.
+/// drill-down SQL is one text, <c>PerformanceMonitor.Common.DrillDownSql</c> (#8470), that Lite's
+/// <c>cmd.CommandText</c> names and Darling's <see cref="PgDrillDownCollector.TopCpuQueriesSql"/> /
+/// <see cref="PgDrillDownCollector.BadActorDetailSql"/> are. The two readers must run it BYTE-IDENTICAL, so
+/// neither can re-inline a copy of its own, and it must carry the per-plan provenance shape rather than the old
+/// hash-folded <c>MAX(max_dop)</c>.
 ///
 /// <para><b>Why identical text and not two independent pins.</b> #2705 fixed Darling's stale-max_dop
 /// cross-check and closed without a record that Lite had a twin; #2999 is what that cost. The two drill-down
 /// reads here were already character-for-character the same before #3648 (the port kept Lite's text), and the
 /// provenance columns are engine-neutral (<c>ROW_NUMBER() OVER</c>, <c>MAX() OVER</c>, <c>CASE</c> aggregates,
-/// explicit <c>NULLS LAST</c>), so the strongest guard available is equality: a future edit to one SKU's read
-/// fails here until the other is brought along.</para>
+/// explicit <c>NULLS LAST</c>), so the strongest guard available is equality: a read that stops running the
+/// Common text fails here until it is brought back.</para>
 ///
 /// <para><b>Why this side hosts the comparison.</b> <c>build.yml</c>'s <c>darling</c> path filter covers
 /// every Lite <c>.cs</c> file as well as the whole Darling tree, so this suite runs on an edit to EITHER
@@ -103,18 +106,26 @@ public sealed class DrillDownDopProvenanceParityTests
     private static string Lf(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
 
     /// <summary>
-    /// Lite's inline SQL: the first <c>cmd.CommandText = @"..."</c> verbatim literal after the named method's
-    /// declaration. The two reads under test contain no doubled quotes, so the literal ends at the first
-    /// <c>";</c>.
+    /// The SQL Lite's method runs: the <c>PerformanceMonitor.Common.DrillDownSql</c> constant that the first
+    /// <c>cmd.CommandText = ...;</c> assignment after the method's declaration names (#8470). A method that assigns
+    /// anything else, an inline literal or another constant, fails here naming what it assigns.
     /// </summary>
     private static string LiteInlineSql(string methodName)
     {
         var source = RepoFile.ReadRepoFile("Lite", "Analysis", "DrillDownCollector.Queries.cs");
         var start = source.IndexOf($"Task {methodName}(", StringComparison.Ordinal);
         Assert.True(start >= 0, $"{methodName} not found in {LiteFile}");
-        const string Marker = "cmd.CommandText = @\"";
-        var literalStart = source.IndexOf(Marker, start, StringComparison.Ordinal) + Marker.Length;
-        var literalEnd = source.IndexOf("\";", literalStart, StringComparison.Ordinal);
-        return source[literalStart..literalEnd];
+        const string Marker = "cmd.CommandText = ";
+        var expressionStart = source.IndexOf(Marker, start, StringComparison.Ordinal) + Marker.Length;
+        var expressionEnd = source.IndexOf(";", expressionStart, StringComparison.Ordinal);
+        var expression = source[expressionStart..expressionEnd].Trim();
+        var text = expression switch
+        {
+            "DrillDownSql.TopCpuQueries" => DrillDownSql.TopCpuQueries,
+            "DrillDownSql.BadActorDetail" => DrillDownSql.BadActorDetail,
+            _ => null,
+        };
+        Assert.True(text is not null, $"{methodName} runs {expression}, not a PerformanceMonitor.Common.DrillDownSql constant");
+        return text!;
     }
 }

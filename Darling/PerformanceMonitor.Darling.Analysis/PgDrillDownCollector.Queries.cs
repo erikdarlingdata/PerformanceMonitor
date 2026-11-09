@@ -183,7 +183,7 @@ LIMIT 5";
     /// reports 0, so 0 was "no reading" rendered as a degree of parallelism. <c>dop_note</c> is the shared
     /// sentence (<c>PerformanceMonitor.Common.QueryDopProvenance</c>) a renderer prints verbatim when the
     /// history disagrees with the headline. New columns are appended after the old ones so the existing
-    /// ordinals are untouched; the SQL is byte-identical to Lite's <c>CollectTopCpuQueries</c> text.</para>
+    /// ordinals are untouched. The text is <see cref="DrillDownSql.TopCpuQueries"/>, the one read both apps run.</para>
     ///
     /// <para>#3959: the ranking and the cut to five happen without the statement text, and <c>query_text</c> is
     /// read afterwards for the five that print. <c>v_query_stats</c> resolves text from the fleet-wide
@@ -191,77 +191,7 @@ LIMIT 5";
     /// the whole window's text to keep five. The printed value is the same <c>MAX(query_text)</c>, judged whole and then cut to 500 (#5320),
     /// over the same rows.</para>
     /// </summary>
-    public const string TopCpuQueriesSql = @"
-WITH windowed AS
-(
-    -- #3648: rank each hash's rows newest-first and carry the hash-wide maximum onto every row, so the
-    -- outer aggregate can name WHICH reading is current and WHEN the maximum was last seen. Explicit
-    -- NULLS LAST on the tie-breakers: DuckDB and Postgres default DESC null placement differently.
-    SELECT database_name, query_hash, query_plan_hash, collection_time, max_dop,
-           delta_worker_time, delta_execution_count, delta_spills,
-           ROW_NUMBER() OVER
-           (
-               PARTITION BY database_name, query_hash
-               ORDER BY collection_time DESC, creation_time DESC NULLS LAST, delta_worker_time DESC NULLS LAST
-           ) AS newest_rn,
-           MAX(max_dop) OVER (PARTITION BY database_name, query_hash) AS max_dop_any_plan
-    FROM v_query_stats
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-    AND   delta_worker_time > 0
-),
-top_queries AS
-(
-    -- #3959: ranked and cut WITHOUT the statement text. The text used to ride the window above for every
-    -- row it read, to print five, and on Darling v_query_stats resolves it from the fleet's text dimension
-    -- row by row. The final SELECT reads it for the five that print.
-    SELECT database_name, query_hash,
-           SUM(delta_worker_time)::BIGINT AS total_cpu_us,
-           SUM(delta_execution_count)::BIGINT AS exec_count,
-           MAX(CASE WHEN newest_rn = 1 THEN max_dop END) AS max_dop,
-           SUM(delta_spills)::BIGINT AS spills,
-           COUNT(DISTINCT query_plan_hash) AS plan_count,
-           MAX(max_dop_any_plan) AS max_dop_any_plan,
-           MAX(CASE WHEN max_dop = max_dop_any_plan THEN collection_time END) AS max_dop_any_plan_last_seen
-    FROM windowed
-    GROUP BY database_name, query_hash
-    ORDER BY total_cpu_us DESC
-    LIMIT 5
-)
-SELECT t.database_name, t.query_hash,
-       t.total_cpu_us,
-       t.exec_count,
-       t.max_dop,
-       t.spills,
-       -- #3959: the same MAX over the same rows the single pass took it over (this group's window rows,
-       -- under the window's own filter). Equality first, which the (server_id, query_hash, collection_time)
-       -- index serves. GROUP BY puts a NULL key's rows in one group that equality cannot match, so only
-       -- a group with a NULL key reads them NULL-safe.
-       COALESCE
-       (
-           (
-               SELECT MAX(v.query_text)
-               FROM v_query_stats AS v
-               WHERE v.server_id = $1 AND v.collection_time >= $2 AND v.collection_time <= $3
-               AND   v.delta_worker_time > 0
-               AND   v.database_name = t.database_name
-               AND   v.query_hash = t.query_hash
-           ),
-           CASE WHEN t.database_name IS NULL OR t.query_hash IS NULL THEN
-           (
-               SELECT MAX(v.query_text)
-               FROM v_query_stats AS v
-               WHERE v.server_id = $1 AND v.collection_time >= $2 AND v.collection_time <= $3
-               AND   v.delta_worker_time > 0
-               AND   v.database_name IS NOT DISTINCT FROM t.database_name
-               AND   v.query_hash IS NOT DISTINCT FROM t.query_hash
-           )
-           END
-       ) AS query_text,
-       t.plan_count,
-       t.max_dop_any_plan,
-       t.max_dop_any_plan_last_seen
-FROM top_queries AS t
-ORDER BY t.total_cpu_us DESC";
+    public const string TopCpuQueriesSql = DrillDownSql.TopCpuQueries;
 
     private async Task CollectTopCpuQueries(AnalysisFinding finding, AnalysisContext context)
     {
@@ -1466,55 +1396,13 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
     /// #3648: the same per-plan <c>max_dop</c> provenance as <see cref="TopCpuQueriesSql"/> — see the essay
     /// there. This read is one hash, unfiltered by CPU spent, so the newest-plan tie-break (compile time,
     /// then CPU spent) is what separates a stale parallel plan still sitting in the cache from the serial
-    /// one doing the work at the same <c>collection_time</c>. Byte-identical to Lite's
-    /// <c>CollectBadActorDetail</c> text.
+    /// one doing the work at the same <c>collection_time</c>. The text is
+    /// <see cref="DrillDownSql.BadActorDetail"/>, the one read both apps run.
     /// <para>#8317: <c>$5</c> is the finding's database, so when one hash runs in several databases the row
     /// described is the one the fact was scored on. A finding that carries no database sends an empty
     /// <c>$5</c> and gets the database that spent the most CPU on the hash.</para>
     /// </summary>
-    public const string BadActorDetailSql = @"
-WITH windowed AS
-(
-    -- #3648: see CollectTopCpuQueries' windowed CTE; same ranking, same hash-wide maximum.
-    SELECT database_name, query_hash, query_plan_hash, collection_time, max_dop,
-           delta_worker_time, delta_execution_count, delta_elapsed_time, delta_logical_reads, delta_spills,
-           query_text,
-           ROW_NUMBER() OVER
-           (
-               PARTITION BY database_name, query_hash
-               ORDER BY collection_time DESC, creation_time DESC NULLS LAST, delta_worker_time DESC NULLS LAST
-           ) AS newest_rn,
-           MAX(max_dop) OVER (PARTITION BY database_name, query_hash) AS max_dop_any_plan
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    AND   query_hash = $4
-    AND   ($5 = '' OR database_name = $5)
-)
-SELECT database_name, query_hash,
-       MAX(query_text) AS query_text,
-       SUM(delta_execution_count)::BIGINT AS exec_count,
-       CASE WHEN SUM(delta_execution_count) > 0
-            THEN SUM(delta_worker_time)::DOUBLE PRECISION / SUM(delta_execution_count) / 1000.0
-            ELSE 0 END AS avg_cpu_ms,
-       CASE WHEN SUM(delta_execution_count) > 0
-            THEN SUM(delta_elapsed_time)::DOUBLE PRECISION / SUM(delta_execution_count) / 1000.0
-            ELSE 0 END AS avg_elapsed_ms,
-       CASE WHEN SUM(delta_execution_count) > 0
-            THEN SUM(delta_logical_reads)::DOUBLE PRECISION / SUM(delta_execution_count)
-            ELSE 0 END AS avg_reads,
-       SUM(delta_worker_time)::BIGINT AS total_cpu_us,
-       SUM(delta_logical_reads)::BIGINT AS total_reads,
-       SUM(delta_spills)::BIGINT AS total_spills,
-       MAX(CASE WHEN newest_rn = 1 THEN max_dop END) AS max_dop,
-       COUNT(DISTINCT query_plan_hash) AS plan_count,
-       MAX(max_dop_any_plan) AS max_dop_any_plan,
-       MAX(CASE WHEN max_dop = max_dop_any_plan THEN collection_time END) AS max_dop_any_plan_last_seen
-FROM windowed
-GROUP BY database_name, query_hash
-ORDER BY total_cpu_us DESC
-LIMIT 1";
+    public const string BadActorDetailSql = DrillDownSql.BadActorDetail;
 
     private async Task CollectBadActorDetail(AnalysisFinding finding, AnalysisContext context)
     {
