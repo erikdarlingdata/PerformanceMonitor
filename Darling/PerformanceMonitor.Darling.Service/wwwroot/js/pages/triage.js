@@ -44,14 +44,20 @@ function alertStatusText(a) {
   return "Not sent";
 }
 
+/* One side of the alert's value fields: a state-only row's stored 0 is not a reading and shows as the dash Alert History shows
+   (its stateOrNumber, on the row node's state_only); a nonzero value on such a row is a real measurement and stays a number. */
+function stateOrNum(a, key) {
+  return a.state_only === true && Number(a[key]) === 0 ? "—" : fmtNum(a[key], 1);
+}
+
 /* One matched alert-history row as a labeled field list (the lead card's body). */
 function alertFields(a) {
   const rows = [
     ["Fired", localTime(a.alert_time)],
     ["Server", a.server_name || "—"],
     ["Metric", a.metric_name || "—"],
-    ["Value", fmtNum(a.current_value, 1)],
-    ["Threshold", fmtNum(a.threshold_value, 1)],
+    ["Value", stateOrNum(a, "current_value")],
+    ["Threshold", stateOrNum(a, "threshold_value")],
     ["Status", alertStatusText(a)],
   ];
   const box = el("div", { class: "detail-fields" }, rows.map(([k, v]) =>

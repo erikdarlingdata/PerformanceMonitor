@@ -1072,6 +1072,12 @@ function notShownCard(title, message) {
   ]);
 }
 
+/* One side of the alert's value line: a state-only row's stored 0 is not a reading and shows as the dash Alert History shows
+   (its stateOrNumber, on get_alert_history's state_only); a nonzero value on such a row is a real measurement and stays a number. */
+function stateOrNum(a, key) {
+  return a.state_only === true && Number(a[key]) === 0 ? "—" : fmtNum(a[key], 1);
+}
+
 /* The header cell: the endpoint's own alert facts, rendered directly (no read — they arrived with the envelope).
    A null `alert` (stale/no match) renders the honest empty state instead of blank fields. */
 function renderAlertHeaderCell(cell, opts) {
@@ -1089,7 +1095,13 @@ function renderAlertHeaderCell(cell, opts) {
        alert card, so the two pages format the same fields the same way. Omitted only when BOTH are absent —
        fmtNum already renders a lone missing side as "\u2014" rather than dropping the whole line. */
     if (typeof a.current_value === "number" || typeof a.threshold_value === "number") {
-      rows.push(["Value vs threshold", "current " + fmtNum(a.current_value, 1) + " vs threshold " + fmtNum(a.threshold_value, 1)]);
+      /* A state-only row's stored zeros are not readings (stateOrNum): the line is left out when both sides are dashes
+         rather than print 0 against 0, the way Alert History shows a dash in each column. */
+      const current = stateOrNum(a, "current_value");
+      const threshold = stateOrNum(a, "threshold_value");
+      if (current !== "—" || threshold !== "—") {
+        rows.push(["Value vs threshold", "current " + current + " vs threshold " + threshold]);
+      }
     }
   }
   const body = a
