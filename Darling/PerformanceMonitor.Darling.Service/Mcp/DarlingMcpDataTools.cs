@@ -2254,8 +2254,10 @@ ORDER BY server_name";
             /* #8361: on a server whose every Query Store database is a readable secondary the scheduler does not run
                query_store_hints (nothing it could read), so its row reads HEALTHY with zero rows while its last run is recent and
                STOPPED once the gate has held it off past the cutoff. Shown as not_collected with the readable-secondary sentence
-               instead, the way the Always On rows are, exactly when the store's newest health capture says so; a failing or denied
-               row keeps its own. Only the listing changes: the rows still feed the sweep arithmetic below. */
+               instead, the way the Always On rows are, under the gate's own judgment: the newest health capture decides while the
+               query_store_health collector's effective schedule lets it refresh on this server, and otherwise the newest
+               ag_replica_role decides alone; a failing or denied row keeps its own. Only the listing changes: the rows still feed
+               the sweep arithmetic below. */
             var queryStoreSecondary = await DarlingGatedCollectorRows.QueryStoreSecondaryMessageAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken);
             if (queryStoreSecondary is not null)
                 shownRows = DarlingGatedCollectorRows.RowsShownWhenQueryStoreSecondary(shownRows);
