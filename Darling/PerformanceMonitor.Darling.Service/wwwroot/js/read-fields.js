@@ -241,6 +241,23 @@ export const READ_FIELDS = {
       series: [{ key: "wait_time_ms_per_second", label: "Wait ms/s" }],
     },
   },
+  get_pg_top_queries: {
+    table: {
+      rowsKey: "queries",
+      emptyText: "No query shapes in this window. pg_stat_statements needs at least two collections to difference.",
+      noteKey: "truncation_note",
+      columns: [
+        { key: "database_name", label: "Database", name: true },
+        { key: "query_text", label: "Query", wrap: true },
+        { key: "calls", label: "Calls", format: "int" },
+        { key: "total_exec_time_ms", label: "Total Time", format: "ms" },
+        { key: "avg_exec_time_ms", label: "Avg Time", format: "ms" },
+        { key: "max_exec_time_ms", label: "Max Time", format: "ms" },
+        { key: "pct_of_total_time", label: "% of Total", format: "num1" },
+        { key: "rows_returned", label: "Rows", format: "int" },
+      ],
+    },
+  },
   get_pg_wraparound_risk: {
     table: {
       rowsKey: "databases",
