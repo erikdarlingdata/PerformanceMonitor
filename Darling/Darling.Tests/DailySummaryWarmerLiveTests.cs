@@ -68,15 +68,12 @@ public sealed class DailySummaryWarmerLiveTests
             /* Cold, as after a service start. */
             DarlingHealthReader.ResetRangeCacheForTests();
 
-            if (Warmers.Exists)
-            {
-                var warmer = Warmers.Create(
-                    servers: () => [(ServerIdA, ServerA), (ServerIdB, ServerB)],
-                    warm: (serverId, name, token) => Warmers.WarmAsync(dataSource, serverId, name, token),
-                    enabled: () => true,
-                    admission: null);
-                await Warmers.RunPassAsync(warmer, ct);
-            }
+            var warmer = Warmers.Create(
+                servers: () => [(ServerIdA, ServerA), (ServerIdB, ServerB)],
+                warm: (serverId, name, token) => Warmers.WarmAsync(dataSource, serverId, name, token),
+                enabled: () => true,
+                admission: null);
+            await Warmers.RunPassAsync(warmer, ct);
 
             /* Land a second row on the closed day of each server AFTER the pass. A visitor whose first read is served
                from the warmed block does not see it; a cold first read does. */

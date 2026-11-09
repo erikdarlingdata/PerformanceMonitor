@@ -1150,6 +1150,29 @@ public sealed partial class DarlingWorker
         _queryStoreBackfill = queryStoreBackfill;
         var backfillLoop = RunQueryStoreBackfillLoopAsync(queryStoreBackfill, servers, () => config.QueryStoreBackfillEnabled, stoppingToken);
 
+        /* #8370: the daily-summary warmer builds each SQL Server target's closed-day block (the Overview's 31-day
+           get_daily_summary_range read) two minutes after start and again after each UTC day boundary plus the cache's
+           grace, one server at a time under the read-admission gate, so a server's first visitor after a start or a new
+           day finds it built rather than paying the cold read of thirty compressed days. It idles while the service is
+           paused, while a materialization-hole repair is rebuilding the rollups, and while neither host that reads the
+           block is on. Awaited with the other loops at shutdown. */
+        var dailySummaryWarmer = new DailySummaryWarmer(
+            servers: () =>
+            {
+                lock (_serversLock)
+                {
+                    return servers
+                        .Where(s => !s.Retired && !s.Config.IsPostgres)
+                        .Select(s => (s.Config.ServerId, s.Config.DisplayName))
+                        .ToList();
+                }
+            },
+            warm: (serverId, name, token) => DailySummaryWarmer.WarmAsync(postgres, serverId, name, _registryState, _logger, token),
+            enabled: () => ShouldRunCollection(_paused) && !_materializationHoleRepairRunning && (config.Web.Enabled || config.Mcp.Enabled),
+            readAdmission: _readAdmission,
+            logger: _logger);
+        var dailySummaryWarmLoop = dailySummaryWarmer.RunAsync(stoppingToken);
+
         /* #5450 proposal 2: the outbound heartbeat, on its own task and connection so a slow or dead URL never touches
            collection. Returns at once when heartbeat.url is not set (the default). The URL is a secret: see
            DarlingHeartbeat for what may reach the log. */
@@ -1876,6 +1899,16 @@ public sealed partial class DarlingWorker
         try
         {
             await backfillLoop;
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown. */
+        }
+
+        /* #8370: the warmer stops at its next wait or its next admitted read; a read in flight is cancelled with the token. */
+        try
+        {
+            await dailySummaryWarmLoop;
         }
         catch (OperationCanceledException)
         {

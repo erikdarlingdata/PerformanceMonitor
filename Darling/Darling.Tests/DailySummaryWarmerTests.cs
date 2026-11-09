@@ -9,7 +9,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -39,64 +38,64 @@ public sealed class DailySummaryWarmerTests
     [Fact]
     public async Task RunAsync_WarmsEveryServerOnceAfterTheStartDelay_ThenWaitsForTheDayBoundaryPlusGrace()
     {
-        var rig = new Rig(Start) { StopAfterDelays = 2 };
+        var harness = new Harness(Start) { StopAfterDelays = 2 };
 
-        await Warmers.RunAsync(rig.Build(TwoServers), rig.Cts.Token);
+        await Warmers.RunAsync(harness.Build(TwoServers), harness.Cts.Token);
 
         var passAt = Start + Warmers.StartDelay;
-        Assert.Equal(Warmers.StartDelay, rig.Delays[0]);
-        Assert.Equal([(1, "alpha", passAt), (2, "beta", passAt)], rig.Warmed);
-        Assert.Equal(NextBoundary(passAt) - passAt, rig.Delays[1]);
+        Assert.Equal(Warmers.StartDelay, harness.Delays[0]);
+        Assert.Equal([(1, "alpha", passAt), (2, "beta", passAt)], harness.Warmed);
+        Assert.Equal(NextBoundary(passAt) - passAt, harness.Delays[1]);
     }
 
     [Fact]
     public async Task RunAsync_RunsASecondPassAtTheBoundary_AndRebuildsEveryServerThere()
     {
-        var rig = new Rig(Start) { StopAfterDelays = 3 };
+        var harness = new Harness(Start) { StopAfterDelays = 3 };
 
-        await Warmers.RunAsync(rig.Build(TwoServers), rig.Cts.Token);
+        await Warmers.RunAsync(harness.Build(TwoServers), harness.Cts.Token);
 
         var firstPassAt = Start + Warmers.StartDelay;
         var secondPassAt = NextBoundary(firstPassAt);
         Assert.Equal(new DateTime(2026, 11, 9, 2, 1, 0, DateTimeKind.Utc), secondPassAt);
-        Assert.Equal(4, rig.Warmed.Count);
-        Assert.Equal([secondPassAt, secondPassAt], rig.Warmed.Skip(2).Select(w => w.At).ToArray());
-        Assert.Equal(TimeSpan.FromDays(1), rig.Delays[2]); // the pass after that is one whole day later
+        Assert.Equal(4, harness.Warmed.Count);
+        Assert.Equal([secondPassAt, secondPassAt], harness.Warmed.Skip(2).Select(w => w.At).ToArray());
+        Assert.Equal(TimeSpan.FromDays(1), harness.Delays[2]); // the pass after that is one whole day later
     }
 
     [Fact]
     public async Task RunAsync_StopsWithoutAPassWhenShutdownCancelsTheStartWait()
     {
-        var rig = new Rig(Start) { StopAfterDelays = 1 };
+        var harness = new Harness(Start) { StopAfterDelays = 1 };
 
-        await Warmers.RunAsync(rig.Build(TwoServers), rig.Cts.Token);
+        await Warmers.RunAsync(harness.Build(TwoServers), harness.Cts.Token);
 
-        Assert.Empty(rig.Warmed);
-        Assert.Single(rig.Delays);
+        Assert.Empty(harness.Warmed);
+        Assert.Single(harness.Delays);
     }
 
     [Fact]
     public async Task RunAsync_StopsMidPassWhenShutdownCancelsAWarm()
     {
-        var rig = new Rig(Start);
-        rig.WarmOverride = (_, _, ct) =>
+        var harness = new Harness(Start);
+        harness.WarmOverride = (_, _, ct) =>
         {
-            rig.Cts.Cancel();
+            harness.Cts.Cancel();
             throw new OperationCanceledException(ct);
         };
 
-        await Warmers.RunAsync(rig.Build(TwoServers), rig.Cts.Token);
+        await Warmers.RunAsync(harness.Build(TwoServers), harness.Cts.Token);
 
-        Assert.Empty(rig.Warmed);
-        Assert.Single(rig.Delays); // no second wait was scheduled after the cancelled pass
+        Assert.Empty(harness.Warmed);
+        Assert.Single(harness.Delays); // no second wait was scheduled after the cancelled pass
     }
 
     [Fact]
     public async Task RunAsync_BacksOffAfterAFailedServer_DoublesOnTheNextFailure_AndReturnsToTheBoundaryOnSuccess()
     {
-        var rig = new Rig(Start) { StopAfterDelays = 4 };
+        var harness = new Harness(Start) { StopAfterDelays = 4 };
         var betaFailures = 0;
-        rig.WarmOverride = (serverId, _, _) =>
+        harness.WarmOverride = (serverId, _, _) =>
         {
             if (serverId == 2 && betaFailures < 2)
             {
@@ -107,25 +106,25 @@ public sealed class DailySummaryWarmerTests
             return Task.CompletedTask;
         };
 
-        await Warmers.RunAsync(rig.Build(TwoServers), rig.Cts.Token);
+        await Warmers.RunAsync(harness.Build(TwoServers), harness.Cts.Token);
 
-        Assert.Equal(Warmers.RetryDelay, rig.Delays[1]);
-        Assert.Equal(Warmers.RetryDelay + Warmers.RetryDelay, rig.Delays[2]);
-        var thirdPassAt = Start + Warmers.StartDelay + rig.Delays[1] + rig.Delays[2];
-        Assert.Equal(NextBoundary(thirdPassAt) - thirdPassAt, rig.Delays[3]);
-        Assert.Equal(3, rig.Warmed.Count(w => w.ServerId == 1)); // alpha is warmed on every pass, a cache hit after the first
-        Assert.Single(rig.Warmed, w => w.ServerId == 2);
+        Assert.Equal(Warmers.RetryDelay, harness.Delays[1]);
+        Assert.Equal(Warmers.RetryDelay + Warmers.RetryDelay, harness.Delays[2]);
+        var thirdPassAt = Start + Warmers.StartDelay + harness.Delays[1] + harness.Delays[2];
+        Assert.Equal(NextBoundary(thirdPassAt) - thirdPassAt, harness.Delays[3]);
+        Assert.Equal(3, harness.Warmed.Count(w => w.ServerId == 1)); // alpha is warmed on every pass, a cache hit after the first
+        Assert.Single(harness.Warmed, w => w.ServerId == 2);
     }
 
     [Fact]
     public async Task RunAsync_SkipsThePassWhileNothingReadsTheCache_AndLooksAgainAfterTheRetryDelay()
     {
-        var rig = new Rig(Start) { StopAfterDelays = 2, Enabled = false };
+        var harness = new Harness(Start) { StopAfterDelays = 2, Enabled = false };
 
-        await Warmers.RunAsync(rig.Build(TwoServers), rig.Cts.Token);
+        await Warmers.RunAsync(harness.Build(TwoServers), harness.Cts.Token);
 
-        Assert.Empty(rig.Warmed);
-        Assert.Equal(Warmers.RetryDelay, rig.Delays[1]);
+        Assert.Empty(harness.Warmed);
+        Assert.Equal(Warmers.RetryDelay, harness.Delays[1]);
     }
 
     [Fact]
@@ -137,37 +136,37 @@ public sealed class DailySummaryWarmerTests
         using var held = await Task.Run(() => admission.AdmitAsync(ReadSurface.Web, "get_wait_stats", ReadWindowBand.Longer, CancellationToken.None));
         Assert.True(held.MayRun);
 
-        var rig = new Rig(Start) { StopAfterDelays = 2, Admission = admission };
+        var harness = new Harness(Start) { StopAfterDelays = 2, Admission = admission };
 
-        await Warmers.RunAsync(rig.Build(TwoServers), rig.Cts.Token);
+        await Warmers.RunAsync(harness.Build(TwoServers), harness.Cts.Token);
 
-        Assert.Empty(rig.Warmed);
-        Assert.Equal(Warmers.RetryDelay, rig.Delays[1]);
+        Assert.Empty(harness.Warmed);
+        Assert.Equal(Warmers.RetryDelay, harness.Delays[1]);
     }
 
     [Fact]
     public async Task RunAsync_TakesOneHeavySlotPerServer_AndGivesItBackBetweenServers()
     {
         var admission = new ReadAdmission(TimeProvider.System, TimeSpan.Zero, null, maxHeavyReads: 1);
-        var rig = new Rig(Start) { StopAfterDelays = 2, Admission = admission };
+        var harness = new Harness(Start) { StopAfterDelays = 2, Admission = admission };
         var runningDuringWarm = new List<int>();
-        rig.WarmOverride = (_, _, _) =>
+        harness.WarmOverride = (_, _, _) =>
         {
             runningDuringWarm.Add(admission.Stats().Running);
             return Task.CompletedTask;
         };
 
-        await Warmers.RunAsync(rig.Build(TwoServers), rig.Cts.Token);
+        await Warmers.RunAsync(harness.Build(TwoServers), harness.Cts.Token);
 
         Assert.Equal([1, 1], runningDuringWarm); // each server's read holds exactly one slot
         Assert.Equal(0, admission.Stats().Running); // and the pass leaves none held
-        Assert.Equal(NextBoundary(Start + Warmers.StartDelay) - (Start + Warmers.StartDelay), rig.Delays[1]);
+        Assert.Equal(NextBoundary(Start + Warmers.StartDelay) - (Start + Warmers.StartDelay), harness.Delays[1]);
     }
 
     /// <summary>A fake clock, a recording delay that advances it, and a warm callback that records each call.</summary>
-    private sealed class Rig
+    private sealed class Harness
     {
-        public Rig(DateTime now) => Now = now;
+        public Harness(DateTime now) => Now = now;
 
         public DateTime Now { get; private set; }
         public List<TimeSpan> Delays { get; } = new();
@@ -178,7 +177,7 @@ public sealed class DailySummaryWarmerTests
         public ReadAdmission? Admission { get; init; }
         public Func<int, string, CancellationToken, Task>? WarmOverride { get; set; }
 
-        public object Build(IReadOnlyList<(int ServerId, string Name)> servers) => Warmers.Create(
+        public DailySummaryWarmer Build(IReadOnlyList<(int ServerId, string Name)> servers) => Warmers.Create(
             servers: () => servers,
             warm: async (serverId, name, ct) =>
             {
@@ -209,57 +208,27 @@ public sealed class DailySummaryWarmerTests
     }
 }
 
-/// <summary>The warmer's surface, reached by name so this file compiles whether or not the service has it: a service
-/// without one fails these tests at their first assert, not at build time.</summary>
+/// <summary>The warmer's surface as the tests drive it: the product's constants, one constructor and its two entry points.</summary>
 internal static class Warmers
 {
-    private static readonly Type? WarmerType = typeof(DarlingWorker).Assembly.GetType("PerformanceMonitor.Darling.Service.DailySummaryWarmer");
+    public static TimeSpan StartDelay => DailySummaryWarmer.StartDelay;
+    public static TimeSpan PassMargin => DailySummaryWarmer.PassMargin;
+    public static TimeSpan RetryDelay => DailySummaryWarmer.RetryDelay;
 
-    private static Type Required()
-    {
-        Assert.True(WarmerType is not null, "the service has no DailySummaryWarmer: nothing builds the closed-day block before a server's first visitor");
-        return WarmerType!;
-    }
-
-    private static T Static<T>(string name) =>
-        (T)Required().GetField(name, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!.GetValue(null)!;
-
-    public static TimeSpan StartDelay => Static<TimeSpan>("StartDelay");
-    public static TimeSpan PassMargin => Static<TimeSpan>("PassMargin");
-    public static TimeSpan RetryDelay => Static<TimeSpan>("RetryDelay");
-
-    /// <summary>False when the service has no warmer; the caller's own assert then shows what that costs.</summary>
-    public static bool Exists => WarmerType is not null;
-
-    public static object Create(
+    public static DailySummaryWarmer Create(
         Func<IReadOnlyList<(int ServerId, string Name)>> servers,
         Func<int, string, CancellationToken, Task> warm,
         Func<bool> enabled,
         ReadAdmission? admission,
         Func<DateTime>? clock = null,
         Func<TimeSpan, CancellationToken, Task>? delay = null)
-    {
-        var type = Required();
-        var ctor = Assert.Single(type.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic));
-        return ctor.Invoke([servers, warm, enabled, admission, NullLogger.Instance, clock, delay]);
-    }
+        => new(servers, warm, enabled, admission, NullLogger.Instance, clock, delay);
 
     /// <summary>The product's own warm read for one server: the Overview's range through the daily summary reader.</summary>
-    public static async Task WarmAsync(Npgsql.NpgsqlDataSource postgres, int serverId, string name, CancellationToken ct)
-    {
-        var target = Required().GetMethod("WarmAsync", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-        Assert.True(target is not null, "DailySummaryWarmer has no WarmAsync");
-        await (Task)target!.Invoke(null, [postgres, serverId, name, null, null, ct])!;
-    }
+    public static Task WarmAsync(Npgsql.NpgsqlDataSource postgres, int serverId, string name, CancellationToken ct)
+        => DailySummaryWarmer.WarmAsync(postgres, serverId, name, registryState: null, logger: null, ct);
 
-    public static Task RunAsync(object warmer, CancellationToken ct) => Invoke(warmer, "RunAsync", ct);
+    public static Task RunAsync(DailySummaryWarmer warmer, CancellationToken ct) => warmer.RunAsync(ct);
 
-    public static Task RunPassAsync(object warmer, CancellationToken ct) => Invoke(warmer, "RunPassAsync", ct);
-
-    private static async Task Invoke(object warmer, string method, CancellationToken ct)
-    {
-        var target = Required().GetMethod(method, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        Assert.True(target is not null, $"DailySummaryWarmer has no {method}");
-        await (Task)target!.Invoke(warmer, [ct])!;
-    }
+    public static Task RunPassAsync(DailySummaryWarmer warmer, CancellationToken ct) => warmer.RunPassAsync(ct);
 }
