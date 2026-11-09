@@ -95,7 +95,10 @@ public sealed class ServerTabRefreshTimerLifetimeTests
             /* A timer started again after StopRefresh shows whether the window's Closed still reaches the tab. */
             timer.Start();
             window.Close();
-            return (hookedWhileShown, hookedAfterStop, runningAfterClose: timer.IsEnabled);
+            var runningAfterClose = timer.IsEnabled;
+            /* The restart is the test's own, and nothing else stops it now that the window's Closed no longer reaches the tab. */
+            timer.Stop();
+            return (hookedWhileShown, hookedAfterStop, runningAfterClose);
         });
 
         Assert.True(seen.hookedWhileShown, "the shown tab did not hook its window");

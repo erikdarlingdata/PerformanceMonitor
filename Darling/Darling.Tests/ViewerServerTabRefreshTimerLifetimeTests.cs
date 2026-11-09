@@ -90,7 +90,10 @@ public sealed class ViewerServerTabRefreshTimerLifetimeTests
             /* A timer started again after Dispose shows whether the window's Closed still reaches the tab. */
             timer.Start();
             window.Close();
-            return (hookedWhileShown, hookedAfterDispose, runningAfterClose: timer.IsEnabled);
+            var runningAfterClose = timer.IsEnabled;
+            /* The restart is the test's own, and nothing else stops it now that the window's Closed no longer reaches the tab. */
+            timer.Stop();
+            return (hookedWhileShown, hookedAfterDispose, runningAfterClose);
         }));
 
         Assert.True(seen.hookedWhileShown, "the shown tab did not hook its window");

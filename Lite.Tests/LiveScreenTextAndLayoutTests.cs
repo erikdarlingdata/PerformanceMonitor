@@ -47,9 +47,17 @@ public sealed class LiveScreenTextAndLayoutTests
                 var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "plan-empty-test", DisplayName = "plan-empty-test", IsEnabled = true };
                 var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
                 typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", Instance)!.SetValue(tab, true);
-                return LogicalDescendants(tab).OfType<TextBlock>()
-                    .Select(t => t.Text)
-                    .Single(t => t.StartsWith("Right-click a query row", StringComparison.Ordinal));
+                try
+                {
+                    return LogicalDescendants(tab).OfType<TextBlock>()
+                        .Select(t => t.Text)
+                        .Single(t => t.StartsWith("Right-click a query row", StringComparison.Ordinal));
+                }
+                finally
+                {
+                    /* The tab is never shown, so no window's Closed stops its auto-refresh timer (#8367); stop it here. */
+                    tab.StopRefresh();
+                }
             }));
 
             Assert.Contains("'View Stored Plan'", text, StringComparison.Ordinal);
