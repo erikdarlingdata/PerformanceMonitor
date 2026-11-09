@@ -90,11 +90,11 @@ public sealed class ViewerFleetSweepsReadTests
             }, ct);
 
         await FleetSweepStore.RecordSweepAsync(postgres,
-            Run(newestId, newestAt, true, true, mutedId, """{"fleet":{"bands":{"Healthy":2}},"watch":{"opened":[],"closed":["cpu-pinned"]},"changes":{"band_transitions":[],"new_servers":[],"departed_servers":[]}}"""),
+            Run(newestId, newestAt, true, true, mutedId, """{"fleet":{"bands":{"Healthy":1,"Critical":1}},"watch":{"opened":[],"closed":["cpu-pinned"],"carried":[{"server_id":2,"item":"cpu-pinned","consecutive_hits":1,"consecutive_misses":1}]},"changes":{"band_transitions":[],"new_servers":[],"departed_servers":[]},"critical_servers":[{"server":"server-b","reason":"cpu pinned across the span"}]}"""),
             new[]
             {
                 new FleetSweepServerVerdict(1, "server-a", "Healthy", "Healthy", null, null),
-                new FleetSweepServerVerdict(2, "server-b", "Healthy", "Critical", null, null),
+                new FleetSweepServerVerdict(2, "server-b", "Critical", "Critical", "cpu pinned across the span", """{"cpu":97}"""),
             },
             Array.Empty<FleetSweepWouldHavePagedEntry>(),
             new[] { new FleetSweepWatchItem(2, "cpu-pinned", "cpu above the measured band", "carried", 1, 1, mutedId, newestId, mutedId, null, mutedAt, newestAt, """{"cpu":40}""") },
@@ -113,9 +113,24 @@ public sealed class ViewerFleetSweepsReadTests
         Assert.Equal(2, webSweeps.Count);
         var webNewest = webSweeps.OfType<JsonObject>().Single(s => s["sweep_id"]!.GetValue<string>() == web["latest"]!["sweep_id"]!.GetValue<string>());
         Assert.Equal("latest", webNewest["report_under"]!.GetValue<string>());
+
+        /* The newest sweep's worklist ships once. latest's document carries the carried items in full under watch.carried, and the
+           slim entry's watch carries their count in its place; the detail's verdicts carry every server's band and reason, so the
+           document's critical_servers (the critical verdicts' names and reasons again) is not embedded beside them. Restoring the
+           full document from latest therefore folds critical_servers back out of the verdicts, and the fold is lossless. */
+        var latestReport = (JsonObject)web["latest"]!["report"]!;
+        Assert.Single((JsonArray)latestReport["watch"]!["carried"]!);
+        var slimCarried = Assert.IsAssignableFrom<JsonValue>(webNewest["report"]!["watch"]!["carried"]);
+        Assert.Equal(1, slimCarried.GetValue<int>());
+        Assert.False(latestReport.ContainsKey("critical_servers"), "latest embeds the list its verdicts already carry");
         var webSweepsWithLatestDocument = webSweeps.DeepClone().AsArray();
         var restored = webSweepsWithLatestDocument.OfType<JsonObject>().Single(s => s["sweep_id"]!.GetValue<string>() == webNewest["sweep_id"]!.GetValue<string>());
-        restored["report"] = web["latest"]!["report"]!.DeepClone();
+        var restoredReport = (JsonObject)latestReport.DeepClone();
+        restoredReport["critical_servers"] = new JsonArray(((JsonArray)web["latest"]!["verdicts"]!).OfType<JsonObject>()
+            .Where(v => v["band"]!.GetValue<string>() == "Critical")
+            .Select(v => (JsonNode)new JsonObject { ["server"] = v["server"]!.GetValue<string>(), ["reason"] = v["reason"]!.GetValue<string>() })
+            .ToArray());
+        restored["report"] = restoredReport;
         restored.Remove("report_under");
         Assert.True(JsonNode.DeepEquals(webSweepsWithLatestDocument, viewerSweeps), "the Viewer's timeline differs from the web feed's");
         Assert.Equal(newestId.ToString(), viewerSweeps[0]!["sweep_id"]!.GetValue<string>());
