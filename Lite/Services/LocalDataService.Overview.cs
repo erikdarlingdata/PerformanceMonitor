@@ -580,12 +580,17 @@ public class ServerSummaryItem
         get
         {
             if (IsOffline || CpuIsStale || !CpuPercent.HasValue) return "--";
-            /* #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so there is no total to show. The
-               figure is the SQL Server's own, and says so. */
-            if (!OtherProcessCpuPercent.HasValue) return $"SQL CPU {CpuPercent:F0}%";
-            return $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
+            return CpuFigure;
         }
     }
+
+    /// <summary>The CPU reading in the headline's words, with no gate on it: "64% (SQL 60%)", or "SQL CPU 60%" when the host
+    /// total is unknown (#7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so the figure is the SQL Server's own
+    /// and says so). <see cref="CpuDisplay"/> shows it only for a reading the card can stand behind; <see cref="StatusReason"/>
+    /// quotes it for an offline card too, because the reason is the card's own account of the numbers it holds and the tooltip
+    /// decides whether to show them (#8465).</summary>
+    private string CpuFigure =>
+        !OtherProcessCpuPercent.HasValue ? $"SQL CPU {CpuPercent:F0}%" : $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
     /// <summary>#8162: the CPU row's detail column, the host's other-process share ("Other: 5%"). Empty when the CPU figure is not shown
     /// (stale, or never measured) or the server cannot report the other-process figure (#7682). #8465: an offline card's row says
     /// when the server was last collected instead (<see cref="StaleDetail"/>), the Darling card's rule.</summary>
@@ -882,8 +887,10 @@ public class ServerSummaryItem
 
             if (CpuIsElevated)
             {
-                /* #7682: "SQL CPU 12%" already names the metric, so it takes no second "CPU" in front. */
-                parts.Add(CpuDisplay.StartsWith("SQL CPU", StringComparison.Ordinal) ? CpuDisplay : "CPU " + CpuDisplay);
+                /* #7682: "SQL CPU 12%" already names the metric, so it takes no second "CPU" in front. #8465: the figure itself,
+                   not CpuDisplay, which reads "--" on an offline card: the reason keeps the pre-blackout number and the tooltip
+                   leaves it out. */
+                parts.Add(CpuFigure.StartsWith("SQL CPU", StringComparison.Ordinal) ? CpuFigure : "CPU " + CpuFigure);
             }
 
             /* #8304: a dark server's Blocking and Deadlocks rows read "--", so the reason names neither; it quotes the rows as they read. */
