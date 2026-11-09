@@ -123,6 +123,7 @@ public partial class PlanViewerControl
         }
 
         // === Operator Details Section ===
+        // #8456: the gate names every row the section prints below, so an operator whose only detail is one of them gets the section.
         var hasOperatorDetails = !string.IsNullOrEmpty(node.OrderBy)
             || !string.IsNullOrEmpty(node.TopExpression)
             || !string.IsNullOrEmpty(node.GroupBy)
@@ -141,7 +142,19 @@ public partial class PlanViewerControl
             || node.SpoolStack || node.DMLRequestSort || node.NonClusteredIndexCount > 0
             || !string.IsNullOrEmpty(node.OffsetExpression) || node.TopRows > 0
             || !string.IsNullOrEmpty(node.ConstantScanValues)
-            || !string.IsNullOrEmpty(node.UdxUsedColumns);
+            || !string.IsNullOrEmpty(node.UdxUsedColumns)
+            || node.PrimaryNodeId > 0 || node.RowCount || node.ForceSeekColumnCount > 0
+            || !string.IsNullOrEmpty(node.PartitionId)
+            || node.IsStarJoin || !string.IsNullOrEmpty(node.StarJoinOperationType)
+            || !string.IsNullOrEmpty(node.ProbeColumn)
+            || node.InRow || node.ComputeSequence
+            || node.RollupHighestLevel > 0 || node.RollupLevels.Count > 0
+            || !string.IsNullOrEmpty(node.TvfParameters)
+            || !string.IsNullOrEmpty(node.OriginalActionColumn)
+            || !string.IsNullOrEmpty(node.TieColumns)
+            || !string.IsNullOrEmpty(node.UdxName)
+            || node.GroupExecuted || node.RemoteDataAccess
+            || node.OptimizedHalloweenProtectionUsed || node.StatsCollectionId > 0;
 
         if (hasOperatorDetails)
         {
