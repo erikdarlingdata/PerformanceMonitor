@@ -31,13 +31,26 @@ namespace Darling.Tests;
 /// not the view's <c>pg_stat_statements(true)</c>. The second fact shows the rows are unaffected: every entry the collector
 /// returns for the target database is an entry the view holds, under the same <c>(queryid, dbid, userid, toplevel)</c> key.</para>
 /// </summary>
-[Collection("live-postgres")]
+/* pg-cluster-roles, not live-postgres: this class runs statements once and reads them back from pg_stat_statements, whose
+   hash table is cluster-wide. In the parallel collections every other session adds shapes, and an eviction pass can take
+   this class's entries between its statements and its read however much room PgStatementTable secured first. The
+   collection runs alone, after the parallel collections, so no other session adds shapes meanwhile and the dealloc
+   bracket is a tripwire that names a pass instead of a step that retries one. */
+[Collection("pg-cluster-roles")]
 public sealed class PgStatementStatsNoTextReadLiveTests
 {
     private const int ServerId = -778301;
 
     [Fact]
-    public async Task TheStockRead_CallsTheFunctionWithShowtextOff_AndReturnsTheViewsEntries()
+    public Task TheStockRead_CallsTheFunctionWithShowtextOff_AndReturnsTheViewsEntries()
+        => StockReadAsync(forcePass: false);
+
+    /// <summary>The same run with an eviction pass forced between its statements and its first read: the pass is named, and the reads look at entries the statements made.</summary>
+    [Fact]
+    public Task TheStockRead_CallsTheFunctionWithShowtextOff_AndReturnsTheViewsEntries_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => StockReadAsync(forcePass: true);
+
+    private async Task StockReadAsync(bool forcePass)
     {
         var adminConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrWhiteSpace(adminConnectionString),
@@ -88,24 +101,30 @@ public sealed class PgStatementStatsNoTextReadLiveTests
         {
             before = await StatsResetEpochAsync(connection, ct);
 
-            /* A statement of this database's own, so the collector has at least one entry to return for it. */
-            for (var run = 0; run < 3; run++)
+            var bracket = await PgStatementTable.RunAsync(connection, ct, async pass =>
             {
-                await ExecAsync(target.ConnectionString, "SELECT 778300 + 1 AS pm7783_no_text_read", ct);
-            }
+                /* A statement of this database's own, so the collector has at least one entry to return for it. */
+                for (var run = 0; run < 3; run++)
+                {
+                    await ExecAsync(target.ConnectionString, "SELECT 778300 + 1 AS pm7783_no_text_read", ct);
+                }
 
-            List<PgStatementStatsCollector.Row> rows;
-            await using (var command = new NpgsqlCommand(shipped, connection))
-            await using (var reader = await command.ExecuteReaderAsync(ct))
-            {
-                rows = await PgStatementStatsCollector.Instance.ReadAsync(reader, context, ct);
-            }
+                await pass.BeforeReadAsync(ct);
 
-            ofTarget = rows.Where(r => r.DatabaseId == targetOid).ToList();
+                List<PgStatementStatsCollector.Row> rows;
+                await using (var command = new NpgsqlCommand(shipped, connection))
+                await using (var reader = await command.ExecuteReaderAsync(ct))
+                {
+                    rows = await PgStatementStatsCollector.Instance.ReadAsync(reader, context, ct);
+                }
 
-            /* The view, read after the collector: entries are only ever added or evicted under pressure, so every key the
-               collector returned for this database is still in the view. The same keys from a text-free read and the view. */
-            viewKeys = await ViewKeysAsync(connection, context.PgExtensionSchema("pg_stat_statements"), targetOid, ct);
+                ofTarget = rows.Where(r => r.DatabaseId == targetOid).ToList();
+
+                /* The view, read after the collector: entries are only ever added or evicted under pressure, so every key the
+                   collector returned for this database is still in the view. The same keys from a text-free read and the view. */
+                viewKeys = await ViewKeysAsync(connection, context.PgExtensionSchema("pg_stat_statements"), targetOid, ct);
+            }, forcePass && attempt == 0);
+            PgStatementTable.AssertNoPassInside(bracket);
             after = await StatsResetEpochAsync(connection, ct);
             if (before == after)
             {
