@@ -235,6 +235,7 @@ public sealed class ViewerOverviewSqlTests
 /// every display property is a pure format. Verifies the one semantic change — status from collection
 /// freshness, not a live ping — maps onto Lite's Online / Warning / Offline card states.
 /// </summary>
+[Collection("application-theme")] // #8395: reads a card brush off the STA thread
 public sealed class ViewerServerSummaryDisplayTests
 {
     private static readonly DateTime Now = new(2026, 7, 3, 12, 0, 0, DateTimeKind.Utc);

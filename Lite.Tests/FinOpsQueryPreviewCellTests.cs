@@ -22,6 +22,7 @@ namespace PerformanceMonitorLite.Tests;
 /// cut its last line. The real Expensive Queries and High Impact grids are taken off the real tab, themed as the app themes them,
 /// and shown with one formatted row; the realized preview cell is one trimmed line whose tooltip carries the whole statement.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class FinOpsQueryPreviewCellTests
 {
     /* The head of a formatted statement as the reader stores it: CRLF line breaks, a tab and eight-space indentation. */

@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// the Delivery tab; Manage Servers shows every column at its default size; and, from the theme, a disabled PasswordBox keeps
 /// a disabled TextBox's fill while a chosen radio button marks itself with the accent.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerDialogsWalkTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

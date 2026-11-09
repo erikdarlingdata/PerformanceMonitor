@@ -31,6 +31,7 @@ namespace Darling.Tests;
 /// first-seen column says it is the first ever sighting; the fleet Overview says it is loading during its first read. The
 /// members the fix adds are reached by name, so this class builds against a tree without them and fails at the lookup.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerWalkthroughLeftovers8133Tests
 {
     private static readonly Assembly ViewerAssembly = typeof(FleetRollup).Assembly;

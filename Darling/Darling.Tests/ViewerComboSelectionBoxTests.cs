@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// IsEditable combo (the Metric box in Add Known Pattern) was blank. The tests build the real dialog, and then every ComboBox
 /// template the Viewer ships (the three app themes and the dialog dictionary), and read the text the closed box actually shows.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerComboSelectionBoxTests
 {
     private const string Base = "pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/";
