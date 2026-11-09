@@ -203,11 +203,11 @@ public sealed class ReleaseWalkFilterAndCompareTests
     [Theory]
     [InlineData("Lite/Controls/ServerTab.LongQueries.cs")]
     [InlineData("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.LongQueries.cs")]
-    public void LongQueries_TheGridsEmptyTextFollowsTheTraceSetting(string path)
+    public void LongQueries_TheGridsEmptyTextLeavesTheTraceStateToTheBanner(string path)
     {
         var source = RepoFile(path);
 
         Assert.Contains("EmptyState.SetText(LongQueryCompletionsGrid", source, StringComparison.Ordinal);
-        Assert.Contains("LongQueriesEmptyText.Text(traceEnabled)", source, StringComparison.Ordinal);
+        Assert.Contains("LongQueriesEmptyText.Text(traceEnabled: true)", source, StringComparison.Ordinal);
     }
 }
