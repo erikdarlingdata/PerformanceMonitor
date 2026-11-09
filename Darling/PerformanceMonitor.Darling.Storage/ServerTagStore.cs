@@ -264,12 +264,25 @@ WHERE server_id = ANY($1)";
     }
 
     /// <inheritdoc />
-    public async Task<ServerTagSnapshot> ReadSnapshotAsync(CancellationToken ct = default)
+    public Task<ServerTagSnapshot> ReadSnapshotAsync(CancellationToken ct = default) =>
+        ReadSnapshotAsync(consistent: false, ct);
+
+    /// <summary>Reads the tree, assignments and rules. With <paramref name="consistent"/> set, every read
+    /// uses the same database snapshot so authorization cannot combine different tag revisions.</summary>
+    public async Task<ServerTagSnapshot> ReadSnapshotAsync(bool consistent, CancellationToken ct = default)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(ct);
-        var tags = await ReadTagsCoreAsync(connection, null, ct);
-        var assignments = await ReadAssignmentsCoreAsync(connection, null, ct);
-        var rules = await ReadRulesCoreAsync(connection, null, ct);
+        await using var transaction = consistent
+            ? await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct)
+            : null;
+        var tags = await ReadTagsCoreAsync(connection, transaction, ct);
+        var assignments = await ReadAssignmentsCoreAsync(connection, transaction, ct);
+        var rules = await ReadRulesCoreAsync(connection, transaction, ct);
+        if (transaction is not null)
+        {
+            await transaction.CommitAsync(ct);
+        }
+
         return new ServerTagSnapshot(tags, assignments, rules);
     }
 

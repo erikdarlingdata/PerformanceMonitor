@@ -45,6 +45,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public sealed partial class InvestigationRequestStore : IInvestigationRequestStore, IInvestigationNoteStore
 {
+    /// <summary>Optional mandatory server IDs for request and report reads.</summary>
+    public IReadOnlyList<int>? ReadServerIds { get; init; }
+
     /// <summary>The first key of the route lock, <c>pg_advisory_xact_lock(5632, route_id)</c>.</summary>
     public const int RouteLockKey = 5632;
 
@@ -1197,7 +1200,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         var requests = new List<InvestigationRequestRow>();
         string? brief = null;
-        await using (var command = Command(connection, null, ReportsRequestsSql,
+        await using (var command = ScopedReadCommand(connection, ReportsRequestsSql, "r.server_id",
             P(Now()), new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid },
             new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer }, P(sinceUtc), P(limit + 1)))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
@@ -1249,7 +1252,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 
         /* #5913: the people's feedback on these reports, and (for a window, not one request) the false-positive counts per family
            over the same window and server. The V191 table is SELECT-able by every role that reads these tables. */
-        var feedbackStore = new InvestigationFeedbackStore(_dataSource, _commandTimeoutSeconds);
+        var feedbackStore = new InvestigationFeedbackStore(_dataSource, _commandTimeoutSeconds) { ReadServerIds = ReadServerIds };
         var feedback = await feedbackStore.ReadAsync(connection, ids, cancellationToken);
         var familyCounts = requestId is null ? await feedbackStore.FamilyCountsAsync(connection, sinceUtc, serverId, cancellationToken) : null;
         return new InvestigationReportsRead(requests, reports, journal, brief, requestsTruncated, journalTruncated, feedback, familyCounts, EvidenceByBasis: true);
@@ -1324,7 +1327,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = Command(connection, null, ListSql,
+        await using var command = ScopedReadCommand(connection, ListSql, "s.server_id",
             P(Now()), PNullable(state), new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer },
             PNullable(family), P(limit));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1811,6 +1814,20 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             new NpgsqlParameter<int?> { TypedValue = routeId, NpgsqlDbType = NpgsqlDbType.Integer },
             new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer },
             P(journalEvent), P(actor), PNullable(reason), PNullable(detailJson), PNullable(onceKey));
+
+    private NpgsqlCommand ScopedReadCommand(NpgsqlConnection connection, string sql, string column, params NpgsqlParameter[] parameters)
+    {
+        var command = Command(connection, null, sql, parameters);
+        if (ReadServerIds is not null)
+        {
+            var parameter = "$" + (command.Parameters.Count + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var order = sql.LastIndexOf("\nORDER BY ", StringComparison.Ordinal);
+            command.CommandText = sql.Insert(order, "\nAND " + column + " = ANY(" + parameter + ")\n");
+            command.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Integer, ReadServerIds.ToArray());
+        }
+
+        return command;
+    }
 
     private NpgsqlCommand Command(NpgsqlConnection connection, NpgsqlTransaction? transaction, string sql, params NpgsqlParameter[] parameters)
     {

@@ -757,6 +757,29 @@ DROP TABLE IF EXISTS collect.schema_columns;
 DROP TABLE IF EXISTS collect.schema_objects;
 DROP TABLE IF EXISTS collect.schema_capture_state;
 DROP TABLE IF EXISTS collect.schema_capture_passes;"),
+        new(257, "hasWebAccessGroups", """
+            DROP TRIGGER IF EXISTS web_access_tag_deleted ON config.server_tags;
+            DROP TABLE IF EXISTS config.web_access_group_tags, config.web_access_group_events, config.web_access_groups CASCADE;
+            DROP FUNCTION IF EXISTS config.manage_web_access_group(text,uuid,bigint,text,text,integer[],uuid,text,boolean,text);
+            DROP FUNCTION IF EXISTS config.activate_web_access_group(uuid,bigint,uuid,text);
+            DROP FUNCTION IF EXISTS config.web_access_snapshot(uuid);
+            DROP FUNCTION IF EXISTS config.web_access_tag_deleted();
+            DROP FUNCTION IF EXISTS config.web_access_owner_guard();
+            DROP FUNCTION IF EXISTS config.harden_web_access_groups();
+            """),
+        new(258, "hasWebAccessExport", """
+            DROP TABLE IF EXISTS config.web_access_export_keys, config.web_access_exports CASCADE;
+            DROP FUNCTION IF EXISTS config.web_access_export(text,uuid,uuid,text,text,text);
+            DROP FUNCTION IF EXISTS config.manage_web_access_group_recoverable(text,uuid,bigint,text,text,integer[],uuid,text,boolean,text);
+            DROP FUNCTION IF EXISTS config.harden_web_access_exports();
+            ALTER TABLE config.web_access_group_events DROP CONSTRAINT IF EXISTS web_access_group_events_event_check;
+            ALTER TABLE config.web_access_group_events ADD CHECK(event IN ('created','updated','rotated','deleted','activated','refused','tag_deleted'));
+            """),
+        new(259, "hasAdvancedWebAccess", """
+            DROP FUNCTION IF EXISTS config.set_web_access_advanced(boolean);
+            DROP FUNCTION IF EXISTS config.harden_web_access_advanced();
+            DROP TABLE IF EXISTS config.web_access_advanced;
+            """),
     ];
 
     /// <summary>

@@ -224,6 +224,13 @@ public sealed class DarlingMcpQueryFleetSummaryTools
         DarlingMcpReadParameters.AddTimestamp(command, windowEnd);
         DarlingMcpReadParameters.AddTimestamp(command, rawFrom);
         DarlingMcpReadParameters.AddInt(command, limit);
+        if (DarlingServerResolver.WebAllowedServerIds is { } allowedIds)
+        {
+            command.CommandText = command.CommandText.Replace("ORDER BY p.cpu_us DESC",
+                "WHERE p.server_id = ANY($6)\nORDER BY p.cpu_us DESC", StringComparison.Ordinal);
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer, allowedIds.ToArray());
+        }
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

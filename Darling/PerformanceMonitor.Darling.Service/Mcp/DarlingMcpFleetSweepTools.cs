@@ -161,6 +161,12 @@ public sealed class DarlingMcpFleetSweepTools
             /* The worklist's names, through the web feed's own gate-and-read (#3482) — the
                ValidateWatchState sharing pattern, so the two surfaces cannot drift on when names are
                joined, and a failed read costs the names, never the worklist. */
+            if (DarlingServerResolver.WebAllowedServerIds is { } ids)
+            {
+                runs = await DarlingWebEndpoints.ScopeSweepsAsync(postgres, runs, ids, cancellationToken);
+                watchItems = watchItems.Where(item => ids.Contains(item.ServerId)).ToList();
+            }
+
             var watchItemNames = await DarlingFleetSweepEndpoints.ReadWatchItemNamesAsync(
                 postgres, watchItems, logger, cancellationToken);
 
@@ -370,6 +376,13 @@ public sealed class DarlingMcpFleetSweepTools
         var ledger = run.AlertsEnabled
             ? new List<FleetSweepWouldHavePagedEntry>()
             : await FleetSweepStore.GetWouldHavePagedAsync(postgres, run.SweepId, cancellationToken);
+
+        if (DarlingServerResolver.WebAllowedServerIds is { } ids)
+        {
+            run = await DarlingWebEndpoints.ScopeSweepAsync(postgres, run, ids, cancellationToken);
+            verdicts = verdicts.Where(verdict => ids.Contains(verdict.ServerId)).ToList();
+            ledger = ledger.Where(entry => ids.Contains(entry.ServerId)).ToList();
+        }
 
         return FleetSweepPresentation.BuildSweepDetailNode(run, verdicts, ledger);
     }

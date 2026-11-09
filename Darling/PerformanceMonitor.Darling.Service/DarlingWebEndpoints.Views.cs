@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -76,7 +76,7 @@ public static partial class DarlingWebEndpoints
     internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(
         NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken,
         ReadLatencyRecorder? readLatency = null, int clientDeadlineHeadroomSeconds = 0, bool remapClientTimeout = false, bool includeDataStartFields = false,
-        Action<Exception>? onRunException = null, DateTime? nowUtc = null, string? caller = null, ReadSurface? cacheHost = null)
+        Action<Exception>? onRunException = null, DateTime? nowUtc = null, string? caller = null, ReadSurface? cacheHost = null, IReadOnlyList<int>? authorizedServerIds = null)
     {
         /* #5506 part 3 (round 1, C1): a heavy panel is answered from the read cache, joins an identical run in flight, or
            runs once and is stored, as /api/read and the MCP reads are. The host that runs it (cacheHost: web or mcp) is
@@ -84,7 +84,7 @@ public static partial class DarlingWebEndpoints
            their entries are never shared. What is stored is the exact text the host answers (PayloadText), so a hit is
            byte-identical to the run that stored it. A hit skips admission. */
         var admission = readLatency?.Admission;
-        if (cacheHost is { } host && admission is not null
+        if (authorizedServerIds is null && cacheHost is { } host && admission is not null
             && admission.IsCached(ReadSurface.Compose, ComposeRouteLabel(body), ComposeWindowBand(body)))
         {
             return await RunComposedPanelCachedAsync(postgres, body, readLatency!, admission, host,
@@ -92,7 +92,7 @@ public static partial class DarlingWebEndpoints
         }
 
         return await RunComposedPanelAdmittedAsync(postgres, body, readLatency, clientDeadlineHeadroomSeconds,
-            remapClientTimeout, includeDataStartFields, onRunException, nowUtc, caller, cacheHost, cancellationToken);
+            remapClientTimeout, includeDataStartFields, onRunException, nowUtc, caller, cacheHost, authorizedServerIds, cancellationToken);
     }
 
     private static async Task<ComposeRunOutcome> RunComposedPanelCachedAsync(
@@ -122,7 +122,7 @@ public static partial class DarlingWebEndpoints
            answer), never the run's, so one run counts once. */
         var flight = cache.Join(key, ttl,
             token => RunComposedPanelAdmittedAsync(postgres, body, readLatency, clientDeadlineHeadroomSeconds, remapClientTimeout,
-                includeDataStartFields, onRunException, nowUtc, caller, host, token),
+                includeDataStartFields, onRunException, nowUtc, caller, host, null, token),
             run => run.PayloadText is { } text && ReadResultCache.IsCacheableText(text, gcf: false) ? text : null);
         if (flight.IsLead)
         {
@@ -161,7 +161,7 @@ public static partial class DarlingWebEndpoints
     private static async Task<ComposeRunOutcome> RunComposedPanelAdmittedAsync(
         NpgsqlDataSource postgres, JsonObject body,
         ReadLatencyRecorder? readLatency, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, bool includeDataStartFields,
-        Action<Exception>? onRunException, DateTime? nowUtc, string? caller, ReadSurface? cacheHost, System.Threading.CancellationToken cancellationToken)
+        Action<Exception>? onRunException, DateTime? nowUtc, string? caller, ReadSurface? cacheHost, IReadOnlyList<int>? authorizedServerIds, System.Threading.CancellationToken cancellationToken)
     {
         /* #4442 scope 2: recorded ONCE per call, here, so the web /api/compose/run route and the MCP
            run_custom_view_panel tool -- both of which call this ONE runner -- contribute exactly one
@@ -201,7 +201,7 @@ public static partial class DarlingWebEndpoints
         }
 
         stopwatch.Restart();
-        var outcome = await ComposePanelRunner.RunComposedPanelCoreAsync(ComposeHost, postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, nowUtc);
+        var outcome = await ComposePanelRunner.RunComposedPanelCoreAsync(ComposeHost, postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, nowUtc, authorizedServerIds);
         /* Round 1, C1: the text the host answers, taken once here so a cached copy of it is the same bytes. */
         if (cacheHost is { } host && outcome.Payload is { } payload)
         {

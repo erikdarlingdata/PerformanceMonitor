@@ -61,6 +61,42 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// </summary>
 internal static class DarlingServerResolver
 {
+    private static readonly AsyncLocal<int?> WebServerId = new();
+    private static readonly AsyncLocal<(IReadOnlyList<int> Ids, IReadOnlyList<int> Tags, bool AllServers)?> WebScope = new();
+
+    internal static IReadOnlyList<int>? WebAllowedServerIds => WebScope.Value?.Ids;
+    internal static IReadOnlyList<int>? WebAllowedTagIds => WebScope.Value?.Tags;
+    internal static bool WebScopeAllServers => WebScope.Value?.AllServers ?? false;
+
+    internal static async Task<string> ReadWebScopeAsync(IReadOnlyList<int> ids, IReadOnlyList<int> tags, Func<Task<string>> read, bool allServers = false)
+    {
+        var previous = WebScope.Value;
+        WebScope.Value = (ids, tags, allServers);
+        try
+        {
+            return await read();
+        }
+        finally
+        {
+            WebScope.Value = previous;
+        }
+    }
+
+    /// <summary>Keep every resolution in an authorized web read on the same server ID.</summary>
+    internal static async Task<string> ReadWebServerAsync(int serverId, Func<Task<string>> read)
+    {
+        var previous = WebServerId.Value;
+        WebServerId.Value = serverId;
+        try
+        {
+            return await read();
+        }
+        finally
+        {
+            WebServerId.Value = previous;
+        }
+    }
+
     /// <summary>The registry-read fault sentence's fixed prefix (#4283 H2) — a constant so the web surface's
     /// <see cref="PerformanceMonitor.Darling.Service.DarlingWebEndpoints.ClassifyToolResponse"/> and the
     /// triage note/card can recognize this specific store fault and route it through <c>ServerErrorResult</c>
@@ -103,6 +139,13 @@ ORDER BY server_name";
         }
 
         var answer = ResolveOrErrorForAnswer(servers, serverName, nameClash);
+        if ((WebServerId.Value is int authorizedId &&
+             (answer.error is not null || answer.resolved.ServerId != authorizedId)) ||
+            (WebAllowedServerIds is { } allowedIds &&
+             (answer.error is not null || !allowedIds.Contains(answer.resolved.ServerId))))
+        {
+            return (default, McpHelpers.Refusal("server_name", "Server data is unavailable to this token."));
+        }
         if (answer.error is null)
         {
             /* #5097: the slow-read record names the server a read resolved; one site covers every server-scoped tool. */
@@ -312,6 +355,13 @@ ORDER BY server_name";
         DarlingPeerDirectory.Snapshot peers,
         NameClash nameClash = NameClash.StoredNameWins)
     {
+        if (WebServerId.Value is not null || WebAllowedServerIds is not null)
+        {
+            servers = servers.Where(server =>
+                (WebServerId.Value is null || server.ServerId == WebServerId.Value) &&
+                (WebAllowedServerIds is null || WebAllowedServerIds.Contains(server.ServerId))).ToList();
+        }
+
         if (string.IsNullOrWhiteSpace(serverName))
         {
             /* No name: the only server there is, or nothing to choose from. */
@@ -348,6 +398,11 @@ ORDER BY server_name";
         string? serverName,
         DarlingPeerDirectory.Snapshot peers)
     {
+        if (WebServerId.Value is not null || WebAllowedServerIds is not null)
+        {
+            return "Server data is unavailable to this token.";
+        }
+
         var message = $"{McpHelpers.ServerMissOpening(serverName, servers.Count)} Available servers:\n{ListAvailableServers(servers)}";
         var disclosure = DarlingPeerDirectory.ResolutionMissDisclosure(peers, serverName);
 
@@ -434,7 +489,16 @@ ORDER BY server_name";
             return (default, fault);
         }
 
-        return ResolveWithFingerprintName(servers, serverName);
+        var answer = ResolveWithFingerprintName(servers, serverName);
+        if ((WebServerId.Value is int authorizedId &&
+             (answer.error is not null || answer.resolved.ServerId != authorizedId)) ||
+            (WebAllowedServerIds is { } allowedIds &&
+             (answer.error is not null || !allowedIds.Contains(answer.resolved.ServerId))))
+        {
+            return (default, McpHelpers.Refusal("server_name", "Server data is unavailable to this token."));
+        }
+
+        return answer;
     }
 
     /// <summary>The pure half of <see cref="ResolveWithFingerprintNameAsync"/>, over an already-read registry.</summary>

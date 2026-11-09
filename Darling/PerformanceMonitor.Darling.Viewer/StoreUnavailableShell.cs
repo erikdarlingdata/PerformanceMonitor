@@ -21,7 +21,7 @@ internal static class StoreUnavailableShell
     internal static readonly IReadOnlyList<string> StoreDependentSidebarHandlers =
     [
         "AddServerButton_Click", "AddMultipleServersButton_Click", "ManageServersButton_Click",
-        "ManageTags_Click", "ImportSettingsButton_Click", "SettingsButton_Click",
+        "ManageTags_Click", "WebAccessGroups_Click", "AdvancedWebAccess_Click", "ImportSettingsButton_Click", "SettingsButton_Click",
     ];
 
     /// <summary>Sidebar footer Click handlers that read no store: usable in every failure state.</summary>

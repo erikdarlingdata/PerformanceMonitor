@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -464,9 +464,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            makes it the only one that can answer when the store IS the problem — so it reports the collector's
            actual verdict instead of a hardcoded "ok". See DescribePing for the four states and their status
            codes, and CollectorRuntimeState for why that verdict is an in-process field rather than a row. */
-        app.MapGet("/api/ping", () =>
+        app.MapGet("/api/ping", (HttpContext context) =>
         {
             var report = DescribePing(collector.Read());
+            if (DarlingWebSeat.FromContext(context).AllowedTagIds is not null)
+            {
+                report = report with { Detail = null };
+            }
             return Results.Json(report, PingJsonOptions, statusCode: report.HttpStatus);
         });
 
@@ -521,7 +525,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     ? null
                     : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct),
                 logger: logger,
-                cancellationToken: context.RequestAborted);
+                cancellationToken: context.RequestAborted,
+                allowedTagIds: DarlingWebSeat.FromContext(context).AllowedTagIds,
+                scopeAllServers: DarlingWebSeat.FromContext(context).ScopeAllServers);
             run.Complete(ReadOutcome.Ok);
             return Results.Json(result, DarlingFleetReader.JsonOptions);
         });
@@ -566,9 +572,6 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             app.MapGet("/api/read/" + name, async (HttpContext context) =>
             {
                 var stopwatch = Stopwatch.StartNew();
-                using var readScope = ReadScope.Open(logger);
-                readScope.Scope.CaptureStatements = true;
-
                 /* #5506 part 3: admission, after the scope and the band. A refused read answers 429 and records busy; a
                    browser that leaves the queue records cancelled; a queued read records its wait as one queue_wait
                    sample. The recorded elapsed time starts after admission (D1). */
@@ -581,13 +584,33 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     return ToHttpResult(nonIntegerRefusal, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
                 }
 
+                int? scopedServerId = null;
+                var allowedTagIds = DarlingWebSeat.FromContext(context).AllowedTagIds;
+                IReadOnlyList<int>? allowedServerIds = null;
+                if (allowedTagIds is not null)
+                {
+                    allowedServerIds = await AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
+                    if (!IsScopedFleetRead(name) || !string.IsNullOrWhiteSpace(Server(context)))
+                    {
+                        scopedServerId = await AuthorizedWebServerAsync(postgres, context, allowedTagIds);
+                        if (scopedServerId is null)
+                        {
+                            return DarlingWebStatementSweep.JsonText("""{"error":"Server data is unavailable to this token."}""",
+                                DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds,
+                                context.RequestAborted, StatusCodes.Status403Forbidden);
+                        }
+                    }
+                }
+
+                using var readScope = ReadScope.Open(logger);
+                readScope.Scope.CaptureStatements = true;
                 var admissionBand = WebWindowBand(name, key => First(context, key));
                 /* #5506 part 3: a heavy cacheable read is answered from the read cache, joins an identical read running now,
                    or runs once and is stored (the text before the statement sweep, which ToHttpResult runs on every answer).
                    The key is the query string as sent, before the read below adds its own as_of. A hit skips admission. */
                 /* #6800: a whole-fleet read of get_resource_use_by_tag (no server) over a window of 24 hours or more is cached for its own TTL. */
                 var fleetRead = ReadAdmission.IsFleetRead(name, Server(context), WebWindowHours(name, key => First(context, key)));
-                if (readAdmission is { } admission && admission.IsCached(ReadSurface.Web, name, admissionBand, fleetRead))
+                if (allowedServerIds is null && readAdmission is { } admission && admission.IsCached(ReadSurface.Web, name, admissionBand, fleetRead))
                 {
                     var cache = admission.Cache;
                     var ttl = ReadResultCache.TtlFor(name, admissionBand, fleetRead);
@@ -703,7 +726,22 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                             context.Request.QueryString = context.Request.QueryString.Add("as_of", askedAsOf);
                         }
 
-                        result = await handler(context, postgres, analysis);
+                        if (allowedServerIds is not null)
+                        {
+                            result = await DarlingServerResolver.ReadWebScopeAsync(allowedServerIds, allowedTagIds!,
+                                () => scopedServerId is int serverId
+                                    ? DarlingServerResolver.ReadWebServerAsync(serverId, () => handler(context, postgres, analysis))
+                                    : handler(context, postgres, analysis), DarlingWebSeat.FromContext(context).ScopeAllServers);
+                            if (result.TrimStart().StartsWith('{') && System.Text.Json.Nodes.JsonNode.Parse(result) is System.Text.Json.Nodes.JsonObject scopedResult)
+                            {
+                                scopedResult.Remove("separately_monitored_databases");
+                                result = scopedResult.ToJsonString();
+                            }
+                        }
+                        else
+                        {
+                            result = await handler(context, postgres, analysis);
+                        }
 
                         /* #5644 W22: the tools' own window parameter is hours_back, but a web caller sends hours; a refusal for an
                            out-of-range one (?hours=-5, ?hours=500) is worded in the caller's own parameter. */
@@ -713,8 +751,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                            start. Added to the web mirror only, never to the tool, so the MCP payloads are unchanged. A
                            failed probe returns the tool's answer as it was. */
                         var askedHours = QueryInt(context, "hours", "hours_back", 0);
-                        result = await WebDataStartNote.AddAsync(
-                            postgres, name, Server(context), askedHours > 0 ? askedHours : null, askedAsOf, result, logger, context.RequestAborted);
+                        if (allowedServerIds is null)
+                        {
+                            result = await WebDataStartNote.AddAsync(
+                                postgres, name, Server(context), askedHours > 0 ? askedHours : null, askedAsOf, result, logger, context.RequestAborted);
+                        }
                     }
                     catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
                     {

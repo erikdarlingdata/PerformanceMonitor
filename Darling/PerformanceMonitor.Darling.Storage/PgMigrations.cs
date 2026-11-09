@@ -3386,6 +3386,9 @@ $rung$;";
         new Migration(254, "slack-chat-requests", V254Sql),
         new Migration(255, "wait-stats-cadence-baseline", V255Sql),
         new Migration(256, "schema-tracking", V256Sql),
+        new Migration(WebAccessGroupSchema.Version, "viewer-managed-web-access-groups", WebAccessGroupSchema.CreateSql),
+        new Migration(258, "viewer-web-token-export", WebAccessExportSchema.CreateSql),
+        new Migration(WebAccessAdvancedSchema.Version, "advanced-web-access-opt-in", WebAccessAdvancedSchema.CreateSql),
     };
 
     /* V256 (#7643): schema tracking. Versioned table and view definitions, kept by the schema_objects collector (Darling only).

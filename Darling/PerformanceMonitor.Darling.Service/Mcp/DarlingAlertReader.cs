@@ -169,6 +169,17 @@ AND   TRUE /* family */";
     public sealed record AlertHistoryFilter(string? MetricName, string? Family)
     {
         public static readonly AlertHistoryFilter None = new(null, null);
+        internal IReadOnlyList<int>? AllowedServerIds { get; init; }
+
+        internal void Constrain(NpgsqlCommand command, string column)
+        {
+            if (AllowedServerIds is null) return;
+            var parameter = "$" + (command.Parameters.Count + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var predicate = "\nAND " + column + " = ANY(" + parameter + ")\n";
+            var order = command.CommandText.IndexOf("\nORDER BY ", StringComparison.Ordinal);
+            command.CommandText = order < 0 ? command.CommandText + predicate : command.CommandText.Insert(order, predicate);
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer, AllowedServerIds.ToArray());
+        }
 
         public bool IsSet => MetricName is not null || Family is not null;
 
@@ -203,6 +214,7 @@ AND   TRUE /* family */";
            `(dismissed = FALSE OR $N)` and an untyped parameter there is a runtime type error, not a compile one. */
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = includeDismissed });
         DarlingMcpReadParameters.AddNullableText(command, filter.MetricName);
+        filter.Constrain(command, "a.server_id");
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -527,6 +539,7 @@ LIMIT 1";
             DarlingMcpReadParameters.AddInt(command, serverId.Value);
         }
         DarlingMcpReadParameters.AddNullableText(command, filter.MetricName);
+        filter.Constrain(command, "server_id");
 
         var count = await command.ExecuteScalarAsync(cancellationToken);
         return count is long l ? l : Convert.ToInt64(count, System.Globalization.CultureInfo.InvariantCulture);

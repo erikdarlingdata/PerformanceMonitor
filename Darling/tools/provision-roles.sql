@@ -1152,6 +1152,16 @@ BEGIN
     END LOOP;
 END
 $do$;
+-- Viewer-managed web credentials: revoke blanket table grants before they become durable.
+DO $web_groups$
+BEGIN
+    IF pg_catalog.to_regprocedure('config.harden_web_access_groups()') IS NOT NULL THEN
+        PERFORM config.harden_web_access_groups();
+        IF pg_catalog.to_regprocedure('config.harden_web_access_exports()') IS NOT NULL THEN PERFORM config.harden_web_access_exports(); END IF;
+        IF pg_catalog.to_regprocedure('config.harden_web_access_advanced()') IS NOT NULL THEN PERFORM config.harden_web_access_advanced(); END IF;
+    END IF;
+END $web_groups$;
+
 COMMIT;
 
 -- 3. config writes -- admin gets the whole schema.
@@ -2669,6 +2679,16 @@ END
 $fn$;
 REVOKE ALL ON FUNCTION config.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION config.set_notification_channels(text[], text, integer, boolean, text, text, text, text, text, text, text, text, text, text, text, text, text, boolean, text, boolean, text, text) TO mcp;
+-- Viewer-managed web credentials: revoke blanket table grants before they become durable.
+DO $web_groups$
+BEGIN
+    IF pg_catalog.to_regprocedure('config.harden_web_access_groups()') IS NOT NULL THEN
+        PERFORM config.harden_web_access_groups();
+        IF pg_catalog.to_regprocedure('config.harden_web_access_exports()') IS NOT NULL THEN PERFORM config.harden_web_access_exports(); END IF;
+        IF pg_catalog.to_regprocedure('config.harden_web_access_advanced()') IS NOT NULL THEN PERFORM config.harden_web_access_advanced(); END IF;
+    END IF;
+END $web_groups$;
+
 COMMIT;
 
 -- #6230: the MCP incident tools queue analyze_now, purge_now, test_connect, pause and resume through this function, the only way the
@@ -4005,3 +4025,13 @@ BEGIN
    END LOOP;
 END
 $do$;
+
+-- Viewer-managed web credentials: revoke blanket table grants before they become durable.
+DO $web_groups$
+BEGIN
+    IF pg_catalog.to_regprocedure('config.harden_web_access_groups()') IS NOT NULL THEN
+        PERFORM config.harden_web_access_groups();
+        IF pg_catalog.to_regprocedure('config.harden_web_access_exports()') IS NOT NULL THEN PERFORM config.harden_web_access_exports(); END IF;
+        IF pg_catalog.to_regprocedure('config.harden_web_access_advanced()') IS NOT NULL THEN PERFORM config.harden_web_access_advanced(); END IF;
+    END IF;
+END $web_groups$;

@@ -357,6 +357,17 @@
                                 <TextBlock Text="Manage Tags" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
+                        <CheckBox x:Name="AdvancedWebAccessCheckBox" Content="Enable advanced web access"
+                                  Visibility="Collapsed" Margin="0,8,0,0" Click="AdvancedWebAccess_Click"/>
+                        <Button x:Name="WebAccessGroupsSidebarButton" Click="WebAccessGroups_Click" Visibility="Collapsed"
+                                AutomationProperties.Name="Manage web access groups"
+                                Style="{StaticResource DarkButton}" Padding="8,5" Margin="0,8,0,0"
+                                ToolTip="Administrator: manage read-only team tokens and tag scopes">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE72E;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                <TextBlock Text="Web Access Groups" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
                         <Button AutomationProperties.AutomationId="OpenPlanViewerSidebarButton" AutomationProperties.Name="Open or paste an execution plan (independent of any server)" Click="OpenPlanViewerButton_Click"
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"

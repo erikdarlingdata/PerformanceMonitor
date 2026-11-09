@@ -37,6 +37,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public sealed class InvestigationFeedbackStore
 {
+    /// <summary>Optional mandatory server IDs for family summary reads.</summary>
+    public IReadOnlyList<int>? ReadServerIds { get; init; }
+
     private readonly NpgsqlDataSource _dataSource;
     private readonly int _commandTimeoutSeconds;
 
@@ -268,6 +271,12 @@ ORDER BY rep.family";
         var rows = new List<InvestigationFamilyCounts>();
         await using var command = Command(connection, FamilyCountsSql, Utc(sinceUtc),
             new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer });
+        if (ReadServerIds is not null)
+        {
+            command.CommandText = command.CommandText.Replace("WHERE r.opened_at >= $1 AND", "WHERE r.server_id = ANY($3) AND r.opened_at >= $1 AND", StringComparison.Ordinal);
+            command.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Integer, ReadServerIds.ToArray());
+        }
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

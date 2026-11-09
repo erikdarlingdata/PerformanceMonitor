@@ -2399,6 +2399,10 @@ public sealed class WebNetworkConfig
 /// </summary>
 public sealed class WebTokenEntry
 {
+    /// <summary>Optional fleet tag IDs for a scoped reader, including each tag’s descendants.</summary>
+    [JsonPropertyName("allowedTagIds")]
+    public List<int>? AllowedTagIds { get; set; }
+
     /// <summary>The <c>reader</c> role: the read-only seat, the one an OIDC viewer gets.</summary>
     public const string ReaderRole = "reader";
 

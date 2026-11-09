@@ -310,6 +310,11 @@ GRANT INSERT ON public.temp_name_control TO viewer;", ct);
         var scratchDatabase = "ON DATABASE \"" + scratch.DatabaseName.Replace("\"", "\"\"", StringComparison.Ordinal) + "\" ";
         Assert.Contains("REVOKE ALL " + shared + "FROM PUBLIC;", batch, StringComparison.Ordinal);
         batch = batch.Replace(shared, scratchDatabase, StringComparison.Ordinal);
+        // The managed batch also protects maintenance databases. Those shared cluster privileges
+        // are not this scratch-table test's to change (#5618); the product statement stays intact.
+        const string maintenanceRevoke = "REVOKE CONNECT ON DATABASE postgres, template1 FROM PUBLIC;";
+        Assert.Contains(maintenanceRevoke, batch, StringComparison.Ordinal);
+        batch = batch.Replace(maintenanceRevoke, "-- Maintenance database CONNECT is unchanged by this scratch test.", StringComparison.Ordinal);
         Assert.DoesNotContain(shared, batch, StringComparison.Ordinal);
         return batch;
     }

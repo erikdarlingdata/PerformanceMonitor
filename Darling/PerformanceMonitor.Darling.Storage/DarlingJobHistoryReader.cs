@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
@@ -50,6 +51,9 @@ public sealed record DarlingJobHistoryRow(
 /// </summary>
 public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = null, string? Category = null, DateTime? UntilUtc = null, int? MinDurationSeconds = null, bool ShareCapPerServer = false)
 {
+    /// <summary>Optional mandatory server IDs applied before selecting the page.</summary>
+    public IReadOnlyList<int>? AllowedServerIds { get; init; }
+
     private int UntilParam(int firstParam) => firstParam + (JobName is null ? 0 : 1) + (RunStatus is null ? 0 : 1) + (Category is null ? 0 : 1) + (MinDurationSeconds is null ? 0 : 1);
 
     /// <summary>
@@ -185,6 +189,14 @@ public static class DarlingJobHistoryReader
             {
                 command.Parameters.Add(p);
             }
+        }
+
+        if (filter?.AllowedServerIds is { } allowedIds)
+        {
+            var parameter = "$" + (command.Parameters.Count + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            command.CommandText = command.CommandText.Replace("WHERE jh.collection_time >=",
+                "WHERE jh.server_id = ANY(" + parameter + ") AND jh.collection_time >=", StringComparison.Ordinal);
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer, allowedIds.ToArray());
         }
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
