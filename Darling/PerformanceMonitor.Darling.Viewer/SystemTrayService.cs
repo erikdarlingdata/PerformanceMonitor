@@ -59,14 +59,50 @@ public sealed class SystemTrayService : IDisposable
     }
 
     /// <summary>
-    /// Initializes the system tray icon with its context menu. Safe to call again (theme change): it
-    /// disposes the old icon and re-subscribes the StateChanged handler exactly once.
+    /// Initializes the system tray icon with its context menu. Safe to call again: it disposes the old icon and
+    /// re-subscribes the StateChanged handler exactly once. A theme change does not come through here; it restyles
+    /// the icon that exists (<see cref="ApplyTheme"/>).
     /// </summary>
     public void Initialize()
     {
         _trayIcon?.Dispose();
 
         _trayIcon = new TaskbarIcon();
+
+        /* Load icon */
+        try
+        {
+            var iconUri = new Uri("pack://application:,,,/EDD.ico", UriKind.Absolute);
+            _trayIcon.IconSource = new BitmapImage(iconUri);
+        }
+        catch
+        {
+            /* Icon loading failed - tray icon will be blank but functional */
+        }
+
+        ApplyTheme();
+
+        /* Double-click to show window */
+        _trayIcon.TrayMouseDoubleClick += (s, e) => _restoreWindow();
+
+        /* Handle minimize to tray. Unsubscribe first, so a second Initialize does not stack a duplicate
+           StateChanged handler on the app-lifetime window. */
+        _mainWindow.StateChanged -= MainWindow_StateChanged;
+        _mainWindow.StateChanged += MainWindow_StateChanged;
+    }
+
+    /// <summary>
+    /// Styles the tray icon's tooltip and context menu for the current theme, on the icon that already exists. A theme
+    /// change runs this in place of rebuilding the icon: disposing the icon leaves a toast on screen open, with its close
+    /// timer stopped and no icon that can close it, and the next toast opens over it (#8475). The toast itself follows the
+    /// theme through <see cref="WindowlessThemeFollower"/>.
+    /// </summary>
+    private void ApplyTheme()
+    {
+        if (_trayIcon == null)
+        {
+            return;
+        }
 
         bool hasLightBackground = ThemeManager.HasLightBackground;
 
@@ -97,17 +133,6 @@ public sealed class SystemTrayService : IDisposable
             Child = _tooltipText
         };
 
-        /* Load icon */
-        try
-        {
-            var iconUri = new Uri("pack://application:,,,/EDD.ico", UriKind.Absolute);
-            _trayIcon.IconSource = new BitmapImage(iconUri);
-        }
-        catch
-        {
-            /* Icon loading failed - tray icon will be blank but functional */
-        }
-
         /* Build context menu — Show Window / Exit. The viewer has no in-process collection to pause. */
         var contextMenu = new ContextMenu();
 
@@ -122,14 +147,6 @@ public sealed class SystemTrayService : IDisposable
         contextMenu.Items.Add(exitItem);
 
         _trayIcon.ContextMenu = contextMenu;
-
-        /* Double-click to show window */
-        _trayIcon.TrayMouseDoubleClick += (s, e) => _restoreWindow();
-
-        /* Handle minimize to tray. Unsubscribe first: Initialize re-runs on theme change, so a
-           plain += would stack a duplicate StateChanged handler on the app-lifetime window each time. */
-        _mainWindow.StateChanged -= MainWindow_StateChanged;
-        _mainWindow.StateChanged += MainWindow_StateChanged;
     }
 
     private void MainWindow_StateChanged(object? sender, EventArgs e)
@@ -214,6 +231,6 @@ public sealed class SystemTrayService : IDisposable
 
     private void OnThemeChanged(string _)
     {
-        _mainWindow.Dispatcher.InvokeAsync(Initialize);
+        _mainWindow.Dispatcher.InvokeAsync(ApplyTheme);
     }
 }

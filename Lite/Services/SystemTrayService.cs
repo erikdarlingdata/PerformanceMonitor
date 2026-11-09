@@ -45,7 +45,9 @@ public class SystemTrayService : IDisposable
     }
 
     /// <summary>
-    /// Initializes the system tray icon with context menu.
+    /// Initializes the system tray icon with context menu. Safe to call again: it disposes the old icon and
+    /// re-subscribes the StateChanged handler exactly once. A theme change does not come through here; it restyles
+    /// the icon that exists (<see cref="ApplyTheme"/>).
     /// </summary>
     public void Initialize()
     {
@@ -53,7 +55,40 @@ public class SystemTrayService : IDisposable
 
         _trayIcon = new TaskbarIcon();
 
+        /* Load icon */
+        try
+        {
+            var iconUri = new Uri("pack://application:,,,/EDD.ico", UriKind.Absolute);
+            _trayIcon.IconSource = new BitmapImage(iconUri);
+        }
+        catch
+        {
+            /* Icon loading failed - tray icon will be blank but functional */
+        }
+
+        ApplyTheme();
+
+        /* Double-click to show window */
+        _trayIcon.TrayMouseDoubleClick += (s, e) => _restoreWindow();
+
+        /* Handle minimize to tray. Unsubscribe first, so a second Initialize does not stack a duplicate
+           StateChanged handler on the app-lifetime window. */
+        _mainWindow.StateChanged -= MainWindow_StateChanged;
+        _mainWindow.StateChanged += MainWindow_StateChanged;
+    }
+
+    /// <summary>
+    /// Styles the tray icon's tooltip and context menu for the current theme, on the icon that already exists. A theme
+    /// change runs this in place of rebuilding the icon: disposing the icon leaves a toast on screen open, with its close
+    /// timer stopped and no icon that can close it, and the next toast opens over it (#8475). The toast itself follows the
+    /// theme through <see cref="WindowlessThemeFollower"/>. The tooltip and the pause item say what the collection is doing now.
+    /// </summary>
+    private void ApplyTheme()
+    {
+        if (_trayIcon == null) return;
+
         bool HasLightBackground = ThemeManager.HasLightBackground;
+        bool paused = _backgroundService?.IsPaused == true;
 
         /* Custom tooltip styled to match current theme.
            Note: Hardcodet TrayToolTip can rarely trigger a race condition in Popup.CreateWindow
@@ -61,7 +96,7 @@ public class SystemTrayService : IDisposable
            The DispatcherUnhandledException handler silently swallows this specific crash. */
         _tooltipText = new TextBlock
         {
-            Text = "Performance Monitor Lite",
+            Text = paused ? "Performance Monitor Lite (Paused)" : "Performance Monitor Lite",
             Foreground = new SolidColorBrush(HasLightBackground
                 ? (Color)ColorConverter.ConvertFromString("#1A1D23")
                 : (Color)ColorConverter.ConvertFromString("#E4E6EB")),
@@ -81,17 +116,6 @@ public class SystemTrayService : IDisposable
             Child = _tooltipText
         };
 
-        /* Load icon */
-        try
-        {
-            var iconUri = new Uri("pack://application:,,,/EDD.ico", UriKind.Absolute);
-            _trayIcon.IconSource = new BitmapImage(iconUri);
-        }
-        catch
-        {
-            /* Icon loading failed - tray icon will be blank but functional */
-        }
-
         /* Build context menu */
         var contextMenu = new ContextMenu();
 
@@ -101,7 +125,7 @@ public class SystemTrayService : IDisposable
 
         contextMenu.Items.Add(new Separator());
 
-        _pauseResumeItem = new MenuItem { Header = "Pause Co_llection", Icon = new TextBlock { Text = "⏸", Background = Brushes.Transparent } };
+        _pauseResumeItem = new MenuItem { Header = paused ? "Resume Co_llection" : "Pause Co_llection", Icon = new TextBlock { Text = paused ? "▶" : "⏸", Background = Brushes.Transparent } };
         _pauseResumeItem.Click += (s, e) => ToggleCollection();
         contextMenu.Items.Add(_pauseResumeItem);
 
@@ -112,14 +136,6 @@ public class SystemTrayService : IDisposable
         contextMenu.Items.Add(exitItem);
 
         _trayIcon.ContextMenu = contextMenu;
-
-        /* Double-click to show window */
-        _trayIcon.TrayMouseDoubleClick += (s, e) => _restoreWindow();
-
-        /* Handle minimize to tray. Unsubscribe first: Initialize re-runs on theme change, so a
-           plain += would stack a duplicate StateChanged handler on the app-lifetime window each time. */
-        _mainWindow.StateChanged -= MainWindow_StateChanged;
-        _mainWindow.StateChanged += MainWindow_StateChanged;
     }
 
     private void MainWindow_StateChanged(object? sender, EventArgs e)
@@ -223,7 +239,7 @@ public class SystemTrayService : IDisposable
 
     private void OnThemeChanged(string _)
     {
-        _mainWindow.Dispatcher.InvokeAsync(Initialize);
+        _mainWindow.Dispatcher.InvokeAsync(ApplyTheme);
     }
 }
 
