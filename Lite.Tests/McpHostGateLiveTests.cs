@@ -345,6 +345,23 @@ public sealed class McpHostGateLiveTests : IDisposable
         Assert.Equal(200, (await ToolsListAsync(host, authorization: null)).Status);
     }
 
+    /// <summary>#8462: a replacement that fails the usability check (<see cref="McpTokenStore.IsUsableToken"/>) is refused,
+    /// so the writes decided at start never sit behind a token the start would have refused. The old token keeps working
+    /// and the refused one is never accepted.</summary>
+    [Theory]
+    [InlineData("short-token-12")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaa")]
+    public async Task NewToken_UnderTheFloor_IsRefused_AndTheOldTokenKeepsWorking(string unusable)
+    {
+        var host = await StartAsync(Token, allowTokenless: false, allowWrites: true);
+        Assert.False(McpTokenStore.IsUsableToken(unusable));
+
+        Assert.False(host.Service.ReplaceToken(unusable));
+
+        Assert.Equal(200, (await ToolsListAsync(host, "Bearer " + Token)).Status);
+        Assert.Equal(401, (await ToolsListAsync(host, "Bearer " + unusable)).Status);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]
