@@ -30,10 +30,11 @@ public sealed class DailySummaryWarmerTests
 
     private static readonly IReadOnlyList<(int ServerId, string Name)> TwoServers = [(1, "alpha"), (2, "beta")];
 
-    /// <summary>The next UTC day boundary plus the cache's closed grace plus the warmer's own margin, measured from
-    /// <paramref name="nowUtc"/>: the instant the blocks built before it stop being served.</summary>
+    /// <summary>The next UTC day boundary plus the warmer's own margin, measured from <paramref name="nowUtc"/>: the
+    /// instant the Overview's 31-days-ending-today key moves to the new day, so a block built then serves every visitor
+    /// of that day.</summary>
     private static DateTime NextBoundary(DateTime nowUtc) =>
-        nowUtc.Date.AddDays(1).Add(DailySummaryRangeCache<object>.ClosedGrace).Add(Warmers.PassMargin);
+        nowUtc.Date.AddDays(1).Add(Warmers.PassMargin);
 
     [Fact]
     public async Task RunAsync_WarmsEveryServerOnceAfterTheStartDelay_ThenWaitsForTheDayBoundaryPlusGrace()
@@ -57,7 +58,7 @@ public sealed class DailySummaryWarmerTests
 
         var firstPassAt = Start + Warmers.StartDelay;
         var secondPassAt = NextBoundary(firstPassAt);
-        Assert.Equal(new DateTime(2026, 11, 9, 2, 1, 0, DateTimeKind.Utc), secondPassAt);
+        Assert.Equal(new DateTime(2026, 11, 9, 0, 1, 0, DateTimeKind.Utc), secondPassAt);
         Assert.Equal(4, harness.Warmed.Count);
         Assert.Equal([secondPassAt, secondPassAt], harness.Warmed.Skip(2).Select(w => w.At).ToArray());
         Assert.Equal(TimeSpan.FromDays(1), harness.Delays[2]); // the pass after that is one whole day later
@@ -163,6 +164,62 @@ public sealed class DailySummaryWarmerTests
         Assert.Equal(NextBoundary(Start + Warmers.StartDelay) - (Start + Warmers.StartDelay), harness.Delays[1]);
     }
 
+    [Fact]
+    public async Task ABlockBuiltByTheBoundaryPass_ServesAVisitorHalfAnHourIntoTheDay_WithATailReadOnly()
+    {
+        var passAt = Warmers.NextPassUtc(Start);
+        var visitorAt = passAt.Date.AddMinutes(30);
+        Assert.True(passAt < visitorAt, $"the boundary pass at {passAt:HH:mm} UTC runs after a {visitorAt:HH:mm} UTC visitor, who pays the cold read");
+
+        var now = passAt;
+        var cache = new DailySummaryRangeCache<DateTime>(() => now);
+        var reads = new List<(DateTime From, DateTime To)>();
+        Task<List<DateTime>> Run(DateTime from, DateTime to, CancellationToken _)
+        {
+            reads.Add((from, to));
+            return Task.FromResult(Days(from, to));
+        }
+
+        /* The Overview's key for the pass's day: 31 days ending today, as of now. */
+        var fromDate = passAt.Date.AddDays(-(DailySummaryWarmer.DaysBack - 1));
+        var toDate = passAt.Date.AddDays(1);
+        await cache.GetRangeAsync("store", 1, fromDate, toDate, "sql", asOfNow: true, d => d, Run);
+        Assert.Equal([(fromDate, toDate)], reads);
+
+        reads.Clear();
+        now = visitorAt;
+        var rows = await cache.GetRangeAsync("store", 1, fromDate, toDate, "sql", asOfNow: true, d => d, Run);
+        Assert.Equal(Days(fromDate, toDate), rows);
+        var tail = Assert.Single(reads);
+        Assert.Equal(toDate, tail.To);
+        Assert.True(tail.From >= passAt.Date.AddDays(-1), $"the visitor re-read from {tail.From:yyyy-MM-dd}: the whole range, not the open tail");
+    }
+
+    [Fact]
+    public void DailySummaryWarmerEnabled_IsAFileKnob_DefaultOn_ReadFromTheConfigFile_AndListedInTheDiagnosticsShape()
+    {
+        var property = typeof(DarlingConfig).GetProperty("DailySummaryWarmerEnabled");
+        Assert.True(property is not null, "DarlingConfig has no DailySummaryWarmerEnabled: the warmer has no operator switch");
+        Assert.Equal(true, property!.GetValue(new DarlingConfig()));
+
+        var off = System.Text.Json.JsonSerializer.Deserialize<DarlingConfig>("{\"dailySummaryWarmerEnabled\": false}");
+        Assert.NotNull(off);
+        Assert.Equal(false, property.GetValue(off));
+
+        Assert.Contains("DarlingConfig.DailySummaryWarmerEnabled", DiagnosticsBundle.ConfigShapeProjected);
+    }
+
+    private static List<DateTime> Days(DateTime from, DateTime to)
+    {
+        var days = new List<DateTime>();
+        for (var day = from; day < to; day = day.AddDays(1))
+        {
+            days.Add(day);
+        }
+
+        return days;
+    }
+
     /// <summary>A fake clock, a recording delay that advances it, and a warm callback that records each call.</summary>
     private sealed class Harness
     {
@@ -214,6 +271,8 @@ internal static class Warmers
     public static TimeSpan StartDelay => DailySummaryWarmer.StartDelay;
     public static TimeSpan PassMargin => DailySummaryWarmer.PassMargin;
     public static TimeSpan RetryDelay => DailySummaryWarmer.RetryDelay;
+
+    public static DateTime NextPassUtc(DateTime nowUtc) => DailySummaryWarmer.NextPassUtc(nowUtc);
 
     public static DailySummaryWarmer Create(
         Func<IReadOnlyList<(int ServerId, string Name)>> servers,
