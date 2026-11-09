@@ -205,6 +205,7 @@ public partial class AlertsHistoryTab : UserControl
             UpdateStaleDataIndicator();
 
             PopulateServerFilter(alerts);
+            StatusChanged?.Invoke($"alert history — refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
