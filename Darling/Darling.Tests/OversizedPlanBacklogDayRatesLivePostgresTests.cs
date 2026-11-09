@@ -196,11 +196,14 @@ VALUES
         Assert.Equal(0L, boundary.GetProperty("rows_expired_last_day").GetInt64());
         Assert.Equal(0L, boundary.GetProperty("rows_drained_last_day").GetInt64());
 
-        /* The note tells a reader how to use them. */
+        /* The note tells a reader how to use them: with passes above zero it reads the drain against the passes that
+           finished, and says nothing about a sweep that is not running. */
         var note = root.GetProperty("note").GetString() ?? "";
         Assert.Contains("rows_drained_last_day", note, StringComparison.Ordinal);
-        Assert.Contains("sweep_passes_last_day", note, StringComparison.Ordinal);
+        Assert.Contains("sweep_passes_last_day is 3", note, StringComparison.Ordinal);
         Assert.Contains("sweep_reachable_rows_per_server_last_day", note, StringComparison.Ordinal);
+        Assert.Contains("the cap for the passes that finished", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("no sweep pass finished", note, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -233,8 +236,42 @@ VALUES
         Assert.Equal(0L, none.RowsExpiredLastDay);
     }
 
-    /// <summary>Migrates the scratch store and seeds the two servers, their backlog rows and the sweep's run records.</summary>
-    private static async Task SeedAsync(ScratchPostgres scratch, CancellationToken ct)
+    [Fact]
+    public async Task WithNoPassFinishedInTheDay_TheNoteSaysTheSweepIsNotRunning_NotThatTheDrainIsAtTheCap()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #8404 zero-passes test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await SeedAsync(scratch, ct, withRunRecords: false);
+
+        await using var postgres = NpgsqlDataSource.Create(ReadConnectionString(scratch));
+        var json = await DarlingMcpOversizedPlanBacklogTools.GetOversizedPlanBacklog(postgres, cancellationToken: ct);
+
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+
+        /* No run record in the day: zero passes, zero reachable, and pending rows still waiting. */
+        Assert.Equal(0, root.GetProperty("sweep_passes_last_day").GetInt32());
+        Assert.Equal(0, root.GetProperty("sweep_reachable_rows_per_server_last_day").GetInt32());
+        var server = root.GetProperty("by_server").EnumerateArray().Single(s => s.GetProperty("server_id").GetInt32() == ServerId);
+        Assert.Equal(2L, server.GetProperty("pending_rows").GetInt64());
+
+        /* A drain of zero against a reachable figure of zero is not "at the cap": no pass finished, so the note
+           says the sweep is not running and sends the reader to the sentinel's run record. */
+        var note = root.GetProperty("note").GetString() ?? "";
+        Assert.Contains("no sweep pass finished in the day", note, StringComparison.Ordinal);
+        Assert.Contains("get_collection_log", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("at the cap", note, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Migrates the scratch store and seeds the two servers and their backlog rows, and, unless told otherwise,
+    /// the sweep's run records.
+    /// </summary>
+    private static async Task SeedAsync(ScratchPostgres scratch, CancellationToken ct, bool withRunRecords = true)
     {
         var seeded = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
         await using var migrate = new NpgsqlConnection(scratch.ConnectionString);
@@ -254,6 +291,11 @@ VALUES
             fixture.Parameters.AddWithValue(seeded.AddDays(-2));
             fixture.Parameters.AddWithValue(seeded.AddDays(-3));
             await fixture.ExecuteNonQueryAsync(ct);
+        }
+
+        if (!withRunRecords)
+        {
+            return;
         }
 
         await using (var runs = new NpgsqlCommand(RunRecordsSql, migrate))
