@@ -575,7 +575,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
            statement itself returns spans more than one day, but these post-read judgments do move between
            refreshes, so they are re-applied after the join every time). */
         Task<List<DailySummaryReadRow>> ReadRawAsync(string sql, IReadOnlyList<string>? scope) => RangeCache.GetRangeAsync(
-            storeKey: postgres,
+            storeKey: DailySummaryRangeCache.StoreKeyFor(postgres), // #8451: the store, not this host's pool: the warmer builds through another
             serverId: serverId,
             fromDate: fromDate,
             toDate: toDate,
