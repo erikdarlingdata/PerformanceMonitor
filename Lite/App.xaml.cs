@@ -297,7 +297,7 @@ public partial class App : Application
     /* #1141: deadlock/blocking notification delivery — Summary (one batched card per cycle, the default)
        or PerEvent (one notification per distinct incident, capped, for per-incident ticketing). */
     public static AlertNotificationMode AlertDeliveryMode { get; set; } = AlertNotificationMode.Summary;
-    public static int AlertPerEventMaxPerCycle { get; set; } = 10; // Max per-event notifications per cycle before "+N more"
+    public static int AlertPerEventMaxPerCycle { get; set; } = AlertDefaults.PerEventMax; // Max per-event notifications per cycle before "+N more"
     public static string MuteRuleDefaultExpiration { get; set; } = "24 hours"; // Default expiration for new mute rules
     public static bool LogAlertDismissals { get; set; } = true; // Log alert dismiss/mute actions to file
 

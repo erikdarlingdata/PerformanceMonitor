@@ -706,8 +706,8 @@ public partial class FinOpsTab : UserControl
     }
 
     /// <summary>
-    /// The zone the selected server's days are counted in for the 7-Day Provisioning Trend and Memory Grant Efficiency: the
-    /// selected time display on that server's clock (its own collected clock, else its open tab's, else the machine's), the rule
+    /// The zone the selected server's days are counted in for the 7-Day Provisioning Trend, Memory Grant Efficiency and the Object
+    /// Growth heatmap: the selected time display on that server's clock (its own collected clock, else its open tab's, else the machine's), the rule
     /// the Application Connections rows and the PVS trend use. The open tab is asked here, on the UI thread, because the tabs are
     /// UI objects.
     /// </summary>
