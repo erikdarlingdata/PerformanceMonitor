@@ -169,8 +169,21 @@ public partial class ServerTab : UserControl
 
     private bool _awaitingFirstCollection = true;
 
-    /// <summary>The host's word that the first collection for this tab has run (or will not): the next refresh words the header from its own result.</summary>
-    internal void FirstCollectionFinished() => _awaitingFirstCollection = false;
+    /// <summary>The host's word that the first collection for this tab has run (or will not). The header is worded from the refresh at
+    /// once, so a collection that fails with auto-refresh off does not leave it saying "Connecting".</summary>
+    internal void FirstCollectionFinished()
+    {
+        _awaitingFirstCollection = false;
+        if (ConnectionStatusText.Text == ConnectingStatusText)
+            ConnectionStatusText.Text = LastRefreshText();
+    }
+
+    /// <summary>
+    /// The Queries tab's window as two UTC instants, resolved once per refresh pass from <paramref name="nowUtc"/> and handed to the
+    /// grid read and the strip load alike, so the strip's window is the grid's window whatever the clock says when each read runs.
+    /// </summary>
+    internal static (DateTime StartUtc, DateTime EndUtc) QueriesWindowUtc(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime nowUtc)
+        => LocalDataService.GetTimeRange(hoursBack, fromDate, toDate, nowUtc);
 
     private readonly bool _hasMsdbAccess;
     /* The connection check's AWS RDS flag (the rdsadmin database exists). It stays false when that check failed. */

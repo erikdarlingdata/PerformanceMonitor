@@ -1656,6 +1656,7 @@ public partial class MainWindow : Window
             catch (Exception ex)
             {
                 serverTab.FirstCollectionFinished();
+                serverTab.RefreshData();
                 _serverStatusSuffix[server.Id] = $"Collection error: {ex.Message}";
                 StatusText.Text = ConnectedStatusText(server.DisplayNameWithIntent, _serverStatusSuffix[server.Id]);
             }

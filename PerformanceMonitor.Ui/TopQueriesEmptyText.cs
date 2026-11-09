@@ -11,7 +11,7 @@ namespace PerformanceMonitor.Ui;
 /// <summary>
 /// What the Top Queries by Duration grid says over its empty rows (Lite and the Darling Viewer) when the time strip above it has
 /// samples. The strip counts the collector's query statistics samples by hour, while the grid ranks only the queries that ran
-/// inside the window, so the strip can draw bars over a grid with no rows. Without a sentence the grid read as a failed load.
+/// inside the window, so the strip can draw bars over a grid with no rows, and this sentence says why the grid is empty.
 /// When the strip is empty too, its own sentence covers the window and the grid adds nothing.
 /// </summary>
 public static class TopQueriesEmptyText

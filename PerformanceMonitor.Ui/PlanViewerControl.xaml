@@ -59,7 +59,8 @@
                                Foreground="{DynamicResource ForegroundBrush}"/>
                 </Expander.Header>
                 <!-- The cards size to their content, and a 900 px window is narrower than four of them with text: the strip scrolls
-                     sideways to the rest, and a card's column stops growing at a width its text wraps inside. -->
+                     sideways to the rest, and each card stops growing at 360 px (the cap sits on the card itself, since a column's
+                     MaxWidth does not constrain a card measured in a strip of unbounded width), so a card's text wraps inside it. -->
                 <ScrollViewer x:Name="InsightsStrip" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                 <Grid MaxHeight="220">
                     <Grid.ColumnDefinitions>
@@ -83,7 +84,7 @@
                     -->
 
                     <!-- Server Context (first, placeholder when no metadata) -->
-                    <Border Grid.Column="0"
+                    <Border Grid.Column="0" MaxWidth="360"
                             Background="{DynamicResource BackgroundLightBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                         <DockPanel>
@@ -108,7 +109,7 @@
                     </Border>
 
                     <!-- Runtime Summary (neutral centre: no accent, just the alignment gutter) -->
-                    <Border Grid.Column="1"
+                    <Border Grid.Column="1" MaxWidth="360"
                             Background="{DynamicResource BackgroundLightBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                         <DockPanel>
@@ -126,7 +127,7 @@
                     </Border>
 
                     <!-- Missing Indexes (center) -->
-                    <Border Grid.Column="2"
+                    <Border Grid.Column="2" MaxWidth="360"
                             Background="{DynamicResource BackgroundLightBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                         <DockPanel>
@@ -152,7 +153,7 @@
                     </Border>
 
                     <!-- Parameters -->
-                    <Border Grid.Column="3"
+                    <Border Grid.Column="3" MaxWidth="360"
                             Background="{DynamicResource BackgroundLightBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                         <DockPanel>

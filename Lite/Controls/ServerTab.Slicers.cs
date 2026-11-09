@@ -142,16 +142,15 @@ public partial class ServerTab : UserControl
         QueryStatsEmptyMessage.Visibility = text is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    private async System.Threading.Tasks.Task LoadQueryStatsSlicerAsync()
+    /// <summary>Loads the strip over the two instants the grid read took, so its window is the grid's window.</summary>
+    private async System.Threading.Tasks.Task LoadQueryStatsSlicerAsync(DateTime startUtc, DateTime endUtc)
     {
         try
         {
-            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
-
-            var data = await Task.Run(() => _dataService.GetQueryStatsSlicerDataAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
+            var data = await Task.Run(() => _dataService.GetQueryStatsSlicerDataAsync(_serverId, 0, startUtc, endUtc, SelectedDatabaseFilter));
             _queryStatsSlicerData = data;
             _queryStatsSlicerMetric = "TotalCpu";
-            var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
+            var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(0, startUtc, endUtc, DateTime.UtcNow);
             if (data.Count == 0)
                 QueryStatsSlicer.ShowEmpty("No query statistics in the selected time window.");
             else

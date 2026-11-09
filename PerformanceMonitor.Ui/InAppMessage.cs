@@ -13,8 +13,8 @@ namespace PerformanceMonitor.Ui;
 
 /// <summary>
 /// The message the plan code shows when a plan is not there (Lite, the Viewer and the shared plan navigation): a small window
-/// drawn from the app's theme brushes, with the sentence and an OK button, modal to its owner. The native message box ignores the
-/// theme, so in the dark theme it opened as a white system box over a dark window.
+/// drawn from the app's theme brushes, with the sentence and an OK button, modal to its owner. A native message box takes the
+/// system theme, not the app's, so this window draws from the app's brushes instead.
 /// </summary>
 public static class InAppMessage
 {
