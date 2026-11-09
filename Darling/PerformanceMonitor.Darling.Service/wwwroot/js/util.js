@@ -1562,13 +1562,17 @@ const joinedReads = new Map();
    flight at once per page; the rest wait their turn here, in the order asked, and every other read is sent at once. A heavy
    read whose caller aborts while it waits is dropped without a request. The four take two rounds, so the slowest of them lands
    later than it would alone, while nothing else on the page waits on them. The server's own long-read limit is per store, across
-   every visitor; this one is the page's share of it. */
+   every visitor; this one is the page's share of it.
+   The connection hold is an HTTP/1.1 matter: the plain-HTTP listeners (loopback, and the network listener without a certificate)
+   and a front door reached over plain HTTP. Over TLS the browser negotiates HTTP/2, one connection carries every request as its
+   own stream, and the gate changes nothing there but how many of the four heavy reads run side by side. */
 const HEAVY_PAGE_READS = new Set(["get_query_store_clutter", "get_query_store_regressions", "get_query_heatmap", "get_plan_corrections"]);
 const HEAVY_READ_CAP = 2;
 let heavyInFlight = 0;
 const heavyWaiting = [];
 
-/** True for a read the page sends through the heavy-read gate (#8452). */
+/** True for a read the page sends through the heavy-read gate (#8452): the Queries tab's four Query Store reads. The gate keeps
+ *  them from holding the browser's connections over HTTP/1.1; over HTTP/2 it only limits how many of them run side by side. */
 export function isHeavyPageRead(tool) {
   return HEAVY_PAGE_READS.has(tool);
 }

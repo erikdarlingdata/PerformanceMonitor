@@ -94,9 +94,11 @@ const second = [
 await settle();
 leaving.abort();
 await settle();
+/* Everything sent so far, before any answer lands: the two heavy reads that took the slots, and nothing else. */
+const sentBeforeAnyLands = [...sent];
 const leftKind = (await second[2]).kind;
 await land(HEAVY[0]);
-out.leaver = { sentBeforeAnyLands: [...sent].slice(0, 2), sentAfterFirstLands: [...sent], leftKind };
+out.leaver = { sentBeforeAnyLands, sentAfterFirstLands: [...sent], leftKind };
 await land(HEAVY[1]);
 await land(HEAVY[3]);
 await Promise.all([second[0], second[1], second[3]]);
