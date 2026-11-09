@@ -1,19 +1,26 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor analysis engine.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 
-namespace PerformanceMonitorLite.Analysis;
+namespace PerformanceMonitor.Analysis;
 
 /// <summary>
-/// The trivial, mechanical projection from the analysis engine's (internal) reconstruction into the shared
-/// public <see cref="BlockingChainModel"/> for the viewer. This is the only per-app block-chain code — it
-/// must bridge an internal analysis type to a Common type, and no shared assembly can see both (Ui sees
-/// Common but not Analysis; Analysis does not reference Common by design). Kept byte-identical to Dashboard's copy.
+/// The projection from the analysis engine's internal <see cref="BlockingReconstruction"/> into the shared public
+/// <see cref="BlockingChainModel"/> the Block Chain window renders. Lite and the Darling viewer both call it, so the
+/// two apps build the same tree from the same chain and show the same empty-state text.
 /// </summary>
-internal static class BlockingChainViewerProjection
+public static class BlockingChainViewerProjection
 {
+    /// <summary>What the Block Chain window shows when no reconstructed chain holds the clicked session.</summary>
     public const string EmptyStateDetail =
         "No blocking was captured for this session in the selected time range, from either the " +
         "blocked-process-report Extended Event or the always-on DMV blocking snapshot. Its wait may not " +
@@ -24,8 +31,9 @@ internal static class BlockingChainViewerProjection
     /// clicked session may be the apex, a mid-level blocker, or a leaf victim). The chain is rooted at its
     /// apex with the full descendant hierarchy. Returns null when the session isn't in any reconstructed
     /// chain (its wait may not have met the blocked-process threshold in the selected range).
+    /// Internal because <see cref="BlockingReconstruction"/> is; both apps and both test projects see the engine's internals.
     /// </summary>
-    public static BlockingChainModel? BuildModelForSession(
+    internal static BlockingChainModel? BuildModelForSession(
         BlockingReconstruction reconstruction,
         int? monitorLoop, int spid, int ecid,
         Func<DateTime, DateTime>? tranStampForDisplay = null)
