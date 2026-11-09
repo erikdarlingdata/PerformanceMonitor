@@ -94,8 +94,12 @@ public static partial class PgTargetScorer
         {
             /* ── owner: knobs (lane 2) ── */
 
-            /* engine-defined: the initdb line, SharedBuffersInitdbDefaultMb. Value is megabytes. */
+            /* engine-defined: the initdb line, SharedBuffersInitdbDefaultMb. Value is megabytes. #8322: 0 when the
+               collector stamped not_applicable — on aurora-postgres the service sizes shared_buffers from the instance's
+               capacity and moves it as the capacity moves, so a value at the initdb figure is not "nobody sized this".
+               Base 0 means no advisory roots and the co-fire amplifier never runs. */
             case PgTargetFactKeys.ConfigSharedBuffers:
+                if (fact.Metadata.GetValueOrDefault("not_applicable") > 0) return 0.0;
                 return fact.Value <= SharedBuffersInitdbDefaultMb ? ConfigAdvisoryBase : 0.0;
 
             /* engine-defined: the shipped default, MaxWalSizeDefaultMb. Value is megabytes. Lane 15 (#3691 §A4):

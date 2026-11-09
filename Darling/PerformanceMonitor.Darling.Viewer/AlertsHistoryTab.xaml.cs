@@ -76,7 +76,9 @@ public partial class AlertsHistoryTab : UserControl
         /* #6136: each column is at least as wide as its own header ("Channel" was cut to "Channe"). */
         Loaded += (_, _) => DataGridHeaderFit.Apply(this);
         /* #5562: the shared picker; the old combo defaulted to the last 24 hours. */
-        TimeRangePickerControl.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
+        TimeRangePickerControl.ZoneProvider = () => ListSpansServers
+            ? MultiServerTime.MixedZone(ViewerTimeHelper.CurrentDisplayMode)
+            : ViewerTimeHelper.CurrentDisplayZone();
         TimeRangePickerControl.Value = TimeRangePresets.Find("1d")!;
         /* #5562 R8: the old list's "All" is one choice again, the span the alert table keeps (90 days), not a year. */
         TimeRangePickerControl.SetLongestChoice(ViewerTimeRangeWindow.AlertHistoryLongestChoice, "All");
@@ -129,6 +131,51 @@ public partial class AlertsHistoryTab : UserControl
     /// <summary>Reloads the alert history (the shell calls this when the Alerts tab becomes visible / on the timer).</summary>
     public Task RefreshAlertsAsync() => LoadAlertsAsync();
 
+    /// <summary>The distinct servers this tab's reads have listed. A list that has shown more than one server is a list of several
+    /// servers for the rest of its life, whatever one read returns.</summary>
+    private readonly HashSet<int> _serversSeen = new();
+
+    /// <summary>
+    /// True while the list spans servers: no server is picked in the Server filter and the reads have listed more than one. Such
+    /// a list reads on one clock (<see cref="MultiServerTime"/>), and the header, the range picker and the rows all take it from
+    /// here, so the clock does not change when a read comes back empty or the range changes.
+    /// </summary>
+    internal bool ListSpansServers => GetSelectedServerId() is null && _serversSeen.Count > 1;
+
+    /// <summary>Puts one read's rows on the grid and writes the empty message, the clock header and the count text. Returns how many
+    /// rows the grid shows. Split out of the load so a test can drive it with rows.</summary>
+    internal int ShowAlerts(List<ViewerAlertRow> alerts)
+    {
+        _serversSeen.UnionWith(alerts.Select(a => a.ServerId));
+        if (ListSpansServers)
+        {
+            /* One read of a list of several servers may hold one server's rows: they still draw on the list's clock. */
+            foreach (var row in alerts)
+            {
+                row.MixedServers = true;
+            }
+        }
+
+        if (_filterManager != null)
+        {
+            _filterManager.UpdateData(alerts);
+        }
+        else
+        {
+            AlertsDataGrid.ItemsSource = alerts;
+        }
+
+        var displayCount = AlertsDataGrid.Items.Count;
+        NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
+        AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ViewerTimeHelper.CurrentDisplayMode, ListSpansServers); // D5: the column names its clock
+        TimeRangePickerControl.Refresh(); // the range label names the same clock
+        DataGridHeaderFit.Apply(AlertsDataGrid); // #6136: a longer title widens its column
+        /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
+        _lastReadRowCount = alerts.Count;
+        AlertCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap, "alert");
+        return displayCount;
+    }
+
     private async Task LoadAlertsAsync()
     {
         if (_dataService == null)
@@ -151,22 +198,7 @@ public partial class AlertsHistoryTab : UserControl
                 return;
             }
 
-            if (_filterManager != null)
-            {
-                _filterManager.UpdateData(alerts);
-            }
-            else
-            {
-                AlertsDataGrid.ItemsSource = alerts;
-            }
-
-            var displayCount = AlertsDataGrid.Items.Count;
-            NoAlertsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-            AlertTimeHeaderText.Text = TimeColumnTitle.For("Time", ViewerTimeHelper.CurrentDisplayMode, alerts.Any(a => a.MixedServers)); // D5: the column names its clock
-            DataGridHeaderFit.Apply(AlertsDataGrid); // #6136: a longer title widens its column
-            /* D7: the cap applies to the READ (alerts.Count), not to what a column filter leaves on screen. */
-            _lastReadRowCount = alerts.Count;
-            AlertCountIndicator.Text = JobHistoryCap.CountText(displayCount, _lastReadRowCount, RowCap, "alert");
+            var displayCount = ShowAlerts(alerts);
 
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
@@ -294,7 +326,7 @@ public partial class AlertsHistoryTab : UserControl
 
         ColumnFilterState? existingFilter = null;
         _filterManager?.Filters.TryGetValue(columnName, out existingFilter);
-        _filterPopupContent!.Initialize(columnName, existingFilter);
+        _filterPopupContent!.Initialize(columnName, existingFilter, columnHeader: ColumnFilterPopup.ColumnHeaderFor(button));
 
         _filterPopup.PlacementTarget = button;
         _filterPopup.IsOpen = true;
