@@ -125,9 +125,8 @@ public interface IAlertSettings
     /// The most analysis PAGE incidents one hold-back window may deliver as individual messages (#3916). A
     /// window holding more collapses into ONE summary naming every incident — so a restart or install burst
     /// (every story re-paging at once across the fleet) arrives as one message, not dozens. Each SKU maps its
-    /// existing per-event cap: Darling <c>alerts.perEventMax</c> (default 5), Lite
-    /// <c>App.AlertPerEventMaxPerCycle</c> (default 10), Dashboard <c>UserPreferences.AlertPerEventMaxPerCycle</c>
-    /// (default 10). Clamped 1–100 at each adapter.
+    /// existing per-event cap: Darling <c>alerts.perEventMax</c>, Lite <c>App.AlertPerEventMaxPerCycle</c>; both
+    /// default to <see cref="PerformanceMonitor.Common.AlertDefaults.PerEventMax"/>. Clamped 1–100 at each adapter.
     /// </summary>
     int    AnalysisPageCap { get; }
 
