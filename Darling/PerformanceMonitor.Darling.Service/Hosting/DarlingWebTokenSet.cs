@@ -22,7 +22,7 @@ internal sealed class DarlingWebTokenSet
 {
     /// <summary>One served named token. <see cref="Role"/> is the normalized word (<see cref="WebTokenEntry.NormalizeRole"/>), and
     /// <see cref="CanEdit"/> is what it grants: <c>operator</c> edits, <c>reader</c> reads.</summary>
-    internal sealed record Entry(string Name, string Token, string Role)
+    internal sealed record Entry(string Name, string Token, string Role, IReadOnlyList<int>? AllowedTagIds = null)
     {
         internal bool CanEdit => string.Equals(Role, WebTokenEntry.OperatorRole, StringComparison.Ordinal);
     }
@@ -150,7 +150,14 @@ internal sealed class DarlingWebTokenSet
                 continue;
             }
 
-            candidates.Add(new Entry(entry.Name!, token, role));
+            if (entry.AllowedTagIds is { } tagIds &&
+                (role != WebTokenEntry.ReaderRole || tagIds.Count == 0 || tagIds.Any(id => id <= 0)))
+            {
+                problems.Add(label + " must use the reader role and a nonempty list of positive allowedTagIds. The token is not served.");
+                continue;
+            }
+
+            candidates.Add(new Entry(entry.Name!, token, role, entry.AllowedTagIds?.Distinct().ToArray()));
         }
 
         var duplicateNames = candidates.GroupBy(c => c.Name, StringComparer.Ordinal).Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet(StringComparer.Ordinal);

@@ -103,7 +103,7 @@ public sealed partial class DarlingMcpAlertTools
         /* #6074: the optional metric and family filters, applied in the SQL (ahead of the row cap). An unknown family is
            an EMPTY answer that names the filter, not an error: the caller learns which spelling matched nothing. */
         var (metricFilter, familyFilter) = AlertFamily.NormalizeHistoryFilter(metric_name, family);
-        var filter = new DarlingAlertReader.AlertHistoryFilter(metricFilter, familyFilter);
+        var filter = new DarlingAlertReader.AlertHistoryFilter(metricFilter, familyFilter) { AllowedServerIds = DarlingServerResolver.WebAllowedServerIds };
         var filterSentence = AlertFamily.DescribeHistoryFilter(metricFilter, familyFilter);
 
         /* Optional server scope: a named server resolves + scopes; omitted = the whole fleet (the viewer's
@@ -149,7 +149,7 @@ public sealed partial class DarlingMcpAlertTools
                 DataWindowFloor.Source.ForCollectorTable("wait_stats"),
                 DataWindowFloor.Source.ForCollectorTable("pg_database_stats"),
             };
-            var notice = await DarlingMcpWindowNotice.ReadAsync(
+            var notice = DarlingServerResolver.WebAllowedServerIds is not null ? McpWindowNotice.Unavailable : await DarlingMcpWindowNotice.ReadAsync(
                 () => DarlingMcpWindowNotice.ProbeScoped(postgres, fleetFloorSources, null, since, windowEnd, cancellationToken),
                 since, windowEnd, "wait_stats or pg_database_stats", emptyAnswer: page.Count == 0, cancellationToken: cancellationToken);
 

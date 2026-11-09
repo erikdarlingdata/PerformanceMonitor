@@ -1543,7 +1543,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 {
                     if (webTokens?.Find(seat.TokenName) is { } namedEntry)
                     {
-                        seat = seat with { CanEdit = namedEntry.CanEdit };
+                        seat = seat with { CanEdit = namedEntry.CanEdit, AllowedTagIds = namedEntry.AllowedTagIds };
                     }
                     else
                     {
@@ -1608,6 +1608,19 @@ public sealed class DarlingWebHostService : BackgroundService
                             context.Response.StatusCode = StatusCodes.Status403Forbidden;
                             context.Response.ContentType = "application/json; charset=utf-8";
                             await context.Response.WriteAsync(ReadOnlySeatRefusalJson());
+                            return;
+                        }
+
+                        // Scoped seats only reach API routes that enforce their tag grant.
+                        if (seat.AllowedTagIds is not null &&
+                            context.Request.Path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase) &&
+                            (frontDoorProxy is not null ||
+                             !(context.Request.Path.Equals("/api/fleet", StringComparison.OrdinalIgnoreCase) ||
+                               context.Request.Path.Equals("/api/session", StringComparison.OrdinalIgnoreCase) ||
+                               DarlingWebEndpoints.SupportsScopedRead(context.Request.Path))))
+                        {
+                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                            await context.Response.WriteAsJsonAsync(new { error = "This endpoint is unavailable to scoped web tokens." });
                             return;
                         }
 

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -68,7 +68,7 @@ public static partial class DarlingWebEndpoints
                GET /api/people answers every session its own key, and only an administrator (a signed-in admin or the shared web token) the list
                of people with their keys and Slack ids (#7107). MCP get_people shows identity kinds, never the ids. */
             var seat = DarlingWebSeat.FromContext(context);
-            return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["can_own"] = seat.OwnerKey is not null, ["signed_in_admin"] = DarlingWebSeat.IsSignedInAdmin(context), ["managed_store"] = managedStore, ["admin_writes_off"] = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm) });
+            return JsonNodeResult(new JsonObject { ["can_edit"] = seat.CanEdit, ["scoped"] = seat.AllowedTagIds is not null, ["can_own"] = seat.OwnerKey is not null, ["signed_in_admin"] = DarlingWebSeat.IsSignedInAdmin(context), ["managed_store"] = managedStore, ["admin_writes_off"] = DarlingWebStoreWrites.AdminWritesOff(managedStore, adminArm) });
         });
 
         /* The read catalog: input truth (read names + their WIRE query keys) the composer binds params from. */
@@ -89,6 +89,20 @@ public static partial class DarlingWebEndpoints
 
             using var run = new WebRouteRun(readLatencyRecorder, CatalogRoute, ReadWindowBand.None, context, readScope.Scope);
             var serverName = context.Request.Query["server"].ToString();
+            if (DarlingWebSeat.FromContext(context).AllowedTagIds is { } catalogTags &&
+                !string.IsNullOrWhiteSpace(serverName))
+            {
+                var authorizedId = await AuthorizedWebServerAsync(postgres, context, catalogTags);
+                if (authorizedId is null)
+                {
+                    return ErrorResult("Server data is unavailable to this token.", StatusCodes.Status403Forbidden);
+                }
+
+                // Keep the authorized ID: resolving the name again could select another server after a rename.
+                var scopedSchedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, authorizedId.Value, context.RequestAborted);
+                run.Complete(ReadOutcome.Ok);
+                return JsonNodeResult(BuildCatalogNode(authorizedId.Value, scopedSchedules));
+            }
             if (string.IsNullOrWhiteSpace(serverName))
             {
                 var fleetSchedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, null, context.RequestAborted);
@@ -121,7 +135,8 @@ public static partial class DarlingWebEndpoints
         app.MapGet("/api/views/{id:long}", async (HttpContext context, long id) =>
         {
             var result = await store.GetAsync(id, DarlingWebSeat.FromContext(context).OwnerKey, context.RequestAborted);
-            return result is CustomViewResult.Ok ok
+            return result is CustomViewResult.Ok ok &&
+                !(DarlingWebSeat.FromContext(context).AllowedTagIds is not null && ok.View!.Personal)
                 ? JsonNodeResult(BuildFullViewNode(ok.View!))
                 : NotFoundResult();
         });
@@ -292,8 +307,11 @@ public static partial class DarlingWebEndpoints
                sees. Only THIS web mapping (see ComposeRunFailureResult) stops putting a STORE fault's text on
                the wire (M1's outcome.Fault, checked before outcome.Error is ever read for the 400/500 split). */
             var stopwatch = Stopwatch.StartNew();
+            var composeTags = DarlingWebSeat.FromContext(context).AllowedTagIds;
+            var authorizedIds = composeTags is null ? null
+                : await AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
             var outcome = await RunComposedPanelAsync(composeReadPostgres ?? postgres, body, context.RequestAborted, readLatencyRecorder, ComposeClientDeadlineHeadroomSeconds, remapClientTimeout: true, includeDataStartFields: true,
-                caller: WebReadCaller(context), cacheHost: ReadSurface.Web);
+                caller: WebReadCaller(context), cacheHost: ReadSurface.Web, authorizedServerIds: authorizedIds);
             if (outcome.PayloadText is { } payloadText)
             {
                 return Results.Text(payloadText, "application/json");

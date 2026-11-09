@@ -1914,11 +1914,22 @@ public sealed class DarlingMcpDataTools
                get_fleet_overview already answers an empty registry with, and not bare prose: prose is not
                JSON, so the web read surface mapped it to a 400 and the Alert History, FinOps and Job History
                pages logged a console error on a fresh install. */
-            if (servers.Count == 0)
+            if (servers.Count == 0 && DarlingServerResolver.WebAllowedServerIds is null)
                 return McpHelpers.Status(
                     "empty",
                     "No servers are registered yet. The service registers each monitored server on its first successful connection."
                     + DarlingPeerDirectory.EmptyRegistryDisclosure(DarlingPeerDirectory.Current));
+
+            if (DarlingServerResolver.WebAllowedServerIds is { } allowedIds)
+            {
+                servers = servers.Where(server => allowedIds.Contains(server.ServerId)).ToList();
+                var names = servers.Select(server => server.ServerName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                servers = servers.Select(server => server with
+                {
+                    SameMachineAs = server.SameMachineAs?.Where(names.Contains).ToArray()
+                }).ToList();
+                return RenderServerList(servers, DateTime.UtcNow, DarlingPeerDirectory.Snapshot.Empty);
+            }
 
             return RenderServerList(servers, DateTime.UtcNow, DarlingPeerDirectory.Current);
         }

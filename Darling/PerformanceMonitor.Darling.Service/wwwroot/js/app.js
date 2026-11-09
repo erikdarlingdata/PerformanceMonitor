@@ -58,7 +58,7 @@ import { renderTriage } from "./pages/triage.js";
 import { renderEditor } from "./editor.js";
 import { renderNotebookEditor } from "./notebook.js";
 import { renderAlertEditor } from "./alert-editor.js";
-import { getSession, listViews, onViewsChanged } from "./views-api.js";
+import { getSession, peekSession, listViews, onViewsChanged } from "./views-api.js";
 import { paintViewList, viewListAfterRead } from "./view-sidebar.js";
 import { renderMuteRules } from "./pages/mute-rules.js";
 import { renderKnownPatterns } from "./pages/known-patterns.js";
@@ -300,6 +300,9 @@ export const ROUTE_RENDERERS = {
  * that card's last-fetched payload instead of re-fetching (the profile it reports changes rarely — a hardware
  * or version change, never per-tick). Every other renderX() call below still ignores it.
  */
+const scopedRoutes = new Set(["fleet", "server", "alerts", "sweeps", "finops", "jobHistory", "investigations"]);
+const scopedNav = new Set(["fleet", "alerts", "sweeps", "finops", "job-history", "investigations"]);
+
 function route(opts) {
   /* The session-expired takeover owns the DOM from the moment it fires until the operator signs in again —
      see showSignedOutState/onSessionExpired below (#4187). hashchange keeps calling this (a stray click, the
@@ -315,7 +318,20 @@ function route(opts) {
 
   if (frontDoor() && gateStore(opts)) return;
 
+  const session = peekSession();
+  if (session?.probe_failed) {
+    mount(main, el("div", { class: "card muted", text: "Dashboard access could not be checked. Refresh to retry." }));
+    return;
+  }
+  for (const link of document.querySelectorAll(".nav a")) {
+    if (session?.scoped) link.hidden = !scopedNav.has(link.dataset.route);
+    else if (link.dataset.route !== "ag") link.hidden = false;
+  }
   const r = currentRoute();
+  if (session?.scoped && !scopedRoutes.has(r.name)) {
+    mount(main, el("div", { class: "card muted", text: "This page requires an unrestricted dashboard session." }));
+    return;
+  }
   resetScrollOnRouteChange(r, !!(opts && opts.poll === true));
   markPageRenderStart(r.name, !!(opts && opts.poll === true));
   setActiveNav(r);
@@ -429,6 +445,7 @@ function paintSidebar() {
 let agNavRevealed = false;
 
 async function refreshAgNav() {
+  if ((await getSession().catch(() => null))?.scoped) return;
   if (agNavRevealed) return;
   const link = document.querySelector('.nav a[data-route="ag"]');
   if (!link) return;
@@ -447,6 +464,7 @@ async function refreshAgNav() {
    reports can_edit. Kept fresh on the 60s poll even while the composer is open. */
 async function refreshViewList() {
   if (!viewList) return;
+  if (peekSession()?.scoped) return;
   const [session, res] = await Promise.all([getSession(), listViews()]);
   if (isSessionExpired()) return; // the session ended while the list was in flight: keep nothing of it
   /* #7929: a failed read keeps the last good list and the paint says so; only an answered list replaces it. */
@@ -497,6 +515,7 @@ const ACCESS_HOVER = {
 function seatLabel(session) {
   if (!session) return null;
   if (session.probe_failed) return { text: "Access: not connected", title: ACCESS_HOVER.none };
+  if (session.scoped) return { text: "Access: scoped read-only", title: "Monitoring data is limited to this token’s permitted server tags." };
   return session.can_edit ? { text: "Access: read-write", title: ACCESS_HOVER.write } : { text: "Access: read-only", title: ACCESS_HOVER.read };
 }
 
@@ -522,6 +541,7 @@ async function fetchCollectionState() {
 /* get_store_host is read at most once per STORE_SIZE_TTL_MS, failures included, so a store that cannot answer is
    not retried every poll. A failure keeps the last good size and marks it stale. */
 async function refreshStoreSize(now) {
+  if ((await getSession().catch(() => null))?.scoped) return;
   if (storeSizeInFlight || (storeSizeAttemptAt && now - storeSizeAttemptAt < STORE_SIZE_TTL_MS)) return;
   storeSizeInFlight = true;
   storeSizeAttemptAt = now;
@@ -948,4 +968,4 @@ function start() {
   route();
 }
 
-startFrontDoor().catch(() => {}).then(start);
+startFrontDoor().catch(() => {}).then(() => getSession()).then(start);

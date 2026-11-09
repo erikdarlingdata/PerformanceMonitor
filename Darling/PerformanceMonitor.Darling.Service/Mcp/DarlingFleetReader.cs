@@ -930,11 +930,33 @@ GROUP BY server_id, collector_name";
         int worstCount = DefaultWorstCount,
         Func<int, CancellationToken, Task<IReadOnlyList<string>?>>? separatelyMonitored = null,
         ILogger? logger = null,
+        IReadOnlyList<int>? allowedTagIds = null,
         CancellationToken cancellationToken = default)
     {
         var now = nowUtc ?? DateTime.UtcNow;
 
         var servers = await ReadServersAsync(postgres, cancellationToken);
+        HashSet<int>? visibleTagIds = null;
+        if (allowedTagIds is not null)
+        {
+            var store = new ServerTagStore(postgres, McpCommandDeadlines.ReadSeconds);
+            var snapshot = await store.ReadSnapshotAsync(consistent: true, cancellationToken);
+            visibleTagIds = new HashSet<int>();
+            var allowedServerIds = new HashSet<int>();
+            foreach (var tagId in allowedTagIds)
+            {
+                if (!snapshot.Tags.Any(tag => tag.Id == tagId))
+                {
+                    continue;
+                }
+
+                visibleTagIds.Add(tagId);
+                visibleTagIds.UnionWith(ServerTagRules.Descendants(snapshot.Tags, tagId));
+                allowedServerIds.UnionWith(ServerTagCoverage.Members(snapshot, tagId));
+            }
+
+            servers.RemoveAll(server => !allowedServerIds.Contains(server.ServerId));
+        }
 
         var cpu = await ReadCpuAsync(postgres, now, cancellationToken);
         var pgCpu = await ReadPgCpuAsync(postgres, now, cancellationToken);
@@ -966,6 +988,23 @@ GROUP BY server_id, collector_name";
         var agentAlertGaps = await ReadAgentAlertGapsAsync(postgres, now, cancellationToken);
         var databaseProtection = await ReadDatabaseProtectionOverdueAsync(postgres, now, cancellationToken);
         var tagForest = await ReadTagForestAsync(postgres, cancellationToken);
+        if (visibleTagIds is not null)
+        {
+            foreach (var serverTags in tags.Values)
+            {
+                serverTags.RemoveAll(tag => !visibleTagIds.Contains(tag.Id));
+            }
+
+            tagForest = tagForest.Where(tag => visibleTagIds.Contains(tag.Id))
+                .Select(tag => new FleetTagNode
+                {
+                    Id = tag.Id,
+                    Name = tag.Name,
+                    ParentId = tag.ParentId is int parentId && visibleTagIds.Contains(parentId) ? parentId : null,
+                    SortOrder = tag.SortOrder,
+                    Colour = tag.Colour,
+                }).ToList();
+        }
         /* #3368: the deadlock band's tiers, read ONCE per roll-up rather than per card. A store reload can
            hot-swap the settings row mid-read, and re-reading per server would let one roll-up band some
            servers on the old pair and the rest on the new one — a mixed reading no configuration ever held,
@@ -1018,7 +1057,7 @@ GROUP BY server_id, collector_name";
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest, collectionHealthAgeSeconds,
-            await ReadCollectionStateAsync(postgres, logger, cancellationToken));
+            allowedTagIds is null ? await ReadCollectionStateAsync(postgres, logger, cancellationToken) : null);
     }
 
     /// <summary>Builds one pre-banded card from a server's raw cross-server reads (pure — the reduction the WPF

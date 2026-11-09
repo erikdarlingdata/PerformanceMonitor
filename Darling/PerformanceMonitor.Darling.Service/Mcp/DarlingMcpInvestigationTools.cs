@@ -65,7 +65,7 @@ public sealed partial class DarlingMcpInvestigationTools
         DateTime sinceUtc, IReadOnlyCollection<int>? routeIds, int limit, CancellationToken cancellationToken);
 
     private static InvestigationRequestStore Store(NpgsqlDataSource postgres) =>
-        new(postgres, ServiceCommandDeadlines.SerialLoopSeconds);
+        new(postgres, ServiceCommandDeadlines.SerialLoopSeconds) { ReadServerIds = DarlingServerResolver.WebAllowedServerIds };
 
     [McpServerTool(Name = "list_investigation_requests"), Description(
         "Lists the investigation requests alerts opened for your agent, newest first, with state, lease and expiry. Writes " +

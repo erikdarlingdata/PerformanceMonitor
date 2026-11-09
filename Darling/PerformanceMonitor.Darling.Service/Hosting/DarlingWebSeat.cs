@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using Microsoft.AspNetCore.Http;
 
 namespace PerformanceMonitor.Darling.Service.Hosting;
@@ -39,7 +40,7 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// sessions and a role change applies to them. <see cref="TryResolveSeat"/> hands such a cookie back read-only with
 /// <see cref="TokenName"/> set, and the middleware's lookup decides the rest.</para>
 /// </summary>
-internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? OwnerKey = null, string? TokenName = null)
+internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? OwnerKey = null, string? TokenName = null, IReadOnlyList<int>? AllowedTagIds = null)
 {
     /// <summary>The shared-token seat: full edit reach, exactly what the token granted before per-user identity
     /// existed.</summary>

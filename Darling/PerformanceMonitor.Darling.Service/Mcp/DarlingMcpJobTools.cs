@@ -168,7 +168,7 @@ public sealed class DarlingMcpJobTools
                 string.IsNullOrWhiteSpace(status) ? null : Array.FindIndex(HistoryStatuses, s => string.Equals(s, status.Trim(), StringComparison.OrdinalIgnoreCase)),
                 string.IsNullOrWhiteSpace(category) ? null : category.Trim(),
                 windowEnd,
-                min_duration_seconds);
+                min_duration_seconds) { AllowedServerIds = DarlingServerResolver.WebAllowedServerIds };
 
             var requestedStart = windowEnd.AddHours(-hours_back);
             var fetched = await DarlingJobHistoryReader.GetAsync(
@@ -207,7 +207,7 @@ public sealed class DarlingMcpJobTools
                run's own time can sit long before the collection that stored it), so coverage starts at the earlier of the probe's floor and the
                oldest run shown (ReadEventAsync). */
             string[]? scopedNames = scope is { } one ? [servers.First(x => x.ServerId == one.ServerId).ServerName] : null;
-            var notice = await DarlingMcpWindowNotice.ReadEventAsync(
+            var notice = DarlingServerResolver.WebAllowedServerIds is not null ? McpWindowNotice.Unavailable : await DarlingMcpWindowNotice.ReadEventAsync(
                 () => DataWindowFloor.GetAsync(postgres, [source], scopedNames, requestedStart, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken),
                 rows.Count > 0 ? rows[^1].RunDateTimeUtc : null, requestedStart, windowEnd, "job_history", emptyAnswer: rows.Count == 0, cancellationToken: cancellationToken);
 
@@ -289,7 +289,10 @@ public sealed class DarlingMcpJobTools
     {
         try
         {
-            return await DarlingJobReader.ReadLatestAgentStatesAsync(postgres, serverId, windowEnd, cancellationToken);
+            var states = await DarlingJobReader.ReadLatestAgentStatesAsync(postgres, serverId, windowEnd, cancellationToken);
+            return DarlingServerResolver.WebAllowedServerIds is { } ids
+                ? states.Where(state => ids.Contains(state.ServerId)).ToList()
+                : states;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

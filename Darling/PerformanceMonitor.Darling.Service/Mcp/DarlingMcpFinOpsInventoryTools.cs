@@ -72,6 +72,11 @@ public sealed class DarlingMcpFinOpsInventoryTools
             var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
             var inventory = await DarlingFinOpsInventoryReader.GetServerInventoryAsync(
                 postgres, McpCommandDeadlines.ReadSeconds, include_removed, cancellationToken);
+            if (DarlingServerResolver.WebAllowedServerIds is { } allowedIds)
+            {
+                inventory = inventory.Where(server => allowedIds.Contains(server.ServerId)).ToList();
+            }
+
             if (inventory.Count == 0)
             {
                 return McpHelpers.Status("empty",
