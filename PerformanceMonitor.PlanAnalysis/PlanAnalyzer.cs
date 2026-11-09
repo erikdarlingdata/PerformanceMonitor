@@ -2970,9 +2970,10 @@ public static partial class PlanAnalyzer
        ScanRuleMinRows rows, returned under ScanPredicateMaxSelectivity of what it read when the plan says
        how many it read, and spent at least ScanRuleMinOwnTimeSharePct of the statement's time in the scan
        when the plan carries statement time. The rows floor reads ActualRowsRead when the plan carries it;
-       when it does not (#8381), the table's cardinality stands in, and a plan that carries neither gives
-       nothing to put a floor on. The impact details come out either way, so the caller does not build them
-       twice. */
+       when it does not (#8381), the table's cardinality stands in, scaled by the scan's executions because
+       the cardinality is a per-execution figure and the rows read are a total across executions, and a plan
+       that carries neither gives nothing to put a floor on. The impact details come out either way, so the
+       caller does not build them twice. */
     private static bool ScanPredicateIsWorthReporting(PlanNode node, PlanStatement stmt, out ScanImpact details)
     {
         details = BuildScanImpactDetails(node, stmt);
@@ -2984,7 +2985,7 @@ public static partial class PlanAnalyzer
             if (Math.Max(node.ActualRowsRead, node.ActualRows) < ScanRuleMinRows)
                 return false;
         }
-        else if (node.HasTableCardinality && node.TableCardinality < ScanRuleMinRows)
+        else if (node.HasTableCardinality && node.TableCardinality * Math.Max(1, node.ActualExecutions) < ScanRuleMinRows)
         {
             return false;
         }
