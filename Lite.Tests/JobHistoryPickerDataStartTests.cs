@@ -60,9 +60,13 @@ public sealed class JobHistoryPickerDataStartTests : IDisposable
 
     private const string JobColumns = "(job_history_id, collection_time, server_id, server_name, instance_id, job_id, job_name, job_enabled, step_id, run_status, run_duration_seconds, retries_attempted, run_datetime)";
 
-    /// <summary>One job outcome, stored at <paramref name="utc"/> and run at it (the server has no clock row, so its run time reads as UTC).</summary>
+    /// <summary>The zone the servers' runs are read on: they have no clock row, so the service reads them on the machine's zone, which
+    /// every test fixes here (east of UTC, where a run at its collection would otherwise read earlier than the collection).</summary>
+    private static readonly TimeZoneInfo MachineZone = TimeZoneInfo.FindSystemTimeZoneById("Tokyo Standard Time");
+
+    /// <summary>One job outcome, stored at <paramref name="utc"/> and run at it, the run written on <see cref="MachineZone"/>'s wall clock.</summary>
     private static string Run(long id, int serverId, DateTime utc) =>
-        $"({id}, {Ts(utc)}, {serverId}, 'SERVER-{serverId}', {id}, 'job-{serverId}', 'Nightly', true, 0, 1, 5, 0, {Ts(utc)})";
+        $"({id}, {Ts(utc)}, {serverId}, 'SERVER-{serverId}', {id}, 'job-{serverId}', 'Nightly', true, 0, 1, 5, 0, {Ts(TimeZoneInfo.ConvertTimeFromUtc(utc, MachineZone))})";
 
     private const string LogColumns = "(log_id, server_id, server_name, collector_name, collection_time, status)";
 
@@ -116,7 +120,7 @@ public sealed class JobHistoryPickerDataStartTests : IDisposable
         }
 
         await _initializer.CreateArchiveViewsAsync();
-        return (new LocalDataService(_initializer), seeded);
+        return (new LocalDataService(_initializer) { MachineZone = MachineZone }, seeded);
     }
 
     private static JobHistoryTab Tab(LocalDataService service)

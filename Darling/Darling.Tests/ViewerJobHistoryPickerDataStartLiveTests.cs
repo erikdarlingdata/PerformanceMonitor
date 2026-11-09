@@ -132,12 +132,30 @@ VALUES ($1, $3, $2, $4, $1, 'job-1', 'Nightly', true, 0, '(Job outcome)', 1, 'Th
             await insert.ExecuteNonQueryAsync(ct);
         }
 
-        /// <summary>Adds a run of <paramref name="serverId"/> stored at <paramref name="collectedUtc"/> that ran at <paramref name="runUtc"/>.</summary>
-        public async Task AddRunAsync(long id, int serverId, DateTime collectedUtc, DateTime runUtc, CancellationToken ct)
+        /// <summary>Adds a run of <paramref name="serverId"/> stored at <paramref name="collectedUtc"/> that ran at <paramref name="runWall"/>, the
+        /// server's wall clock.</summary>
+        public async Task AddRunAsync(long id, int serverId, DateTime collectedUtc, DateTime runWall, CancellationToken ct)
         {
             await using var connection = new NpgsqlConnection(_scratch.ConnectionString);
             await connection.OpenAsync(ct);
-            await InsertRunAsync(connection, id, serverId, collectedUtc, runUtc, ct);
+            await InsertRunAsync(connection, id, serverId, collectedUtc, runWall, ct);
+        }
+
+        /// <summary>Gives <paramref name="serverId"/> a clock: its newest server_properties row carries <paramref name="timeZoneId"/> and the
+        /// offset that zone has at <paramref name="collectedUtc"/>, the row the grid reads the server's run times on.</summary>
+        public async Task AddClockAsync(int serverId, string timeZoneId, int offsetMinutes, DateTime collectedUtc, CancellationToken ct)
+        {
+            await using var connection = new NpgsqlConnection(_scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await using var insert = new NpgsqlCommand(@"
+INSERT INTO collect.server_properties (collection_id, server_id, server_name, collection_time, utc_offset_minutes, time_zone_id)
+VALUES (1, $1, $2, $3, $4, $5)", connection);
+            insert.Parameters.AddWithValue(serverId);
+            insert.Parameters.AddWithValue(ServerName(serverId));
+            insert.Parameters.AddWithValue(Naive(collectedUtc));
+            insert.Parameters.AddWithValue(offsetMinutes);
+            insert.Parameters.AddWithValue(timeZoneId);
+            await insert.ExecuteNonQueryAsync(ct);
         }
 
         public ValueTask DisposeAsync() => _scratch.DisposeAsync();
@@ -233,6 +251,9 @@ VALUES ($1, $3, $2, $4, $1, 'job-1', 'Nightly', true, 0, '(Job outcome)', 1, 'Th
         await using var store = await Store.CreateAsync(ct);
         var copiedRun = store.Seeded.OldestA.AddDays(-7);
         await store.AddRunAsync(4, ServerA, store.Seeded.OldestA, copiedRun, ct);
+        /* The instant the grid shows for that run: the server has no clock row, so its runs are read on the machine's clock, the
+           rule every grid row follows. */
+        var expected = (await store.Viewer.GetServerClockOrMachineAsync(ServerA, ct)).ToUtc(copiedRun);
 
         StaTestThread.Run(async () =>
         {
@@ -242,8 +263,33 @@ VALUES ($1, $3, $2, $4, $1, 'job-1', 'Nightly', true, 0, '(Job outcome)', 1, 'Th
 
             await tab.RefreshJobsAsync();
 
-            Assert.Equal(copiedRun, tab.TimeRangePickerControl.DataStartUtc);
+            Assert.Equal(expected, tab.TimeRangePickerControl.DataStartUtc);
             Assert.Contains("\nData starts ", Notes(tab.TimeRangePickerControl), StringComparison.Ordinal);
+        });
+    }
+
+    /* Server A keeps Pacific time: its newest clock row carries the zone and November's offset (-480), and its oldest run is a July
+       noon on its wall clock, when the zone was an hour ahead of that offset. The note names the instant the grid shows for that
+       run, read on the server's zone, not the wall clock shifted by the one newest offset. */
+    [Fact]
+    public async Task AnOldestRunAcrossADaylightSavingChange_IsReadOnTheServersZone_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(ct);
+        var pacific = TimeZoneInfo.FindSystemTimeZoneById("Pacific Standard Time");
+        var oldest = store.Seeded.OldestA;
+        var julyNoon = new DateTime(oldest.Month <= 7 ? oldest.Year - 1 : oldest.Year, 7, 1, 12, 0, 0, DateTimeKind.Unspecified);
+        await store.AddClockAsync(ServerA, pacific.Id, -480, oldest, ct);
+        await store.AddRunAsync(4, ServerA, oldest, julyNoon, ct);
+
+        StaTestThread.Run(async () =>
+        {
+            var tab = Tab(store.Viewer);
+            tab.TimeRangePickerControl.Value = TimeRangePresets.Find("1mo")!;
+
+            await tab.RefreshJobsAsync();
+
+            Assert.Equal(TimeZoneInfo.ConvertTimeToUtc(julyNoon, pacific), tab.TimeRangePickerControl.DataStartUtc);
         });
     }
 
