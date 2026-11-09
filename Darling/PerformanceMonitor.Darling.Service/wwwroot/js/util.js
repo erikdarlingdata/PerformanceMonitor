@@ -1112,6 +1112,13 @@ export function fmtInt(v, o) {
   const places = placesFor(o);
   return places > 0 ? fixed(n, places) : n.toLocaleString(undefined, { maximumFractionDigits: 0 });
 }
+/* An alert-history row's stored zero that is not a reading: the row's alert reports a state, not a measurement (the server's
+   state_only, from AlertMetricClassifier.IsStateOnly: a resolution, Database State, Agent Not Running), so Alert History, the
+   triage card and the notebook header show a dash for it rather than a number. A nonzero value on such a row is a real measurement
+   and stays a number, and a measured row's 0 is a reading. One rule, so the surfaces never drift apart. */
+export function isStateZero(a, key) {
+  return a != null && a.state_only === true && Number(a[key]) === 0;
+}
 export function fmtNum(v, d = 1) {
   if (v == null) return "—";
   const n = Number(v);
