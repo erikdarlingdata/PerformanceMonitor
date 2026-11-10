@@ -3158,6 +3158,14 @@ function Set-DarlingServiceQuotedPath([string]$name, [string]$exePath) {
 
 # Every process whose executable lives under $root, so the copy can refuse instead of failing half-way.
 #
+# One record for each: the process, with its name, its id and its executable's path as they were read here.
+# Callers decide on the record and never ask the process for its path again (#8537): a process that exits
+# after it is listed has no path left to read, and a path that cannot be read says nothing about where the
+# process ran from.
+#
+# Callers wrap the call in @( ) before they count the result. Windows PowerShell 5.1 gives a lone record no
+# Count, so one hit, unwrapped, counts as nothing.
+#
 # It NAMES them. It never kills one, and no version of this script ever should: the bundled PostgreSQL runs
 # out of pg-runtime under this very directory, and a sweep that force-kills "everything under the install
 # dir" takes the monitoring store down as its first act. Stopping the service stops the store properly;
@@ -3175,7 +3183,9 @@ function Get-DarlingProcessesUnderPath([string]$root) {
         # inaccessible process is not evidence of anything - skip it and keep looking.
         try { $path = $process.Path } catch { continue }
         if ([string]::IsNullOrEmpty($path)) { continue }
-        if ($path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { $hits += $process }
+        if ($path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+            $hits += [pscustomobject]@{ Process = $process; ProcessName = $process.ProcessName; Id = $process.Id; Path = $path }
+        }
     }
 
     return @($hits)
@@ -3238,6 +3248,21 @@ function Test-DarlingProcessStopsWithTheService([string]$processPath, [string]$i
     # The trailing separator is what keeps pg-runtime-prev - the rescued previous runtime, a real directory
     # in this layout - from matching a pg-runtime prefix test.
     return $processPath.StartsWith(($root + $sep + 'pg-runtime' + $sep), [StringComparison]::OrdinalIgnoreCase)
+}
+
+# True only for a process known to have exited: its own HasExited answers true. A process that has exited
+# holds no file under the install tree, so there is nothing left for an operator to close (#8537).
+#
+# Anything short of that answer leaves the process counted. PowerShell returns nothing, rather than an error,
+# for a property whose read fails, and HasExited fails that way for a running process this session may not
+# open, so an empty answer is not an exit.
+function Test-DarlingProcessHasExited($process) {
+    if ($null -eq $process) { return $false }
+
+    $exited = $null
+    try { $exited = $process.HasExited } catch { return $false }
+
+    return ($exited -is [bool] -and $exited)
 }
 
 function Get-DarlingDirectoryBytes([string]$path) {
@@ -4312,13 +4337,21 @@ elseif (-not (Test-DarlingSamePath $registeredRoot $InstallRoot) -and -not (Test
 # about to be stopped on purpose. Without that filter this guard refuses EVERY upgrade of a running install
 # - the service is always holding its own tree - which is a guard that fails closed on the happy path and
 # trains people to pass -SkipStopGuard, i.e. a guard that has stopped guarding by being unusable.
+#
+# #8537: the filter judges the path each record carries, the one read when the process was listed. On
+# Windows every PostgreSQL connection is its own postgres.exe under pg-runtime, and on a busy store they
+# start and end all the time, so one that exits after it is listed is still judged by where it ran from.
+# What the filter leaves is then asked whether it has exited: a process that has holds nothing an operator
+# could close, and one whose exit cannot be confirmed stays on the list.
 $holders = @(Get-DarlingProcessesUnderPath $InstallRoot |
-    Where-Object { -not (Test-DarlingProcessStopsWithTheService $_.Path $InstallRoot) })
+    Where-Object { -not (Test-DarlingProcessStopsWithTheService $_.Path $InstallRoot) } |
+    Where-Object { -not (Test-DarlingProcessHasExited $_.Process) })
 
 if ($holders.Count -gt 0 -and -not $SkipStopGuard) {
     # Parenthesised before -join on purpose: `$x | ForEach-Object { ... } -join ', '` binds -join to
     # ForEach-Object as a parameter and throws, which is a fine way to lose a deploy to a formatting bug.
-    $names = @($holders | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" })
+    # Each line gives the path the guard read, so the operator can see which executable under the tree it is.
+    $names = @($holders | ForEach-Object { "$($_.ProcessName) (pid $($_.Id)), running from '$($_.Path)'" })
     Note "Processes are running out of the install tree that stopping the service will not close:"
     foreach ($name in $names) { Note "  $name" }
     Fail "Close them and re-run. $(Get-DarlingNothingChangedText) Do NOT kill them blindly. If these are your own psql.exe or a shell sitting in the install directory, or a Darling Viewer you left open, just exit them. Use -SkipStopGuard only if you are certain the copy will not hit a locked file."
@@ -4416,6 +4449,9 @@ if (-not $SkipStopGuard) {
     Wait-DarlingInstallTreeClear $InstallRoot $script:InstallTreeClearWaitSeconds $script:InstallTreeClearPollSeconds | Out-Null
 }
 $stillHolding = Get-DarlingProcessesUnderPath $InstallRoot
+# Made a list before it is counted: Windows PowerShell 5.1 gives a lone record no Count, and nothing
+# compared with zero would pass the check below with one process still holding the tree.
+$stillHolding = @($stillHolding)
 if ($stillHolding.Count -gt 0 -and -not $SkipStopGuard) {
     $names = @($stillHolding | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" })
     Note "The service is stopped, but processes are STILL running out of the install tree:"
