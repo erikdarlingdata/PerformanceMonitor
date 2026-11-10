@@ -245,7 +245,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
            firing's open history rows. Route-only: SeverityOverride stays null, so the recovery still renders RESOLVED. With no
            record (nothing delivered, or a firing that carried no tier), the send falls back to the firing's own tierless rule. */
         if (AlertFamily.RecoveryPairs.TryGetValue(outcome.MetricName, out var closedFiring)
-            && await FiredRouteTierAsync(outcome.ServerKey, closedFiring, outcome.MetricName, cancellationToken) is { } firedTier)
+            && await FiredRouteTierAsync(outcome.ServerKey, closedFiring, outcome.MetricName, context?.AgReplicaIdentity ?? "", cancellationToken) is { } firedTier)
         {
             context ??= new AlertContext();
             context.RouteSeverity = firedTier;
@@ -367,9 +367,10 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
 
         public DateTime FiredAtUtc { get; }
 
-        /// <summary>#8525: the tier the newest delivered fire of the episode went out at, as its site graded it; null when the site
-        /// passed none. The pair's recovery routes at this tier, so it takes the route the firing took.</summary>
-        public AlertSeverityLevel? FiredSeverity { get; set; }
+        /// <summary>#8525: the tier the newest delivered fire went out at, as its site graded it (null when the site passed none), per
+        /// replica identity (<see cref="AlertContext.AgReplicaIdentity"/>; the empty key for the server pair, whose incident is the
+        /// server). The AG pair is one incident per replica, so each reconnect reads and drops its own replica's tier.</summary>
+        public Dictionary<string, AlertSeverityLevel?> FiredTiers { get; } = new(StringComparer.Ordinal);
 
         public string LastValue { get; set; } = "";
 
@@ -465,7 +466,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
 
             fire.LastValue = currentValue;
             fire.DetailText = detailText;
-            fire.FiredSeverity = context?.SeverityOverride;
+            fire.FiredTiers[context?.AgReplicaIdentity ?? ""] = context?.SeverityOverride;
             foreach (var (channel, where, routeId) in delivered)
             {
                 fire.AddDestination(channel, where, routeId);
@@ -767,26 +768,28 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
     }
 
     /// <summary>
-    /// The open episode's delivered fires, read back from alert history (#5825): the clear's fallback when this
-    /// deliverer's memory has no record of the alert, which is every clear after a service restart. The fire rows'
-    /// <c>Route</c> records name each channel that delivered and the route that supplied it; the destination is that
-    /// route's CURRENT one (a URL is a secret, so the row never holds it), or the channel's current default when no route
-    /// supplied it. A route deleted or disabled since the fire gives that channel no destination. Null when the store
-    /// cannot read history, no delivered fire is open, or the read fails (logged): the clear then sends nothing.
-    /// </summary>
-    /// <summary>
     /// #8525: the tier the open firing <paramref name="firing"/> on <paramref name="serverKey"/> was delivered at, for the route of its
-    /// recovery <paramref name="recovery"/>: this process's delivered fire, whose entry the recovery closes, else the severity of the
-    /// newest open fire row in history (a firing delivered before a restart). Null when nothing is recorded or the firing carried no
-    /// tier, and the recovery then routes as a tierless firing of its name does. Never throws except for the caller's own cancellation.
+    /// recovery <paramref name="recovery"/>. The AG pair is one incident per replica, so the record is read and dropped by
+    /// <paramref name="identity"/> (the replica's <see cref="AlertContext.AgReplicaIdentity"/>; empty for the server pair), and the
+    /// entry goes when no replica is left on it. After a restart the firing's open history rows answer, but a stored row does not say
+    /// which replica fired, so history gives a tier only when every open row agrees on one. Null when nothing is recorded, the rows
+    /// disagree, or the firing carried no tier; the recovery then routes as a tierless firing of its name does. Never throws except
+    /// for the caller's own cancellation.
     /// </summary>
-    private async Task<AlertSeverityLevel?> FiredRouteTierAsync(string serverKey, string firing, string recovery, CancellationToken cancellationToken)
+    private async Task<AlertSeverityLevel?> FiredRouteTierAsync(
+        string serverKey, string firing, string recovery, string identity, CancellationToken cancellationToken)
     {
         lock (_deliveredFires)
         {
-            if (_deliveredFires.Remove((serverKey, firing), out var fire))
+            var key = (serverKey, firing);
+            if (_deliveredFires.TryGetValue(key, out var fire) && fire.FiredTiers.Remove(identity, out var tier))
             {
-                return fire.FiredSeverity;
+                if (fire.FiredTiers.Count == 0)
+                {
+                    _deliveredFires.Remove(key);
+                }
+
+                return tier;
             }
         }
 
@@ -798,7 +801,13 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         try
         {
             var history = await reader.GetOpenDeliveredFiresAsync(serverKey, firing, recovery, cancellationToken);
-            return history is { Rows.Count: > 0 } ? AlertContextSerializer.TryReadSeverity(history.Rows[0].ContextJson) : null;
+            if (history is null || history.Rows.Count == 0)
+            {
+                return null;
+            }
+
+            var tiers = history.Rows.Select(row => AlertContextSerializer.TryReadSeverity(row.ContextJson)).Distinct().ToList();
+            return tiers.Count == 1 ? tiers[0] : null;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -811,6 +820,14 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
         }
     }
 
+    /// <summary>
+    /// The open episode's delivered fires, read back from alert history (#5825): the clear's fallback when this
+    /// deliverer's memory has no record of the alert, which is every clear after a service restart. The fire rows'
+    /// <c>Route</c> records name each channel that delivered and the route that supplied it; the destination is that
+    /// route's CURRENT one (a URL is a secret, so the row never holds it), or the channel's current default when no route
+    /// supplied it. A route deleted or disabled since the fire gives that channel no destination. Null when the store
+    /// cannot read history, no delivered fire is open, or the read fails (logged): the clear then sends nothing.
+    /// </summary>
     private async Task<DeliveredFire?> ReadDeliveredFireAsync(AlertResolution resolution, CancellationToken cancellationToken)
     {
         if (_historyStore is not IDeliveredFireReader reader)
