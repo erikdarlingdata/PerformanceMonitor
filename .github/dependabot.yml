@@ -21,9 +21,9 @@
 # normalises those back on add.
 #
 # The harness restore is a step the updater does not perform, not a workaround for something misconfigured
-# here, and the lock files are worth the step: they are the only pin on the TRANSITIVE closure, which no
-# props diff shows moving. Reconciling #3143's AWSSDK.PI 4.0.100.11 -> .12 also moved AWSSDK.Core
-# 4.0.102.1 -> .3, which the one-line props change never mentioned.
+# here. The lock files are worth it: they are the only pin on the TRANSITIVE closure, which no props diff shows
+# moving. Reconciling #3143's AWSSDK.PI 4.0.100.11 -> .12 also moved AWSSDK.Core 4.0.102.1 -> .3, which the
+# one-line props change never mentioned.
 #
 # Not automated. A workflow committing to a Dependabot branch needs a write-scoped credential this repository
 # does not issue, and a push made with GITHUB_TOKEN triggers no workflow run — so the healed commit would
