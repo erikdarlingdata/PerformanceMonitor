@@ -68,7 +68,7 @@ public sealed class ViewerPageLayoutLooksWrongTests
             var found = new List<string>();
             Find<TextBlock>(tab, "SkippedCyclesLine").Text = "Skipped cycles in 24 h: 3 late cycles, 7 slots skipped. Last 2026-11-07 14:44:10: slowest step wait_stats, 41.2 s.";
             var failure = Find<TextBlock>(tab, "ConnectionFailureLine");
-            failure.Text = "One connection failure at 2026-11-07 14:44:10 reached 12 collectors: each missed that one run and has no other error in the window. Nothing to do unless it repeats.";
+            failure.Text = "One connection failure at 2026-11-07 14:44:10 reached 12 collectors: each missed that one run and has no other error in the last 7 days. Nothing to do unless it repeats.";
             failure.Visibility = Visibility.Visible;
 
             var chart = Find<FrameworkElement>(tab, "CollectorDurationChart");

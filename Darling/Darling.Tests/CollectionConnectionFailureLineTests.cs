@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -58,7 +59,7 @@ public sealed class CollectionConnectionFailureLineTests
 
         Assert.NotNull(line);
         Assert.Contains("reached 3 collectors", line);
-        Assert.Contains("1 of them have other errors in the window as well", line);
+        Assert.Contains("1 of them have other errors in the last 7 days as well", line);
         Assert.DoesNotContain("each missed that one run", line);
         Assert.DoesNotContain("Nothing to do", line);
     }
@@ -78,7 +79,7 @@ public sealed class CollectionConnectionFailureLineTests
 
         Assert.NotNull(line);
         Assert.Contains("reached 15 collectors", line);
-        Assert.Contains("15 of them have other errors in the window as well", line);
+        Assert.Contains("15 of them have other errors in the last 7 days as well", line);
         Assert.Contains("It has repeated, or those collectors fail for other reasons too", line);
         Assert.DoesNotContain("Nothing to do", line);
     }
@@ -124,7 +125,30 @@ public sealed class CollectionConnectionFailureLineTests
 
         Assert.NotNull(line);
         Assert.StartsWith("One connection failure at 2026-11-07 10:32:05 reached 2 collectors", line);
-        Assert.EndsWith("One earlier connection failure is in the window too.", line);
+        Assert.EndsWith("One earlier connection failure is in the last 7 days too.", line);
+    }
+
+    /// <summary>
+    /// #8533. The rows are the grid's, which holds each collector's runs for the trailing seven days, and the sentence shares a card
+    /// with the skipped-slots line, which is read over 24 hours. A drop 43 hours before the read is in the rows and outside those
+    /// 24 hours, so the sentence says which days it speaks for.
+    /// </summary>
+    [Fact]
+    public void ADropFortyThreeHoursBeforeTheRead_IsSaidToBeInTheLastSevenDays()
+    {
+        var readAt = new DateTime(2026, 11, 9, 5, 32, 5, DateTimeKind.Utc);
+        var dropped = readAt.AddHours(-43);
+        Assert.True(readAt - dropped > SkippedCycleReader.Window, "the drop has to sit outside the skipped-slots read's window for this to be the card the reader saw");
+        var rows = Enumerable.Range(0, 12)
+            .Select(i => ($"collector_{i:00}", (DateTime?)dropped.AddSeconds(i * 3), (string?)PreLoginHandshake, 1L))
+            .ToList();
+
+        var line = SummaryLine(rows);
+
+        Assert.NotNull(line);
+        Assert.StartsWith("One connection failure at 2026-11-07 10:32:05 reached 12 collectors", line);
+        Assert.Contains("each missed that one run and has no other error in the last 7 days", line);
+        Assert.EndsWith("Nothing to do unless it repeats.", line);
     }
 
     [Fact]
