@@ -892,39 +892,71 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     }
 
     /// <summary>
-    /// #8542: the shared renderer over a mixed action with no store state judges each target on the
-    /// evidence it carries. The clean target gets its statement; the parameter-sensitive one and the one
-    /// measured on a secondary are named with their blockers and get none.
+    /// #8542: only the store's forcing state withholds a statement. A parameter-sensitive target and a
+    /// target measured on a secondary carry their caution and disclosure WITH the statement (#1882,
+    /// #2138), with no state and with a state that holds nothing against them.
     /// </summary>
     [Fact]
-    public void CopyPasteCommand_OverAMixedAction_GivesAStatementOnlyForTheTargetWithNoBlocker()
+    public void CopyPasteCommand_KeepsTheStatement_ForATargetOnlyItsOwnEvidenceCautions()
     {
-        var action = Action(Target(201, 11), Target(202, 12, psp: true), Target(203, 13, replica: "Secondary"));
-        var structured = FactRemediation.BuildStructuredRemediation(action)!.ForcePlanTargets;
-
-        var sql = FactRemediation.RenderCopyPasteCommand(action);
-        var runnable = RunnableLines(sql);
-
-        foreach (var target in structured)
+        var clean = Target(201, 11);
+        var psp = Target(202, 12, psp: true);
+        var secondary = Target(203, 13, replica: "Secondary");
+        var action = Action(clean, psp, secondary);
+        var quiet = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer)
         {
-            Assert.True(
-                target.Eligible == Forces(runnable, target.QueryId, target.PlanId),
-                $"query {target.QueryId} / plan {target.PlanId} is eligible: {target.Eligible}, and the command must agree");
-        }
+            [ForcePlanTargetKey.Of(clean)] = State(planForced: false, forcingType: "NONE", failures: 0),
+            [ForcePlanTargetKey.Of(psp)] = State(planForced: false, forcingType: "NONE", failures: 0),
+            [ForcePlanTargetKey.Of(secondary)] = State(planForced: false, forcingType: "NONE", failures: 0),
+        };
 
-        Assert.True(Forces(runnable, 201, 11));
-        Assert.Contains(ForcePlanBlockerNames.ParameterSensitivityCoFired, sql, StringComparison.Ordinal);
-        Assert.Contains(ForcePlanBlockerNames.SecondaryReplicaEvidence, sql, StringComparison.Ordinal);
+        foreach (var sql in new[] { FactRemediation.RenderCopyPasteCommand(action), FactRemediation.RenderCopyPasteCommand(action, quiet) })
+        {
+            var runnable = RunnableLines(sql);
+            Assert.True(Forces(runnable, 201, 11), "the clean target keeps its statement");
+            Assert.True(Forces(runnable, 202, 12), "the parameter-sensitive target keeps its statement under its caution");
+            Assert.True(Forces(runnable, 203, 13), "the secondary-replica target keeps its statement under its disclosure");
+            Assert.Contains("CAUTION: parameter-sensitive", sql, StringComparison.Ordinal);
+            Assert.Contains("Measured on the Secondary replica", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("NOT ELIGIBLE", sql, StringComparison.Ordinal);
+        }
     }
 
     /// <summary>
-    /// #8542: when every target has a blocker the command is still text (the targets and their blockers,
+    /// #8542: a parameter-sensitive target the store ALSO blocks gets no statement, and the comment names
+    /// every blocker of the gate, the store's and the target's own.
+    /// </summary>
+    [Fact]
+    public void CopyPasteCommand_WithholdsTheStatement_WhenTheStoreBlocksAParameterSensitiveTarget()
+    {
+        var psp = Target(202, 12, psp: true);
+        var sql = FactRemediation.RenderCopyPasteCommand(
+            Action(Target(201, 11), psp),
+            For(psp, State(apcState: "Expired", apcReason: "TempTableChanged", apcLastGood: 12)));
+
+        var runnable = RunnableLines(sql);
+        Assert.True(Forces(runnable, 201, 11));
+        Assert.False(Forces(runnable, 202, 12));
+        Assert.Contains(ForcePlanBlockerNames.ApcWithdrewIt, sql, StringComparison.Ordinal);
+        Assert.Contains(ForcePlanBlockerNames.ParameterSensitivityCoFired, sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #8542: when the store blocks every target the command is still text (the targets and their blockers,
     /// in comments), it says no statement is offered, and it holds nothing SQL Server would run.
     /// </summary>
     [Fact]
-    public void CopyPasteCommand_WhenNoTargetIsEligible_SaysSo_AndHoldsNoStatement()
+    public void CopyPasteCommand_WhenTheStoreBlocksEveryTarget_SaysSo_AndHoldsNoStatement()
     {
-        var sql = FactRemediation.RenderCopyPasteCommand(Action(Target(202, 12, psp: true), Target(203, 13, replica: "Secondary")));
+        var withdrawn = Target(202, 12);
+        var failing = Target(203, 13);
+        var states = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer)
+        {
+            [ForcePlanTargetKey.Of(withdrawn)] = State(apcState: "Expired", apcReason: "TempTableChanged", apcLastGood: 12),
+            [ForcePlanTargetKey.Of(failing)] = State(failures: 2, failureReason: "GENERAL_FAILURE"),
+        };
+
+        var sql = FactRemediation.RenderCopyPasteCommand(Action(withdrawn, failing), states);
 
         Assert.False(string.IsNullOrWhiteSpace(sql));
         Assert.Empty(RunnableLines(sql));

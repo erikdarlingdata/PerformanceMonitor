@@ -251,6 +251,11 @@ public sealed class ForcePlanReplicaScopeTests
         Assert.Contains("sys.query_store_replicas", sql, StringComparison.Ordinal);
         Assert.Contains(ForceDocUrl, sql, StringComparison.Ordinal);
 
+        /* The RUNNABLE statement is unchanged: we do NOT emit @replica_group_id, because the collector
+           stores replica_name (a role) and not the replica_group_id, so there is no correct value to
+           put there. Emitting a guess would be worse than disclosing the default. */
+        Assert.Contains("EXEC sys.sp_query_store_force_plan @query_id = 123, @plan_id = 99;", sql, StringComparison.Ordinal);
+
         /* Asserted over the EXECUTABLE lines only, not the whole blob. #1914 added the scoped form to the
            disclosure — as a COMMENT, so the operator can see the shape they would have to write — and a
            bare DoesNotContain over the whole string could not tell that apart from us emitting it. What
@@ -260,11 +265,6 @@ public sealed class ForcePlanReplicaScopeTests
             .Where(line => line.Length > 0 && !line.StartsWith("--", StringComparison.Ordinal));
 
         Assert.DoesNotContain(runnableLines, line => line.Contains("@replica_group_id", StringComparison.Ordinal));
-
-        /* #8542: secondary_replica_evidence is a blocker, so the target is named with it and nothing is
-           handed over to run: the unscoped statement would force on the primary. */
-        Assert.DoesNotContain(runnableLines, line => line.Contains("sp_query_store_force_plan", StringComparison.Ordinal));
-        Assert.Contains(ForcePlanBlockerNames.SecondaryReplicaEvidence, sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -379,13 +379,8 @@ public sealed class ForcePlanReplicaScopeTests
         Assert.NotNull(sql);
         Assert.Contains("Measured on the Secondary replica", sql!, StringComparison.Ordinal);
         Assert.Contains("forces on the PRIMARY", sql, StringComparison.Ordinal);
-
-        /* #8542: the disclosure rides with the target's name and blocker, and no statement is given. */
-        var runnableLines = sql!.Split('\n')
-            .Select(line => line.Trim())
-            .Where(line => line.Length > 0 && !line.StartsWith("--", StringComparison.Ordinal));
-        Assert.Empty(runnableLines);
-        Assert.Contains(ForcePlanBlockerNames.SecondaryReplicaEvidence, sql, StringComparison.Ordinal);
+        Assert.Contains("USE [MyDb];", sql, StringComparison.Ordinal);
+        Assert.Contains("EXEC sys.sp_query_store_force_plan @query_id = 123, @plan_id = 99;", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -495,13 +490,11 @@ public sealed class ForcePlanReplicaScopeTests
         /* The gentler levers are NAMED — the caution is advice with a next step, not just a wince. */
         Assert.Contains("update statistics", sql, StringComparison.Ordinal);
 
-        /* #8542: parameter_sensitivity_cofired is a blocker, so the caution rides with the target's name
-           and nothing is handed over to run. */
+        /* The caution is comment-only: the runnable statement is byte-identical to the unflagged one. */
         var runnableLines = sql!.Split('\n')
             .Select(line => line.Trim())
             .Where(line => line.Length > 0 && !line.StartsWith("--", StringComparison.Ordinal));
-        Assert.Empty(runnableLines);
-        Assert.Contains(ForcePlanBlockerNames.ParameterSensitivityCoFired, sql, StringComparison.Ordinal);
+        Assert.Contains("EXEC sys.sp_query_store_force_plan @query_id = 123, @plan_id = 99;", runnableLines);
     }
 
     [Fact]
@@ -647,12 +640,6 @@ public sealed class ForcePlanReplicaScopeTests
         var sql = FactRemediation.RenderCopyPasteCommand(action);
         Assert.NotNull(sql);
         Assert.Contains("CAUTION: parameter-sensitive", sql!, StringComparison.Ordinal);
-
-        /* #8542: the caution rides with the target's name and blocker, and no statement is given. */
-        var runnableLines = sql!.Split('\n')
-            .Select(line => line.Trim())
-            .Where(line => line.Length > 0 && !line.StartsWith("--", StringComparison.Ordinal));
-        Assert.Empty(runnableLines);
-        Assert.Contains(ForcePlanBlockerNames.ParameterSensitivityCoFired, sql, StringComparison.Ordinal);
+        Assert.Contains("EXEC sys.sp_query_store_force_plan @query_id = 123, @plan_id = 99;", sql, StringComparison.Ordinal);
     }
 }
