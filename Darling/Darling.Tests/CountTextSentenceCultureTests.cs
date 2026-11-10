@@ -81,4 +81,16 @@ public sealed class CountTextSentenceCultureTests
 
         Assert.Equal("1,234 predicates, sampled at 0.10% of executions", text);
     }
+
+    [Fact]
+    public void LockStatsRowsNote_NoQueue_OnAGermanDesktop_CountsItsCapturesInOneConvention()
+    {
+        // The no-queue branch counts its captures like the queued branch below it, and one capture reads as one.
+        var many = OnAGermanDesktop(() => ViewerServerTab.LockStatsRowsNote(0, 1500));
+        var one = ViewerServerTab.LockStatsRowsNote(0, 1);
+
+        Assert.Equal("No lock was waiting in any of 1,500 captures. Every lock held in this window was granted.", many.Text);
+        Assert.StartsWith("No lock was waiting in any of 1,500 captures", many.Detail, StringComparison.Ordinal);
+        Assert.StartsWith("No lock was waiting in any of 1 capture.", one.Text, StringComparison.Ordinal);
+    }
 }

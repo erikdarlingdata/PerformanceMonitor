@@ -146,7 +146,7 @@ public partial class WaitDrillDownWindow : Window
            the chain walk below only sees those rows, so a head blocker whose own snapshot falls outside the
            newest 1,000 is missed. truncationNote surfaces that instead of silently absorbing it. */
         var (allTotalCount, allSnapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, _fromUtc, _toUtc, includeMonitor: true);
-        var truncationNote = allSnapshots.Count < allTotalCount ? $" | showing newest 1,000 of {allTotalCount:N0} snapshots" : "";
+        var truncationNote = allSnapshots.Count < allTotalCount ? string.Create(System.Globalization.CultureInfo.InvariantCulture, $" | showing newest 1,000 of {allTotalCount:N0} snapshots") : "";
 
         var headBlockerInfos = WalkBlockingChains(waiters.Select(ToSnapshotInfo), allSnapshots.Select(ToSnapshotInfo));
 

@@ -815,8 +815,8 @@ public partial class ViewerServerTab
         if (queuedCount == 0)
         {
             return new PanelNoteText(
-                $"No lock was waiting in any of {totalCaptures:N0} captures. Every lock held in this window was granted.",
-                $"No lock was waiting in any of {totalCaptures:N0} captures — every lock held in this "
+                $"No lock was waiting in any of {CountText.Plural(totalCaptures, "capture")}. Every lock held in this window was granted.",
+                $"No lock was waiting in any of {CountText.Plural(totalCaptures, "capture")} — every lock held in this "
                 + "window was granted, which is the healthy answer rather than a missing read.");
         }
 

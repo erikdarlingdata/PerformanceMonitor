@@ -1610,13 +1610,13 @@ internal static class PgDisplay
         CaptureTimeUtc = row.CaptureTime,
     };
 
-    /// <summary>How many wait rows are attributed to a statement. A null query id is a target that does not report
-    /// one (#6836) and 0 is work belonging to no statement, so neither counts: a lifted <c>null != 0</c> is true
-    /// and would call every row of a PostgreSQL 13 target attributed (#6849).</summary>
     /// <summary>The lead of the predicate statistics note: the predicate count and the sample rate the rows were taken at.</summary>
     internal static string PredicateStatsSummary(int predicates, double sampled) =>
         string.Create(CultureInfo.InvariantCulture, $"{CountText.Plural(predicates, "predicate")}, sampled at {sampled * 100:N2}% of executions");
 
+    /// <summary>How many wait rows are attributed to a statement. A null query id is a target that does not report
+    /// one (#6836) and 0 is work belonging to no statement, so neither counts: a lifted <c>null != 0</c> is true
+    /// and would call every row of a PostgreSQL 13 target attributed (#6849).</summary>
     internal static int WaitSamplingAttributedCount(IReadOnlyList<DarlingPgWaitSamplingReader.PgWaitSamplingRow> rows)
     {
         ArgumentNullException.ThrowIfNull(rows);
