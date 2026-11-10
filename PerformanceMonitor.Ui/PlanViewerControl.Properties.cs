@@ -916,6 +916,7 @@ public partial class PlanViewerControl
                 PerformanceMonitor.PlanAnalysis.PropertyRows.ClampWidth(_propertiesPanelWidth));
             PropertiesSplitter.Visibility = Visibility.Visible;
             PropertiesPanel.Visibility = Visibility.Visible;
+            FitSidePanels();
         }
     }
 
@@ -1230,6 +1231,7 @@ public partial class PlanViewerControl
             _selectedNodeBorder = null;
         }
         _selectedNode = null;
+        FitSidePanels();
     }
 
     #endregion
@@ -1344,25 +1346,27 @@ public partial class PlanViewerControl
         var columns = ParameterCard.Columns(parameters);
         var allCompiledNull = parameters.All(p => p.CompiledValue == null);
 
-        var colDef = new List<GridLength> { GridLength.Auto, GridLength.Auto };
+        /* The grid is never wider than its card, which cuts what is past its edge with no ellipsis. The name column shares the
+           card with the value columns at twice a value column's weight and no wider than its longest name (its MaxWidth, set
+           once the cells are in the tree, below), so a short name takes its own width and a long one is what gives. The data
+           type sizes to its text, and its cells stop at ParameterTypeMaxWidth (AddParamCell). Each value column keeps
+           ParameterValueMinWidth however long the names are: room for its header, and a hover target for a cut cell's
+           tooltip. The three minimums and the type's maximum come to less than the narrowest the card's content gets (its
+           360 px cap, less its edge, its margins and a scroll bar). */
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2, GridUnitType.Star), MinWidth = ParameterNameMinWidth });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         int compiledCol = -1, runtimeCol = -1;
         int nextCol = 2;
         if (columns.ShowCompiled)
         {
-            colDef.Add(new GridLength(1, GridUnitType.Star));
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = ParameterValueMinWidth });
             compiledCol = nextCol++;
         }
         if (columns.ShowRuntime)
         {
-            colDef.Add(new GridLength(1, GridUnitType.Star));
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = ParameterValueMinWidth });
             runtimeCol = nextCol++;
-        }
-
-        var grid = new Grid();
-        foreach (var width in colDef)
-        {
-            // A value column keeps 40 px however long the names are, so a cut cell keeps a hover target for its tooltip.
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = width, MinWidth = width.IsStar ? 40 : 0 });
         }
 
         var columnHeaderBrush = ParamsAccentBrush;
@@ -1403,9 +1407,27 @@ public partial class PlanViewerControl
 
         ParametersContent.Children.Add(grid);
 
+        // The name column's bound: its widest cell on one line, measured in the tree, where the cells have the card's font.
+        var nameWidth = ParameterNameMinWidth;
+        foreach (var cell in grid.Children.OfType<TextBlock>().Where(cell => Grid.GetColumn(cell) == 0))
+        {
+            cell.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            nameWidth = Math.Max(nameWidth, Math.Ceiling(cell.DesiredSize.Width));
+        }
+        grid.ColumnDefinitions[0].MaxWidth = nameWidth;
+
         foreach (var annotation in ParameterCard.Annotations(parameters, statement.StatementText, maskedText, unresolved))
             AddParameterAnnotation(annotation);
     }
+
+    /// <summary>The least the Parameters card's name column keeps, in px, when a long name gives way to the value columns.</summary>
+    private const double ParameterNameMinWidth = 60;
+
+    /// <summary>The most a Parameters card data type cell takes, in px, its margin included: room for the longest built-in type name.</summary>
+    private const double ParameterTypeMaxWidth = 110;
+
+    /// <summary>The least a Parameters card value column keeps, in px: its header ("Compiled") and its cell's margin.</summary>
+    private const double ParameterValueMinWidth = 64;
 
     private static void AddParamCell(Grid grid, int row, int col, string text, Brush brush,
         FontWeight fontWeight = default, bool sniffed = false)
@@ -1423,10 +1445,13 @@ public partial class PlanViewerControl
         };
         if (col <= 1)
         {
-            // Name and DataType columns are short — no need for max width.
-            tb.MaxWidth = double.PositiveInfinity;
+            // A name is as wide as its column lets it be. A data type's column sizes to its cells, so the cell carries the
+            // bound: a cell measured with no limit is cut at its column's edge with no ellipsis. A name or a type over 30
+            // characters carries a tooltip; so does one that is cut, which is known only once it is laid out.
+            tb.MaxWidth = col == 1 ? ParameterTypeMaxWidth - tb.Margin.Right : double.PositiveInfinity;
             if (text.Length > 30)
                 tb.ToolTip = text;
+            tb.SizeChanged += (_, _) => tb.ToolTip = text.Length > 30 || IsTrimmed(tb) ? text : null;
         }
         else
         {

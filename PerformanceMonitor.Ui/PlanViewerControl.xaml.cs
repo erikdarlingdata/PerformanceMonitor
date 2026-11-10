@@ -62,6 +62,11 @@ public partial class PlanViewerControl : UserControl
     private bool _insightsSetByUser;
     private bool _applyingInsightsFit;
 
+    // The width the Statements panel asks for: 450 px as it opens, then the width its splitter was dragged to. The width it is
+    // given can be narrower (FitSidePanels).
+    private double _statementsWidth = PlanPanelLayout.DefaultStatementsWidth;
+    private bool _fittingSidePanels;
+
     /// <summary>
     /// Opens or collapses the insights panel by the viewer's height (<see cref="PlanInsightsLayout.StartsExpanded"/>) as a plan shows it: in a
     /// small window the plan graph keeps most of the height and the panel starts collapsed. A panel the person has opened or closed
@@ -203,11 +208,82 @@ public partial class PlanViewerControl : UserControl
             System.Windows.Controls.ColumnDefinition.WidthProperty, typeof(ColumnDefinition));
         widthDescriptor?.AddValueChanged(PropertiesColumn, (_, _) =>
         {
+            // A width FitSidePanels gives the panel in a narrow viewer is not one the person dragged, so it is not remembered.
+            if (_fittingSidePanels) return;
             if (PropertiesPanel.Visibility != Visibility.Visible) return;
             var width = PropertiesColumn.Width;
             if (width.IsAbsolute && width.Value > 0)
                 _propertiesPanelWidth = width.Value;
         });
+
+        /* The two side panels share the viewer's width with the canvas, so their widths are fitted again whenever that width
+           changes; a drag of the Statements splitter is the width that panel asks for from then on. */
+        PlanBody.SizeChanged += (_, e) => { if (e.WidthChanged) FitSidePanels(); };
+        StatementsSplitter.DragCompleted += (_, _) =>
+        {
+            if (StatementsPanel.Visibility == Visibility.Visible && StatementsColumn.ActualWidth > 0)
+                _statementsWidth = StatementsColumn.ActualWidth;
+        };
+
+        UpdateToolbarState();
+    }
+
+    /// <summary>
+    /// The zoom, Fit and Minimap buttons act on the operators on the canvas, and Save writes the plan behind them, so they are
+    /// enabled only while a statement is drawn: not before a plan loads, and not after text that does not parse or a plan with no
+    /// statement to draw. Save is also enabled for a withheld plan, where its click is what says why that plan is not saved.
+    /// </summary>
+    private void UpdateToolbarState()
+    {
+        var drawn = _currentStatement?.RootNode != null;
+
+        /* A button that is disabled while it holds the keyboard focus drops the focus out of the viewer, and the viewer's
+           own Ctrl+V with it: a plan pasted after a click on Fit would stop the next paste from reaching the viewer. The
+           viewer takes the focus first, so it stays inside. */
+        if (!drawn && (ZoomInButton.IsKeyboardFocused || ZoomOutButton.IsKeyboardFocused || ZoomFitButton.IsKeyboardFocused
+            || MinimapToggleButton.IsKeyboardFocused || SavePlanButton.IsKeyboardFocused))
+        {
+            Focus();
+        }
+
+        ZoomInButton.IsEnabled = drawn;
+        ZoomOutButton.IsEnabled = drawn;
+        ZoomFitButton.IsEnabled = drawn;
+        MinimapToggleButton.IsEnabled = drawn;
+        SavePlanButton.IsEnabled = drawn || _planWithheld;
+    }
+
+    /// <summary>
+    /// Gives the open side panels the widths <see cref="PlanPanelLayout.Fit"/> works out for the viewer's width, and the canvas
+    /// column the minimum that goes with them, so neither a panel opening nor a splitter drag leaves the canvas less than that.
+    /// Before the first layout pass there is no width to fit to; the pass that gives one fits the panels.
+    /// </summary>
+    private void FitSidePanels()
+    {
+        var viewerWidth = PlanBody.ActualWidth;
+        if (viewerWidth <= 0)
+            return;
+
+        var statementsOpen = StatementsPanel.Visibility == Visibility.Visible;
+        var propertiesOpen = PropertiesPanel.Visibility == Visibility.Visible;
+        var fit = PlanPanelLayout.Fit(
+            viewerWidth,
+            statementsOpen ? _statementsWidth : null,
+            propertiesOpen ? PerformanceMonitor.PlanAnalysis.PropertyRows.ClampWidth(_propertiesPanelWidth) : null);
+
+        _fittingSidePanels = true;
+        try
+        {
+            if (statementsOpen)
+                StatementsColumn.Width = new GridLength(fit.Statements);
+            if (propertiesOpen)
+                PropertiesColumn.Width = new GridLength(fit.Properties);
+            CanvasColumn.MinWidth = fit.CanvasMinimum;
+        }
+        finally
+        {
+            _fittingSidePanels = false;
+        }
     }
 
     /// <summary>
@@ -311,6 +387,7 @@ public partial class PlanViewerControl : UserControl
             Clear();
             CapturedQueryText = queryText;
             _planWithheld = true;
+            UpdateToolbarState();
             EmptyStateTitle.Text = withheld;
             EmptyStateDetail.Visibility = Visibility.Collapsed;
             return;
@@ -418,6 +495,10 @@ public partial class PlanViewerControl : UserControl
         CostText.Visibility = Visibility.Collapsed;
         ClosePropertiesPanel();
         CloseMinimapPanel();
+        /* The zoom belongs to the plan that is going: the next plan is drawn at 100%, as the first one is, whatever the
+           previous plan was zoomed or fitted to. */
+        SetZoom(1.0);
+        UpdateToolbarState();
     }
 
     #region Save & Statement Selection
@@ -597,12 +678,14 @@ public partial class PlanViewerControl : UserControl
 
     private void ShowStatementsPanel()
     {
-        StatementsColumn.Width = new GridLength(450);
-        StatementsSplitterColumn.Width = new GridLength(5);
+        _statementsWidth = PlanPanelLayout.DefaultStatementsWidth;
+        StatementsColumn.Width = new GridLength(_statementsWidth);
+        StatementsSplitterColumn.Width = new GridLength(PlanPanelLayout.SplitterWidth);
         StatementsSplitter.Visibility = Visibility.Visible;
         StatementsPanel.Visibility = Visibility.Visible;
         StatementsButton.Visibility = Visibility.Visible;
         StatementsButtonSeparator.Visibility = Visibility.Visible;
+        FitSidePanels();
     }
 
     private void CloseStatementsPanel()
@@ -611,6 +694,7 @@ public partial class PlanViewerControl : UserControl
         StatementsSplitter.Visibility = Visibility.Collapsed;
         StatementsColumn.Width = new GridLength(0);
         StatementsSplitterColumn.Width = new GridLength(0);
+        FitSidePanels();
     }
 
     #endregion

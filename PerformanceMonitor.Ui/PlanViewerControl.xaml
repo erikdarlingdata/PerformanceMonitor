@@ -18,16 +18,18 @@
                 BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
             <DockPanel>
                 <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
-                    <Button Content="+" Click="ZoomIn_Click" Width="28" Height="28" Padding="0" FontSize="16"
+                    <!-- The zoom, Fit, Save and Minimap buttons act on a drawn plan: the code-behind enables them while one is
+                         drawn (UpdateToolbarState). -->
+                    <Button x:Name="ZoomInButton" Content="+" Click="ZoomIn_Click" Width="28" Height="28" Padding="0" FontSize="16"
                             FontWeight="Bold" ToolTip="Zoom In"/>
-                    <Button Content="&#x2212;" Click="ZoomOut_Click" Width="28" Height="28" Padding="0" FontSize="16"
+                    <Button x:Name="ZoomOutButton" Content="&#x2212;" Click="ZoomOut_Click" Width="28" Height="28" Padding="0" FontSize="16"
                             FontWeight="Bold" Margin="4,0,0,0" ToolTip="Zoom Out"/>
-                    <Button Content="Fit" Click="ZoomFit_Click" Height="28" Padding="8,0" Margin="4,0,0,0"
+                    <Button x:Name="ZoomFitButton" Content="Fit" Click="ZoomFit_Click" Height="28" Padding="8,0" Margin="4,0,0,0"
                             ToolTip="Zoom to Fit"/>
                     <TextBlock x:Name="ZoomLevelText" Text="100%" VerticalAlignment="Center"
                                Foreground="{DynamicResource ForegroundMutedBrush}" Margin="8,0,0,0" FontSize="11"/>
                     <Separator Margin="12,4"/>
-                    <Button Content="Save .sqlplan" Click="SavePlan_Click" Height="28" Padding="8,0"
+                    <Button x:Name="SavePlanButton" Content="Save .sqlplan" Click="SavePlan_Click" Height="28" Padding="8,0"
                             ToolTip="Save plan as .sqlplan file"/>
                     <Separator x:Name="StatementsButtonSeparator" Margin="12,4" Visibility="Collapsed"/>
                     <Button x:Name="StatementsButton" Content="Statements" Click="ToggleStatements_Click"
@@ -105,8 +107,12 @@
                                                FontWeight="SemiBold" Foreground="{DynamicResource InsightServerBrush}"
                                                Margin="0,0,0,6"/>
                                     <StackPanel x:Name="ServerContextContent"/>
+                                    <!-- The sentence is longer than the card's 360 px cap, so it wraps, and within 220 px: a card
+                                         with one sentence to show stays near its minimum width and leaves the strip to the cards
+                                         after it. -->
                                     <TextBlock x:Name="ServerContextEmpty"
                                                FontSize="12" Visibility="Collapsed"
+                                               TextWrapping="Wrap" MaxWidth="220" HorizontalAlignment="Left"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                 </StackPanel>
                             </ScrollViewer>
@@ -227,15 +233,17 @@
                      Padding="8,4"/>
         </Expander>
 
-        <!-- Statements Panel + Plan Canvas + Properties Panel -->
-        <Grid Grid.Row="3">
+        <!-- Statements Panel + Plan Canvas + Properties Panel. The two panels open at the widths they ask for and narrow, the
+             Statements panel first, when those would leave the canvas less than its minimum; the code-behind sets the widths and
+             the canvas column's minimum (FitSidePanels), which also bounds a splitter drag. -->
+        <Grid x:Name="PlanBody" Grid.Row="3">
             <Grid.ColumnDefinitions>
                 <!-- Col 0: Statements Panel (hidden by default) -->
                 <ColumnDefinition x:Name="StatementsColumn" Width="0"/>
                 <!-- Col 1: Statements Splitter (hidden by default) -->
                 <ColumnDefinition x:Name="StatementsSplitterColumn" Width="0"/>
                 <!-- Col 2: Plan Canvas -->
-                <ColumnDefinition Width="*"/>
+                <ColumnDefinition x:Name="CanvasColumn" Width="*"/>
                 <!-- Col 3: Properties Splitter (hidden by default) -->
                 <ColumnDefinition Width="Auto"/>
                 <!-- Col 4: Properties Panel (hidden by default) -->
