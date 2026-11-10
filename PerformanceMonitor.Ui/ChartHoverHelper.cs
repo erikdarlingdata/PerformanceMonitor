@@ -297,6 +297,9 @@ internal sealed class ChartHoverHelper
     /// </summary>
     internal string? HoverTextAt(ScottPlot.Pixel pixel)
     {
+        // Over a legend entry that ends in an ellipsis, the hover is that entry's whole text.
+        if (LegendFullTextAt(pixel) is { } whole) return whole;
+
         var mouseCoords = _chart.Plot.GetCoordinates(pixel);
 
         /* Use X-axis (time) proximity as the primary filter, Y-axis distance
@@ -540,7 +543,26 @@ internal sealed class ChartHoverHelper
     /// </summary>
     private bool TryLegendHitTest(ScottPlot.Pixel clickPixel, out ScottPlot.IPlottable? plottable)
     {
-        plottable = null;
+        var inLegend = TryLegendEntryHitTest(clickPixel, out var item);
+        plottable = item?.Plottable;                                      // may be null (manual item)
+        return inLegend;
+    }
+
+    /// <summary>
+    /// The whole text of the legend entry under <paramref name="pixel"/> when the legend shows it ending in an ellipsis
+    /// (<see cref="WrappedLegendLayout"/> shortens an entry wider than its row), else null.
+    /// </summary>
+    internal string? LegendFullTextAt(ScottPlot.Pixel pixel)
+    {
+        if (_chart.Plot.Layout.LayoutEngine is not WrappedLegendLayout engine) return null;
+        if (!TryLegendEntryHitTest(pixel, out var item) || item is null) return null;
+        return item.LabelText.Contains(WrappedLegendLayout.Ellipsis, StringComparison.Ordinal) ? engine.NamedText(item) : null;
+    }
+
+    /// <summary>The legend hit test, giving the entry itself: <paramref name="item"/> is the entry whose label or symbol holds the pixel, null in the padding between entries.</summary>
+    private bool TryLegendEntryHitTest(ScottPlot.Pixel clickPixel, out ScottPlot.LegendItem? item)
+    {
+        item = null;
 
         var lr = _chart.Plot.LastRender;
         if (lr.Count == 0) return false;                                  // not yet rendered
@@ -567,7 +589,7 @@ internal sealed class ChartHoverHelper
             if (tight.LabelRects[i].WithOffset(off).Contains(clickPixel) ||
                 tight.SymbolRects[i].WithOffset(off).Contains(clickPixel))
             {
-                plottable = tight.LegendItems[i].Plottable;               // may be null (manual item)
+                item = tight.LegendItems[i];
                 return true;
             }
         }

@@ -43,6 +43,7 @@ namespace PerformanceMonitor.Ui;
 /// #8540: an entry wider than the row under the plot (a sentence, such as the restart marker's, on a narrow chart) is fitted to that row
 /// before the rule above places the entries. It is broken across lines at its spaces, so the whole entry shows. When those lines would
 /// take the plot under <see cref="MinPlotHeight"/> and one line per entry would not, the entry keeps one line and ends in an ellipsis.
+/// A word wider than the row is cut the same way. The hover shows the whole text of an entry that ends in an ellipsis.
 /// </para>
 /// </remarks>
 internal sealed class WrappedLegendLayout : ILayoutEngine
@@ -203,7 +204,7 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
     /// <summary>
     /// Fits every entry wider than <paramref name="width"/> to it and remembers the fitted text for the layouts that follow. The entry is
     /// broken across lines at its spaces; with <paramref name="oneLine"/> it keeps one line, cut to the width and ending in an ellipsis.
-    /// A single word wider than the legend keeps a line of its own. True when an entry was fitted.
+    /// A single word wider than the legend keeps a line of its own, cut to the width and ending in an ellipsis. True when an entry was fitted.
     /// </summary>
     private bool FitWideEntries(float width, Paint paint, bool oneLine)
     {
@@ -214,14 +215,7 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
 
             if (oneLine)
             {
-                var keep = text.Length - 1;
-                for (; keep > 1; keep--)
-                {
-                    item.LabelText = text[..keep].TrimEnd() + Ellipsis;
-                    if (EntryWidth(item, paint) <= width + 0.5f) break;
-                }
-
-                _fitted[text] = text[..keep].TrimEnd() + Ellipsis;
+                _fitted[text] = Shorten(item, text, width, paint);
                 item.LabelText = text;
                 continue;
             }
@@ -243,8 +237,17 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
             }
 
             lines.Add(line);
+
+            // A line that is one word wider than the row (a name with no space in it) is cut to the row and ends in an ellipsis.
+            for (var i = 0; i < lines.Count; i++)
+            {
+                item.LabelText = lines[i];
+                if (EntryWidth(item, paint) > width + 0.5f) lines[i] = Shorten(item, lines[i], width, paint);
+            }
+
             item.LabelText = text;
-            if (lines.Count > 1) _fitted[text] = string.Join("\n", lines);
+            var fitted = string.Join("\n", lines);
+            if (!string.Equals(fitted, text, StringComparison.Ordinal)) _fitted[text] = fitted;
         }
 
         ShowFitted();
@@ -252,8 +255,27 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
         return _fitted.Count > 0;
     }
 
-    /// <summary>Ends an entry that keeps one line and does not show its whole text.</summary>
+    /// <summary>Ends an entry, or a line of one, that does not show its whole text.</summary>
     internal const string Ellipsis = "\u2026";
+
+    /// <summary>The longest start of <paramref name="text"/> that, with an ellipsis after it, is no wider than <paramref name="width"/> as the entry's label.</summary>
+    private string Shorten(LegendItem item, string text, float width, Paint paint)
+    {
+        var keep = text.Length - 1;
+        for (; keep > 1; keep--)
+        {
+            item.LabelText = text[..keep].TrimEnd() + Ellipsis;
+            if (EntryWidth(item, paint) <= width + 0.5f) break;
+        }
+
+        return text[..Math.Max(keep, 1)].TrimEnd() + Ellipsis;
+    }
+
+    /// <summary>
+    /// The text the plottable named <paramref name="item"/> when the legend shows it fitted (broken across lines, or shortened), else null.
+    /// The hover reads it to show the whole text of an entry that ends in an ellipsis.
+    /// </summary>
+    internal string? NamedText(LegendItem item) => _named.TryGetValue(item, out var named) ? named : null;
 
     /// <summary>The width one entry takes on a row of its own: its symbol and its label.</summary>
     private float EntryWidth(LegendItem item, Paint paint)
