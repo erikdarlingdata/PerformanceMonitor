@@ -170,23 +170,13 @@ public sealed class ManagedWebGroupGuardTests
     }
 
     [Fact]
-    public async Task TheHost_AsksTheStoreOncePerApiRequest_NeverForAnAsset_AndNeverWhileUnavailable_AndRefusesAStoreFailureAtSignInLikeAnyOtherToken()
+    public async Task TheHost_AsksTheStoreOncePerApiRequestAndPageLoad_NeverForAScriptOrStylesheet_AndNeverWhileUnavailable_AndRefusesAStoreFailureAtSignInLikeAnyOtherToken()
     {
         var ct = TestContext.Current.CancellationToken;
         using var rig = new Rig();
         await rig.RefreshedMatchAsync();
         await using var postgres = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=unused;Database=unused");
-        var builder = WebApplication.CreateBuilder();
-        builder.WebHost.UseTestServer();
-        builder.Logging.ClearProviders();
-        builder.Services.AddSingleton(postgres);
-        DarlingWebHostService.ConfigureResponseCompression(builder.Services);
-        await using var app = builder.Build();
-        var host = new DarlingWebHostService(NullLogger<DarlingWebHostService>.Instance,
-            new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
-        host.ConfigurePipeline(app, postgres, true, IPAddress.Loopback, IPNetwork.Parse("10.0.0.0/8"), Shared, null,
-            webTokens: null, managedGroups: rig.Groups);
-        await app.StartAsync(ct);
+        await using var app = await StartHostAsync(rig, postgres, ct);
         var server = app.GetTestServer();
 
         var signIn = await DarlingWebHostGateLiveTests.PostSignIn(server, Host, IPAddress.Parse("10.0.0.10"), Token);
@@ -196,17 +186,22 @@ public sealed class ManagedWebGroupGuardTests
         var afterSignIn = rig.Metadata.Reads;
         Assert.True(afterSignIn >= 1, "the sign-in checks the group against the store");
 
-        await Read("/app.js", cookie);
-        await Read("/", cookie);
+        // The page's scripts and stylesheets carry no data, so the group cookie on them costs no store trip.
+        await Read(server, "/js/app.js", cookie);
+        await Read(server, "/css/app.css", cookie);
         Assert.Equal(afterSignIn, rig.Metadata.Reads);
 
-        await Read("/api/session", cookie);
+        // The page itself and each API call are checked once.
+        await Read(server, "/", cookie);
         Assert.Equal(afterSignIn + 1, rig.Metadata.Reads);
+        await Read(server, "/api/session", cookie);
+        Assert.Equal(afterSignIn + 2, rig.Metadata.Reads);
 
         var ring = rig.Ring;
         rig.Ring = DarlingPasswordKey.Refusing("test key temporarily unavailable");
-        Assert.Equal(401, (await Read("/api/session", cookie)).Status);
-        Assert.Equal(afterSignIn + 1, rig.Metadata.Reads);
+        Assert.Equal(401, (await Read(server, "/api/session", cookie)).Status);
+        await Read(server, "/", cookie);
+        Assert.Equal(afterSignIn + 2, rig.Metadata.Reads);
         rig.Ring = ring;
 
         rig.Metadata.Throw = true;
@@ -216,25 +211,69 @@ public sealed class ManagedWebGroupGuardTests
         Assert.NotEqual(503, liveToken.Response.StatusCode);
         Assert.Equal(await Body(otherString), await Body(liveToken));
         Assert.Equal(0, liveToken.Response.Headers.SetCookie.Count);
+    }
 
-        async Task<(int Status, string Body)> Read(string path, string? cookie)
-        {
-            var response = await server.SendAsync(context =>
-            {
-                context.Request.Path = path;
-                context.Request.Headers.Host = Host;
-                context.Connection.RemoteIpAddress = IPAddress.Parse("10.0.0.4");
-                if (cookie is not null) context.Request.Headers.Cookie = cookie;
-            });
-            return (response.Response.StatusCode, await Body(response));
-        }
+    [Fact]
+    public async Task AGroupThatNoLongerAdmitsItsCookie_IsShownTheSignInForm_OnThePageItself()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var rig = new Rig();
+        await rig.RefreshedMatchAsync();
+        await using var postgres = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Username=unused;Database=unused");
+        await using var app = await StartHostAsync(rig, postgres, ct);
+        var server = app.GetTestServer();
 
-        // The test server's response stream is a forward-only reader over what the pipeline wrote, so it is read from where it stands.
-        static async Task<string> Body(HttpContext response)
+        var signIn = await DarlingWebHostGateLiveTests.PostSignIn(server, Host, IPAddress.Parse("10.0.0.10"), Token);
+        var header = Assert.Single(signIn.Response.Headers.SetCookie)!;
+        var cookie = header[..header.IndexOf(';')];
+
+        var signInForm = await Read(server, "/", null);
+        Assert.Equal(200, signInForm.Status);
+        Assert.Contains("<form", signInForm.Body, StringComparison.OrdinalIgnoreCase);
+        Assert.NotEqual(signInForm.Body, (await Read(server, "/", cookie)).Body);
+
+        // The group is disabled, deleted or rotated, or the switch is off: the store answers no enabled group for the cookie. The API
+        // call says the session is over, and the page the holder then reloads is the sign-in form, where a current token signs in.
+        rig.Metadata.Group = null;
+        Assert.Equal(401, (await Read(server, "/api/session", cookie)).Status);
+        var page = await Read(server, "/", cookie);
+        Assert.Equal(signInForm.Status, page.Status);
+        Assert.Equal(signInForm.Body, page.Body);
+    }
+
+    private static async Task<WebApplication> StartHostAsync(Rig rig, NpgsqlDataSource postgres, CancellationToken ct)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        builder.Services.AddSingleton(postgres);
+        DarlingWebHostService.ConfigureResponseCompression(builder.Services);
+        var app = builder.Build();
+        var host = new DarlingWebHostService(NullLogger<DarlingWebHostService>.Instance,
+            new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
+        host.ConfigurePipeline(app, postgres, true, IPAddress.Loopback, IPNetwork.Parse("10.0.0.0/8"), Shared, null,
+            webTokens: null, managedGroups: rig.Groups);
+        await app.StartAsync(ct);
+        return app;
+    }
+
+    private static async Task<(int Status, string Body)> Read(TestServer server, string path, string? cookie)
+    {
+        var response = await server.SendAsync(context =>
         {
-            using var reader = new StreamReader(response.Response.Body);
-            return await reader.ReadToEndAsync();
-        }
+            context.Request.Path = path;
+            context.Request.Headers.Host = Host;
+            context.Connection.RemoteIpAddress = IPAddress.Parse("10.0.0.4");
+            if (cookie is not null) context.Request.Headers.Cookie = cookie;
+        });
+        return (response.Response.StatusCode, await Body(response));
+    }
+
+    // The test server's response stream is a forward-only reader over what the pipeline wrote, so it is read from where it stands.
+    private static async Task<string> Body(HttpContext response)
+    {
+        using var reader = new StreamReader(response.Response.Body);
+        return await reader.ReadToEndAsync();
     }
 
     [Fact]
