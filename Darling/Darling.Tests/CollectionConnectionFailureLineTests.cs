@@ -83,6 +83,23 @@ public sealed class CollectionConnectionFailureLineTests
         Assert.DoesNotContain("Nothing to do", line);
     }
 
+    /// <summary>
+    /// The Collection Log lists the runs of the time range it is set to, so the line that sends a reader there for the collectors'
+    /// other errors says how far that range has to reach.
+    /// </summary>
+    [Fact]
+    public void ALineThatSendsTheReaderToTheCollectionLog_SaysHowFarItsRangeHasToReach()
+    {
+        var rows = Enumerable.Range(0, 15)
+            .Select(i => ($"collector_{i:00}", (DateTime?)Cycle.AddSeconds(i * 3), (string?)PreLoginHandshake, 2L))
+            .ToList();
+
+        var line = SummaryLine(rows);
+
+        Assert.NotNull(line);
+        Assert.EndsWith("the Collection Log says which once its time range reaches back to those runs.", line);
+    }
+
     [Fact]
     public void AStatementErrorOnOneCollector_IsNotAConnectionFailure()
     {
