@@ -126,6 +126,25 @@ WHERE event LIKE 'profile%' AND request_id IS NULL AND actor = 'person:tester'",
         });
     }
 
+    /// <summary>#8578: the Requests tab names a server the way the web list does, by the registry's display name, whatever name the request was
+    /// opened with (a request stored before the name was one name keeps its old label).</summary>
+    [Fact]
+    public async Task TheRequestsTab_NamesAServerByItsRegistryDisplayName_NotTheNameTheRequestWasOpenedWith()
+    {
+        await RunAsRoleAsync("viewer", async (viewer, owner, requestId, ct) =>
+        {
+            await ExecAsync(owner, $@"
+UPDATE config.investigation_requests SET server_name = 'SQLHOST07.corp.example.com:SalesDb:RO' WHERE request_id = '{requestId}';
+UPDATE servers SET display_name = 'Sales OLTP' WHERE server_id = 7;", ct);
+
+            Assert.Equal("Sales OLTP", Assert.Single(await viewer.GetInvestigationRequestsAsync(null, ct)).ServerName);
+
+            /* A server the registry no longer holds keeps the name the request was opened with. */
+            await ExecAsync(owner, "DELETE FROM servers WHERE server_id = 7", ct);
+            Assert.Equal("SQLHOST07.corp.example.com:SalesDb:RO", Assert.Single(await viewer.GetInvestigationRequestsAsync(null, ct)).ServerName);
+        });
+    }
+
     [Fact]
     public async Task AViewerSeat_ReadsEverything_AndEveryWriteRefusesAsReadOnly()
     {

@@ -74,6 +74,7 @@ let favorites = new Set();
 let acks = new Map(); // server_id -> epoch ms of the acknowledgement
 let colors = {}; // severity -> "#rrggbb" (only valid choices)
 let sidebarCollapsed = false;
+let navCollapsed = false; // the sidebar's page links folded away so the server list gets the height (#8578)
 let sidebarGrouped = false;
 let dbFilters = new Map(); // server_id -> the chosen database names (1 to MAX_DB_NAMES, kept exactly as chosen)
 let viewGroups = new Set(); // collapsed Custom Views sidebar groups (#6214): "my", or "folder:" + the folder's name
@@ -174,6 +175,7 @@ export function reload() {
 
   const s = readJson(KEY_SIDEBAR);
   sidebarCollapsed = !!(s && s.collapsed === true);
+  navCollapsed = !!(s && s.navCollapsed === true);
   sidebarGrouped = !!(s && s.grouped === true);
   const g0 = storeScope === null ? s : readJson(sidebarGroupsKey());
   sidebarGroups = new Set(g0 && Array.isArray(g0.collapsedGroups) ? g0.collapsedGroups.filter(isGroupId).slice(0, MAX_IDS) : []);
@@ -445,16 +447,27 @@ export function setSidebarCollapsed(collapsed) {
   changed();
 }
 
+/** Whether the sidebar's page links are folded away (#8578). Per browser, default expanded. */
+export function isNavCollapsed() {
+  return navCollapsed;
+}
+
+export function setNavCollapsed(collapsed) {
+  navCollapsed = collapsed === true;
+  writeSidebar();
+  changed();
+}
+
 /** One writer for the sidebar key, so a change to one field never drops the others. */
 function writeSidebar() {
   if (storeScope === null) {
-    writeJson(KEY_SIDEBAR, { collapsed: sidebarCollapsed, grouped: sidebarGrouped, collapsedGroups: [...sidebarGroups] });
+    writeJson(KEY_SIDEBAR, { collapsed: sidebarCollapsed, navCollapsed, grouped: sidebarGrouped, collapsedGroups: [...sidebarGroups] });
     return;
   }
   /* At a front door the collapsed/grouped choices stay shared, the legacy groups stay as store mode left them, and this
      store's groups go under its own key. */
   const legacy = readJson(KEY_SIDEBAR);
-  writeJson(KEY_SIDEBAR, { collapsed: sidebarCollapsed, grouped: sidebarGrouped, collapsedGroups: legacy && Array.isArray(legacy.collapsedGroups) ? legacy.collapsedGroups : [] });
+  writeJson(KEY_SIDEBAR, { collapsed: sidebarCollapsed, navCollapsed, grouped: sidebarGrouped, collapsedGroups: legacy && Array.isArray(legacy.collapsedGroups) ? legacy.collapsedGroups : [] });
   writeJson(sidebarGroupsKey(), { collapsedGroups: [...sidebarGroups] });
 }
 

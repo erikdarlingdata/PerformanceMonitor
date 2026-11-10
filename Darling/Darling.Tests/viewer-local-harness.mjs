@@ -23,7 +23,7 @@ function load(storage) {
   const ctx = vm.createContext({ console, Date, localStorage: storage });
   vm.runInContext(source + "\n;globalThis.api = { " +
     "KEY_FAVORITES, KEY_ACKS, KEY_SEVERITY_COLORS, KEY_SIDEBAR, isFavorite, toggleFavorite, favoritesFirst, updateAttention, attentionFor, " +
-    "acknowledge, isAcknowledged, severityColor, setSeverityColor, applySeverityColors, isSidebarCollapsed, setSidebarCollapsed, " +
+    "acknowledge, isAcknowledged, severityColor, setSeverityColor, applySeverityColors, isSidebarCollapsed, setSidebarCollapsed, isNavCollapsed, setNavCollapsed, " +
     "refreshAttention, summarizeAlerts, KEY_DB_FILTER, getDatabaseFilter, setDatabaseFilter, MAX_DB_NAMES, MAX_DB_QUERY_BYTES, databaseQueryBytes };", ctx);
   return ctx.api;
 }
@@ -115,6 +115,27 @@ if (scenario === "favorites") {
   out.afterReload = load(st).isSidebarCollapsed();
   a.setSidebarCollapsed(false);
   out.afterExpand = load(st).isSidebarCollapsed();
+} else if (scenario === "navCollapsed") {
+  // #8578: the sidebar's page links fold away; the choice is per browser, default expanded, and independent of the icon rail.
+  const st = makeStorage();
+  const a = load(st);
+  out.initial = a.isNavCollapsed();
+  a.setNavCollapsed(true);
+  const b = load(st);
+  out.afterReload = b.isNavCollapsed();
+  out.railUntouched = b.isSidebarCollapsed();
+  b.setSidebarCollapsed(true);
+  out.navKeptWhenRailChanges = load(st).isNavCollapsed();
+  b.setNavCollapsed(false);
+  const c = load(st);
+  out.afterExpand = c.isNavCollapsed();
+  out.railKeptWhenNavChanges = c.isSidebarCollapsed();
+  out.unreadable = load(makeStorage({}, { throwOnRead: true })).isNavCollapsed();
+  const w = load(makeStorage({}, { throwOnWrite: true }));
+  w.setNavCollapsed(true);
+  out.unwritableStillWorksInSession = w.isNavCollapsed();
+  st.data[a.KEY_SIDEBAR] = JSON.stringify({ v: 1, navCollapsed: "yes" });
+  out.handEdited = load(st).isNavCollapsed();
 } else if (scenario === "oneRead") {
   const st = makeStorage();
   const a = load(st);

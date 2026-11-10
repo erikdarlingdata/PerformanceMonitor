@@ -38,7 +38,14 @@
                hidden at desktop widths, so the picker lives here, where the menu is on every width. -->
           <div id="store-picker" class="store-picker" hidden></div>
         </div>
-        <nav class="nav">
+        <!-- #8578: the page links fold away (js/viewer-local-ui.js initNavCollapse) so the server list below keeps the height. The
+             links scroll inside this block when the window is short; the button is first in Tab order, then the links. -->
+        <div class="nav-block">
+          <button id="nav-collapse" class="nav-collapse" type="button" aria-controls="nav-links" aria-expanded="true">
+            <span class="nav-collapse-chevron" aria-hidden="true">&#9662;</span>
+            <span>Pages</span>
+          </button>
+        <nav class="nav" id="nav-links">
           <a data-route="fleet" href="#/fleet">Fleet Overview</a>
           <!-- Revealed by js/app.js only once the store has Availability Group data (#991); the #/ag route works
                regardless, so a deep link is never broken by the entry being hidden. -->
@@ -58,6 +65,7 @@
           <a data-route="query-tag-usage" href="#/query-tag-usage">Query Tag Usage</a>
           <a data-route="job-history" href="#/job-history">Job History</a>
         </nav>
+        </div>
         <div class="server-list-header">Servers</div>
         <div id="server-search" class="server-search"></div>
         <div id="server-list"></div>

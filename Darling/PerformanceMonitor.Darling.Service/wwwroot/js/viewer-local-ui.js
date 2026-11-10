@@ -15,7 +15,7 @@
 import { el, mount } from "./util.js";
 import {
   SEVERITIES, DEFAULT_SEVERITY_COLORS, isFavorite, toggleFavorite, attentionFor, acknowledge, severityColor,
-  setSeverityColor, resetSeverityColors, applySeverityColors, isSidebarCollapsed, setSidebarCollapsed, onChange,
+  setSeverityColor, resetSeverityColors, applySeverityColors, isSidebarCollapsed, setSidebarCollapsed, isNavCollapsed, setNavCollapsed, onChange,
 } from "./viewer-local.js";
 
 /** Keeps a control inside a clickable row from also activating the row (a click, or Enter/Space on the button). */
@@ -78,6 +78,22 @@ export function initSidebarCollapse(appRoot, button) {
     button.textContent = c ? "\u00bb" : "\u00ab";
   };
   button.addEventListener("click", () => setSidebarCollapsed(!isSidebarCollapsed()));
+  onChange(sync);
+  sync();
+}
+
+/** The fold button for the sidebar's page links (#8578): hides the links so the server list gets the height; the choice is kept per browser. */
+export function initNavCollapse(button, nav) {
+  if (!button || !nav) return;
+  const sync = () => {
+    const c = isNavCollapsed();
+    nav.hidden = c;
+    button.setAttribute("aria-expanded", c ? "false" : "true");
+    button.setAttribute("title", c ? "Show the page links" : "Hide the page links");
+    const chevron = button.querySelector(".nav-collapse-chevron");
+    if (chevron) chevron.textContent = c ? "▸" : "▾";
+  };
+  button.addEventListener("click", () => setNavCollapsed(!isNavCollapsed()));
   onChange(sync);
   sync();
 }
