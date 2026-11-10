@@ -43,8 +43,15 @@ Object.defineProperty(globalThis, "navigator", { value: { clipboard: { writeText
 
 const fetches = [];
 let body = "{}";
+/* What /api/session answers with; null leaves that read to the scenario's body, as every other read. */
+let session = null;
 const signals = [];
-globalThis.fetch = async (url, opts) => { fetches.push(String(url)); signals.push(opts && opts.signal ? opts.signal : null); return { status: 200, ok: true, text: async () => body }; };
+globalThis.fetch = async (url, opts) => {
+  fetches.push(String(url));
+  signals.push(opts && opts.signal ? opts.signal : null);
+  const answer = session && String(url).split("?")[0].endsWith("/api/session") ? JSON.stringify(session) : body;
+  return { status: 200, ok: true, text: async () => answer };
+};
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "analysis-findings-"));
 try {
@@ -113,6 +120,21 @@ try {
       await settle();
       const u = new URL(fetches[0], "http://x.test");
       return { path: u.pathname, params: Object.fromEntries(u.searchParams), clipboard, label: ask.textContent, buttons: byTag(root, "button").filter((b) => b.textContent === "Ask AI" || b.textContent === "AI prompt copied").length };
+    },
+    /* The cards under a given session (HARNESS_SESSION): the shell reads the session before any page draws, so it is read here first. */
+    sessionButtons: async () => {
+      const views = await import(pathToFileURL(path.join(scratch, "views-api.js")).href);
+      session = JSON.parse(process.env.HARNESS_SESSION);
+      await views.getSession();
+      const root = await run("srv-a");
+      const buttons = byTag(root, "button").map((b) => b.textContent);
+      return {
+        scoped: views.peekSession().scoped === true,
+        cards: all(root, (n) => /\breco-card\b/.test(n.className)).length,
+        buttons,
+        links: byTag(root, "a").length,
+        reads: fetches.map((u) => new URL(u, "http://x.test").pathname),
+      };
     },
     link: async () => {
       const root = await run("srv-a");

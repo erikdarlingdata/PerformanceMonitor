@@ -322,9 +322,14 @@ internal static class ComposePanelRunner
     /// unchanged from before #4442 scope 2 added the wrapper. <paramref name="logger"/> is the one the host's
     /// read-latency recorder carries (<see cref="ReadLatencyRecorder.Logger"/>), where the data-start probe reports
     /// a failure it swallows.</summary>
+    /// <summary>The one answer a scoped caller gets for a scope that names no server it may see: an unknown name, a name outside the
+    /// grant and a name the registry cannot resolve all look the same.</summary>
+    private static ComposeRunOutcome EmptyScopedAnswer() =>
+        ComposeRunOutcome.Ok(new JsonObject { ["sql"] = "", ["rows"] = new JsonArray(), ["annotations"] = new JsonArray() });
+
     internal static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(
         ComposeRunHost host, NpgsqlDataSource postgres, JsonObject body, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, bool includeDataStartFields, System.Threading.CancellationToken cancellationToken,
-        ILogger? logger = null, Action<Exception>? onRunException = null, DateTime? nowUtc = null)
+        ILogger? logger = null, Action<Exception>? onRunException = null, IReadOnlyList<int>? authorizedServerIds = null, DateTime? nowUtc = null)
     {
         if (body["panel"] is not JsonObject panel)
         {
@@ -369,10 +374,33 @@ internal static class ComposePanelRunner
         var (resolvedScope, scopeRefusal) = await host.ResolveServerNames(postgres, serverScope, cancellationToken, logger);
         if (scopeRefusal is not null)
         {
-            return ComposeRunOutcome.BadRequest(McpHelpers.ErrorMessageOf(scopeRefusal));
+            /* A scoped caller gets the empty answer an unknown or out-of-scope name gets: a refusal would say that two registrations
+               share the name it sent. */
+            return authorizedServerIds is null ? ComposeRunOutcome.BadRequest(McpHelpers.ErrorMessageOf(scopeRefusal)) : EmptyScopedAnswer();
         }
 
         serverScope = resolvedScope;
+        if (authorizedServerIds is not null)
+        {
+            var names = new List<string>();
+            await using var command = postgres.CreateCommand(
+                "SELECT server_name FROM collect.servers WHERE server_id = ANY($1)");
+            command.CommandTimeout = StorageCommandDeadlines.ComposedReadSeconds;
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer, authorizedServerIds.ToArray());
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                names.Add(reader.GetString(0));
+            }
+
+            serverScope = serverScope is { Count: > 0 }
+                ? serverScope.Intersect(names, StringComparer.OrdinalIgnoreCase).ToList()
+                : names;
+            if (serverScope.Count == 0)
+            {
+                return EmptyScopedAnswer();
+            }
+        }
 
         /* The run window (#1606): an explicit absolute pair (windowStart/windowEnd — the zoom/brush and
            historical-analysis path) takes precedence over the relative `hours` (which the frontend keeps
@@ -438,6 +466,8 @@ internal static class ComposePanelRunner
            (ComposeCompiler.BuildFactRelation returns it before any wide-table branch), so the wide table is never read: its
            eligibility gate, its size guard and its notes would all describe a table this panel does not touch. A panel the
            router sends to a rollup skips them; one that reads the wide table (a recent window, or a dimension no rollup carries) is unchanged. */
+        /* A scoped caller reaches every guard below. serverScope holds only servers the grant permits by this point, so the
+           guards' refusals and notices, which name the servers they counted, name no server outside the grant. */
         var wideResolution = plan!.Measure.SourceTable == "query_store_stats"
             && !ComposeCompiler.ResolveFactRoute(plan, now, start, rollups, coverage).IsCagg
             ? await ResolveQueryStoreWideEligibleAsync(postgres, serverScope, start, end, hasWindowEnd ? end : (DateTime?)null, cancellationToken, plan)
@@ -530,7 +560,7 @@ internal static class ComposePanelRunner
 
         await using var snapshot = hourlyEdgesSnapshot;
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough ?? moduleMap.Through, UnregisteredServers: unregisteredServers, QueryStoreGroupMembers: wideResolution.GroupMembers, QueryStoreStampThrough: stampThrough, ModuleMapMissing: moduleMap.Missing, QueryStoreRawServerIds: rawServerIds, QueryStoreFleetReady: wideResolution.FleetReady);
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough ?? moduleMap.Through, UnregisteredServers: unregisteredServers, QueryStoreGroupMembers: wideResolution.GroupMembers, QueryStoreStampThrough: stampThrough, ModuleMapMissing: moduleMap.Missing, QueryStoreRawServerIds: rawServerIds, QueryStoreFleetReady: wideResolution.FleetReady, AuthorizedServerIds: authorizedServerIds);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -571,7 +601,7 @@ internal static class ComposePanelRunner
             /* W13: a scope naming only servers the registry does not know, over rows that hold nothing, is a server that does not exist, and
                a null aggregate row was being returned as if it were an answer. Names that ARE stored (a removed server's history, #5525)
                keep returning their rows, so this fires only when the run found nothing for them. */
-            if (UnknownServerMessage(serverScope, unregisteredServers, rows, registryLookupFailed) is { } unknownServer)
+            if (authorizedServerIds is null && UnknownServerMessage(serverScope, unregisteredServers, rows, registryLookupFailed) is { } unknownServer)
             {
                 return ComposeRunOutcome.NotFound(unknownServer);
             }

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
@@ -50,6 +51,9 @@ public sealed record DarlingJobHistoryRow(
 /// </summary>
 public sealed record JobHistoryFilter(string? JobName = null, int? RunStatus = null, string? Category = null, DateTime? UntilUtc = null, int? MinDurationSeconds = null, bool ShareCapPerServer = false)
 {
+    /// <summary>Optional mandatory server IDs applied before selecting the page.</summary>
+    public IReadOnlyList<int>? AllowedServerIds { get; init; }
+
     private int UntilParam(int firstParam) => firstParam + (JobName is null ? 0 : 1) + (RunStatus is null ? 0 : 1) + (Category is null ? 0 : 1) + (MinDurationSeconds is null ? 0 : 1);
 
     /// <summary>
@@ -179,6 +183,11 @@ public static class DarlingJobHistoryReader
         }
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(sinceUtc) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = limit });
+        if (filter?.AllowedServerIds is { } allowedIds)
+        {
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer, allowedIds.ToArray());
+        }
+
         if (filter is not null)
         {
             foreach (var p in filter.Parameters())
@@ -384,8 +393,16 @@ ORDER BY jh.category_name";
         var serverFilter = scopedToServer ? "AND   jh.server_id = $2" : string.Empty;
         var floorParam = scopedToServer ? "$3" : "$2";
         var limitParam = scopedToServer ? "$4" : "$3";
-        var filterSql = filter is null ? string.Empty : filter.Clauses(scopedToServer ? 5 : 4);
-        var statsUntilSql = filter is null ? string.Empty : filter.StatsClause(scopedToServer ? 5 : 4);
+        var firstFilterParam = scopedToServer ? 5 : 4;
+        var allowedServerSql = string.Empty;
+        if (filter?.AllowedServerIds is not null)
+        {
+            // Reserve the grant's slot before the optional job filters.
+            allowedServerSql = $"AND   jh.server_id = ANY(${firstFilterParam++})";
+        }
+
+        var filterSql = filter?.Clauses(firstFilterParam) ?? string.Empty;
+        var statsUntilSql = filter?.StatsClause(firstFilterParam) ?? string.Empty;
         var baseCutSql = filter is null ? new JobHistoryFilter().BaseCutSql(limitParam) : filter.BaseCutSql(limitParam);
 
         return $@"
@@ -402,6 +419,7 @@ active_servers AS (
     FROM job_history AS jh
     WHERE jh.collection_time >= {floorParam}
     {serverFilter}
+    {allowedServerSql}
 ),
 server_offsets AS (
     SELECT

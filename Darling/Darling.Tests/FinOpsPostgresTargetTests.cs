@@ -35,7 +35,7 @@ public sealed class FinOpsPostgresTargetTests
         new { server_name = "DD-SQL", display_name = "DD-SQL", engine_kind = (string?)null },
     });
 
-    private static JsonElement Run(string scenario, string registry, string reads = "{}", string server = "", string tab = "")
+    private static JsonElement Run(string scenario, string registry, string reads = "{}", string server = "", string tab = "", string? session = null)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "finops-postgres-target-harness.mjs"));
@@ -45,6 +45,7 @@ public sealed class FinOpsPostgresTargetTests
         psi.Environment["HARNESS_READS"] = reads;
         psi.Environment["HARNESS_SERVER"] = server;
         psi.Environment["HARNESS_TAB"] = tab;
+        if (session is not null) psi.Environment["HARNESS_SESSION"] = session;
 
         Process proc;
         try
@@ -84,6 +85,18 @@ public sealed class FinOpsPostgresTargetTests
 
         Assert.Equal("CC-SQL", r.GetProperty("selected").GetString());
         Assert.Equal(["AA-PG (PostgreSQL)", "BB-AURORA (PostgreSQL)", "CC-SQL", "DD-SQL"], Strings(r.GetProperty("options")));
+    }
+
+    /// <summary>#7988: an empty server list is a scoped session's grant and any other session's registry, and the page says which.
+    /// A scoped reader whose tags map to no server is not told the store has no servers.</summary>
+    [Theory]
+    [InlineData("""{"can_edit":false,"scoped":true}""", "No servers are in this token's scope.")]
+    [InlineData("""{"can_edit":false,"scoped":false}""", "No servers are registered yet.")]
+    public void AnEmptyServerList_NamesTheScopeForAScopedSession_AndTheRegistryForAnyOther(string session, string sentence)
+    {
+        var strips = Strings(Run("strips", "[]", tab: "utilization", session: session).GetProperty("strips"));
+
+        Assert.Equal([sentence], strips);
     }
 
     [Fact]

@@ -16,7 +16,7 @@ const stripped = fs.readFileSync(appPath, "utf8")
   .replace(/^import .*;[ \t]*\r?$/gm, "")
   /* app.js exports the router's table and currentRoute() for the route-load test (#7864); a script has no export keyword. */
   .replace(/^export (?=(?:const|function) )/gm, "")
-  .replace(/^startFrontDoor\(\)\.catch\(\(\) => \{\}\)\.then\(start\);[ \t]*\r?$/m, "");
+  .replace(/^startFrontDoor\(\)\.catch\(\(\) => \{\}\)\.then\(\(\) => getSession\(\)\)\.then\(start\);[ \t]*\r?$/m, "");
 if (/^import /m.test(stripped) || /^startFrontDoor\(/m.test(stripped)) {
   throw new Error("app.js layout changed: the harness cannot separate its imports and its start() call");
 }
@@ -124,6 +124,7 @@ const sandbox = {
   initSeverityColorSettings() {},
   readTool: async () => ({ kind: "empty" }),
   getSession: async () => null,
+  peekSession: () => ({ can_edit: false, scoped: false }),
   /* #6840: no front door here, so the address is the route and every link is the one it was. */
   frontDoor: () => false,
   currentStore: () => null,

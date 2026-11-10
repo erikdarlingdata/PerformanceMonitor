@@ -23,6 +23,7 @@
 
 import { storeHash, el, mount, readTool, onPageLeave, loadingStrip, errorStrip, emptyStrip, noticeStrip } from "../util.js";
 import { setPanelSignal } from "../panels.js";
+import { peekSession } from "../views-api.js";
 import { showPageWhenSettled, dropWaitingSwap } from "../refresh-in-place.js";
 import { orderServers } from "../server-order.js";
 import { isPostgresRow } from "./finops/gate.js";
@@ -269,11 +270,12 @@ export function renderFinops(main, server, tabId, opts) {
       lastRows = null;
       if (body) mount(body, node);
     };
-    /* An empty registry is a definite answer, not a failed read: drop the cache and the painted page's reads. */
+    /* An empty registry is a definite answer, not a failed read: drop the cache and the painted page's reads. A scoped session's
+       empty list is its grant, which says nothing about the registry, so the sentence names the scope. */
     const showEmpty = () => {
       lastRows = null;
       endBuilds();
-      if (body) mount(body, emptyStrip("No servers are registered yet."));
+      if (body) mount(body, emptyStrip(peekSession()?.scoped ? "No servers are in this token's scope." : "No servers are registered yet."));
     };
     /* A read the page left (#6793) or a signed-out session says nothing about the registry: keep the cache and the painted page. */
     if (res.kind === "aborted" || res.kind === "auth") return;

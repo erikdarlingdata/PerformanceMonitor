@@ -32,7 +32,7 @@ import { pageRangePicker, windowResultOfSpec } from "../page-range.js";
 import { relativeSpec, specName } from "../time-range.js";
 import { mutePrefillParams } from "../mute-context.js";
 import { orderServers } from "../server-order.js";
-import { getSession } from "../views-api.js";
+import { getSession, peekSession } from "../views-api.js";
 import { noteRefreshError } from "../refresh-in-place.js";
 
 /* #3169: the state-carrying notification_type values, derived from the one shared map rather than listed a
@@ -86,6 +86,8 @@ function alertColumns() {
   const base = showExternal
     ? ALERT_COLUMNS.slice(0, 3).concat([EXTERNAL_COLUMN], ALERT_COLUMNS.slice(3))
     : ALERT_COLUMNS;
+  /* The triage page is outside a scoped seat's routes, so its column is left out rather than linked to a refusal. */
+  if (peekSession()?.scoped) return base;
   return canMute ? [SELECT_COLUMN, TRIAGE_COLUMN, MUTE_COLUMN].concat(base) : [TRIAGE_COLUMN].concat(base);
 }
 

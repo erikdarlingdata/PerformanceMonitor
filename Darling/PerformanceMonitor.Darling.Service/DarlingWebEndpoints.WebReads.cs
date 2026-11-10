@@ -668,8 +668,10 @@ public static partial class DarlingWebEndpoints
     /// maps here too, for the same reason.</para>
     /// </summary>
     internal static IResult ToHttpResult(string result, string route, ILogger logger, long elapsedMs, CancellationToken requestAborted,
-        SensitiveStatements.JudgeBudget? sweepBudget = null)
+        SensitiveStatements.JudgeBudget? sweepBudget = null, int? statusCode = null)
     {
+        /* statusCode: the status a JSON passthrough body is answered with when the route decides it (a scoped web token's 403, whose
+           body is the route's own fixed sentence); null answers 200. A refusal, an error and a plain sentence keep their own codes. */
         /* #6341 round 1: classified from the tool's own result BEFORE the sweep. The sweep can withhold the status word
            or the whole sentence (it fails closed when the judge runs out of time), and a classification read off that
            placeholder answered a store fault 200 or 400 with no log line. The status and the one log line never depend on
@@ -686,7 +688,7 @@ public static partial class DarlingWebEndpoints
 
         return kind switch
         {
-            ToolResponseKind.JsonPassthrough => Results.Text(swept.Text, "application/json"),
+            ToolResponseKind.JsonPassthrough => Results.Text(swept.Text, "application/json", statusCode: statusCode),
             ToolResponseKind.Refusal => Results.Text(swept.Text, "application/json", statusCode: StatusCodes.Status400BadRequest),
             _ => Results.Json(new { error = swept.Text }, statusCode: StatusCodes.Status400BadRequest),
         };

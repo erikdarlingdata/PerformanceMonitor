@@ -1106,6 +1106,14 @@ public sealed class DarlingWebHostService : BackgroundService
             /* #7735: the named web tokens, each with its role, served beside the shared token by the sign-in leg. An entry that cannot be
                served is left out with one Critical line naming it; the shared token's own handling above is unchanged. */
             var webTokens = DarlingWebTokenSet.Resolve(config.Web.Network, accessToken, mcpTokens, _logger);
+            if (frontDoorProxy is not null && webTokens is { HasScoped: true })
+            {
+                /* A front door forwards no tag grant to the stores behind it, so a scoped reader has no dashboard here: the sign-in leg
+                   refuses the token, and the API gate refuses its session. Said once at start, before anyone signs in. */
+                _logger.LogCritical(
+                    "web.network.tokens has {Count} reader entries with allowedTagIds, and this service is a front door: a scoped token cannot sign in here. Serve scoped tokens on a store's own dashboard.",
+                    webTokens.Named.Count(entry => entry.AllowedTagIds is not null));
+            }
 
             /* #5288: the Host guard admits the listen address only while the server is exposed on it. networkListenIp
                was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
@@ -1543,7 +1551,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 {
                     if (webTokens?.Find(seat.TokenName) is { } namedEntry)
                     {
-                        seat = seat with { CanEdit = namedEntry.CanEdit };
+                        seat = seat with { CanEdit = namedEntry.CanEdit, AllowedTagIds = namedEntry.AllowedTagIds };
                     }
                     else
                     {
@@ -1611,6 +1619,26 @@ public sealed class DarlingWebHostService : BackgroundService
                             return;
                         }
 
+                        // Scoped seats only reach API routes that enforce their tag grant.
+                        if (seat.AllowedTagIds is not null &&
+                            context.Request.Path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase) &&
+                            (frontDoorProxy is not null ||
+                             !(context.Request.Path.Equals("/api/fleet", StringComparison.OrdinalIgnoreCase) ||
+                               context.Request.Path.Equals("/api/session", StringComparison.OrdinalIgnoreCase) ||
+                               DarlingWebEndpoints.SupportsScopedRead(context.Request.Path))))
+                        {
+                            refusals.Report(
+                                _logger, "Web dashboard", DarlingRefusalGate.ReadOnlySeat, StatusCodes.Status403Forbidden,
+                                remote,
+                                frontDoorProxy is not null
+                                    ? $"the signed-in seat is a scoped reader (web token {seat.TokenName}) and a front door forwards no tag grant"
+                                    : $"the signed-in seat is a scoped reader (web token {seat.TokenName}) and this route is not one that enforces its tag grant",
+                                DateTime.UtcNow);
+                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                            await context.Response.WriteAsJsonAsync(new { error = "This endpoint is unavailable to scoped web tokens." });
+                            return;
+                        }
+
                         await next(context);
                         return;
 
@@ -1625,7 +1653,7 @@ public sealed class DarlingWebHostService : BackgroundService
                            abort still propagates — that is not a failure to report. */
                         try
                         {
-                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName, clock, mcpTokens, webTokens);
+                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName, clock, mcpTokens, webTokens, frontDoor: frontDoorProxy is not null);
                         }
                         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
                         {
@@ -2167,14 +2195,15 @@ public sealed class DarlingWebHostService : BackgroundService
         string? publicHostName,
         Func<DateTime> clock,
         IReadOnlyList<string>? mcpTokens,
-        DarlingWebTokenSet? webTokens)
+        DarlingWebTokenSet? webTokens,
+        bool frontDoor = false)
     {
         var path = context.Request.Path.Value ?? "/";
         var remote = context.Connection.RemoteIpAddress;
 
         if (string.Equals(path, LoginPath, StringComparison.OrdinalIgnoreCase))
         {
-            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null, publicHostName, clock, mcpTokens, webTokens);
+            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null, publicHostName, clock, mcpTokens, webTokens, frontDoor: frontDoor);
             return;
         }
 
@@ -2447,7 +2476,8 @@ public sealed class DarlingWebHostService : BackgroundService
         string? publicHostName,
         Func<DateTime> clock,
         IReadOnlyList<string>? mcpTokens,
-        DarlingWebTokenSet? webTokens = null)
+        DarlingWebTokenSet? webTokens = null,
+        bool frontDoor = false)
     {
         var remote = context.Connection.RemoteIpAddress;
         var now = clock();
@@ -2554,6 +2584,19 @@ public sealed class DarlingWebHostService : BackgroundService
         }
 
         signInThrottle.Accepted(attempt);
+        if (!sharedMatch && namedMatch is { AllowedTagIds: not null } && frontDoor)
+        {
+            /* A front door forwards no tag grant, so a scoped reader gets no session here: the holder learns it at the form, not from a
+               shell whose every API request the gate refuses. The token matched, so the throttle counts the attempt as accepted. */
+            refusals.Report(
+                _logger, "Web dashboard", DarlingRefusalGate.SignIn, StatusCodes.Status403Forbidden, remote,
+                $"web token {namedMatch.Name} is a scoped reader (allowedTagIds) and this dashboard is a front door, which forwards no tag grant",
+                now);
+            await WriteSignInErrorAsync(context, StatusCodes.Status403Forbidden,
+                "This token cannot be used on this dashboard. A token scoped to server tags signs in on a store's own dashboard, not on a front door.");
+            return;
+        }
+
         if (sharedMatch)
         {
             AppendSessionCookie(context, signingKey);

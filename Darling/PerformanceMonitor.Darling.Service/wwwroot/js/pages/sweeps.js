@@ -30,6 +30,7 @@ import { gridTable } from "../panels.js";
 import { pageRangePicker, windowOfSpec } from "../page-range.js";
 import { relativeSpec } from "../time-range.js";
 import { showPageWhenSettled } from "../refresh-in-place.js";
+import { getSession, peekSession } from "../views-api.js";
 
 /* The watch-item state vocabulary — the label each FleetSweepWatchStateMachine state owes an operator. The
    KEYS are the machine's own constants; Darling.Tests.FleetSweepWebFeedTests parses THIS OBJECT and compares
@@ -97,6 +98,8 @@ export async function renderSweeps(main, opts) {
 /* The effective cadence, read from the same get_alert_settings the Settings window edits. Display only:
    the web feed reads the knob, it never writes it (lane 2's V124 owns the writes). */
 async function renderCadence(meta) {
+  /* The alert settings are outside a scoped seat's reads; the cadence line is left out rather than asked for and refused. */
+  if (peekSession()?.scoped) return;
   const res = await readTool("get_alert_settings", {});
   const fs = res.kind === "data" && res.data ? res.data.fleet_sweep : null;
   if (!fs) return;
@@ -285,6 +288,12 @@ function sweepDocument(d) {
 
 /* #7562: the rows of the liveness table, in words for a person. */
 export function livenessRows(d, lv) {
+  if (lv.scope === "service") {
+    return [
+      ["Collector service", d.instruments_alive ? "Instruments running" : "The service reported an instrument problem"],
+      ["Scope", "Server lists and totals are limited to this token's tags. Service health describes the shared collector."],
+    ];
+  }
   const rows = [];
   rows.push(["Answer", d.instruments_alive ? "Yes, alerts and collection were running" : "No, something stopped", d.instruments_alive ? "sev-Healthy" : "sev-Critical"]);
   rows.push(["Service started", localTime(lv.service_started_at)]);
@@ -475,6 +484,7 @@ function watchStateSev(state) {
    the JSON round-trip every tick for a profile that changes only on a hardware or version change — never
    per-tick. A hashchange/first-paint/span-change call (opts.poll not true) always fetches fresh. */
 async function renderStoreHost(box, opts) {
+  if ((await getSession()).scoped) return;
   const isPoll = !!(opts && opts.poll === true);
   if (isPoll && lastStoreHostPayload) {
     renderStoreHostPayload(box, lastStoreHostPayload);

@@ -106,6 +106,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                COUNT(*) OVER () AS pairs
         FROM pairs AS p
         JOIN servers AS s ON s.server_id = p.server_id
+        WHERE ($6::integer[] IS NULL OR p.server_id = ANY($6))
         ORDER BY p.cpu_us DESC, s.server_name, p.database_name
         LIMIT $5
         """;
@@ -204,6 +205,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                COUNT(*) OVER () AS pairs
         FROM pairs AS p
         JOIN servers AS s ON s.server_id = p.server_id
+        WHERE ($6::integer[] IS NULL OR p.server_id = ANY($6))
         ORDER BY p.cpu_us DESC, s.server_name, p.database_name
         LIMIT $5
         """;
@@ -224,6 +226,8 @@ public sealed class DarlingMcpQueryFleetSummaryTools
         DarlingMcpReadParameters.AddTimestamp(command, windowEnd);
         DarlingMcpReadParameters.AddTimestamp(command, rawFrom);
         DarlingMcpReadParameters.AddInt(command, limit);
+        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer, (object?)DarlingServerResolver.WebAllowedServerIds?.ToArray() ?? DBNull.Value);
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

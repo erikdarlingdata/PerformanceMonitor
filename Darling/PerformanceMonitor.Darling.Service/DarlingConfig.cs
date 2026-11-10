@@ -2404,6 +2404,11 @@ public sealed class WebNetworkConfig
 /// </summary>
 public sealed class WebTokenEntry
 {
+    /// <summary>Optional server tag ids for a scoped reader: the reader sees the servers under these tags and their descendants, and
+    /// nothing else. Null is an unscoped reader. Only a <c>web.network.tokens</c> entry with the reader role carries one.</summary>
+    [JsonPropertyName("allowedTagIds")]
+    public List<int>? AllowedTagIds { get; set; }
+
     /// <summary>The <c>reader</c> role: the read-only seat, the one an OIDC viewer gets.</summary>
     public const string ReaderRole = "reader";
 

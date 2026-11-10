@@ -61,6 +61,58 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// </summary>
 internal static class DarlingServerResolver
 {
+    private static readonly AsyncLocal<int?> WebServerId = new();
+    private static readonly AsyncLocal<(int ServerId, string ServerName, string DisplayName)?> WebPinnedServer = new();
+    private static readonly AsyncLocal<(IReadOnlyList<int> Ids, IReadOnlyList<int> Tags)?> WebScope = new();
+
+    internal static IReadOnlyList<int>? WebAllowedServerIds => WebScope.Value?.Ids;
+    internal static IReadOnlyList<int>? WebAllowedTagIds => WebScope.Value?.Tags;
+
+    internal static async Task<T> ReadWebScopeAsync<T>(IReadOnlyList<int> ids, IReadOnlyList<int> tags, Func<Task<T>> read)
+    {
+        var previous = WebScope.Value;
+        WebScope.Value = (ids, tags);
+        try
+        {
+            return await read();
+        }
+        finally
+        {
+            WebScope.Value = previous;
+        }
+    }
+
+    /// <summary>Keep every resolution in an authorized web read on the same server, and answer the exact canonical name from this row
+    /// without a registry read.</summary>
+    internal static async Task<T> ReadWebServerAsync<T>((int ServerId, string ServerName, string DisplayName) server, Func<Task<T>> read)
+    {
+        var previous = WebPinnedServer.Value;
+        WebPinnedServer.Value = server;
+        try
+        {
+            return await ReadWebServerAsync(server.ServerId, read);
+        }
+        finally
+        {
+            WebPinnedServer.Value = previous;
+        }
+    }
+
+    /// <summary>Keep every resolution in an authorized web read on the same server ID.</summary>
+    internal static async Task<T> ReadWebServerAsync<T>(int serverId, Func<Task<T>> read)
+    {
+        var previous = WebServerId.Value;
+        WebServerId.Value = serverId;
+        try
+        {
+            return await read();
+        }
+        finally
+        {
+            WebServerId.Value = previous;
+        }
+    }
+
     /// <summary>The registry-read fault sentence's fixed prefix (#4283 H2) — a constant so the web surface's
     /// <see cref="PerformanceMonitor.Darling.Service.DarlingWebEndpoints.ClassifyToolResponse"/> and the
     /// triage note/card can recognize this specific store fault and route it through <c>ServerErrorResult</c>
@@ -96,6 +148,13 @@ ORDER BY server_name";
         NameClash nameClash = NameClash.StoredNameWins)
     #pragma warning restore CA1068
     {
+        /* An authorized web read already resolved this exact name against the registry: answer from that row instead of reading it again. */
+        if (WebPinnedServer.Value is { } pinned && WebServerId.Value == pinned.ServerId && pinned.ServerName.Length > 0
+            && string.Equals(serverName?.Trim(), pinned.ServerName, StringComparison.OrdinalIgnoreCase))
+        {
+            return (pinned, null);
+        }
+
         var (servers, fault) = await LoadEnabledOrFaultAsync(postgres, cancellationToken);
         if (fault is not null)
         {
@@ -103,6 +162,13 @@ ORDER BY server_name";
         }
 
         var answer = ResolveOrErrorForAnswer(servers, serverName, nameClash);
+        if ((WebServerId.Value is int authorizedId &&
+             (answer.error is not null || answer.resolved.ServerId != authorizedId)) ||
+            (WebAllowedServerIds is { } allowedIds &&
+             (answer.error is not null || !allowedIds.Contains(answer.resolved.ServerId))))
+        {
+            return (default, McpHelpers.Refusal("server_name", "Server data is unavailable to this token."));
+        }
         if (answer.error is null)
         {
             /* #5097: the slow-read record names the server a read resolved; one site covers every server-scoped tool. */
@@ -312,6 +378,13 @@ ORDER BY server_name";
         DarlingPeerDirectory.Snapshot peers,
         NameClash nameClash = NameClash.StoredNameWins)
     {
+        if (WebServerId.Value is not null || WebAllowedServerIds is not null)
+        {
+            servers = servers.Where(server =>
+                (WebServerId.Value is null || server.ServerId == WebServerId.Value) &&
+                (WebAllowedServerIds is null || WebAllowedServerIds.Contains(server.ServerId))).ToList();
+        }
+
         if (string.IsNullOrWhiteSpace(serverName))
         {
             /* No name: the only server there is, or nothing to choose from. */
@@ -348,6 +421,11 @@ ORDER BY server_name";
         string? serverName,
         DarlingPeerDirectory.Snapshot peers)
     {
+        if (WebServerId.Value is not null || WebAllowedServerIds is not null)
+        {
+            return "Server data is unavailable to this token.";
+        }
+
         var message = $"{McpHelpers.ServerMissOpening(serverName, servers.Count)} Available servers:\n{ListAvailableServers(servers)}";
         var disclosure = DarlingPeerDirectory.ResolutionMissDisclosure(peers, serverName);
 
@@ -434,7 +512,16 @@ ORDER BY server_name";
             return (default, fault);
         }
 
-        return ResolveWithFingerprintName(servers, serverName);
+        var answer = ResolveWithFingerprintName(servers, serverName);
+        if ((WebServerId.Value is int authorizedId &&
+             (answer.error is not null || answer.resolved.ServerId != authorizedId)) ||
+            (WebAllowedServerIds is { } allowedIds &&
+             (answer.error is not null || !allowedIds.Contains(answer.resolved.ServerId))))
+        {
+            return (default, McpHelpers.Refusal("server_name", "Server data is unavailable to this token."));
+        }
+
+        return answer;
     }
 
     /// <summary>The pure half of <see cref="ResolveWithFingerprintNameAsync"/>, over an already-read registry.</summary>

@@ -140,13 +140,17 @@ public sealed class DarlingMcpFleetTools
                     ? null
                     : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct),
                 cancellationToken: cancellationToken,
-                logger: logger);
+                logger: logger,
+                allowedTagIds: DarlingServerResolver.WebAllowedTagIds);
 
             if (result.TotalServers == 0)
             {
-                return McpHelpers.Status(
-                    "empty",
-                    "No servers are registered yet. The service registers each monitored server on its first successful connection.");
+                /* A scoped web reader whose tags map to no server is told so; the registry may well hold servers it cannot see. */
+                return DarlingServerResolver.WebAllowedServerIds is not null
+                    ? McpHelpers.Status("empty", "No servers are in this token's scope.")
+                    : McpHelpers.Status(
+                        "empty",
+                        "No servers are registered yet. The service registers each monitored server on its first successful connection.");
             }
 
             /* Both branches serialize the SAME result (so a rollup field added later reaches both shapes
@@ -156,7 +160,7 @@ public sealed class DarlingMcpFleetTools
             var node = JsonSerializer.SerializeToNode(result, DarlingFleetReader.JsonOptions)!.AsObject();
 
             /* #7010: the window notice, one fleet-wide and one per truncated card (summary mode strips the cards, and only the top level stays). */
-            var windowNotice = await ReadWindowNoticeAsync(
+            var windowNotice = DarlingServerResolver.WebAllowedServerIds is not null ? null : await ReadWindowNoticeAsync(
                 postgres, result.Cards.Select(c => c.ServerName).ToList(), now.AddHours(-hours_back), now, logger, cancellationToken);
             windowNotice?.AttachTop(node);
 

@@ -56,8 +56,25 @@ internal static class DarlingServerDataStartEndpoint
         app.MapGet(Route, async (HttpContext context) =>
         {
             var stopwatch = Stopwatch.StartNew();
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(
-                postgres, DarlingWebEndpoints.First(context, "server"), context.RequestAborted);
+            var allowedTagIds = DarlingWebSeat.FromContext(context).AllowedTagIds;
+            var authorized = allowedTagIds is null
+                ? default
+                : await DarlingWebEndpoints.AuthorizedWebServerRowAsync(postgres, context, allowedTagIds);
+            if (allowedTagIds is not null && authorized.Refused)
+            {
+                return DarlingWebStatementSweep.JsonText("""{"error":"Server data is unavailable to this token."}""",
+                    Route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
+            }
+
+            var serverName = DarlingWebEndpoints.First(context, "server") ?? DarlingWebEndpoints.First(context, "server_name");
+            /* The authorized registry row is the resolution: the scoped form reads the registry once, in AuthorizedWebServerRowAsync, and
+               a registry fault found there is the error the unscoped form's own resolution would hand back. */
+            var (resolved, error) = authorized.Row is { } permitted
+                ? (permitted, (string?)null)
+                : authorized.StoreFault is { } registryFault
+                    ? (default, registryFault)
+                    : await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, context.RequestAborted);
+
             if (error is not null)
             {
                 return DarlingWebEndpoints.ToHttpResult(error, Route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);

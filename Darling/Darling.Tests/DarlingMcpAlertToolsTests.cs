@@ -182,7 +182,6 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         var sql = Reader.AlertHistoryAllServersSql;
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
         Assert.Contains("(a.dismissed = FALSE OR $4)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("a.server_id =", sql, StringComparison.Ordinal);   /* fleet-wide */
         Assert.Contains("alert_time <= $2", sql, StringComparison.Ordinal);       /* #2495 upper edge */
         Assert.Contains("LIMIT $3", sql, StringComparison.Ordinal);
     }

@@ -473,14 +473,32 @@ public sealed class DarlingMcpQueryTagTools
         try
         {
             var snapshot = await store.ReadSnapshotAsync(ct);
+            var allowedIds = DarlingServerResolver.WebAllowedServerIds;
+            if (allowedIds is not null)
+            {
+                var tagIds = await store.UsedTagIdsAsync(allowedIds, ct);
+                snapshot = snapshot with
+                {
+                    Tags = snapshot.Tags.Where(tag => tagIds.Contains(tag.Id))
+                        .Select(tag => tag with { ParentId = tag.ParentId is int parent && tagIds.Contains(parent) ? parent : null }).ToList(),
+                    Assignments = snapshot.Assignments.Where(assignment =>
+                        assignment.ServerId is int id && allowedIds.Contains(id)).ToList(),
+                    ServerNames = snapshot.ServerNames.Where(pair => allowedIds.Contains(pair.Key))
+                        .ToDictionary(pair => pair.Key, pair => pair.Value),
+                };
+            }
+
             var tags = new JsonArray();
             var listed = 0;
             var truncated = false;
             foreach (var tag in InTreeOrder(snapshot.Tags))
             {
                 var node = TagNode(snapshot, tag);
-                node["rule_count"] = snapshot.RuleCountByTag.GetValueOrDefault(tag.Id);
-                node["enabled_rule_count"] = snapshot.EnabledRuleCountByTag.GetValueOrDefault(tag.Id);
+                if (allowedIds is null)
+                {
+                    node["rule_count"] = snapshot.RuleCountByTag.GetValueOrDefault(tag.Id);
+                    node["enabled_rule_count"] = snapshot.EnabledRuleCountByTag.GetValueOrDefault(tag.Id);
+                }
                 var mine = snapshot.Assignments.Where(a => a.TagId == tag.Id).ToList();
                 node["assignment_count"] = mine.Count;
                 var assignments = new JsonArray();
@@ -514,6 +532,7 @@ public sealed class DarlingMcpQueryTagTools
                     ["note"] = "A tag, assignment or rule write takes effect on the collector's next map pass; the map is current when built_version has caught up with rules_version.",
                 },
             };
+            if (allowedIds is not null) result.Remove("map");
             result["assignments_returned"] = listed;
             result["truncated"] = truncated;
             if (truncated)
