@@ -140,9 +140,11 @@ namespace PerformanceMonitor.Ui
 
         /// <summary>
         /// Minimal chrome for simple single-series charts (e.g. the history dialogs): backgrounds,
-        /// axis, grid, and tick label colors only — no legend handling, axis-margin override,
+        /// axis, grid, tick label and legend colors only — no legend placement, axis-margin override,
         /// font-size override, background brush, or first-render hook. Sources colors from
-        /// <see cref="GetThemeColors"/> so the per-theme hexes can't drift from the full theme.
+        /// <see cref="GetThemeColors"/> so the per-theme hexes can't drift from the full theme. The legend
+        /// takes the theme's colors because ScottPlot draws one inside the plot for any named series, and
+        /// its stock white box and black text do not belong on a dark plot (#8540).
         /// </summary>
         public static void ApplyMinimalChartTheme(WpfPlot chart)
         {
@@ -153,6 +155,9 @@ namespace PerformanceMonitor.Ui
             chart.Plot.Grid.MajorLineColor = c.Grid;
             chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor = c.Text;
             chart.Plot.Axes.Left.TickLabelStyle.ForeColor = c.Text;
+            chart.Plot.Legend.BackgroundColor = c.LegendBackground;
+            chart.Plot.Legend.FontColor = c.LegendForeground;
+            chart.Plot.Legend.OutlineColor = c.LegendOutline;
             ApplyShortPlotFixes(chart);
         }
 
