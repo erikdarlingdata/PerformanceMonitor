@@ -467,15 +467,18 @@ public static class DarlingRetention
         /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
         var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
-        /* Decide the raw-relation skip on whether the extension is ACTUALLY installed in this store, not on
-           the worker's _timescaleAvailable latch. The latch can read false while the extension is present
-           (setup failed after CREATE EXTENSION already succeeded elsewhere, or a prior pass's failure was
-           transient) — a store the sweep would then treat as plain PostgreSQL, DELETEing raw rows the
-           service-triggered gated purge (#4299) is holding for exactly the reason the gate exists. Fail
-           toward keeping rows: a probe that cannot answer skips the three raw relations this pass rather
-           than guessing, logged once (not once per table). True plain PostgreSQL (no extension row) keeps
-           the DELETE fallback below unchanged. */
-        var rawSkipSafe = await ProbeRawSkipSafeAsync(postgres, logger, cancellationToken);
+        /* Decide which raw relations leave this sweep on what the store's own catalogs say, not on the worker's
+           _timescaleAvailable latch: the raw relations that are HYPERTABLES here belong to the service-triggered
+           gated purge (#4299), which drops their chunks and holds them for exactly the reason the gate exists.
+           The latch can read false while those hypertables are present (setup failed after CREATE EXTENSION
+           already succeeded elsewhere, or a prior pass's failure was transient), and a sweep that trusted it
+           would DELETE held rows. A raw table that is a plain table, in a database that carries the extension
+           row but never converted it (a store run without TimescaleDB whose database was cloned from a template
+           that carries the extension, or a conversion that failed), has no chunks for that purge to drop, so it
+           takes the DELETE below like any plain table: that DELETE is the only purge its rows ever get. Fail
+           toward keeping rows: a probe that cannot answer keeps all three raw relations out of this pass rather
+           than guessing, logged once (not once per table). */
+        var gatedRawRelations = await ProbeGatedRawRelationsAsync(postgres, logger, cancellationToken);
 
         try
         {
@@ -511,7 +514,7 @@ public static class DarlingRetention
                    head. NOT an outright exclusion of tiered tables either: the moment coverage reaches back,
                    the normal horizon applies again, so a never-armed policy cannot mean unbounded growth. */
                 /* #4427: the three raw relations (membership from TimescaleSupport.RawRelations itself,
-                   never a copied list) leave this sweep's drop path entirely on a TimescaleDB store. The
+                   never a copied list) leave this sweep's drop path entirely where they are hypertables. The
                    floor-only check just BELOW (IsTieredDropSafeAsync/IsRawTierDropSafeAsync) compares each
                    rollup's OLDEST bucket against raw's oldest row, so it reads Covered even when a hole sits
                    INSIDE the covered span — an outage seam the repair hasn't reached, a range the repair
@@ -522,13 +525,16 @@ public static class DarlingRetention
                    hold exists to protect. Counted as neither purged nor failed — nothing here failed, and the
                    rows are exactly where the gated purge (or a still-running repair) means them to be; the
                    dimension GC below stays safe regardless, since its cutoff is measured from the oldest
-                   surviving digest-carrying fact row. Plain-PostgreSQL mode (timescaleAvailable false) is
-                   unaffected: there are no rollups there, so the DELETE fallback below is raw's only purge.
-                   Because this skip runs first, no raw table can ever reach the floor check below under
-                   Timescale, so IsTieredDropSafeAsync can no longer return false for any table that reaches
-                   it there — the call stays for the tables that DO reach it (the non-raw tiered ones), and
-                   for plain-PostgreSQL mode, where it is skipped by its own timescaleAvailable guard. */
-                if (rawSkipSafe && TimescaleSupport.RawRelations.Contains(definition.TargetTable))
+                   surviving digest-carrying fact row. A raw relation the probe did not list is a plain table
+                   by construction, whether or not the database carries the extension row: no rollup covers
+                   it, so the coverage gate below would hold it for good (IsRawTierDropSafeAsync answers "not
+                   safe" with no aggregate to measure), and it has no chunks for drop_chunks to drop. It goes
+                   straight to the time-sliced DELETE, the way a catalog entry that stays a plain table does,
+                   whichever way the worker's timescaleAvailable latch reads. Because the skip runs first, no
+                   raw hypertable reaches the coverage gate or drop_chunks either, so IsTieredDropSafeAsync
+                   sees only the non-raw tiered tables, and in plain-PostgreSQL mode it is skipped by its own
+                   timescaleAvailable guard. */
+                if (gatedRawRelations.Contains(definition.TargetTable))
                 {
                     logger?.LogInformation(
                         "Retention purge for {Table} is owned by the service-triggered, gated raw purge (#4299); the sweep does not drop it.",
@@ -536,36 +542,43 @@ public static class DarlingRetention
                     continue;
                 }
 
-                if (timescaleAvailable && !await IsTieredDropSafeAsync(postgres, definition.TargetTable, logger, cancellationToken))
-                {
-                    logger?.LogWarning(
-                        "Retention purge SKIPPED for {Table}: its rollup does not yet cover the oldest rows, so dropping would delete history no aggregate holds. Resumes by itself once a backfill extends coverage.",
-                        definition.TargetTable);
+                var plainRawRelation = TimescaleSupport.RawRelations.Contains(definition.TargetTable);
 
-                    /* Those rows are still there past their horizon — which is fine for the dimension GC
-                       below (#1795): its cutoff is MEASURED from the oldest surviving digest-carrying fact
-                       row, so held history bounds the GC instead of deferring it. */
-                    continue;
-                }
-
-                /* #5640: a catalog entry that stays a plain table (the attention table) has no chunks to drop, so on
-                   a TimescaleDB store it takes the same time-sliced DELETE a plain-PostgreSQL store runs, straight
-                   away, instead of a drop_chunks call that fails and warns once per sweep before falling back. */
-                if (timescaleAvailable && !definition.StaysPlainTable)
+                /* The two hypertable steps, the coverage gate and drop_chunks, are for relations that can be hypertables; a plain
+                   raw relation skips both and takes the DELETE below. */
+                if (!plainRawRelation)
                 {
-                    var dropped = await DropChunksOneAsync(
-                        postgres, definition.TargetTable, DropChunksSqlFor(definition, retentionDays),
-                        logger, cancellationToken);
-                    if (dropped is not null)
+                    if (timescaleAvailable && !await IsTieredDropSafeAsync(postgres, definition.TargetTable, logger, cancellationToken))
                     {
-                        tablesPurged++;
-                        totalChunksDropped += dropped.Value;
+                        logger?.LogWarning(
+                            "Retention purge SKIPPED for {Table}: its rollup does not yet cover the oldest rows, so dropping would delete history no aggregate holds. Resumes by itself once a backfill extends coverage.",
+                            definition.TargetTable);
+
+                        /* Those rows are still there past their horizon — which is fine for the dimension GC
+                           below (#1795): its cutoff is MEASURED from the oldest surviving digest-carrying fact
+                           row, so held history bounds the GC instead of deferring it. */
                         continue;
                     }
 
-                    /* drop_chunks failed (warned) — most likely this one table failed hypertable
-                       conversion and is still plain. Fall back to the extension-free DELETE so the
-                       table still honors its horizon instead of growing unbounded. */
+                    /* #5640: a catalog entry that stays a plain table (the attention table) has no chunks to drop, so on
+                       a TimescaleDB store it takes the same time-sliced DELETE a plain-PostgreSQL store runs, straight
+                       away, instead of a drop_chunks call that fails and warns once per sweep before falling back. */
+                    if (timescaleAvailable && !definition.StaysPlainTable)
+                    {
+                        var dropped = await DropChunksOneAsync(
+                            postgres, definition.TargetTable, DropChunksSqlFor(definition, retentionDays),
+                            logger, cancellationToken);
+                        if (dropped is not null)
+                        {
+                            tablesPurged++;
+                            totalChunksDropped += dropped.Value;
+                            continue;
+                        }
+
+                        /* drop_chunks failed (warned) — most likely this one table failed hypertable
+                           conversion and is still plain. Fall back to the extension-free DELETE so the
+                           table still honors its horizon instead of growing unbounded. */
+                    }
                 }
 
                 var deleted = await PurgeOneAsync(
@@ -2221,33 +2234,54 @@ WHERE NOT EXISTS
     }
 
     /// <summary>
-    /// #4427 item 7: whether the three raw relations should be skipped from THIS sweep's drop path, decided
-    /// on whether the TimescaleDB extension is ACTUALLY installed in this store (<c>pg_extension</c>) rather
-    /// than on the worker's <c>_timescaleAvailable</c> latch. The latch can read false while the extension is
-    /// present — a failed setup pass, or a transient failure on a store the extension WAS created in earlier —
-    /// and the old code treated that store as plain PostgreSQL, DELETEing raw rows the service-triggered gated
-    /// purge (#4299) is holding for exactly the reason the gate exists.
-    ///
-    /// <para><c>true</c> (skip raw from this sweep) when the extension is present, AND when the probe itself
-    /// cannot answer — fail toward keeping rows, logged once at Warning rather than once per raw table.
-    /// <c>false</c> (true plain PostgreSQL, no extension row) leaves the DELETE fallback below byte-identical
-    /// to how it always ran.</para>
+    /// The raw relations (<see cref="TimescaleSupport.RawRelations"/>) this sweep leaves to the service-triggered, gated raw purge
+    /// (#4299): the ones that are hypertables in this store, read from the extension's own catalog on a connection of the sweep's
+    /// own. That purge drops CHUNKS, so it owns exactly the raw relations that have them. A raw table that is a plain table, in a
+    /// database that carries the extension row but never converted it, has no chunks for it to drop, and this sweep's DELETE is
+    /// the only purge its rows ever get, so it is not in the set. Decided on the store's catalogs, never on the worker's
+    /// <c>timescaleAvailable</c> latch, which can read false while the raw hypertables are present and held by the gate. A store
+    /// without the extension has no hypertables: the empty set. A probe that cannot answer returns all three, logged once: the
+    /// failure direction is deleting held history, so the sweep keeps the rows rather than guessing.
     /// </summary>
-    internal static async Task<bool> ProbeRawSkipSafeAsync(NpgsqlDataSource postgres, ILogger? logger, CancellationToken cancellationToken)
+    internal static async Task<IReadOnlySet<string>> ProbeGatedRawRelationsAsync(NpgsqlDataSource postgres, ILogger? logger, CancellationToken cancellationToken)
     {
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            return await TimescaleSupport.DetectAsync(connection, cancellationToken);
+            if (!await TimescaleSupport.DetectAsync(connection, cancellationToken))
+            {
+                return new HashSet<string>(StringComparer.Ordinal);
+            }
+
+            await using var command = new NpgsqlCommand(
+                "SELECT hypertable_name FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name = ANY($1)",
+                connection) { CommandTimeout = DeleteTimeoutSeconds };
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = TimescaleSupport.RawRelations.ToArray() });
+
+            var gated = new HashSet<string>(StringComparer.Ordinal);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                gated.Add(reader.GetString(0));
+            }
+
+            return gated;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(
                 "Could not read this store's TimescaleDB state ({Message}) — keeping the three raw tables out of this sweep's drop path rather than deleting on a guess.",
                 ex.Message);
-            return true;
+            return new HashSet<string>(TimescaleSupport.RawRelations, StringComparer.Ordinal);
         }
     }
+
+    /// <summary>
+    /// True when every raw relation leaves this sweep's DELETE and drop paths: each is a hypertable the gated purge owns, or the
+    /// store's TimescaleDB state could not be read (<see cref="ProbeGatedRawRelationsAsync"/>, which fails toward keeping rows).
+    /// </summary>
+    internal static async Task<bool> ProbeRawSkipSafeAsync(NpgsqlDataSource postgres, ILogger? logger, CancellationToken cancellationToken) =>
+        (await ProbeGatedRawRelationsAsync(postgres, logger, cancellationToken)).Count == TimescaleSupport.RawRelations.Count;
 
     /// <summary>
     /// May this table's expired chunks be dropped, per the #1680 coverage gate (#1784)? Delegates to

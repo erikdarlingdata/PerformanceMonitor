@@ -322,9 +322,14 @@ internal static class ComposePanelRunner
     /// unchanged from before #4442 scope 2 added the wrapper. <paramref name="logger"/> is the one the host's
     /// read-latency recorder carries (<see cref="ReadLatencyRecorder.Logger"/>), where the data-start probe reports
     /// a failure it swallows.</summary>
+    /// <summary>The one answer a scoped caller gets for a scope that names no server it may see: an unknown name, a name outside the
+    /// grant and a name the registry cannot resolve all look the same.</summary>
+    private static ComposeRunOutcome EmptyScopedAnswer() =>
+        ComposeRunOutcome.Ok(new JsonObject { ["sql"] = "", ["rows"] = new JsonArray(), ["annotations"] = new JsonArray() });
+
     internal static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(
         ComposeRunHost host, NpgsqlDataSource postgres, JsonObject body, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, bool includeDataStartFields, System.Threading.CancellationToken cancellationToken,
-        ILogger? logger = null, Action<Exception>? onRunException = null, DateTime? nowUtc = null, IReadOnlyList<int>? authorizedServerIds = null)
+        ILogger? logger = null, Action<Exception>? onRunException = null, IReadOnlyList<int>? authorizedServerIds = null, DateTime? nowUtc = null)
     {
         if (body["panel"] is not JsonObject panel)
         {
@@ -369,7 +374,9 @@ internal static class ComposePanelRunner
         var (resolvedScope, scopeRefusal) = await host.ResolveServerNames(postgres, serverScope, cancellationToken, logger);
         if (scopeRefusal is not null)
         {
-            return ComposeRunOutcome.BadRequest(authorizedServerIds is null ? McpHelpers.ErrorMessageOf(scopeRefusal) : "The requested server scope is unavailable.");
+            /* A scoped caller gets the empty answer an unknown or out-of-scope name gets: a refusal would say that two registrations
+               share the name it sent. */
+            return authorizedServerIds is null ? ComposeRunOutcome.BadRequest(McpHelpers.ErrorMessageOf(scopeRefusal)) : EmptyScopedAnswer();
         }
 
         serverScope = resolvedScope;
@@ -391,10 +398,7 @@ internal static class ComposePanelRunner
                 : names;
             if (serverScope.Count == 0)
             {
-                return ComposeRunOutcome.Ok(new JsonObject
-                {
-                    ["sql"] = "", ["rows"] = new JsonArray(), ["annotations"] = new JsonArray()
-                });
+                return EmptyScopedAnswer();
             }
         }
 
@@ -462,7 +466,9 @@ internal static class ComposePanelRunner
            (ComposeCompiler.BuildFactRelation returns it before any wide-table branch), so the wide table is never read: its
            eligibility gate, its size guard and its notes would all describe a table this panel does not touch. A panel the
            router sends to a rollup skips them; one that reads the wide table (a recent window, or a dimension no rollup carries) is unchanged. */
-        var wideResolution = authorizedServerIds is null && plan!.Measure.SourceTable == "query_store_stats"
+        /* A scoped caller reaches every guard below. serverScope holds only servers the grant permits by this point, so the
+           guards' refusals and notices, which name the servers they counted, name no server outside the grant. */
+        var wideResolution = plan!.Measure.SourceTable == "query_store_stats"
             && !ComposeCompiler.ResolveFactRoute(plan, now, start, rollups, coverage).IsCagg
             ? await ResolveQueryStoreWideEligibleAsync(postgres, serverScope, start, end, hasWindowEnd ? end : (DateTime?)null, cancellationToken, plan)
             : default;
@@ -530,7 +536,7 @@ internal static class ComposePanelRunner
            client deadline and bounds the guard. The other path resolves it inside the try below, as it always has. */
         int? candidateComposedSeconds = null;
         HourlyEdgesSnapshot? hourlyEdgesSnapshot = null;
-        if (authorizedServerIds is null && hourlyEdgesCandidate is not null)
+        if (hourlyEdgesCandidate is not null)
         {
             candidateComposedSeconds = await host.ResolveComposedQuerySeconds(postgres, cancellationToken);
             try
@@ -565,7 +571,7 @@ internal static class ComposePanelRunner
            inside the statement timeout, is refused here in milliseconds instead of after a minute of reading. Decided on the compiled
            route, so a panel the hourly-raw-edges route or a rollup serves is never counted. A panel whose hourly-edges guard did not pass
            holds the snapshot's connection, and the estimate reads there under a savepoint. Fails open, like the Query Store guard above. */
-        if (authorizedServerIds is null && QueryStoreWideReadGuard.RawCollectorFor(plan!.Measure.SourceTable, compiled!.Route) is { } rawCollector
+        if (QueryStoreWideReadGuard.RawCollectorFor(plan!.Measure.SourceTable, compiled!.Route) is { } rawCollector
             && await QueryStoreWideReadGuard.CheckRawAsync(postgres, snapshot?.Connection, serverScope, rawCollector, start, end, logger, StorageCommandDeadlines.ComposedReadSeconds, cancellationToken) is { } rawTooBig)
         {
             return ComposeRunOutcome.BadRequest(rawTooBig);
@@ -619,7 +625,7 @@ internal static class ComposePanelRunner
                ask where this panel's own rows start. The Query Store wide table reports its own start in the
                history note below, so a panel it served is not asked twice. */
             ComposeStoreAvailability.DataStartNotice? dataStartNotice = null;
-            if (authorizedServerIds is null && retentionNotice is null && !queryStoreWideEligible)
+            if (retentionNotice is null && !queryStoreWideEligible)
             {
                 dataStartNotice = await ComposeStoreAvailability.FindDataStartNoticeAsync(
                     postgres, plan.Measure.SourceTable, compiled.Route, serverScope, start, end, composedQuerySeconds, cancellationToken, logger);

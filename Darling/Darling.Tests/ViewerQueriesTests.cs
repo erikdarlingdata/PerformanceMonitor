@@ -341,10 +341,10 @@ public sealed class ViewerQueriesSqlTests
     /// caller asked for; the delta slicers never had the problem because for them the two are one column.
     /// </param>
     [Theory]
-    [InlineData(nameof(ViewerDataService.QueryStatsSlicerSql), "query_stats", "COUNT(DISTINCT query_hash)", "date_trunc('hour', collection_time)", "collection_time")]
-    [InlineData(nameof(ViewerDataService.ProcStatsSlicerSql), "procedure_stats", "COUNT(DISTINCT object_name)", "date_trunc('hour', collection_time)", "collection_time")]
-    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(DISTINCT query_id)", "date_trunc('hour', COALESCE(interval_start_time_utc, collection_time))", "COALESCE(interval_start_time_utc, collection_time)")]
-    public void SlicerSql_BucketsByHour_SevenColumnShape(string sqlName, string table, string distinctCount, string bucketExpression, string windowFilter)
+    [InlineData(nameof(ViewerDataService.QueryStatsSlicerSql), "query_stats", "COUNT(DISTINCT query_hash)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time")]
+    [InlineData(nameof(ViewerDataService.ProcStatsSlicerSql), "procedure_stats", "COUNT(DISTINCT object_name)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time")]
+    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(DISTINCT query_id)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), TIMESTAMP '2000-01-01 00:00:00')", "COALESCE(interval_start_time_utc, collection_time)")]
+    public void SlicerSql_BucketsAtTheWindowsWidth_SevenColumnShape(string sqlName, string table, string distinctCount, string bucketExpression, string windowFilter)
     {
         var sql = SqlByName(sqlName);
         Assert.Contains(bucketExpression, sql, StringComparison.Ordinal);
@@ -946,12 +946,13 @@ public sealed class ViewerQueriesLivePostgresTests
 
         await using var viewer = new ViewerDataService(cs!);
 
-        /* One hour bucket, so the slicer assertion is about dedup rather than bucket boundaries. */
+        /* One hour bucket, so the slicer assertion is about dedup rather than bucket boundaries: the window is over two hours
+           long, the length at which the slicer keeps the hour (SlicerBuckets), and every seeded row sits in its last hour. */
         var bucketStart = TruncateToSeconds(DateTime.UtcNow).AddHours(-3);
         bucketStart = bucketStart.AddMinutes(-bucketStart.Minute).AddSeconds(-bucketStart.Second);
         var firstExecA = bucketStart.AddMinutes(1);
         var firstExecB = bucketStart.AddMinutes(2);
-        var start = bucketStart.AddMinutes(-1);
+        var start = bucketStart.AddHours(-2);
         var end = bucketStart.AddMinutes(59);
 
         var bodySucceeded = false;

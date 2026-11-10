@@ -9,6 +9,7 @@
 using System;
 using System.Windows;
 using System.Windows.Input;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -38,7 +39,7 @@ public partial class ManageCredentialProfilesDialog : Window
         ProfilesGrid.ItemsSource = null;
         var profiles = _profileStore.GetAll();
         ProfilesGrid.ItemsSource = profiles;
-        StatusText.Text = $"{profiles.Count} profile(s).";
+        StatusText.Text = $"{CountText.Plural(profiles.Count, "profile")}.";
         NoProfilesMessage.Visibility = profiles.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 

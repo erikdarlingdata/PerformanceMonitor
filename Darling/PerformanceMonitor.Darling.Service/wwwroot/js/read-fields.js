@@ -601,8 +601,10 @@ export const READ_FIELDS = {
         { key: "alert_time", label: "Time", format: "time" },
         { key: "server_name", label: "Server" },
         { key: "metric_name", label: "Metric" },
-        { key: "current_value", label: "Value", format: "num2" },
-        { key: "threshold_value", label: "Threshold", format: "num2" },
+        /* stateZeroDash: a state-only row's stored 0 (the row's state_only: a resolution, Database State, Agent Not Running) is not a
+           reading and shows as the dash Alert History shows, not 0.00; a measured row keeps its number. */
+        { key: "current_value", label: "Value", format: "num2", stateZeroDash: true },
+        { key: "threshold_value", label: "Threshold", format: "num2", stateZeroDash: true },
         { key: "notification_type", label: "Notification" },
         { key: "muted", label: "Muted", format: "bool" },
         { key: "detail_text", label: "Detail", wrap: true, localizeAlertDetail: true },
@@ -840,20 +842,30 @@ export const READ_FIELDS = {
 
 /**
  * #7670: a table cell that carries its own columns (a Custom View built from a sample read keeps only key, label and format) still says its
- * collector notes in the words the catalog's column for the same read and key uses ("shred gated: 1", not "shred_gated=1"). Only `plain` and
- * `localizeText` come across, and only for a column that sets neither and has no format.
+ * collector notes in the words the catalog's column for the same read and key uses ("shred gated: 1", not "shred_gated=1"). `plain` and
+ * `localizeText` come across only for a column that sets neither and has no format. `stateZeroDash` (#8492: an alert-history value column
+ * whose stored 0 on a state-only row is not a reading) comes across to a column of the same key whatever its format, so a saved view's
+ * Value and Threshold columns show the dash Alert History shows rather than 0.00. A cell that is not a table, or has no columns of its
+ * own, comes back as it is.
  */
-function withCatalogWords(cell) {
+export function withCatalogWords(cell) {
+  if (!cell || cell.viz !== "table" || !(Array.isArray(cell.columns) && cell.columns.length)) return cell;
   const entry = READ_FIELDS[cell.read];
   const known = entry ? [...((entry.table && entry.table.columns) || []), ...((entry.tableFleet && entry.tableFleet.columns) || [])] : [];
   if (!known.length) return cell;
   let changed = false;
   const columns = cell.columns.map((c) => {
-    if (!c || c.format || c.plain !== undefined || c.localizeText !== undefined) return c;
-    const same = known.find((k) => k.key === c.key && k.plain);
-    if (!same) return c;
-    changed = true;
-    return { ...c, plain: same.plain, localizeText: same.localizeText };
+    if (!c) return c;
+    let next = c;
+    if (!c.format && c.plain === undefined && c.localizeText === undefined) {
+      const words = known.find((k) => k.key === c.key && k.plain);
+      if (words) next = { ...next, plain: words.plain, localizeText: words.localizeText };
+    }
+    if (c.stateZeroDash === undefined && known.some((k) => k.key === c.key && k.stateZeroDash === true)) {
+      next = { ...next, stateZeroDash: true };
+    }
+    if (next !== c) changed = true;
+    return next;
   });
   return changed ? { ...cell, columns } : cell;
 }
@@ -866,7 +878,7 @@ export function resolveReadTable(cell) {
   if (!cell) return cell;
   const field = cell.viz === "line" ? "series" : cell.viz === "stat" ? "stats" : cell.viz === "table" ? "columns" : null;
   if (!field) return cell;
-  if (Array.isArray(cell[field]) && cell[field].length) return cell.viz === "table" ? withCatalogWords(cell) : cell;
+  if (Array.isArray(cell[field]) && cell[field].length) return withCatalogWords(cell);
   const entry = READ_FIELDS[cell.read];
   const fleet = cell.viz === "table" && entry && entry.tableFleet && !(cell.params && cell.params.collector_name);
   const part = entry && (fleet ? entry.tableFleet : entry[cell.viz]);

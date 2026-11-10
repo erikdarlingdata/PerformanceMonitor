@@ -34,6 +34,14 @@ public partial class DrillDownCollector
     /// </summary>
     private readonly Func<int, string, int?>? _collectorFrequencyMinutes;
 
+    /// <summary>
+    /// Sees the statement text the <c>top_cpu_queries</c> and <c>bad_actor_query</c> reads hand DuckDB, keyed by the
+    /// drill-down each fills, at the moment it runs: after the archive plan's rewrite, before the reader opens. The text
+    /// both reads run is <see cref="DrillDownSql"/>, shared with Darling, and a test observes here that it stays so.
+    /// Null outside those tests.
+    /// </summary>
+    internal Action<string, string>? StatementObserver { get; init; }
+
     public DrillDownCollector(DuckDbInitializer duckDb, IPlanFetcher? planFetcher = null, Func<int, string, int?>? collectorFrequencyMinutes = null)
     {
         _duckDb = duckDb;

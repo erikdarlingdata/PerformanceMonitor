@@ -159,7 +159,8 @@ public sealed class WaitRateRowIntervalLiveTests
         Assert.False(await RelationExistsAsync(connection, TimescaleSupport.WaitStatsIntervalBaselineView, ct));
     }
 
-    /// <summary>The viewer's probe: the successor relation is the V255 sentinel, the arm below the schema tracking one (V256, #7643).</summary>
+    /// <summary>The viewer's probe: the successor relation is the V255 sentinel, the arm below the schema tracking one (V256, #7643) and the
+    /// collection_log status index (V257, #8464).</summary>
     [Fact]
     public void TheProbe_MapsTheCadenceBaselineTo255_AndItsAbsenceTo254()
     {
@@ -169,7 +170,7 @@ public sealed class WaitRateRowIntervalLiveTests
         var parameters = map.GetParameters();
         var rate = Array.FindIndex(parameters, p => p.Name == "hasWaitStatsCadenceBaseline");
         Assert.True(rate >= 0, "the probe has a hasWaitStatsCadenceBaseline sentinel");
-        Assert.Equal(parameters.Length - 2, rate);
+        Assert.Equal(parameters.Length - 3, rate);
 
         var allTrue = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)map.Invoke(null, allTrue)!);

@@ -21,7 +21,7 @@ public sealed class ManagedWebGroupCookieTests
         Assert.True(DarlingWebSeat.TryResolveSeat(DarlingWebSeat.EncodeGroupCookieSubject(id,generation),out var seat));
         Assert.Equal(id,seat.GroupId);Assert.Equal(generation,seat.GroupGeneration);
         Assert.False(seat.CanEdit);Assert.Null(seat.OwnerKey);Assert.Null(seat.TokenName);
-        Assert.Null(seat.AllowedTagIds);Assert.False(seat.ScopeAllServers);
+        Assert.Null(seat.AllowedTagIds);
         foreach(var bad in new[]{"g1:","g1:wrong:wrong","g1:"+Guid.Empty.ToString("N")+":"+generation.ToString("N"),
             "g1:"+id.ToString("N")+":"+Guid.Empty.ToString("N"),"g1:"+id.ToString("N")+":"+generation.ToString("N")+":admin"})
             Assert.False(DarlingWebSeat.TryResolveSeat(bad,out _));

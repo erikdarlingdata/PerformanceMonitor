@@ -113,8 +113,19 @@ public sealed class LastCollectCountsSuccessOnlyTests : IDisposable
         var summary = await data.GetServerSummaryAsync(ServerId, "dark", registeredAtUtc: null);
         Assert.NotNull(summary);
         Assert.Null(summary!.LastCollectionTime);
-        Assert.Equal(ServerFreshness.NeverCollected, summary.CollectionFreshness);
+        /* #8464: the collectors ran and every one failed, so the card is Offline, not awaiting its first collection; nothing was
+           collected, so nothing was retained, and the label says "Never". A server with no collector row at all stays awaiting. */
+        Assert.True(await data.HasAnyCollectorRowAsync(ServerId));
+        Assert.Equal(ServerFreshness.Offline, summary.CollectionFreshness);
         Assert.Equal("Never", summary.LastCollectionDisplay);
+
+        const int untried = ServerId + 1;
+        Assert.False(await data.HasAnyCollectorRowAsync(untried));
+        var waiting = await data.GetServerSummaryAsync(untried, "untried", registeredAtUtc: DateTime.UtcNow.AddMinutes(-31));
+        Assert.NotNull(waiting);
+        Assert.Null(waiting!.LastCollectionTime);
+        Assert.Equal(ServerFreshness.NeverCollected, waiting.CollectionFreshness);
+        Assert.Equal("Never", waiting.LastCollectionDisplay);
     }
 
     private async Task LogAsync(DuckDBConnection connection, string collector, DateTime at, string status)

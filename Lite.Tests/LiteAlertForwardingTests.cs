@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Hardcodet.Wpf.TaskbarNotification;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -95,7 +96,7 @@ public partial class LiteAlertForwardingTests : IDisposable
         App.AlertFailedJobLookbackMinutes = 60;
         App.AlertCooldownMinutes = 5;
         App.AlertDeliveryMode = AlertNotificationMode.Summary;
-        App.AlertPerEventMaxPerCycle = 10;
+        App.AlertPerEventMaxPerCycle = AlertDefaults.PerEventMax;
     }
 
     /* ---------------- fakes (adapter/store/deliverer — the engine sees Lite's REAL settings) ---------------- */

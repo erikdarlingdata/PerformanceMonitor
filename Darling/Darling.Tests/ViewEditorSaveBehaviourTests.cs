@@ -69,4 +69,17 @@ public sealed class ViewEditorSaveBehaviourTests
         /* The saved view has an id after the first press, so the button reads "Save changes", not "Create view" / "Create notebook". */
         Assert.Equal("Save changes", run.GetProperty("labelAfterFirst").GetString());
     }
+
+    /// <summary>The dashboard composer's preview of a saved view's own-columns alert-history table draws what the saved view draws: a
+    /// state-only row's stored zeros as the dash, and a measured row's numbers.</summary>
+    [Fact]
+    public void ThePreview_ShowsTheDashForAStateOnlyRowsStoredZeros_AndTheNumbersOfAMeasuredRow()
+    {
+        var preview = Run().GetProperty("preview");
+        var strips = string.Join(" | ", preview.GetProperty("strips").EnumerateArray().Select(s => s.GetString()));
+        var rows = preview.GetProperty("rows").EnumerateArray().Select(r => r.EnumerateArray().Select(c => c.GetString()!).ToArray()).ToArray();
+        Assert.True(rows.Length == 2, "the preview drew " + rows.Length + " rows; strips: " + strips);
+        Assert.Equal(new[] { "Client Timeouts Cleared", "\u2014", "\u2014" }, rows[0]);
+        Assert.Equal(new[] { "High CPU", "90.00", "80.00" }, rows[1]);
+    }
 }

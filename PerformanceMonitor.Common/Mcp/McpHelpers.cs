@@ -261,7 +261,7 @@ internal static class McpHelpers
 
         if (resolved < 2 * hoursBack)
         {
-            return Refusal("baseline_hours_back", $"The comparison window (the last {hoursBack} hours) and the baseline window (hours {resolved} to {resolved - hoursBack} back) would overlap: baseline_hours_back {resolved} is below 2 x hours_back ({2 * hoursBack}). Pass a baseline_hours_back of at least {2 * hoursBack}, or a smaller hours_back.");
+            return Refusal("baseline_hours_back", $"The comparison window (the last {CountText.Plural(hoursBack, "hour")}) and the baseline window (hours {resolved} to {resolved - hoursBack} back) would overlap: baseline_hours_back {resolved} is below 2 x hours_back ({2 * hoursBack}). Pass a baseline_hours_back of at least {2 * hoursBack}, or a smaller hours_back.");
         }
 
         return null;
@@ -585,6 +585,32 @@ internal static class McpHelpers
         "changes it. WIRE CHANGE: formerly named truncated.";
 
     /// <summary>
+    /// The clock sentence of a SQL Server read whose every stamp is the store's naive UTC: <c>collection_time</c>
+    /// and the bucket starts cut from it, the Extended Events <c>event_time</c> and <c>deadlock_time</c>, Query
+    /// Store's <c>interval_start_time_utc</c>, and a latest snapshot's <c>captured_at</c>. Leading space: it is
+    /// appended to the tool's own prose, ahead of the shared sentences that close a description, so on a split
+    /// description it sits in the guide tail. The one read stamped on the monitored server's clock, Lite's
+    /// <c>get_cpu_utilization</c>, carries its own sentence instead.
+    /// </summary>
+    public const string UtcStampsDescription =
+        " Every stamp here is UTC, not the monitored server's clock (get_server_properties has its utc_offset_minutes).";
+
+    /// <summary>The clock sentence of <c>get_daily_summary_range</c>, whose row is a calendar day cut from UTC
+    /// <c>collection_time</c>.</summary>
+    public const string UtcDayDescription =
+        " summary_date is a UTC day, not the monitored server's (get_server_properties has its utc_offset_minutes).";
+
+    /// <summary>The clock sentence of a PostgreSQL target's time series, whose points are stamped
+    /// <c>collection_time</c>; those targets have no <c>get_server_properties</c> offset to point at.</summary>
+    public const string UtcCollectionTimeDescription =
+        " collection_time is UTC, not the monitored server's clock.";
+
+    /// <summary>The clock sentence of a PostgreSQL target's series whose points are stamped <c>sample_time</c>
+    /// (get_pg_cpu_utilization's Performance Insights buckets).</summary>
+    public const string UtcSampleTimeDescription =
+        " sample_time is UTC, not the monitored server's clock.";
+
+    /// <summary>
     /// #4966: <c>effective_start</c> as every window-floor payload prints it, always as UTC with the trailing Z, on
     /// both SKUs. The served start is either the start that was asked for (already UTC, so a plain "o" printed the Z)
     /// or the floor read off the store (a naive instant, so a plain "o" printed none), and the zone marker used to
@@ -621,7 +647,7 @@ internal static class McpHelpers
     /// </summary>
     public static string SnapshotsWithoutDeltaMessage(string serverName, int hoursBack, long snapshots, DateTime? newestMeasuredDeltaAt, DateTime windowEnd)
     {
-        var message = $"{serverName} stored {snapshots} query_stats snapshot(s) in the last {hoursBack} hour(s), but none carries a measured delta, so no CPU can be attributed to a query in this window. "
+        var message = $"{serverName} stored {CountText.Plural(snapshots, "query_stats snapshot")} in the last {CountText.Plural(hoursBack, "hour")}, but none carries a measured delta, so no CPU can be attributed to a query in this window. "
             + "A CPU figure is the change in a plan's counters between two snapshots of the same plan; a plan sighted once, or sighted again with unmoved counters, stores zero deltas and is left out of the ranking. "
             + "This is not a collection gap, and collection health showing stored rows is consistent with it.";
         if (newestMeasuredDeltaAt is { } newest)

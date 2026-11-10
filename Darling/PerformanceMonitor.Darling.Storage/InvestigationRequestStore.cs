@@ -462,6 +462,7 @@ FROM (
     LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
     WHERE ($3::integer IS NULL OR r.server_id = $3)
       AND ($4::text IS NULL OR r.family = $4)
+      AND ($6::integer[] IS NULL OR r.server_id = ANY($6))
 ) AS s
 WHERE ($2::text IS NULL OR s.effective_state = $2)
 ORDER BY s.opened_at DESC, s.request_id
@@ -531,6 +532,7 @@ RETURNING source_request_id, server_id, decided_at";
 WHERE ($2::uuid IS NULL OR r.request_id = $2)
   AND ($3::integer IS NULL OR r.server_id = $3)
   AND ($2::uuid IS NOT NULL OR r.opened_at >= $4)
+  AND ($6::integer[] IS NULL OR r.server_id = ANY($6))
 ORDER BY r.opened_at DESC, r.request_id
 LIMIT $5";
 
@@ -1163,7 +1165,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = Command(connection, null, ReportsRequestsSql,
             P(Now()), new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid },
-            new NpgsqlParameter<int?> { TypedValue = null, NpgsqlDbType = NpgsqlDbType.Integer }, P(DateTime.MinValue), P(1));
+            new NpgsqlParameter<int?> { TypedValue = null, NpgsqlDbType = NpgsqlDbType.Integer }, P(DateTime.MinValue), P(1), ReadServerScopeParameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -1200,9 +1202,9 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         var requests = new List<InvestigationRequestRow>();
         string? brief = null;
-        await using (var command = ScopedReadCommand(connection, ReportsRequestsSql, "r.server_id",
+        await using (var command = Command(connection, null, ReportsRequestsSql,
             P(Now()), new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid },
-            new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer }, P(sinceUtc), P(limit + 1)))
+            new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer }, P(sinceUtc), P(limit + 1), ReadServerScopeParameter()))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
@@ -1327,9 +1329,9 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = ScopedReadCommand(connection, ListSql, "s.server_id",
+        await using var command = Command(connection, null, ListSql,
             P(Now()), PNullable(state), new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer },
-            PNullable(family), P(limit));
+            PNullable(family), P(limit), ReadServerScopeParameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var rows = new List<InvestigationRequestRow>();
         while (await reader.ReadAsync(cancellationToken))
@@ -1815,19 +1817,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer },
             P(journalEvent), P(actor), PNullable(reason), PNullable(detailJson), PNullable(onceKey));
 
-    private NpgsqlCommand ScopedReadCommand(NpgsqlConnection connection, string sql, string column, params NpgsqlParameter[] parameters)
-    {
-        var command = Command(connection, null, sql, parameters);
-        if (ReadServerIds is not null)
-        {
-            var parameter = "$" + (command.Parameters.Count + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
-            var order = sql.LastIndexOf("\nORDER BY ", StringComparison.Ordinal);
-            command.CommandText = sql.Insert(order, "\nAND " + column + " = ANY(" + parameter + ")\n");
-            command.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Integer, ReadServerIds.ToArray());
-        }
-
-        return command;
-    }
+    private NpgsqlParameter ReadServerScopeParameter() =>
+        new() { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = (object?)ReadServerIds?.ToArray() ?? DBNull.Value };
 
     private NpgsqlCommand Command(NpgsqlConnection connection, NpgsqlTransaction? transaction, string sql, params NpgsqlParameter[] parameters)
     {

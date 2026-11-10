@@ -76,7 +76,7 @@ public partial class FinOpsTab
         FinOpsIndexAnalysisNoDataMessage.Visibility = Visibility.Collapsed;
         FinOpsIndexAnalysisCountIndicator.Text = recs.Count > 0
             ? PerformanceMonitor.Common.CountText.Plural(recs.Count, "recommendation")
-            : "no cleanup recommendations — indexes look clean";
+            : "no cleanup recommendations: indexes look clean";
     }
 
     /// <summary>Rebuilds the banner strip: the &lt;14-day uptime caveat, the dedupe-only notice, and every analyzer Note (its stated limitations).</summary>
@@ -88,14 +88,14 @@ public partial class FinOpsTab
         if (result.ShowUptimeCaveat)
         {
             AddIndexAnalysisBanner(
-                "Server uptime is under 14 days — index usage data may be incomplete, so some \"Unused Index\" findings could be premature.",
+                "Server uptime is under 14 days: index usage data may be incomplete, so some \"Unused Index\" findings could be premature.",
                 "#F39C12", "#33290F");
         }
 
         if (result.DedupeOnlyApplied)
         {
             AddIndexAnalysisBanner(
-                "Dedupe-only mode is in effect — unused indexes were NOT flagged (server uptime is 7 days or less). Only duplicate/consolidation and compression findings are shown.",
+                "Dedupe-only mode is in effect: unused indexes were NOT flagged (server uptime is 7 days or less). Only duplicate/consolidation and compression findings are shown.",
                 "#3498DB", "#0F2433");
         }
 

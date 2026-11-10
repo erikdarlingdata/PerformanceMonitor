@@ -21,7 +21,8 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 internal sealed class DarlingWebTokenSet
 {
     /// <summary>One served named token. <see cref="Role"/> is the normalized word (<see cref="WebTokenEntry.NormalizeRole"/>), and
-    /// <see cref="CanEdit"/> is what it grants: <c>operator</c> edits, <c>reader</c> reads.</summary>
+    /// <see cref="CanEdit"/> is what it grants: <c>operator</c> edits, <c>reader</c> reads. <see cref="AllowedTagIds"/> is a reader's
+    /// server tag grant (distinct, positive ids), or null for a reader who sees every server and for every operator.</summary>
     internal sealed record Entry(string Name, string Token, string Role, IReadOnlyList<int>? AllowedTagIds = null)
     {
         internal bool CanEdit => string.Equals(Role, WebTokenEntry.OperatorRole, StringComparison.Ordinal);
@@ -42,6 +43,9 @@ internal sealed class DarlingWebTokenSet
 
     /// <summary>True when at least one named token is served.</summary>
     internal bool HasNamed => Named.Count > 0;
+
+    /// <summary>Whether any served entry is a scoped reader (carries <c>allowedTagIds</c>).</summary>
+    internal bool HasScoped => Named.Any(entry => entry.AllowedTagIds is not null);
 
     /// <summary>
     /// The entry a presented token is, or null when it matches none. Every served token is compared, each in constant time, and the

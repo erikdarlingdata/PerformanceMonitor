@@ -1298,9 +1298,10 @@ public sealed class AlertsConfig
     public AlertNotificationMode DeliveryMode { get; set; } = AlertNotificationMode.Summary;
 
     /// <summary>Per-event mode's cap on incidents delivered individually per cycle before the trailing
-    /// "+N more" batch (#1141); clamped 1–100 when applied. Stored as <c>config_alert_settings.per_event_max</c>.</summary>
+    /// "+N more" batch (#1141); clamped 1–100 when applied. Defaults to <see cref="AlertDefaults.PerEventMax"/>, the figure Lite
+    /// ships too. Stored as <c>config_alert_settings.per_event_max</c>.</summary>
     [JsonPropertyName("perEventMax")]
-    public int PerEventMax { get; set; } = 5;
+    public int PerEventMax { get; set; } = AlertDefaults.PerEventMax;
 
     /* The long-running-query read shape (V20 control-plane knobs) — the row cap + the five noise-filter
        opt-outs the shared AlertEngine forwards to GetLongRunningQueriesAsync. Defaults match Lite's App.*
@@ -1659,7 +1660,11 @@ public sealed class McpConfig
     /// <see cref="McpNetworkConfig.EncryptedToken"/> or <see cref="McpNetworkConfig.Token"/>, an enabled MCP server does not
     /// start, and the log names the settings to add. On, a loopback-only server with no token serves local clients
     /// without one, with the write and investigation tools off (they need the token), and every start logs one line
-    /// saying so. A configured token always gates, whatever this says. File-only and restart-only.
+    /// saying so. This applies only to a start with no token configured: a configured token is still resolved and gates
+    /// every request, and a token that clears the floor serves the write and investigation tools as their settings say,
+    /// whatever this says. Lite's <c>mcp_allow_tokenless_loopback</c> differs: on, Lite does not read its stored token at
+    /// all and serves reads only.
+    /// File-only and restart-only.
     /// </summary>
     [JsonPropertyName("allowTokenlessLoopback")]
     public bool AllowTokenlessLoopback { get; set; }
@@ -2399,7 +2404,8 @@ public sealed class WebNetworkConfig
 /// </summary>
 public sealed class WebTokenEntry
 {
-    /// <summary>Optional fleet tag IDs for a scoped reader, including each tag’s descendants.</summary>
+    /// <summary>Optional server tag ids for a scoped reader: the reader sees the servers under these tags and their descendants, and
+    /// nothing else. Null is an unscoped reader. Only a <c>web.network.tokens</c> entry with the reader role carries one.</summary>
     [JsonPropertyName("allowedTagIds")]
     public List<int>? AllowedTagIds { get; set; }
 

@@ -17,6 +17,7 @@ namespace Lite.Tests;
 /// on a store with no tags. New members are reached by name so this class builds against a tree without them; the grids are
 /// the real controls, built and shown on the shared STA thread with Lite's theme.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class LiteViewerWalkthroughLows8115Tests
 {
     private const string ThemeUri = "pack://application:,,,/PerformanceMonitorLite;component/Themes/DarkTheme.xaml";

@@ -27,6 +27,7 @@ namespace PerformanceMonitorLite.Tests;
 /// <c>Analysis: *</c> route on that item, and saves the canonical text from the item or from a typed spelling.
 /// Drives the real dialog on an STA thread and reads what <c>BuildRoute</c> would save.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class NotificationRouteAnalysisAllDialogTests
 {
     private static NotificationRouteEditDialog Dialog(NotificationRoute? existing = null) =>

@@ -458,14 +458,17 @@ public sealed class CollectionCycleSkipTests : IDisposable
     }
 
     [Fact]
-    public void TheThirteenPredicates_InterpolateTheCollectorName()
+    public void TheFourteenPredicates_InterpolateTheCollectorName()
     {
         var services = Path.Combine(RepoRootFromThisFile(), "Lite", "Services");
+        /* #8464: the Overview card's Last Collect and the server list's last success interpolate the shared
+           CollectionRunSql.SuccessfulCollectorRun, which carries the same name from the same constant; they count here too,
+           as does the any-collector-row probe beside them (HasAnyCollectorRowAsync). */
         var count = Directory.EnumerateFiles(services, "LocalDataService.*.cs")
             .Sum(f => System.Text.RegularExpressions.Regex.Matches(File.ReadAllText(f),
-                @"collector_name <> '\{CollectionCycleSkip\.CollectorName\}'").Count);
+                @"collector_name <> '\{CollectionCycleSkip\.CollectorName\}'|\{CollectionRunSql\.SuccessfulCollectorRun\}").Count);
 
-        Assert.Equal(13, count);
+        Assert.Equal(14, count);
     }
 
     [Fact]

@@ -22,13 +22,14 @@ namespace PerformanceMonitorLite.Services;
 public partial class LocalDataService
 {
     /// <summary>
-    /// Gets the latest Query Store snapshot for a server, aggregated across all databases.
-    /// Shows top queries by total duration (execution_count * avg_duration).
+    /// Gets the Query Store strip's buckets for a server, aggregated across all databases, at the width <see cref="SlicerBuckets"/>
+    /// picks for the window: a minute over a short window, an hour over a day. Each bar is keyed on the interval's start.
     /// </summary>
     public async Task<List<TimeSliceBucket>> GetQueryStoreSlicerDataAsync(
         int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+        var bucketMinutes = SlicerBuckets.MinutesFor(startTime, endTime);
 
         /* #7256: a window that starts after the newest archived row reads the hot table alone. */
         return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", startTime.AddDays(-1), ReadAsync, CancellationToken.None);
@@ -37,7 +38,9 @@ public partial class LocalDataService
         {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        /* $4 is the bucket width in minutes, on the grid every width of SlicerBuckets divides. */
+        var bucket = $"time_bucket(to_minutes(CAST($4 AS INTEGER)), COALESCE(interval_start_time_utc, collection_time), {TrendBuckets.OriginSql})";
 
         command.CommandText = @"
 WITH deduped AS
@@ -126,7 +129,7 @@ SELECT
     -- so this is a placement fix and not a timezone trade. Legacy rows have no interval start and keep
     -- collection_time placement, so a window spanning the upgrade renders correctly on both sides and the
     -- lag simply disappears as the pre-upgrade rows age out.
-    date_trunc('hour', COALESCE(interval_start_time_utc, collection_time)) AS bucket,
+    " + bucket + @" AS bucket,
     COUNT(DISTINCT query_id) AS query_count,
     COALESCE(SUM(CAST(avg_cpu_time_us AS DOUBLE PRECISION) * execution_count), 0) / 1000.0 AS total_cpu_ms,
     COALESCE(SUM(CAST(avg_duration_us AS DOUBLE PRECISION) * execution_count), 0) / 1000.0 AS total_duration_ms,
@@ -135,13 +138,14 @@ SELECT
     COALESCE(SUM(CAST(avg_physical_io_reads AS DOUBLE PRECISION) * execution_count), 0) AS total_physical_reads
 FROM deduped
 WHERE rn = 1
-GROUP BY date_trunc('hour', COALESCE(interval_start_time_utc, collection_time))
+GROUP BY " + bucket + @"
 ORDER BY bucket";
 
         command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 

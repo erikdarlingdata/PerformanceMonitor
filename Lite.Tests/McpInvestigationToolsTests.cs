@@ -354,16 +354,23 @@ FROM generate_series(1, {InvestigationToolCore.MaxLimit + 1}) AS t(i)");
     public void LitesInvestigationTools_KeepTheSharedContractWithDarling() =>
         Assert.Empty(Darling.Tests.InvestigationToolContract.Differences(typeof(McpInvestigationTools)));
 
+    /// <summary>#8461: of the four tools the class declares, the gate serves the two that change investigation state, and the two
+    /// reads are on the read-only list and served in every configuration, as Darling serves them.</summary>
     [Fact]
-    public void TheFourToolNames_AreTheOnesTheGateServes()
+    public void TheDeclaredStateChangingTools_AreTheOnesTheGateServes_AndTheDeclaredReads_AreOnTheReadOnlyList()
     {
         var declared = typeof(McpInvestigationTools).GetMethods()
             .Select(m => m.GetCustomAttributes(typeof(ModelContextProtocol.Server.McpServerToolAttribute), false)
                 .Cast<ModelContextProtocol.Server.McpServerToolAttribute>().SingleOrDefault()?.Name)
             .Where(n => n is not null)
+            .Select(n => n!)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
+        var reads = declared.Where(McpToolClassification.ReadOnlyTools.Contains).ToArray();
+        var stateChanging = declared.Except(reads).ToArray();
 
-        Assert.Equal(McpInvestigationPolicy.InvestigationTools.OrderBy(n => n, StringComparer.Ordinal), declared);
+        Assert.Equal(new[] { "get_investigation_reports", "list_investigation_requests" }, reads);
+        Assert.Equal(new[] { "claim_investigation_request", "submit_investigation_report" }, stateChanging);
+        Assert.Equal(stateChanging, McpInvestigationPolicy.InvestigationTools.OrderBy(n => n, StringComparer.Ordinal));
     }
 }

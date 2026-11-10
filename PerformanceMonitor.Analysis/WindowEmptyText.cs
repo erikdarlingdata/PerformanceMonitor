@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -32,7 +33,7 @@ public static class WindowEmptyText
 
         var opening = factCount > 0
             ? $"The collector observed none of the analysis window {window}, even though this server has {history}. " +
-              $"The {factCount} fact(s) that could still be read are point-in-time configuration and state, " +
+              $"The {CountText.Plural(factCount, "fact")} that could still be read {(factCount == 1 ? "is" : "are")} point-in-time configuration and state, " +
               "not measurements of this window. "
             : $"No facts were collected in the analysis window {window}, even though this server has {history}. ";
 

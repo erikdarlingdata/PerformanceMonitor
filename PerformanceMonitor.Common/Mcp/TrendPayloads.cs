@@ -199,7 +199,7 @@ internal static class TrendPayloads
             ? "Each line is one file of the requested database"
             : "Each line is one database's data or log files, pooled (file_type ROWS or LOG); pass database_name to chart one database per file";
         var fold = folded > 0
-            ? $" The {charted.ToString(CultureInfo.InvariantCulture)} with the most I/O stall in the window (read + write ms) have their own line; the other {folded.ToString(CultureInfo.InvariantCulture)} are folded into one '{OtherLabel}' line, pooled collection by collection, so its latency is theirs combined."
+            ? $" The {charted.ToString(CultureInfo.InvariantCulture)} with the most I/O stall in the window (read + write ms) {(charted == 1 ? "has its" : "have their")} own line; the other {folded.ToString(CultureInfo.InvariantCulture)} {(folded == 1 ? "is" : "are")} folded into one '{OtherLabel}' line, pooled collection by collection, so its latency is theirs combined."
             : " Every line that did I/O in the window is shown, heaviest stall first.";
         return grain + "." + fold;
     }
@@ -251,7 +251,7 @@ internal static class TrendPayloads
     /// misspelt database and an idle one both land here and only a list of the real names tells them apart.
     /// </summary>
     public static string FileIoScopeEmptyMessage(string serverName, string scope, int hoursBack) =>
-        $"No read or write activity was recorded for database '{scope}' on {serverName} in the last {hoursBack} hour(s). The name must match a collected database exactly (get_file_io_stats lists them); omit database_name for every database.";
+        $"No read or write activity was recorded for database '{scope}' on {serverName} in the last {CountText.Plural(hoursBack, "hour")}. The name must match a collected database exactly (get_file_io_stats lists them); omit database_name for every database.";
 
     /// <summary>
     /// <c>get_lock_wait_trend</c>'s data envelope: the family's bucketed rate, and the per-type legend that says

@@ -459,7 +459,10 @@ ANALYZE collect.plan_regression_daily_built;", ct);
     }
 
     [Fact]
-    public async Task TheGc_ProbesTheTotalsByIndex_NeverScansThem_AndRemovesExpiredDaysWhileLiveDaysStay()
+    public Task TheGc_ProbesTheTotalsByIndex_NeverScansThem_AndRemovesExpiredDaysWhileLiveDaysStay()
+        => GcProbesTheTotalsAsync(forcePass: false);
+
+    internal async Task GcProbesTheTotalsAsync(bool forcePass)
     {
         await RunLiveAsync(async (scratch, connection, ct) =>
         {
@@ -500,35 +503,58 @@ ANALYZE collect.plan_regression_daily_built;", ct);
                blocks, where a delete with a predicate of its own would read the whole 90,010-row table, and a pass with
                nothing due runs no totals delete at all. */
             var counted = await StartStatementCountAsync(connection, ct);
-            Assert.Equal(1L, await PlanRegressionDaily.GcAsync(connection, Now, ct));
-            if (counted)
+
+            /* The whole window, from the counter's reset to the last cleanup, runs under PgStatementTable: the view is
+               cluster-wide, and an eviction pass from another session between the cleanup and its count takes the one keyed
+               delete's entry (run once, the least-used kind there is), which a run the pass landed in is voided and run again
+               for. A run after one that removed the due day seeds it again, so each run removes one due key as the first did. */
+            var run = await PgStatementTable.RunAsync(connection, ct, async pass =>
             {
-                var (calls, blocks) = await TotalsDeleteStatementsAsync(connection, ct);
-                Assert.True(calls == 1, $"the cleanup ran {calls} totals deletes for one due key");
-                Assert.True(blocks <= 60, $"the cleanup's totals delete touched {blocks} blocks for ten due rows");
-            }
+                await ExecAsync(connection, @"
+INSERT INTO collect.plan_regression_daily_built (server_id, day, built_seq)
+SELECT 9, DATE '2026-03-10', 0
+WHERE NOT EXISTS (SELECT 1 FROM collect.plan_regression_daily_built WHERE server_id = 9 AND day = DATE '2026-03-10');
+INSERT INTO collect.plan_regression_daily (server_id, day, database_name, query_id, plan_id, replica_role, query_plan_hash, execs)
+SELECT 9, DATE '2026-03-10', 'db1', q, 1, NULL, 'h', 1 FROM generate_series(1, 10) AS q
+WHERE NOT EXISTS (SELECT 1 FROM collect.plan_regression_daily WHERE server_id = 9 AND day = DATE '2026-03-10');", ct);
+                if (counted)
+                {
+                    await ResetStatementCountAsync(connection, ct);
+                }
 
-            Assert.Equal(90000L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily", ct));
-            if (counted)
-            {
-                await ExecAsync(connection, "SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)", ct);
-            }
+                Assert.Equal(1L, await PlanRegressionDaily.GcAsync(connection, Now, ct));
+                await pass.BeforeReadAsync(ct);
 
-            Assert.Equal(0L, await PlanRegressionDaily.GcAsync(connection, Now, ct));
-            if (counted)
-            {
-                var (calls, _) = await TotalsDeleteStatementsAsync(connection, ct);
-                Assert.True(calls == 0, $"the cleanup ran {calls} totals deletes when nothing had expired");
-            }
+                if (counted)
+                {
+                    var (calls, blocks) = await TotalsDeleteStatementsAsync(connection, ct);
+                    Assert.True(calls == 1, $"the cleanup ran {calls} totals deletes for one due key");
+                    Assert.True(blocks <= 60, $"the cleanup's totals delete touched {blocks} blocks for ten due rows");
+                }
 
-            Assert.Equal(90000L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily", ct));
+                Assert.Equal(90000L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily", ct));
+                if (counted)
+                {
+                    await ResetStatementCountAsync(connection, ct);
+                }
 
-            /* The live days stay, and an expired day of an enabled server goes with its totals. */
-            await ExecAsync(connection, "INSERT INTO collect.plan_regression_daily_built (server_id, day, built_seq) VALUES (1, DATE '2026-03-03', 0)", ct);
-            await ExecAsync(connection, "INSERT INTO collect.plan_regression_daily (server_id, day, database_name, query_id, plan_id, replica_role, query_plan_hash, execs) VALUES (1, DATE '2026-03-03', 'db1', 1, 1, NULL, 'h', 1)", ct);
-            Assert.Equal(1L, await PlanRegressionDaily.GcAsync(connection, Now, ct));
-            Assert.Equal(90000L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily", ct));
-            Assert.Equal(3L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily_built", ct));
+                Assert.Equal(0L, await PlanRegressionDaily.GcAsync(connection, Now, ct));
+                if (counted)
+                {
+                    var (calls, _) = await TotalsDeleteStatementsAsync(connection, ct);
+                    Assert.True(calls == 0, $"the cleanup ran {calls} totals deletes when nothing had expired");
+                }
+
+                Assert.Equal(90000L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily", ct));
+
+                /* The live days stay, and an expired day of an enabled server goes with its totals. */
+                await ExecAsync(connection, "INSERT INTO collect.plan_regression_daily_built (server_id, day, built_seq) VALUES (1, DATE '2026-03-03', 0)", ct);
+                await ExecAsync(connection, "INSERT INTO collect.plan_regression_daily (server_id, day, database_name, query_id, plan_id, replica_role, query_plan_hash, execs) VALUES (1, DATE '2026-03-03', 'db1', 1, 1, NULL, 'h', 1)", ct);
+                Assert.Equal(1L, await PlanRegressionDaily.GcAsync(connection, Now, ct));
+                Assert.Equal(90000L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily", ct));
+                Assert.Equal(3L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily_built", ct));
+            }, forcePass);
+            PgStatementTable.AssertNoPassInside(run);
         });
     }
 
@@ -543,9 +569,13 @@ ANALYZE collect.plan_regression_daily_built;", ct);
         }
 
         await ExecAsync(connection, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements", ct);
-        await ExecAsync(connection, "SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)", ct);
+        await ResetStatementCountAsync(connection, ct);
         return true;
     }
+
+    /// <summary>Clears the module's counters for this database, so the counts that follow are of the statements run since.</summary>
+    private static Task ResetStatementCountAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        ExecAsync(connection, "SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)", ct);
 
     /// <summary>The calls and the blocks touched (hit plus read) of the statements that delete from the totals table, in this database.</summary>
     private static async Task<(long Calls, long Blocks)> TotalsDeleteStatementsAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -718,4 +748,18 @@ AND   query ~ '^DELETE FROM collect\.plan_regression_daily(\s|$)';", connection)
 
         return string.Empty;
     }
+}
+
+/* pg-cluster-roles, not the parallel own-store shape: the fact fills pg_stat_statements until eviction passes have taken the
+   body's own entries, on purpose, and in the parallel collections those passes take the other sessions' entries run once
+   as well. The collection runs alone, after the parallel collections, so the fill takes nobody else's entries. The body
+   is the one PlanRegressionDailyBuilderLiveTests runs without the forced pass, and it mints its own scratch database. */
+
+/// <summary>The forcing run of <see cref="PlanRegressionDailyBuilderLiveTests"/>'s counting body: an eviction pass between the cleanup and the count, and the count is still of the delete the cleanup ran.</summary>
+[Collection("pg-cluster-roles")]
+public sealed class PlanRegressionDailyBuilderForcedPassLiveTests
+{
+    [Fact]
+    public Task TheGc_ProbesTheTotalsByIndex_NeverScansThem_AndRemovesExpiredDaysWhileLiveDaysStay_WhenAnEvictionPassLandsBetweenItsStatementsAndItsReads_StillReadsTheEntriesItsStatementsMade()
+        => new PlanRegressionDailyBuilderLiveTests().GcProbesTheTotalsAsync(forcePass: true);
 }

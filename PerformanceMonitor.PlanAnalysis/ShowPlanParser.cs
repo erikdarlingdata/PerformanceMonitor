@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
 using System.Xml.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.PlanAnalysis;
 
@@ -40,7 +41,7 @@ public static class ShowPlanParser
         // limit is in characters, not bytes.
         if (xml.Length > MaxParseCharacters)
         {
-            plan.ParseError = $"Plan XML exceeds the supported size limit of {MaxParseCharacters:N0} characters.";
+            plan.ParseError = string.Create(CultureInfo.InvariantCulture, $"Plan XML exceeds the supported size limit of {MaxParseCharacters:N0} characters.");
             return plan;
         }
 
@@ -68,7 +69,7 @@ public static class ShowPlanParser
 
         if (xml.Length > MaxParseCharacters)
         {
-            plan.ParseError = $"Plan XML exceeds the supported size limit of {MaxParseCharacters:N0} characters.";
+            plan.ParseError = string.Create(CultureInfo.InvariantCulture, $"Plan XML exceeds the supported size limit of {MaxParseCharacters:N0} characters.");
             return Task.FromResult(plan);
         }
 
@@ -588,7 +589,8 @@ public static class ShowPlanParser
     {
         stmt.StatementOptmLevel = stmtEl.Attribute("StatementOptmLevel")?.Value;
         stmt.StatementOptmEarlyAbortReason = stmtEl.Attribute("StatementOptmEarlyAbortReason")?.Value;
-        stmt.StatementParameterizationType = (int)ParseDouble(stmtEl.Attribute("StatementParameterizationType")?.Value);
+        var parameterizationType = stmtEl.Attribute("StatementParameterizationType")?.Value;
+        stmt.StatementParameterizationType = parameterizationType is null ? null : (int)ParseDouble(parameterizationType);
         stmt.StatementSqlHandle = stmtEl.Attribute("StatementSqlHandle")?.Value;
         stmt.DatabaseContextSettingsId = ParseLong(stmtEl.Attribute("DatabaseContextSettingsId")?.Value);
         stmt.ParentObjectId = (int)ParseDouble(stmtEl.Attribute("ParentObjectId")?.Value);
@@ -1812,12 +1814,12 @@ public static class ShowPlanParser
             var writes = ParseLong(sortSpillEl.Attribute("WritesToTempDb")?.Value);
             var reads = ParseLong(sortSpillEl.Attribute("ReadsFromTempDb")?.Value);
             var prefix = spillToTempDbEl != null
-                ? $"Sort spill level {spillLevel}, {spillThreads} thread(s)"
+                ? $"Sort spill level {spillLevel}, {spillThreads} {(spillThreads == "1" ? "thread" : "threads")}"
                 : "Sort spill";
             result.Add(new PlanWarning
             {
                 WarningType = "Sort Spill",
-                Message = $"{prefix}. Granted: {granted:N0} KB, Used: {used:N0} KB, Writes: {writes:N0}, Reads: {reads:N0}",
+                Message = string.Create(CultureInfo.InvariantCulture, $"{prefix}. Granted: {granted:N0} KB, Used: {used:N0} KB, Writes: {writes:N0}, Reads: {reads:N0}"),
                 Severity = PlanWarningSeverity.Warning,
                 SpillDetails = new SpillDetail
                 {
@@ -1838,12 +1840,12 @@ public static class ShowPlanParser
             var writes = ParseLong(hashSpillEl.Attribute("WritesToTempDb")?.Value);
             var reads = ParseLong(hashSpillEl.Attribute("ReadsFromTempDb")?.Value);
             var prefix = spillToTempDbEl != null
-                ? $"Hash spill level {spillLevel}, {spillThreads} thread(s)"
+                ? $"Hash spill level {spillLevel}, {spillThreads} {(spillThreads == "1" ? "thread" : "threads")}"
                 : "Hash spill";
             result.Add(new PlanWarning
             {
                 WarningType = "Hash Spill",
-                Message = $"{prefix}. Granted: {granted:N0} KB, Used: {used:N0} KB, Writes: {writes:N0}, Reads: {reads:N0}",
+                Message = string.Create(CultureInfo.InvariantCulture, $"{prefix}. Granted: {granted:N0} KB, Used: {used:N0} KB, Writes: {writes:N0}, Reads: {reads:N0}"),
                 Severity = PlanWarningSeverity.Warning,
                 SpillDetails = new SpillDetail
                 {
@@ -1861,16 +1863,16 @@ public static class ShowPlanParser
             !warningsEl.Elements(Ns + "SortSpillDetails").Any() &&
             !warningsEl.Elements(Ns + "HashSpillDetails").Any())
         {
-            var msg = $"Spill level {spillLevel}, {spillThreads} thread(s)";
+            var msg = $"Spill level {spillLevel}, {spillThreads} {(spillThreads == "1" ? "thread" : "threads")}";
             var grantedKB = ParseLong(spillToTempDbEl.Attribute("GrantedMemoryKB")?.Value);
             var usedKB = ParseLong(spillToTempDbEl.Attribute("UsedMemoryKB")?.Value);
             var writes = ParseLong(spillToTempDbEl.Attribute("WritesToTempDb")?.Value);
             var reads = ParseLong(spillToTempDbEl.Attribute("ReadsFromTempDb")?.Value);
             if (grantedKB > 0 || writes > 0)
             {
-                msg += $". Granted: {grantedKB:N0} KB, Used: {usedKB:N0} KB";
-                if (writes > 0) msg += $", Writes: {writes:N0}";
-                if (reads > 0) msg += $", Reads: {reads:N0}";
+                msg += string.Create(CultureInfo.InvariantCulture, $". Granted: {grantedKB:N0} KB, Used: {usedKB:N0} KB");
+                if (writes > 0) msg += string.Create(CultureInfo.InvariantCulture, $", Writes: {writes:N0}");
+                if (reads > 0) msg += string.Create(CultureInfo.InvariantCulture, $", Reads: {reads:N0}");
             }
             result.Add(new PlanWarning
             {
@@ -1883,15 +1885,16 @@ public static class ShowPlanParser
         // Exchange spill details
         foreach (var exchSpillEl in warningsEl.Elements(Ns + "ExchangeSpillDetails"))
         {
+            var writes = ParseLong(exchSpillEl.Attribute("WritesToTempDb")?.Value);
             result.Add(new PlanWarning
             {
                 WarningType = "Exchange Spill",
-                Message = $"Exchange spill: {ParseLong(exchSpillEl.Attribute("WritesToTempDb")?.Value):N0} writes to TempDB. The parallel exchange operator ran out of memory buffers and spilled rows to disk. This typically means the memory grant was too small for the data volume flowing through this exchange.",
+                Message = $"Exchange spill: {CountText.Plural(writes, "write")} to TempDB. The parallel exchange operator ran out of memory buffers and spilled rows to disk. This typically means the memory grant was too small for the data volume flowing through this exchange.",
                 Severity = PlanWarningSeverity.Warning,
                 SpillDetails = new SpillDetail
                 {
                     SpillType = "Exchange",
-                    WritesToTempDb = ParseLong(exchSpillEl.Attribute("WritesToTempDb")?.Value)
+                    WritesToTempDb = writes
                 }
             });
         }
@@ -1924,7 +1927,7 @@ public static class ShowPlanParser
                 result.Add(new PlanWarning
                 {
                     WarningType = "Memory Grant",
-                    Message = $"{kind}: Granted {grantedMB:N0} MB, Used {usedMB:N0} MB",
+                    Message = string.Create(CultureInfo.InvariantCulture, $"{kind}: Granted {grantedMB:N0} MB, Used {usedMB:N0} MB"),
                     Severity = PlanWarningSeverity.Warning
                 });
             }

@@ -911,7 +911,8 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
         _zoomLevel = Math.Max(MinZoom, Math.Min(MaxZoom, level));
         ZoomTransform.ScaleX = _zoomLevel;
         ZoomTransform.ScaleY = _zoomLevel;
-        ZoomLevelText.Text = $"{(int)(_zoomLevel * 100)}%";
+        // The nearest whole percent (#8491): three Zoom Out steps from 100% land on 0.5499..., which reads 55%, not the truncated 54%.
+        ZoomLevelText.Text = $"{Math.Round(_zoomLevel * 100, MidpointRounding.AwayFromZero)}%";
     }
 
     private void GraphScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)

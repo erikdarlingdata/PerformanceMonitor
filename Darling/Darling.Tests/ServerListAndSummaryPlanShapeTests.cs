@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -45,11 +46,14 @@ namespace Darling.Tests;
 public sealed class ServerListAndSummaryPlanShapeTests
 {
     private const int CollectingServerId = -397_601;
-    private static readonly int[] s_serverIds = { CollectingServerId };
+    /// <summary>#8464: a server whose every collector attempt fails. It has no SUCCESS row, so its descent can never stop early; what is
+    /// pinned for it is that the descent fetches and rejects no row.</summary>
+    private const int AllFailedServerId = -397_602;
+    private static readonly int[] s_serverIds = { CollectingServerId, AllFailedServerId };
 
     /// <summary>The pre-#3976 shape, kept here as the row-correctness oracle for all three reads (they all
-    /// answered this same MAX per server before this fix).</summary>
-    private const string OldSummaryLastCollectionSql = "SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
+    /// answered this same MAX per server before this fix), over the SUCCESS rows the shipped reads count (#8464).</summary>
+    private const string OldSummaryLastCollectionSql = "SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1 AND status = 'SUCCESS'";
 
     [Fact]
     public async Task TheShippedReads_TouchFarFewerChunks_AndReturnTheSameNewestCollection_AgainstDevPostgres()
@@ -83,13 +87,16 @@ public sealed class ServerListAndSummaryPlanShapeTests
         {
             await DeleteSentinelsAsync(connection, ct);
             var now = TruncateToSeconds(DateTime.UtcNow);
-            await ExecAsync(connection, ct,
-                "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date) VALUES ($1, $2, $2, TRUE, 3, 16, 'sqlserver', $3, $3)",
-                CollectingServerId, "server3976-a", now.AddDays(-9));
-            /* #6454: list_servers lists a registered server only while its definition exists. */
-            await ExecAsync(connection, ct,
-                "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, TRUE) ON CONFLICT (server_id) DO NOTHING",
-                CollectingServerId, "server3976-a");
+            foreach (var (id, name) in new[] { (CollectingServerId, "server3976-a"), (AllFailedServerId, "server3976-b") })
+            {
+                await ExecAsync(connection, ct,
+                    "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date) VALUES ($1, $2, $2, TRUE, 3, 16, 'sqlserver', $3, $3)",
+                    id, name, now.AddDays(-9));
+                /* #6454: list_servers lists a registered server only while its definition exists. */
+                await ExecAsync(connection, ct,
+                    "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, TRUE) ON CONFLICT (server_id) DO NOTHING",
+                    id, name);
+            }
 
             /* A week of daily history at production-like density (a real store's collectors write hundreds of
                rows a day per server), so the planner's cost model has the same incentive it has in the field
@@ -98,10 +105,15 @@ public sealed class ServerListAndSummaryPlanShapeTests
             for (var day = 8; day >= 1; day--)
             {
                 await InsertCollectionLogBatchAsync(connection, ct, CollectingServerId, now.AddDays(-day), 200);
+                await InsertCollectionLogBatchAsync(connection, ct, AllFailedServerId, now.AddDays(-day), 200, "PERMISSIONS");
             }
 
             var newest = now.AddMinutes(-1);
             await InsertCollectionLogAsync(connection, ct, CollectingServerId, newest);
+            /* #8464: a PERMISSIONS attempt and an ERROR attempt newer than the newest SUCCESS. Every read must still answer the SUCCESS time. */
+            await InsertCollectionLogAsync(connection, ct, CollectingServerId, now.AddSeconds(-30), "PERMISSIONS");
+            await InsertCollectionLogAsync(connection, ct, CollectingServerId, now.AddSeconds(-20), "ERROR");
+            await InsertCollectionLogAsync(connection, ct, AllFailedServerId, now.AddSeconds(-20), "ERROR");
 
             using (var analyze = new NpgsqlCommand("ANALYZE collect.collection_log", connection))
             {
@@ -123,6 +135,16 @@ public sealed class ServerListAndSummaryPlanShapeTests
             var row = Assert.Single(rows, r => r.ServerId == CollectingServerId);
             Assert.Equal(DarlingMcpTestData.Naive(newest), row.LastCollection);
             Assert.Equal(oracleRow, row.LastCollection);
+            Assert.Null(Assert.Single(rows, r => r.ServerId == AllFailedServerId).LastCollection);
+
+            /* #8464: the all-failed server's descent has no row to stop at, so what is pinned is the access path: the newest chunk's probe reads
+               idx_collection_log_status_time with status in its Index Cond, an index probe that finds nothing, where the time-keyed index fetches
+               every one of the server's rows from the heap and rejects each. The planner chooses per chunk from its estimates, and on this seed
+               (400 rows a chunk, half of every row SUCCESS) it takes the status-keyed index on the newest chunks and the time-only index on the
+               older ones; the newest chunk is the one every live server's descent opens first. */
+            const string AllFailedProbe = "SELECT cl.collection_time FROM v_collection_log cl WHERE cl.server_id = $1 AND " + CollectionRunSql.SuccessfulCollectorRun + " ORDER BY cl.collection_time DESC LIMIT 1";
+            var allFailedPlan = await ExplainAsync(connection, "EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF, SUMMARY OFF) " + AllFailedProbe, [AllFailedServerId], ct);
+            Assert.Matches(@"Index Cond: \(\(server_id = '-397602'::integer\) AND \(status = 'SUCCESS'::text\)\)", allFailedPlan);
 
             if (timescaleEnabled)
             {
@@ -132,8 +154,9 @@ public sealed class ServerListAndSummaryPlanShapeTests
                    varies run to run and is not this test's to control. This is ServerListSql's own LATERAL
                    body (asserted below, ignoring formatting), parameterized, so it proves the identical
                    per-server mechanism without that noise. */
-                /* #5735: the probe carries the skipped-slots exclusion the shipped read now has. */
-                const string LateralProbe = "SELECT cl.collection_time FROM v_collection_log cl WHERE cl.server_id = $1 AND " + CollectionCycleRow.NotCycleRowSql + " ORDER BY cl.collection_time DESC LIMIT 1";
+                /* #5735, #8464: the probe carries the predicate the shipped read has, the successful-collector-run filter, which
+                   leaves out failed attempts as well as the skipped-slots and analysis-pass rows. */
+                const string LateralProbe = "SELECT cl.collection_time FROM v_collection_log cl WHERE cl.server_id = $1 AND " + CollectionRunSql.SuccessfulCollectorRun + " ORDER BY cl.collection_time DESC LIMIT 1";
                 var flattenedServerListSql = Regex.Replace(DarlingDataReader.ServerListSql, @"\s+", " ");
                 Assert.Contains(
                     LateralProbe.Replace("cl.server_id = $1", "cl.server_id = s.server_id", StringComparison.Ordinal),
@@ -193,20 +216,20 @@ public sealed class ServerListAndSummaryPlanShapeTests
         return result is null || result == DBNull.Value ? null : Convert.ToDateTime(result);
     }
 
-    private static Task InsertCollectionLogAsync(NpgsqlConnection connection, CancellationToken ct, int id, DateTime at) =>
+    private static Task InsertCollectionLogAsync(NpgsqlConnection connection, CancellationToken ct, int id, DateTime at, string status = "SUCCESS") =>
         ExecAsync(connection, ct,
-            "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status) VALUES ($1, $2, 'server3976', 'wait_stats', $3, 'SUCCESS')",
-            CollectionIdGenerator.Next(), id, at);
+            "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status) VALUES ($1, $2, 'server3976', 'wait_stats', $3, $4)",
+            CollectionIdGenerator.Next(), id, at, status);
 
     /// <summary>Production-like density: <paramref name="rowCount"/> rows spread across the day ending at
     /// <paramref name="dayEnd"/>, one set-based INSERT with a unique log_id per row.</summary>
-    private static Task InsertCollectionLogBatchAsync(NpgsqlConnection connection, CancellationToken ct, int id, DateTime dayEnd, int rowCount) =>
+    private static Task InsertCollectionLogBatchAsync(NpgsqlConnection connection, CancellationToken ct, int id, DateTime dayEnd, int rowCount, string status = "SUCCESS") =>
         ExecAsync(connection, ct, """
             INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status)
-            SELECT 9_397_601_000_000 + (extract(epoch from $2::timestamp)::bigint * 1000) + row_number() OVER (),
-                   $1, 'server3976', 'wait_stats', t, 'SUCCESS'
+            SELECT 9_397_601_000_000 + (extract(epoch from $2::timestamp)::bigint * 1000) + row_number() OVER () + (CASE WHEN $1 = -397602 THEN 500 ELSE 0 END),
+                   $1, 'server3976', 'wait_stats', t, $4
             FROM generate_series($2::timestamp - interval '1 day', $2::timestamp, interval '1 day' / $3) AS t
-            """, id, dayEnd, rowCount);
+            """, id, dayEnd, rowCount, status);
 
     private static async Task ExecAsync(NpgsqlConnection connection, CancellationToken ct, string sql, params object[] args)
     {

@@ -89,9 +89,20 @@ public static partial class DarlingWebEndpoints
 
             using var run = new WebRouteRun(readLatencyRecorder, CatalogRoute, ReadWindowBand.None, context, readScope.Scope);
             var serverName = context.Request.Query["server"].ToString();
-            if (DarlingWebSeat.FromContext(context).AllowedTagIds is { } catalogTags &&
-                !string.IsNullOrWhiteSpace(serverName))
+            if (DarlingWebSeat.FromContext(context).AllowedTagIds is { } catalogTags)
             {
+                if (string.IsNullOrWhiteSpace(serverName))
+                {
+                    /* The fleet form for a scoped reader keeps the fleet-wide overrides (the cadence every server shares) and the grant's
+                       own servers' overrides, and drops every other server's row before the node is built, so nothing in the answer is
+                       derived from a server the reader may not see. */
+                    var permitted = await AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
+                    var fleetSchedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, null, context.RequestAborted);
+                    var grantSchedules = fleetSchedules.Where(schedule => schedule.ServerId is null || Array.IndexOf(permitted, schedule.ServerId.Value) >= 0).ToList();
+                    run.Complete(ReadOutcome.Ok);
+                    return JsonNodeResult(BuildCatalogNode(null, grantSchedules));
+                }
+
                 var authorizedId = await AuthorizedWebServerAsync(postgres, context, catalogTags);
                 if (authorizedId is null)
                 {
@@ -135,6 +146,8 @@ public static partial class DarlingWebEndpoints
         app.MapGet("/api/views/{id:long}", async (HttpContext context, long id) =>
         {
             var result = await store.GetAsync(id, DarlingWebSeat.FromContext(context).OwnerKey, context.RequestAborted);
+            /* A scoped seat never reaches this route: the host's gate answers 403 to every path outside SupportsScopedRead. The
+               personal-view check below is defence in depth for that seat. */
             return result is CustomViewResult.Ok ok &&
                 !(DarlingWebSeat.FromContext(context).AllowedTagIds is not null && ok.View!.Personal)
                 ? JsonNodeResult(BuildFullViewNode(ok.View!))

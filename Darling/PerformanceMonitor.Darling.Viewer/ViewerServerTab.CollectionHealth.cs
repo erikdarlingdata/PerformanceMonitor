@@ -550,7 +550,7 @@ public partial class ViewerServerTab
 
             var tables = root.TryGetProperty("tablesPurged", out var t) && t.TryGetInt32(out var ti) ? ti : 0;
             var rows = root.TryGetProperty("rowsPurged", out var r) && r.TryGetInt32(out var ri) ? ri : 0;
-            return $"Purged {rows:N0} row(s)/chunk(s) across {tables:N0} table(s)";
+            return $"Purged {CountText.Plural(rows, "row/chunk", "rows/chunks")} across {CountText.Plural(tables, "table")}";
         }
         catch (JsonException)
         {

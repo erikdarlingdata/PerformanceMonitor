@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json.Nodes;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -229,7 +230,7 @@ internal static class FleetSweepsRows
         var faults = Objects(lv["server_read_faults"]).ToList();
         if (faults.Count > 0)
         {
-            lines.Add(faults.Count + " server read fault(s): " + string.Join("; ", faults.Select(f => $"{Str(f, "server")} ({Str(f, "error")})")));
+            lines.Add(CountText.Plural(faults.Count, "server read fault") + ": " + string.Join("; ", faults.Select(f => $"{Str(f, "server")} ({Str(f, "error")})")));
         }
 
         foreach (var note in lv["notes"] is JsonArray notes ? notes : new JsonArray())

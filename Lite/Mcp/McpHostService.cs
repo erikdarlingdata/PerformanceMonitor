@@ -226,9 +226,9 @@ public sealed class McpHostService : BackgroundService
     {
         /* #6066: Lite's pseudonym key (Credential Manager), for the data-detail filter and the brief composer at metadataOnly. None: logins are numbered per answer. */
         if (pseudonymKeys is not null) services.AddSingleton<IPseudonymKeySource>(pseudonymKeys);
-        /* #5820: the four investigation tools are served only with mcp_allow_investigations on AND the writes off
-           (McpInvestigationPolicy). Registered BEFORE the write policy so its instructions census (built there) counts
-           only the tools this start offers. */
+        /* #5820, #8461: the tools that claim and report on investigation requests are served only with mcp_allow_investigations on
+           AND the writes off (McpInvestigationPolicy); the two investigation reads are ordinary reads. Registered BEFORE the write
+           policy so its instructions census (built there) counts only the tools this start offers. */
         services.AddMcpInvestigationPolicy(McpInvestigationPolicy.Served(allowInvestigations, allowWrites));
 
         /* #5820: mcp_data_detail, read once per start. McpDataDetailFilter (AddCallToolFilters) reads this singleton on
@@ -324,10 +324,12 @@ public sealed class McpHostService : BackgroundService
     }
 
     /// <summary>Makes <paramref name="newToken"/> the token every request must carry, from the next request on; the old one is refused
-    /// at once. False (nothing changes) when this host serves without a token or the new token is empty.</summary>
+    /// at once. False (nothing changes) when this host serves without a token or the new token is not usable
+    /// (<see cref="McpTokenStore.IsUsableToken"/>): what a start serves was decided against a usable token, and a weaker
+    /// one must never take its place in front of the write or investigation tools.</summary>
     internal bool ReplaceToken(string newToken)
     {
-        if (_serving.Token is null || string.IsNullOrEmpty(newToken))
+        if (_serving.Token is null || !McpTokenStore.IsUsableToken(newToken))
         {
             return false;
         }

@@ -300,8 +300,8 @@ export const ROUTE_RENDERERS = {
  * that card's last-fetched payload instead of re-fetching (the profile it reports changes rarely — a hardware
  * or version change, never per-tick). Every other renderX() call below still ignores it.
  */
-const scopedRoutes = new Set(["fleet", "server", "alerts", "views", "view", "notebook", "sweeps", "finops", "jobHistory", "investigations"]);
-const scopedNav = new Set(["fleet", "alerts", "views", "sweeps", "finops", "job-history", "investigations"]);
+const scopedRoutes = new Set(["fleet", "server", "alerts", "sweeps", "finops", "jobHistory", "investigations"]);
+const scopedNav = new Set(["fleet", "alerts", "sweeps", "finops", "job-history", "investigations"]);
 
 function route(opts) {
   /* The session-expired takeover owns the DOM from the moment it fires until the operator signs in again —
@@ -464,6 +464,7 @@ async function refreshAgNav() {
    reports can_edit. Kept fresh on the 60s poll even while the composer is open. */
 async function refreshViewList() {
   if (!viewList) return;
+  if (peekSession()?.scoped) return;
   const [session, res] = await Promise.all([getSession(), listViews()]);
   if (isSessionExpired()) return; // the session ended while the list was in flight: keep nothing of it
   /* #7929: a failed read keeps the last good list and the paint says so; only an answered list replaces it. */
@@ -514,7 +515,7 @@ const ACCESS_HOVER = {
 function seatLabel(session) {
   if (!session) return null;
   if (session.probe_failed) return { text: "Access: not connected", title: ACCESS_HOVER.none };
-  if (session.scoped) return { text: "Access: scoped read-only", title: "Monitoring data is limited to this token’s permitted server tags." };
+  if (session.scoped) return { text: "Access: scoped read-only", title: "Monitoring data is limited to this token's permitted server tags." };
   return session.can_edit ? { text: "Access: read-write", title: ACCESS_HOVER.write } : { text: "Access: read-only", title: ACCESS_HOVER.read };
 }
 

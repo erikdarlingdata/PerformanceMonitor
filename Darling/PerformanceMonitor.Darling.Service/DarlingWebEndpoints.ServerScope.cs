@@ -141,7 +141,6 @@ public static partial class DarlingWebEndpoints
         "/api/read/get_plan_cache_bloat",
         "/api/read/get_running_jobs",
         "/api/read/get_agent_alerts",
-        "/api/read/get_job_history",
         "/api/read/get_plan_xml",
         "/api/read/get_query_store_plan_xml",
         "/api/read/get_procedure_plan_xml",
@@ -160,7 +159,6 @@ public static partial class DarlingWebEndpoints
         "/api/read/get_health_parser_significant_waits",
         "/api/read/get_health_parser_system_health",
         "/api/read/get_change_watches",
-        "/api/read/get_known_patterns",
         "/api/read/get_finops_recommendations",
         "/api/read/get_finops",
         "/api/read/get_alert_details",
@@ -171,7 +169,7 @@ public static partial class DarlingWebEndpoints
     internal static bool IsScopedFleetRead(string name) =>
         name is "list_servers" or "get_alert_history" or "get_fleet_overview" or "get_query_fleet_summary"
             or "get_finops_inventory" or "list_investigation_requests" or "get_investigation_reports" or "get_sweep_reports"
-            or "get_alert_settings" or "list_query_tags" or "get_job_history";
+            or "list_query_tags" or "get_job_history";
 
     internal static bool SupportsScopedRead(PathString path) =>
         SupportsScopedServerRead(path) ||
@@ -181,7 +179,6 @@ public static partial class DarlingWebEndpoints
         path.Equals("/api/catalog", StringComparison.OrdinalIgnoreCase) ||
         path.Equals("/api/agent-changes", StringComparison.OrdinalIgnoreCase) ||
         path.Equals("/api/compose/run", StringComparison.OrdinalIgnoreCase) ||
-        path.StartsWithSegments("/api/views", StringComparison.OrdinalIgnoreCase) ||
         path.StartsWithSegments("/api/sweeps", StringComparison.OrdinalIgnoreCase);
 
     internal static bool SupportsScopedServerRead(PathString path) =>
@@ -191,15 +188,8 @@ public static partial class DarlingWebEndpoints
     internal static async Task<int[]> AllowedWebServerIdsAsync(
         NpgsqlDataSource postgres, HttpContext context, System.Threading.CancellationToken cancellationToken)
     {
-        var seat=PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat.FromContext(context);
-        if(!seat.ScopeAllServers)
-            return await AllowedWebServerIdsAsync(postgres,seat.AllowedTagIds ?? Array.Empty<int>(),cancellationToken);
-        await using var command=postgres.CreateCommand("SELECT server_id FROM collect.servers");
-        command.CommandTimeout=McpCommandDeadlines.ReadSeconds;
-        var ids=new List<int>();
-        await using var reader=await command.ExecuteReaderAsync(cancellationToken);
-        while(await reader.ReadAsync(cancellationToken)) ids.Add(reader.GetInt32(0));
-        return ids.ToArray();
+        var seat = PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat.FromContext(context);
+        return await AllowedWebServerIdsAsync(postgres, seat.AllowedTagIds ?? Array.Empty<int>(), cancellationToken);
     }
 
     internal static async Task<int[]> AllowedWebServerIdsAsync(
@@ -230,7 +220,7 @@ public static partial class DarlingWebEndpoints
     }
 
     internal static async Task<int?> AuthorizedWebServerAsync(
-        NpgsqlDataSource postgres, HttpContext context, IReadOnlyList<int> allowedTagIds)
+        NpgsqlDataSource postgres, HttpContext context, IReadOnlyList<int> allowedTagIds, int[]? allowedServerIds = null)
     {
         var query = context.Request.Query;
         // Refuse ambiguous or missing selectors instead of letting the tool choose a server.
@@ -242,7 +232,7 @@ public static partial class DarlingWebEndpoints
                 return null;
             }
 
-            var ids = await AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
+            var ids = allowedServerIds ?? await AllowedWebServerIdsAsync(postgres, allowedTagIds, context.RequestAborted);
             return Array.IndexOf(ids, id) >= 0 ? id : null;
         }
 
@@ -256,34 +246,32 @@ public static partial class DarlingWebEndpoints
             return null;
         }
 
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(
-            postgres, Server(context), context.RequestAborted);
+        var serverIds = allowedServerIds ?? await AllowedWebServerIdsAsync(postgres, allowedTagIds, context.RequestAborted);
+        var (resolved, error) = await DarlingServerResolver.ReadWebScopeAsync(serverIds, allowedTagIds,
+            () => DarlingServerResolver.ResolveOrErrorAsync(postgres, Server(context), context.RequestAborted));
         if (error is not null)
         {
             return null;
         }
 
-        if(PerformanceMonitor.Darling.Service.Hosting.DarlingWebSeat.FromContext(context).ScopeAllServers)
-            return resolved.ServerId;
+        /* From here the request names the server by its canonical server_name, so a read's own resolution is an exact match inside
+           the grant and the resolver's pinned id is a second check rather than the only one. */
+        var canonical = new List<KeyValuePair<string, string?>>();
+        foreach (var pair in query)
+        {
+            if (string.Equals(pair.Key, "server", StringComparison.OrdinalIgnoreCase) || string.Equals(pair.Key, "server_name", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
 
-        // One statement sees the tree and its assignments in the same PostgreSQL snapshot.
-        await using var command = postgres.CreateCommand("""
-            WITH RECURSIVE allowed_tags(id) AS (
-                SELECT id FROM config.server_tags WHERE id = ANY($1)
-                UNION
-                SELECT child.id FROM config.server_tags child
-                JOIN allowed_tags parent ON child.parent_id = parent.id
-            )
-            SELECT EXISTS (
-                SELECT 1 FROM config.server_tag_map assignment
-                JOIN allowed_tags tag ON tag.id = assignment.tag_id
-                WHERE assignment.server_id = $2
-            )
-            """);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer,
-            System.Linq.Enumerable.ToArray(allowedTagIds));
-        command.Parameters.AddWithValue(resolved.ServerId);
-        return (bool)(await command.ExecuteScalarAsync(context.RequestAborted))! ? resolved.ServerId : null;
+            foreach (var value in pair.Value)
+            {
+                canonical.Add(new KeyValuePair<string, string?>(pair.Key, value));
+            }
+        }
+
+        canonical.Add(new KeyValuePair<string, string?>("server", resolved.ServerName));
+        context.Request.QueryString = QueryString.Create(canonical);
+        return resolved.ServerId;
     }
 }

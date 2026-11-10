@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -191,7 +192,7 @@ public static class DarlingPgLoggingAudit
         var rdsParameters = byName.Keys.Count(n => n.StartsWith("rds.", StringComparison.Ordinal));
         var managed = rdsParameters > 0;
         var hostingEvidence = managed
-            ? $"{rdsParameters} rds.* parameter(s) in the snapshot, which only RDS and Aurora carry - remedies are "
+            ? $"{CountText.Plural(rdsParameters, "rds.* parameter")} in the snapshot, which only RDS and Aurora carry - remedies are "
               + "worded for a parameter group, where ALTER SYSTEM is refused."
             : "no rds.* parameter in the snapshot, so this is not RDS or Aurora - remedies are worded as ALTER "
               + "SYSTEM plus a reload. If this server IS managed by a provider that hides its own parameters, "

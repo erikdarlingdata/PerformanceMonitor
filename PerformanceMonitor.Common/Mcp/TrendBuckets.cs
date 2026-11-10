@@ -286,7 +286,7 @@ internal static class TrendBuckets
             var across = seriesCount > 1 ? $" across {seriesCount} series" : string.Empty;
             return McpHelpers.Refusal(
                 "bucket_minutes",
-                $"bucket_minutes {width} over {hoursBack} hour(s){across} is up to {points.ToString(CultureInfo.InvariantCulture)} points, over this read's {budget.MaxPoints.ToString(CultureInfo.InvariantCulture)}-point cap. Use bucket_minutes {fits} or wider, or narrow hours_back (as_of moves the window) for finer points.");
+                $"bucket_minutes {width} over {CountText.Plural(hoursBack, "hour")}{across} is up to {points.ToString(CultureInfo.InvariantCulture)} points, over this read's {budget.MaxPoints.ToString(CultureInfo.InvariantCulture)}-point cap. Use bucket_minutes {fits} or wider, or narrow hours_back (as_of moves the window) for finer points.");
         }
 
         return null;
@@ -297,7 +297,7 @@ internal static class TrendBuckets
     private static string WidestOverCapRefusal(int hoursBack, int windowMinutes, int seriesCount, TrendBudget budget, string narrowHint) =>
         McpHelpers.Refusal(
             "hours_back",
-            $"{hoursBack} hour(s) across {seriesCount} series is up to {PointsFor(windowMinutes, MaxBucketMinutes, seriesCount).ToString(CultureInfo.InvariantCulture)} points even at the widest bucket ({MaxBucketMinutes} minutes), over this read's {budget.MaxPoints.ToString(CultureInfo.InvariantCulture)}-point cap, so no bucket_minutes can serve it. {narrowHint}");
+            $"{CountText.Plural(hoursBack, "hour")} across {seriesCount} series is up to {PointsFor(windowMinutes, MaxBucketMinutes, seriesCount).ToString(CultureInfo.InvariantCulture)} points even at the widest bucket ({MaxBucketMinutes} minutes), over this read's {budget.MaxPoints.ToString(CultureInfo.InvariantCulture)}-point cap, so no bucket_minutes can serve it. {narrowHint}");
 
     /// <summary>The points an automatic width serves when it could not meet the auto target (the widest bucket still holds more
     /// than <paramref name="autoTarget"/>), else null (#7877). The payload names the miss instead of claiming the target.</summary>
@@ -381,7 +381,7 @@ internal static class TrendBuckets
     /// </summary>
     public static string AggregateNote(int bucketMinutes, bool requested, int budgetPoints) =>
         $"Each point summarizes the collections in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start (the first point at the window's start). "
-        + "Counts are summed across the bucket, and rates and ratios are recomputed from those sums over the seconds the collections covered — never averaged from per-collection values — so a bucket the window cuts short holds smaller counts but a true rate. "
+        + "Counts are summed across the bucket, and rates and ratios are recomputed from those sums over the seconds the collections covered, never averaged from per-collection values, so a bucket the window cuts short holds smaller counts but a true rate. "
         + "peak_* and worst_* are the single most extreme collection inside the bucket, so a spike survives the rollup. "
         + Sizing(requested, budgetPoints);
 

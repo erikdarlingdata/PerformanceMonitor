@@ -23,6 +23,7 @@ namespace Darling.Tests;
 /// #6384: the Collection Health tab's Sweep Pressure sub-tab. The real SQL Server tab is built on the shared STA thread and given a
 /// report, so a panel whose controls the XAML does not name, or whose grids stay empty for a report that has rows, fails here.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerSweepPressurePanelTests
 {
     private static SweepPressureReport Report(params HeaviestCollectorRow[] heaviest) =>

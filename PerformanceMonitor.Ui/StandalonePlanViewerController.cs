@@ -64,6 +64,11 @@ public sealed class StandalonePlanViewerController
        the awaited read completes and the finally clears the flag independently of the tab-control lifecycle. */
     private bool _pasteInProgress;
 
+    /// <summary>Shows a notice to the user. Defaults to
+    /// <see cref="MessageBox.Show(string, string, MessageBoxButton, MessageBoxImage)"/>; a test swaps it to record what
+    /// the controller tells the user without a modal dialog.</summary>
+    internal Func<string, string, MessageBoxButton, MessageBoxImage, MessageBoxResult> ShowNotice { get; set; } = MessageBox.Show;
+
     public StandalonePlanViewerController(TabControl planTabControl)
     {
         _planTabControl = planTabControl ?? throw new ArgumentNullException(nameof(planTabControl));
@@ -327,8 +332,7 @@ public sealed class StandalonePlanViewerController
                 var (ok, xml) = await ClipboardText.TryReadAsync();
                 if (!ok)
                 {
-                    MessageBox.Show("Couldn't read the clipboard. It may be in use by another app. Try again.",
-                        "Paste Plan XML", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    ShowClipboardUnavailable();
                     return;
                 }
                 if (!string.IsNullOrWhiteSpace(xml))
@@ -405,7 +409,7 @@ public sealed class StandalonePlanViewerController
         emptyState!.Visibility = Visibility.Collapsed;
         viewer.Visibility = Visibility.Visible;
 
-        var uniqueLabel = GetUniqueSubTabLabel(label);
+        var uniqueLabel = GetUniqueSubTabLabel(label, subTab);
         if (subTab.Header is StackPanel headerPanel &&
             headerPanel.Children[0] is TextBlock headerLabel)
         {
@@ -415,15 +419,18 @@ public sealed class StandalonePlanViewerController
     }
 
     /// <summary>
-    /// Returns a label that is unique among current inner plan sub-tab headers.
+    /// Returns a label that is unique among the other inner plan sub-tab headers.
     /// If <paramref name="baseLabel"/> is already taken, appends " (1)", " (2)", \u2026
+    /// <paramref name="labelled"/> is the sub-tab the label is for, so its own current label does not count as
+    /// taken: a plan loaded into a tab that already holds one replaces it, and the tab keeps the plain label.
     /// </summary>
-    private string GetUniqueSubTabLabel(string baseLabel)
+    private string GetUniqueSubTabLabel(string baseLabel, TabItem? labelled = null)
     {
         var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var item in _planTabControl.Items)
         {
             if (item is TabItem { Tag: string t } && t == PlanAddTabId) continue;
+            if (ReferenceEquals(item, labelled)) continue;
             if (item is TabItem subTab &&
                 subTab.Header is StackPanel sp &&
                 sp.Children[0] is TextBlock tb)
@@ -504,23 +511,42 @@ public sealed class StandalonePlanViewerController
             // Claim the paste gesture during event routing, before the async read yields on the retry path
             // (#2837): setting e.Handled after the await would let the key event finish routing unsuppressed.
             e.Handled = true;
-            // Re-entrancy guard (#2870): the async retry window yields the UI thread, so a HELD Ctrl+V
-            // (OS key-repeat) could otherwise put several reads in flight at once and each would LoadPlan a
-            // tab. Drop repeats while a paste runs; the key stays claimed above so it can't fall through.
-            if (_pasteInProgress) return;
-            _pasteInProgress = true;
-            try
-            {
-                var (ok, xml) = await ClipboardText.TryReadAsync();
-                if (ok && !string.IsNullOrWhiteSpace(xml) && !CallerPlanXmlPrompt.Refuse(xml))
-                {
-                    // Await so the guard spans the off-thread parse, not just the clipboard read (#2870).
-                    await LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");
-                }
-            }
-            finally { _pasteInProgress = false; }
+            await PasteIntoActivePlanSubTabAsync();
         }
     }
+
+    /// <summary>The Ctrl+V gesture's body: reads the clipboard and loads its text into the active sub-tab. Internal so
+    /// a test can drive the gesture without a keyboard. Re-entrancy guard (#2870): the async retry window yields the
+    /// UI thread, so a HELD Ctrl+V (OS key-repeat) could otherwise put several reads in flight at once and each would
+    /// LoadPlan a tab. Repeats are dropped while a paste runs; the handler has already claimed the key, so a dropped
+    /// repeat can't fall through.</summary>
+    internal async Task PasteIntoActivePlanSubTabAsync()
+    {
+        if (_pasteInProgress) return;
+        _pasteInProgress = true;
+        try
+        {
+            var (ok, xml) = await ClipboardText.TryReadAsync();
+            if (!ok)
+            {
+                ShowClipboardUnavailable();
+                return;
+            }
+            if (!string.IsNullOrWhiteSpace(xml) && !CallerPlanXmlPrompt.Refuse(xml))
+            {
+                // Await so the guard spans the off-thread parse, not just the clipboard read (#2870).
+                await LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");
+            }
+        }
+        finally { _pasteInProgress = false; }
+    }
+
+    /// <summary>The notice both paste entry points, the Paste XML button and Ctrl+V, give when the clipboard cannot be
+    /// opened within the retry budget: another app holds it (a clipboard manager, Office, a browser or an RDP session),
+    /// so the read is worth trying again.</summary>
+    private void ShowClipboardUnavailable() =>
+        ShowNotice("Couldn't read the clipboard. It may be in use by another app. Try again.",
+            "Paste Plan XML", MessageBoxButton.OK, MessageBoxImage.Warning);
 
     private void LoadPlanFromFileIntoActiveTab(string path)
     {

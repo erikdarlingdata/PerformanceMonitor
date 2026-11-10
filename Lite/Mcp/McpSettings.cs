@@ -57,7 +57,8 @@ internal sealed class McpSettings
     public bool AllowWrites { get; set; } = false;
 
     /// <summary>
-    /// Whether the four investigation tools (<see cref="McpInvestigationPolicy.InvestigationTools"/>, #5820) are
+    /// Whether the state-changing investigation tools (<see cref="McpInvestigationPolicy.InvestigationTools"/>, #5820; the two
+    /// investigation reads are ordinary reads, #8461) are
     /// offered. Default OFF. Read from <c>mcp_allow_investigations</c> (<see cref="McpInvestigationPolicy.InvestigationsSetting"/>)
     /// at start, like <c>mcp_allow_writes</c>. They are served only when this is on AND <see cref="AllowWrites"/> is
     /// off (<see cref="McpInvestigationPolicy.Served"/>): they also need a token, so with mcp_allow_tokenless_loopback on they are not served, and the mute
@@ -67,8 +68,10 @@ internal sealed class McpSettings
 
     /// <summary>
     /// Default OFF: once the MCP server is on, every request needs the token (<see cref="McpTokenStore"/>), like Darling's.
-    /// On, the server answers local clients without one, as earlier builds did, but serves the read tools only: the write and
-    /// investigation tools need a token. Import Settings never brings this value in from another folder. Read from <c>mcp_allow_tokenless_loopback</c>
+    /// On, the stored token is not read: there is no gate, the server answers local clients without a token, as earlier builds
+    /// did, and serves the read tools only, because the write and investigation tools need a token the gate compares against.
+    /// This differs from Darling, whose <c>mcp.allowTokenlessLoopback</c> applies only when no token is configured and leaves a
+    /// configured token gating every request. Import Settings never brings this value in from another folder. Read from <c>mcp_allow_tokenless_loopback</c>
     /// (<see cref="AllowTokenlessLoopbackSetting"/>) at start, so a change needs a restart. File setting only, no Settings window control.
     /// </summary>
     public bool AllowTokenlessLoopback { get; set; } = false;

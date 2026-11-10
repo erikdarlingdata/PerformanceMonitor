@@ -657,7 +657,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                     DarlingMcpWritePolicy.ServerAdminSetting);
             }
 
-            /* #5632 Phase A, ruling R2: the investigation tools (claim_investigation_request, submit_investigation_report)
+            /* #5632 Phase A, ruling R2: the investigation tools (DarlingMcpWritePolicy.InvestigationTools:
+               claim_investigation_request, post_investigation_message and submit_investigation_report)
                write only investigation state and need the same token gate as the writes, but never WITH the writes: one
                token cannot tell an agent from a person. Both settings on: they stay off and this one Critical line says
                why. The token gate (requireTokenWhenLoopbackOnly) and the wrong-token throttle (DarlingSignInThrottle) in

@@ -629,14 +629,15 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// Hourly procedure-stats buckets for the Top-Procedures slicer — Lite's
-    /// <c>GetProcStatsSlicerDataAsync</c> ported (same bucket shape as the query-stats slicer, so it
-    /// shares <see cref="ReadQueryStatsSlicerAsync"/>). The distinct-count is over object_name.
+    /// Procedure-stats buckets for the Top-Procedures slicer — Lite's <c>GetProcStatsSlicerDataAsync</c> ported (same
+    /// bucket shape as the query-stats slicer, so it shares <see cref="ReadQueryStatsSlicerAsync"/>), at the width
+    /// <see cref="SlicerBuckets"/> picks for the window ($5 minutes, on the grid every width of it divides: a minute over a
+    /// short window, an hour over a day). The distinct-count is over object_name.
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
-    public const string ProcStatsSlicerSql = """
+    public const string ProcStatsSlicerSql = $"""
         SELECT
-            date_trunc('hour', collection_time) AS bucket,
+            date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}) AS bucket,
             /* #5449: a procedure that did no work in a cycle has no stored row now (old data still has its zero-delta row),
                so the count is of procedures WITH work: the same number on both. */
             COUNT(DISTINCT object_name) FILTER (WHERE COALESCE(delta_execution_count, 0) > 0 OR COALESCE(delta_worker_time, 0) > 0 OR COALESCE(delta_elapsed_time, 0) > 0) AS proc_count,
@@ -650,11 +651,11 @@ public sealed partial class ViewerDataService
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        GROUP BY date_trunc('hour', collection_time)
+        GROUP BY 1
         ORDER BY bucket
         """;
 
-    /// <summary>Hourly procedure-stats slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>].</summary>
+    /// <summary>Procedure-stats slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>], at the width <see cref="SlicerBuckets"/> picks for it.</summary>
     public async Task<List<TimeSliceBucket>> GetProcStatsSlicerDataAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
         => await ReadQueryStatsSlicerAsync(ProcStatsSlicerSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);

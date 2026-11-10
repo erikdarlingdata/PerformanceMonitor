@@ -526,8 +526,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     : (serverId, ct) => DarlingWorker.AnalysisSeparatelyMonitoredDatabasesAsync(serverId, registryState.Read(), postgres, ct),
                 logger: logger,
                 cancellationToken: context.RequestAborted,
-                allowedTagIds: DarlingWebSeat.FromContext(context).AllowedTagIds,
-                scopeAllServers: DarlingWebSeat.FromContext(context).ScopeAllServers);
+                allowedTagIds: DarlingWebSeat.FromContext(context).AllowedTagIds);
             run.Complete(ReadOutcome.Ok);
             return Results.Json(result, DarlingFleetReader.JsonOptions);
         });
@@ -584,23 +583,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     return ToHttpResult(nonIntegerRefusal, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted);
                 }
 
-                int? scopedServerId = null;
                 var allowedTagIds = DarlingWebSeat.FromContext(context).AllowedTagIds;
-                IReadOnlyList<int>? allowedServerIds = null;
-                if (allowedTagIds is not null)
-                {
-                    allowedServerIds = await AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
-                    if (!IsScopedFleetRead(name) || !string.IsNullOrWhiteSpace(Server(context)))
-                    {
-                        scopedServerId = await AuthorizedWebServerAsync(postgres, context, allowedTagIds);
-                        if (scopedServerId is null)
-                        {
-                            return DarlingWebStatementSweep.JsonText("""{"error":"Server data is unavailable to this token."}""",
-                                DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds,
-                                context.RequestAborted, StatusCodes.Status403Forbidden);
-                        }
-                    }
-                }
 
                 using var readScope = ReadScope.Open(logger);
                 readScope.Scope.CaptureStatements = true;
@@ -610,15 +593,19 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                    The key is the query string as sent, before the read below adds its own as_of. A hit skips admission. */
                 /* #6800: a whole-fleet read of get_resource_use_by_tag (no server) over a window of 24 hours or more is cached for its own TTL. */
                 var fleetRead = ReadAdmission.IsFleetRead(name, Server(context), WebWindowHours(name, key => First(context, key)));
-                if (allowedServerIds is null && readAdmission is { } admission && admission.IsCached(ReadSurface.Web, name, admissionBand, fleetRead))
+                /* The one-server form of a held view (get_finops view=optimization) is kept for the view's own TTL from the moment it is stored.
+                   A scoped reader never takes or fills any cache entry, the held one included: the key carries no caller identity. */
+                var view = First(context, "view");
+                var serverHeld = ReadAdmission.IsServerHeldRead(name, Server(context), view);
+                if (allowedTagIds is null && readAdmission is { } admission && admission.IsCached(ReadSurface.Web, name, admissionBand, fleetRead, serverHeld))
                 {
                     var cache = admission.Cache;
-                    var ttl = ReadResultCache.TtlFor(name, admissionBand, fleetRead);
+                    var ttl = ReadResultCache.TtlFor(name, admissionBand, fleetRead, view, serverHeld);
                     /* Round 2, L4: each value of a repeated name is passed apart (StringValues.ToString() joins them with a comma,
                        which ?database=x%2Cy also gives); the key escapes every name and value. */
                     var key = ReadCacheKey.ForWeb(name,
                         context.Request.Query.SelectMany(q => q.Value.Select(v => new KeyValuePair<string, string?>(q.Key, v))),
-                        cache.Generation, cache, ttl, heldFromStore: ReadAdmission.FleetTtlApplies(name, fleetRead));
+                        cache.Generation, cache, ttl, heldFromStore: ReadAdmission.FleetTtlApplies(name, fleetRead) || serverHeld);
                     if (cache.TryGet(key, out var stored))
                     {
                         /* Round 2, L3: a hit runs no read, so it does not count as one in flight. */
@@ -716,6 +703,24 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
                     try
                     {
+                        int? scopedServerId = null;
+                        int[]? allowedServerIds = null;
+                        if (allowedTagIds is not null)
+                        {
+                            allowedServerIds = await AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
+                            if (!IsScopedFleetRead(name) || !string.IsNullOrWhiteSpace(Server(context)))
+                            {
+                                scopedServerId = await AuthorizedWebServerAsync(postgres, context, allowedTagIds, allowedServerIds);
+                                if (scopedServerId is null)
+                                {
+                                    /* The fixed sentence, swept like every other answer, with the seat's 403; never the registry's names. */
+                                    return new WebReadAnswer(ToHttpResult("""{"error":"Server data is unavailable to this token."}""",
+                                        DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds,
+                                        context.RequestAborted, statusCode: StatusCodes.Status403Forbidden), null, ReadOutcome.Ok);
+                                }
+                            }
+                        }
+
                         /* A newest-first capped read is judged against the window it read: with no anchor sent, the end is
                            taken once here and handed to both the read and the note check. A request with its own anchor
                            is left as sent. */
@@ -731,7 +736,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                             result = await DarlingServerResolver.ReadWebScopeAsync(allowedServerIds, allowedTagIds!,
                                 () => scopedServerId is int serverId
                                     ? DarlingServerResolver.ReadWebServerAsync(serverId, () => handler(context, postgres, analysis))
-                                    : handler(context, postgres, analysis), DarlingWebSeat.FromContext(context).ScopeAllServers);
+                                    : handler(context, postgres, analysis));
                             if (result.TrimStart().StartsWith('{') && System.Text.Json.Nodes.JsonNode.Parse(result) is System.Text.Json.Nodes.JsonObject scopedResult)
                             {
                                 scopedResult.Remove("separately_monitored_databases");

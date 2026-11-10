@@ -12,7 +12,7 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class WebAccessGroupSchema
 {
     /// <summary>The migration creating the managed team credential control plane.</summary>
-    public const int Version = 257;
+    public const int Version = 258;
 
     /// <summary>DDL and protected mutation functions, applied atomically by the migration runner.</summary>
     public const string CreateSql = """

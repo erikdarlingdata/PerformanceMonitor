@@ -91,7 +91,7 @@ WITH rep AS (
     SELECT r.request_id, r.family, p.verdict AS report_verdict
     FROM config.investigation_requests AS r
     JOIN config.investigation_reports AS p ON p.request_id = r.request_id
-    WHERE r.opened_at >= $1 AND ($2::integer IS NULL OR r.server_id = $2)
+    WHERE r.opened_at >= $1 AND ($2::integer IS NULL OR r.server_id = $2) AND ($3::integer[] IS NULL OR r.server_id = ANY($3))
       AND r.practice_of IS NULL
 ), newest AS (
     SELECT DISTINCT ON (f.request_id) f.request_id, f.verdict
@@ -271,11 +271,7 @@ ORDER BY rep.family";
         var rows = new List<InvestigationFamilyCounts>();
         await using var command = Command(connection, FamilyCountsSql, Utc(sinceUtc),
             new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer });
-        if (ReadServerIds is not null)
-        {
-            command.CommandText = command.CommandText.Replace("WHERE r.opened_at >= $1 AND", "WHERE r.server_id = ANY($3) AND r.opened_at >= $1 AND", StringComparison.Ordinal);
-            command.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Integer, ReadServerIds.ToArray());
-        }
+        command.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Integer, (object?)ReadServerIds?.ToArray() ?? DBNull.Value);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

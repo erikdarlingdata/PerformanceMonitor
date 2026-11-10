@@ -162,10 +162,10 @@ internal sealed class DarlingWebGroupTokens : IDisposable
         var group = enabled.Group;
         if (!group.Enabled || group.ActivationState != "active" || SessionGeneration(group.TokenGeneration, enabled.Epoch) != generation)
             return null;
-        // The immutable ID/generation, not a reusable name, is the authenticated identity.
-        return new DarlingWebSeat(group.Name,false,AllowedTagIds:group.TagIds,
-            GroupId:group.GroupId,GroupGeneration:generation,
-            ScopeAllServers:group.Scope==WebAccessGroupScope.AllServers);
+        // The immutable ID/generation, not a reusable name, is the authenticated identity. A group over every server is an
+        // unscoped reader seat, the same seat a named reader token without allowedTagIds gets; a tag-scoped group carries its tags.
+        return new DarlingWebSeat(group.Name,false,AllowedTagIds:group.Scope==WebAccessGroupScope.AllServers ? null : group.TagIds,
+            GroupId:group.GroupId,GroupGeneration:generation);
     }
 
     private static Guid SessionGeneration(Guid tokenGeneration, Guid epoch)

@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.PlanAnalysis;
@@ -33,7 +34,7 @@ public sealed partial class PgFactCollector
        so it provably predates whatever change set that configuration and must not be counted. A
        current_maxdop of 0 (unlimited) or unknown (no server_config row yet) makes no configuration
        impossible, so the count is unchanged in both of those cases. */
-    public const string QueryStatsSql = @"
+    public static string QueryStatsSql => @"
 WITH current_maxdop AS
 (
     SELECT value_in_use
@@ -48,9 +49,7 @@ SELECT
     /* #5633: DISTINCT (database, query_hash), like spilling_queries below. This count drives the QUERY_HIGH_DOP threshold (5/20) and
        its N-queries text, and v_query_stats holds one row per query per snapshot, so one high-DOP query seen in 20 collections
        scored at full severity as 20 queries. A NULL hash collapses to one per database, as for spilling_queries. */
-    COUNT(DISTINCT CASE WHEN v.max_dop > 8
-                         AND (m.value_in_use IS NULL OR m.value_in_use = 0 OR v.max_dop <= m.value_in_use)
-                        THEN COALESCE(v.database_name, '') || '/' || COALESCE(v.query_hash, '') END) AS high_dop_queries,
+" + QueryHighDopSignature.HighDopQueriesCountSql + @"
     COUNT(DISTINCT CASE WHEN v.delta_spills > 0
                         THEN COALESCE(v.database_name, '') || '/' || COALESCE(v.query_hash, '') END) AS spilling_queries,
     SUM(v.delta_execution_count) AS total_executions,
@@ -185,14 +184,7 @@ LIMIT " + FactRanked.MaxObjects + ";";
         }
     }
 
-    /// <summary>
-    /// How many parameter-sensitive plans the fact counts and how many the read reports: the <c>LIMIT</c> this
-    /// statement carried until the compiled-before-the-window test moved to the reader (#4821), which has to run
-    /// BEFORE the cap for the cap to keep the same plans.
-    /// </summary>
-    internal const int ParameterSensitivityMaxOffenders = 20;
-
-    public const string ParameterSensitivitySql = @"
+    public static string ParameterSensitivitySql => @"
 WITH newest AS
 (
     -- creation_time is the MONITORED SERVER's local wall clock -- QueryStatsCollector ships the
@@ -260,11 +252,7 @@ SELECT
     query_plan_hash
 FROM latest, svr
 WHERE rn = 1
-AND   min_worker_time >= 10000
-AND   max_worker_time >= 250000
-AND   execution_count >= 20
-AND   creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'
-AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
+" + ParameterSensitivitySignature.PredicateSql("creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'") + @"
 ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
     /// <summary>
@@ -338,7 +326,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                         }));
                 }
                 offenderCount++;
-                if (offenderCount >= ParameterSensitivityMaxOffenders)
+                if (offenderCount >= FactThresholds.ParameterSensitivity.OffenderCap)
                     break;
             }
 
@@ -359,7 +347,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                     ["worst_min_worker_us"] = worstMinWorker,
                     ["worst_max_worker_us"] = worstMaxWorker,
                     ["worst_grant_ratio"] = worstGrantRatio,
-                    ["grant_divergence"] = worstGrantRatio >= 5 ? 1 : 0,
+                    ["grant_divergence"] = worstGrantRatio >= FactThresholds.ParameterSensitivity.GrantDivergenceRatio ? 1 : 0,
                     ["spill_divergence"] = worstSpillDivergence
                 }
             });

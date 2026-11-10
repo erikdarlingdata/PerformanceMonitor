@@ -109,6 +109,7 @@ AND   a.alert_time <= $2
 AND   a.server_id = $3
 AND   (a.dismissed = FALSE OR $5)
 AND   ($6::text IS NULL OR lower(a.metric_name) = lower($6))
+AND   ($7::integer[] IS NULL OR a.server_id = ANY($7))
 AND   TRUE /* family */
 ORDER BY a.alert_time DESC
 LIMIT $4";
@@ -123,6 +124,7 @@ WHERE a.alert_time >= $1
 AND   a.alert_time <= $2
 AND   (a.dismissed = FALSE OR $4)
 AND   ($5::text IS NULL OR lower(a.metric_name) = lower($5))
+AND   ($6::integer[] IS NULL OR a.server_id = ANY($6))
 AND   TRUE /* family */
 ORDER BY a.alert_time DESC
 LIMIT $3";
@@ -139,6 +141,7 @@ AND   alert_time <= $2
 AND   server_id = $3
 AND   dismissed = TRUE
 AND   ($4::text IS NULL OR lower(metric_name) = lower($4))
+AND   ($5::integer[] IS NULL OR server_id = ANY($5))
 AND   TRUE /* family */";
 
     /// <summary>The fleet-wide twin of <see cref="DismissedAlertCountSql"/>. $1 window start, $2 window end.</summary>
@@ -149,6 +152,7 @@ WHERE alert_time >= $1
 AND   alert_time <= $2
 AND   dismissed = TRUE
 AND   ($3::text IS NULL OR lower(metric_name) = lower($3))
+AND   ($4::integer[] IS NULL OR server_id = ANY($4))
 AND   TRUE /* family */";
 
     /// <summary>
@@ -171,15 +175,9 @@ AND   TRUE /* family */";
         public static readonly AlertHistoryFilter None = new(null, null);
         internal IReadOnlyList<int>? AllowedServerIds { get; init; }
 
-        internal void Constrain(NpgsqlCommand command, string column)
-        {
-            if (AllowedServerIds is null) return;
-            var parameter = "$" + (command.Parameters.Count + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
-            var predicate = "\nAND " + column + " = ANY(" + parameter + ")\n";
-            var order = command.CommandText.IndexOf("\nORDER BY ", StringComparison.Ordinal);
-            command.CommandText = order < 0 ? command.CommandText + predicate : command.CommandText.Insert(order, predicate);
-            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer, AllowedServerIds.ToArray());
-        }
+        internal void BindServerScope(NpgsqlCommand command) =>
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer,
+                (object?)AllowedServerIds?.ToArray() ?? DBNull.Value);
 
         public bool IsSet => MetricName is not null || Family is not null;
 
@@ -214,7 +212,7 @@ AND   TRUE /* family */";
            `(dismissed = FALSE OR $N)` and an untyped parameter there is a runtime type error, not a compile one. */
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = includeDismissed });
         DarlingMcpReadParameters.AddNullableText(command, filter.MetricName);
-        filter.Constrain(command, "a.server_id");
+        filter.BindServerScope(command);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -539,7 +537,7 @@ LIMIT 1";
             DarlingMcpReadParameters.AddInt(command, serverId.Value);
         }
         DarlingMcpReadParameters.AddNullableText(command, filter.MetricName);
-        filter.Constrain(command, "server_id");
+        filter.BindServerScope(command);
 
         var count = await command.ExecuteScalarAsync(cancellationToken);
         return count is long l ? l : Convert.ToInt64(count, System.Globalization.CultureInfo.InvariantCulture);

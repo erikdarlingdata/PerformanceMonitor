@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// header and its distance from the grid below it. The server's version comes from its registry entry, the same fact the FinOps PVS grid
 /// and get_plan_corrections read.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerOlderSkuEmptyStatesTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

@@ -8,6 +8,7 @@
 
 using System.Collections.Generic;
 using System.Text;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -135,14 +136,14 @@ public static partial class PgTargetAdvice
 
         var resets = (KnobMeta(pressure, "checkpointer_reset_count") ?? 0) + (KnobMeta(pressure, "wal_reset_count") ?? 0);
         if (resets > 0)
-            sb.Append("Statistics were reset ").Append(KnobNum(resets)).Append(" time(s) inside the window, so these totals are a floor. ");
+            sb.Append("Statistics were reset ").Append(CountText.Plural((long)resets, "time")).Append(" inside the window, so these totals are a floor. ");
 
         /* #3955: PostgreSQL counts a shutdown checkpoint as requested and keeps the count across the restart, and its own
            write and sync phases land in the same counters, so the collector left the restart-spanning intervals out of
            the checkpoint figures rather than read them as the workload's. */
         var restarts = KnobMeta(pressure, "postmaster_restart_count") ?? 0;
         if (restarts > 0)
-            sb.Append("PostgreSQL restarted ").Append(KnobNum(restarts)).Append(" time(s) inside the window; a shutdown checkpoint " +
+            sb.Append("PostgreSQL restarted ").Append(CountText.Plural((long)restarts, "time")).Append(" inside the window; a shutdown checkpoint " +
                       "counts as requested and its own write and sync phases land in the same counters, so the collection " +
                       "interval(s) spanning a restart are left out of the requested count and the checkpoint write and sync " +
                       "time rather than read as WAL pressure. ");
@@ -419,7 +420,7 @@ public static partial class PgTargetAdvice
           .Append(KnobBytes(mean)).Append("/s across ").Append(KnobNum(KnobMeta(shift, "rated_samples") ?? 0))
           .Append(" rated collections, peaking at ").Append(KnobBytes(peak)).Append("/s in one collection interval. ");
         if (resets > 0)
-            sb.Append("WAL statistics were reset ").Append(KnobNum(resets)).Append(" time(s) inside the window, so the total is a floor. ");
+            sb.Append("WAL statistics were reset ").Append(CountText.Plural((long)resets, "time")).Append(" inside the window, so the total is a floor. ");
         sb.Append("Context, not a finding: WAL volume has no absolute bar, the same rate is routine on one server and a " +
                   "regression on another, so it is graded only by ANOMALY_PG_WAL_VOLUME against this server's own hour-of-week " +
                   "baseline, and that anomaly folds onto the checkpoint-pressure incident it leads.");

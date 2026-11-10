@@ -62,16 +62,15 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal static class DarlingServerResolver
 {
     private static readonly AsyncLocal<int?> WebServerId = new();
-    private static readonly AsyncLocal<(IReadOnlyList<int> Ids, IReadOnlyList<int> Tags, bool AllServers)?> WebScope = new();
+    private static readonly AsyncLocal<(IReadOnlyList<int> Ids, IReadOnlyList<int> Tags)?> WebScope = new();
 
     internal static IReadOnlyList<int>? WebAllowedServerIds => WebScope.Value?.Ids;
     internal static IReadOnlyList<int>? WebAllowedTagIds => WebScope.Value?.Tags;
-    internal static bool WebScopeAllServers => WebScope.Value?.AllServers ?? false;
 
-    internal static async Task<string> ReadWebScopeAsync(IReadOnlyList<int> ids, IReadOnlyList<int> tags, Func<Task<string>> read, bool allServers = false)
+    internal static async Task<T> ReadWebScopeAsync<T>(IReadOnlyList<int> ids, IReadOnlyList<int> tags, Func<Task<T>> read)
     {
         var previous = WebScope.Value;
-        WebScope.Value = (ids, tags, allServers);
+        WebScope.Value = (ids, tags);
         try
         {
             return await read();
@@ -83,7 +82,7 @@ internal static class DarlingServerResolver
     }
 
     /// <summary>Keep every resolution in an authorized web read on the same server ID.</summary>
-    internal static async Task<string> ReadWebServerAsync(int serverId, Func<Task<string>> read)
+    internal static async Task<T> ReadWebServerAsync<T>(int serverId, Func<Task<T>> read)
     {
         var previous = WebServerId.Value;
         WebServerId.Value = serverId;

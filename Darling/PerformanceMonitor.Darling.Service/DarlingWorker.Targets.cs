@@ -845,9 +845,11 @@ public sealed partial class DarlingWorker
     /// <c>query_store_health</c> capture that Query Store is on for is a readable secondary, or, with no such database, its newest
     /// <c>ag_replica_role</c> reads Secondary; never when a <c>query_store_replica</c> is set for it. The same store facts the Query
     /// Store reads' <c>not_collected</c> answer is built from (<see cref="DarlingQueryStoreReadableSecondary"/>), read on each call.
-    /// The capture counts only while the <c>query_store_health</c> collector's effective schedule lets it refresh on this server;
-    /// disabled, the capture is frozen and the role alone decides, so a failover reaches the gate. The read runs in the sweep body
-    /// and carries the sweep deadline like every other store command there. False when the store cannot answer, so the collector runs.
+    /// The capture counts while the <c>query_store_health</c> collector's effective schedule lets it refresh on this server;
+    /// disabled, the capture is frozen: a PRIMARY or SECONDARY role overrules it, and under any other role the newest query_store run
+    /// decides, so a failover reaches the gate while a readable standby whose run reads nothing stays gated, as the reads judge it
+    /// (#8402). The read runs in the
+    /// sweep body and carries the sweep deadline like every other store command there. False when the store cannot answer, so the collector runs.
     /// </summary>
     internal async Task<bool> IsQueryStoreReadableSecondaryAsync(ServerLoopState server, ServerRuntime runtime, CancellationToken cancellationToken)
     {
@@ -2077,7 +2079,7 @@ LIMIT 1";
     private static string WhereToCreateIt(string? connectedDatabase)
         => string.IsNullOrWhiteSpace(connectedDatabase)
             ? "in the connected database (CREATE EXTENSION ...). "
-            : $"in database '{connectedDatabase}', which is the one this collector connects to — an "
+            : $"in database '{connectedDatabase}', which is the one this collector connects to: an "
               + "extension installed in a DIFFERENT database on the same cluster is invisible from here, "
               + $"so run CREATE EXTENSION in '{connectedDatabase}'. ";
 
@@ -2100,7 +2102,7 @@ LIMIT 1";
     private static string WhereToGrantIt(string? connectedDatabase)
         => string.IsNullOrWhiteSpace(connectedDatabase)
             ? "in the database this collector connects to."
-            : $"in database '{connectedDatabase}', the one this collector connects to — issued in a "
+            : $"in database '{connectedDatabase}', the one this collector connects to: issued in a "
               + "DIFFERENT database on the same cluster, they change nothing here.";
 
     /// <summary>
@@ -2130,7 +2132,7 @@ LIMIT 1";
         var where = string.IsNullOrWhiteSpace(connectedDatabase)
             ? $"run {create} in the connected database (extensions are per-database). "
             : $"run {create} in database '{connectedDatabase}', which is the one this collector connects "
-              + "to — an extension installed in a DIFFERENT database on the same cluster is invisible "
+              + "to: an extension installed in a DIFFERENT database on the same cluster is invisible "
               + "from here. ";
 
         var preload = required.Any(r => r.InstallKind == PgExtensionInstallKind.SharedPreloadLibraries)
@@ -2139,7 +2141,7 @@ LIMIT 1";
               + "whatever else is installed. "
             : string.Empty;
 
-        return $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the {names} {noun} this collector reads is "
+        return $"{ex.MessageText} (SQLSTATE {ex.SqlState}): the {names} {noun} this collector reads is "
             + "not installed on this target. This is NOT a missing grant, and no GRANT will change it: "
             + where
             + preload
@@ -2246,7 +2248,7 @@ LIMIT 1";
             ? "in the connected database"
             : $"in database '{connectedDatabase}'";
 
-        var head = $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the missing object is {companion.ObjectName}, "
+        var head = $"{ex.MessageText} (SQLSTATE {ex.SqlState}): the missing object is {companion.ObjectName}, "
             + $"which is NOT the {extension.ExtensionName} extension's base object";
 
         const string tail = "This is "
@@ -2269,7 +2271,7 @@ LIMIT 1";
                 return head + $". pg_extension has NO row for {extension.ExtensionName} {where}: the extension "
                     + "was never created there, so it is not present at any version and there is nothing for "
                     + $"ALTER EXTENSION {extension.ExtensionName} UPDATE to update. This target is Aurora, where "
-                    + $"this collector's source is {auroraSource} — which needs no extension — so the collector "
+                    + $"this collector's source is {auroraSource} (which needs no extension), so the collector "
                     + $"is not waiting on one: running CREATE EXTENSION {extension.ExtensionName} {where} is "
                     + $"OPTIONAL, and what it buys is {companion.ObjectName} and nothing else. " + tail;
 
@@ -2280,25 +2282,25 @@ LIMIT 1";
                     + $"{extension.ExtensionName} {where}"
                     + (extension.InstallKind == PgExtensionInstallKind.SharedPreloadLibraries
                         ? $", and {extension.ExtensionName} has to be in shared_preload_libraries before that "
-                          + "does anything — a parameter-group change and a restart. "
+                          + "does anything: a parameter-group change and a restart. "
                         : ". ")
                     + tail;
 
             /* BELOW the companion's version: #3818's case, and now stated as a fact read out of the catalog
                rather than as one of two possibilities. */
             case PgExtensionCompanionVerdict.BelowCompanionVersion:
-                return head + $": that resolved, so the extension IS installed {where} and this is not the "
+                return head + $". That resolved, so the extension IS installed {where} and this is not the "
                     + "extension missing. pg_extension says it is at catalog version "
                     + $"{extensionRow.ExtensionVersion}, below the {companion.SinceExtensionVersion} whose update "
-                    + $"script creates {companion.ObjectName} — an engine upgraded in place or restored keeps the "
+                    + $"script creates {companion.ObjectName}: an engine upgraded in place or restored keeps the "
                     + "version the extension was created at until someone runs ALTER EXTENSION "
-                    + $"{extension.ExtensionName} UPDATE {where} — a statement, with no restart and no "
+                    + $"{extension.ExtensionName} UPDATE {where}, a statement, with no restart and no "
                     + "shared_preload_libraries change; RDS and Aurora do not run it for you. " + tail;
 
             /* AT OR ABOVE: the update everything else would have recommended is already done, so recommending
                it again is the wrong-remedy defect in its third form. */
             case PgExtensionCompanionVerdict.AtOrAboveCompanionVersion:
-                return head + $": that resolved, so the extension IS installed {where} and this is not the "
+                return head + $". That resolved, so the extension IS installed {where} and this is not the "
                     + "extension missing. pg_extension says it is at catalog version "
                     + $"{extensionRow.ExtensionVersion}, which already carries {companion.ObjectName} "
                     + $"({companion.SinceExtensionVersion} and later), so no ALTER EXTENSION "
@@ -2310,12 +2312,12 @@ LIMIT 1";
             /* NOTHING OBSERVED — or a version string nothing can rank. The two-possibilities sentence, which
                is everything the fault alone supports. */
             default:
-                return head + ": that resolved, so the "
+                return head + ". That resolved, so the "
                     + $"extension IS installed {where} and this is not the extension missing. {companion.ObjectName} "
                     + $"is created by the extension's {companion.SinceExtensionVersion} update script, so either the "
                     + $"extension is present at a catalog version below {companion.SinceExtensionVersion} (an engine "
                     + "upgraded in place or restored keeps the version the extension was created at until someone "
-                    + $"runs ALTER EXTENSION {extension.ExtensionName} UPDATE {where} — a statement, with no restart "
+                    + $"runs ALTER EXTENSION {extension.ExtensionName} UPDATE {where}, a statement, with no restart "
                     + "and no shared_preload_libraries change; RDS and Aurora do not run it for you) or the object "
                     + "is installed outside the schema the query text names (a relocatable extension lives in whatever "
                     + "schema it was created in; check pg_extension.extversion and extnamespace). " + tail;
@@ -2451,10 +2453,10 @@ LIMIT 1";
                hint said pg_monitor covers everything, which sent an operator in a circle: the product's
                own changelog knew better. */
             CollectorTargetFault.Permissions when ReadsServerLogWithPgReadFile(collectorName) => ("PERMISSIONS",
-                $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — this collector reads the server log with "
+                $"{ex.MessageText} (SQLSTATE {ex.SqlState}): this collector reads the server log with "
                 + "pg_read_file(), which pg_monitor does NOT cover. The monitoring login needs BOTH the "
                 + "pg_read_server_files role AND an explicit GRANT EXECUTE ON FUNCTION pg_read_file(text), "
-                + "pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean) — the "
+                + "pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean): the "
                 + "role alone does not carry EXECUTE, because the function's ACL is postgres=X/postgres. "
                 + "EXECUTE grants live in each database's own catalog, so issue them "
                 + WhereToGrantIt(connectedDatabase)
@@ -2464,7 +2466,7 @@ LIMIT 1";
                 + "collector switches to it on its own once it is granted."),
 
             CollectorTargetFault.Permissions => ("PERMISSIONS",
-                $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the monitoring login lacks a grant this "
+                $"{ex.MessageText} (SQLSTATE {ex.SqlState}): the monitoring login lacks a grant this "
                 + "source needs. pg_monitor covers every collector here; check that it is granted."),
 
             /* #3410, the half #3414 left open: 58P01 and 42501 were told apart in the classifier —
@@ -2478,16 +2480,16 @@ LIMIT 1";
                is the exception being made, not a reclassification. */
             CollectorTargetFault.Unclassified when ReadsServerLogWithPgReadFile(collectorName) && ex.SqlState == "58P01" =>
                 ("PERMISSIONS",
-                    $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the server named the exact file it could "
+                    $"{ex.MessageText} (SQLSTATE {ex.SqlState}). The server named the exact file it could "
                     + "not OPEN, and that path is the fact to act on: 58P01 is a missing FILE, not a missing "
-                    + "grant, and no GRANT changes it — a denial is 42501 and gets different advice. The "
+                    + "grant, and no GRANT changes it (a denial is 42501 and gets different advice). The "
                     + "path is built from the server's own answers, current_setting('log_directory') joined "
                     + "to a name pg_ls_logdir() returned in the same statement, and it resolves on the "
                     + "MONITORED server's filesystem, not the monitoring host's. A one-off is a file removed "
                     + "between the listing and the read and heals on the next cycle; one that repeats every "
                     + "cycle means the directory log_directory names no longer holds what the listing said, "
                     + "which is worth a look at that server's setting and what actually sits behind it. A "
-                    + "server whose logging_collector is off does not land here — that is detected first "
+                    + "server whose logging_collector is off does not land here: that is detected first "
                     + "and recorded as its own named state."),
 
             /* #4046 part 1c: a 22021 on a log-tail reader has no arm here on purpose. It keeps ERROR, and the
@@ -2528,7 +2530,7 @@ LIMIT 1";
                makes it one. Threaded from ServerRuntime.ConnectedDatabase; when that is unknown the
                sentence degrades to what it always said rather than inventing a name. */
             CollectorTargetFault.ObjectMissing => ("PERMISSIONS",
-                $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the source object does not exist on this "
+                $"{ex.MessageText} (SQLSTATE {ex.SqlState}): the source object does not exist on this "
                 + "target. This is NOT a missing grant: it is normally an extension that was never created "
                 + WhereToCreateIt(connectedDatabase)
                 + "The collector will keep degrading until it is. Recorded as a non-fatal skip rather than "
@@ -2537,7 +2539,7 @@ LIMIT 1";
             /* 0A000 / 55000 / 55006: the server will not do this, permanently or by configuration —
                pg_stat_wal on Aurora, or an optimized-reads cache that is switched off. */
             CollectorTargetFault.FeatureDisabled => ("PERMISSIONS",
-                $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — this source is unsupported or disabled on "
+                $"{ex.MessageText} (SQLSTATE {ex.SqlState}): this source is unsupported or disabled on "
                 + "this server. NOT a missing grant. Aurora does not implement some community sources at "
                 + "all, and others are gated by a parameter group. Recorded as a non-fatal skip because it "
                 + "will not change until the platform or the parameter group does."),
@@ -2606,7 +2608,7 @@ LIMIT 1";
         {
             PostgresCancelSource.TargetStatementTimeout =>
                 $"{collectorName} on {where} was CANCELLED BY THE SERVER after {elapsed} ms (SQLSTATE "
-                + $"{CollectorFaultCancelOrigin.QueryCanceled}) — the target's own statement_timeout "
+                + $"{CollectorFaultCancelOrigin.QueryCanceled}): the target's own statement_timeout "
                 + "expired, so the deadline that fired is on the monitored server, not here. Nothing was "
                 + "collected this cycle: this is NOT 'there was nothing to collect'.",
 
@@ -2625,7 +2627,7 @@ LIMIT 1";
                response. A cancel that DID arrive as SQLSTATE 57014 would be contradicted by its own
                explanation. */
             PostgresCancelSource.OurCommandDeadline =>
-                $"{collectorName} on {where} hit its CLIENT-SIDE command deadline after {elapsed} ms — "
+                $"{collectorName} on {where} hit its CLIENT-SIDE command deadline after {elapsed} ms: "
                 + "its command timeout expired and Npgsql cancelled the read mid-stream, which is why the "
                 + "transport reports 'Exception while reading from stream' with no SQLSTATE. The statement "
                 + "was still running when it was cut off, so the work asked for does not fit the deadline; "
@@ -2653,7 +2655,7 @@ LIMIT 1";
                  + "for a pg_cancel_backend() aimed at the backend, and for the client CancelRequest this "
                  + "service's own command deadline sends: one code, three producers, and only the wording "
                  + $"tells them apart. The server said {QuotedCancelWording(origin.ServerText)}, which is "
-                 + "not its statement_timeout wording — so do not change statement_timeout on the target "
+                 + "not its statement_timeout wording, so do not change statement_timeout on the target "
                  + "on the strength of this row. Nothing was collected this cycle: this is NOT 'there was "
                  + "nothing to collect'.",
         };
@@ -3352,11 +3354,11 @@ LIMIT 1";
 
             await LogRunAsync(
                 server, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds,
-                $"{ex.Message} — the MONITORING HOST's IAM role lacks a grant this source needs, which is "
+                $"{ex.Message}. The MONITORING HOST's IAM role lacks a grant this source needs, which is "
                 + "not a database grant: plan capture on managed PostgreSQL reads the server log through "
                 + "the RDS API, so the role needs rds:DescribeDBInstances, rds:DescribeDBClusters, "
                 + "rds:DescribeDBLogFiles and rds:DownloadDBLogFilePortion "
-                + "on the target instance. Nothing was read this cycle — this is NOT 'no plans were "
+                + "on the target instance. Nothing was read this cycle: this is NOT 'no plans were "
                 + "captured'.",
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
@@ -3371,10 +3373,10 @@ LIMIT 1";
 
             await LogRunAsync(
                 server, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds,
-                $"{ex.Message} — the MONITORING HOST's IAM role lacks a grant this source needs, which is "
+                $"{ex.Message}. The MONITORING HOST's IAM role lacks a grant this source needs, which is "
                 + "not a database grant: instance CPU on managed PostgreSQL reads AWS Performance Insights, "
                 + "so the role needs rds:DescribeDBInstances, rds:DescribeDBClusters and "
-                + "pi:GetResourceMetrics on the target instance. Nothing was read this cycle — this is NOT "
+                + "pi:GetResourceMetrics on the target instance. Nothing was read this cycle: this is NOT "
                 + "'CPU is idle'.",
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;

@@ -47,10 +47,13 @@ public sealed class ViewerFinOpsSqlTests
     public void ProvisioningTrendSql_DailyCpuAndMemoryRatio()
     {
         var sql = ViewerDataService.ProvisioningTrendSql;
-        Assert.Contains("CAST(collection_time AS DATE)", sql, StringComparison.Ordinal);
+        /* The days are the caller's buckets ($3 labels, $4 starts, $5 ends), never the UTC date of each sample: the Viewer passes the
+           selected time display's days and the MCP tools UTC days. */
+        Assert.Contains("unnest($3::date[], $4::timestamp[], $5::timestamp[])", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_cpu_utilization_stats", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_memory_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY CAST(collection_time AS DATE)", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY d.day", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("CAST(collection_time AS DATE)", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -237,7 +240,9 @@ public sealed class ViewerFinOpsSqlTests
     {
         Assert.Contains("FROM v_index_object_stats", ViewerDataService.ObjectGrowthSummarySql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $5", ViewerDataService.ObjectGrowthSummarySql, StringComparison.Ordinal);
-        Assert.Contains("date_trunc('day', ios.collection_time)", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
+        /* The series buckets each sample into the day the caller's days table holds it in, so a column is a day of the caller's calendar. */
+        Assert.Contains("JOIN days d", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY ios.schema_name, ios.table_name, d.day", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $6", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
         Assert.Contains("GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)",
             ViewerDataService.ObjectIndexDetailSql, StringComparison.Ordinal);

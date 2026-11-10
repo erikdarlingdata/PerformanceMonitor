@@ -645,7 +645,7 @@ public static class SameStatementPileupDetector
             Investigation:
                 $"The active-query snapshot caught {sessions} sessions executing the SAME statement at one instant, "
                 + $"all past {minElapsedMs / 1000.0:F1} s elapsed, {ioWaiters} suspended on {waits}, while the same "
-                + $"statement's {baselineObservations} in-flight observation(s) over the prior {BaselineLookbackMinutes} minutes "
+                + $"statement's {CountText.Plural(baselineObservations, "in-flight observation")} over the prior {BaselineLookbackMinutes} minutes "
                 + $"topped out at {baselineMaxMs} ms. That is the live signature of a shared parameterized plan flipping to an "
                 + "IO-heavy shape: every caller inherits the flip at once, the copies convoy on page reads, and client "
                 + "timeouts follow within seconds. The drill-down quotes the piled-up sessions (elapsed, waits, reads) and "
