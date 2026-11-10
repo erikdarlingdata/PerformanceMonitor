@@ -1424,11 +1424,14 @@ public static partial class PlanAnalyzer
                     ? $"{rewinds / rebinds:F1}x rewinds (cache hits) per rebind (cache miss)"
                     : "no rewinds (cache hits) at all";
 
+                // An estimated plan carries fractional rewinds. The count is shown rounded the way N0 rounds (a midpoint to
+                // the even neighbour), and the noun follows the number shown, so 1.3 reads "1 rewind" and 1.5 "2 rewinds".
+                var rewindsShown = (long)Math.Round(rewinds, MidpointRounding.ToEven);
                 node.Warnings.Add(new PlanWarning
                 {
                     RuleNumber = 14,
                     WarningType = "Lazy Spool Ineffective",
-                    Message = $"Lazy spool has low cache hit ratio ({source}): {rebinds:N0} rebinds (cache misses), {rewinds:N0} {(rewinds == 1 ? "rewind (cache hit)" : "rewinds (cache hits)")}, {ratio}. The spool is caching results but rarely reusing them, adding overhead for no benefit.",
+                    Message = $"Lazy spool has low cache hit ratio ({source}): {rebinds:N0} rebinds (cache misses), {CountText.Plural(rewindsShown, "rewind (cache hit)", "rewinds (cache hits)")}, {ratio}. The spool is caching results but rarely reusing them, adding overhead for no benefit.",
                     Severity = severity
                 });
             }

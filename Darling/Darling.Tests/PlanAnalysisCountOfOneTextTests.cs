@@ -106,25 +106,35 @@ public sealed class PlanAnalysisCountOfOneTextTests
         Assert.Contains(expected, warning.Message, StringComparison.Ordinal);
     }
 
-    private static PlanNode LazySpool(long rebinds, long rewinds) => new()
+    /// <summary>An actual plan's spool carries whole rebind and rewind counts; an estimated plan's carries fractions.</summary>
+    private static PlanNode LazySpool(bool actual, double rebinds, double rewinds) => new()
     {
         NodeId = 0,
         PhysicalOp = "Table Spool",
         LogicalOp = "Lazy Spool",
-        HasActualStats = true,
-        ActualRebinds = rebinds,
-        ActualRewinds = rewinds,
-        ActualExecutions = rebinds + rewinds,
-        ActualRows = rebinds + rewinds
+        HasActualStats = actual,
+        ActualRebinds = actual ? (long)rebinds : 0,
+        ActualRewinds = actual ? (long)rewinds : 0,
+        ActualExecutions = actual ? (long)(rebinds + rewinds) : 0,
+        ActualRows = actual ? (long)(rebinds + rewinds) : 0,
+        EstimateRebinds = actual ? 0 : rebinds,
+        EstimateRewinds = actual ? 0 : rewinds
     };
 
     [Theory]
-    [InlineData(500, 1, "500 rebinds (cache misses), 1 rewind (cache hit),")]
-    [InlineData(500, 20, "500 rebinds (cache misses), 20 rewinds (cache hits),")]
-    [InlineData(500, 0, "500 rebinds (cache misses), 0 rewinds (cache hits),")]
-    public void LazySpool_CountsItsRewindsAsAPersonSays(long rebinds, long rewinds, string expected)
+    [InlineData(true, 500, 1, "500 rebinds (cache misses), 1 rewind (cache hit),")]
+    [InlineData(true, 500, 20, "500 rebinds (cache misses), 20 rewinds (cache hits),")]
+    [InlineData(true, 500, 0, "500 rebinds (cache misses), 0 rewinds (cache hits),")]
+    // An estimated count is shown rounded, and the word follows the number shown: 1.3 and 1.49 read "1 rewind".
+    [InlineData(false, 500, 1.3, "500 rebinds (cache misses), 1 rewind (cache hit),")]
+    [InlineData(false, 500, 1.49, "500 rebinds (cache misses), 1 rewind (cache hit),")]
+    // The display rounds a midpoint to the even neighbour, so 1.5 reads "2 rewinds", 2.5 "2 rewinds" and 0.5 "0 rewinds".
+    [InlineData(false, 500, 1.5, "500 rebinds (cache misses), 2 rewinds (cache hits),")]
+    [InlineData(false, 500, 2.5, "500 rebinds (cache misses), 2 rewinds (cache hits),")]
+    [InlineData(false, 500, 0.5, "500 rebinds (cache misses), 0 rewinds (cache hits),")]
+    public void LazySpool_CountsItsRewindsAsAPersonSays(bool actual, double rebinds, double rewinds, string expected)
     {
-        var warning = AnalyzeSingle(LazySpool(rebinds, rewinds), statementMs: 1_000, "Lazy Spool Ineffective");
+        var warning = AnalyzeSingle(LazySpool(actual, rebinds, rewinds), statementMs: 1_000, "Lazy Spool Ineffective");
 
         Assert.Contains(expected, warning.Message, StringComparison.Ordinal);
     }
