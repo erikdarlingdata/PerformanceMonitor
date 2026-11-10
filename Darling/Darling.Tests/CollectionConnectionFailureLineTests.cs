@@ -58,7 +58,7 @@ public sealed class CollectionConnectionFailureLineTests
 
         Assert.NotNull(line);
         Assert.Contains("reached 3 collectors", line);
-        Assert.Contains("1 of them have other errors in the window as well", line);
+        Assert.Contains("1 of them have other errors in the last 7 days as well", line);
         Assert.DoesNotContain("each missed that one run", line);
         Assert.DoesNotContain("Nothing to do", line);
     }
@@ -78,9 +78,26 @@ public sealed class CollectionConnectionFailureLineTests
 
         Assert.NotNull(line);
         Assert.Contains("reached 15 collectors", line);
-        Assert.Contains("15 of them have other errors in the window as well", line);
+        Assert.Contains("15 of them have other errors in the last 7 days as well", line);
         Assert.Contains("It has repeated, or those collectors fail for other reasons too", line);
         Assert.DoesNotContain("Nothing to do", line);
+    }
+
+    /// <summary>
+    /// The Collection Log lists the runs of the time range it is set to, so the line that sends a reader there for the collectors'
+    /// other errors says how far that range has to reach.
+    /// </summary>
+    [Fact]
+    public void ALineThatSendsTheReaderToTheCollectionLog_SaysHowFarItsRangeHasToReach()
+    {
+        var rows = Enumerable.Range(0, 15)
+            .Select(i => ($"collector_{i:00}", (DateTime?)Cycle.AddSeconds(i * 3), (string?)PreLoginHandshake, 2L))
+            .ToList();
+
+        var line = SummaryLine(rows);
+
+        Assert.NotNull(line);
+        Assert.EndsWith("the Collection Log says which once its time range reaches back to those runs.", line);
     }
 
     [Fact]
@@ -124,7 +141,31 @@ public sealed class CollectionConnectionFailureLineTests
 
         Assert.NotNull(line);
         Assert.StartsWith("One connection failure at 2026-11-07 10:32:05 reached 2 collectors", line);
-        Assert.EndsWith("One earlier connection failure is in the window too.", line);
+        Assert.EndsWith("One earlier connection failure is in the last 7 days too.", line);
+    }
+
+    /// <summary>
+    /// #8533. The rows are the grid's, which holds each collector's runs for the trailing seven days, and the sentence shares a card
+    /// with the skipped-slots line, which is read over 24 hours. A drop 43 hours before the read is in the rows and outside those
+    /// 24 hours, so the sentence says which days it speaks for. The drop's age is illustrative: the sentence takes no clock and words
+    /// rows of any age the same way. That the rows stop at seven days is pinned through each app's own read, in
+    /// <c>CollectionHealthErrorWindowTests</c> (Lite) and <c>ViewerCollectionHealthErrorWindowLiveTests</c>.
+    /// </summary>
+    [Fact]
+    public void ADropFortyThreeHoursBeforeTheRead_IsSaidToBeInTheLastSevenDays()
+    {
+        var readAt = new DateTime(2026, 11, 9, 5, 32, 5, DateTimeKind.Utc);
+        var dropped = readAt.AddHours(-43);
+        var rows = Enumerable.Range(0, 12)
+            .Select(i => ($"collector_{i:00}", (DateTime?)dropped.AddSeconds(i * 3), (string?)PreLoginHandshake, 1L))
+            .ToList();
+
+        var line = SummaryLine(rows);
+
+        Assert.NotNull(line);
+        Assert.StartsWith("One connection failure at 2026-11-07 10:32:05 reached 12 collectors", line);
+        Assert.Contains("each missed that one run and has no other error in the last 7 days", line);
+        Assert.EndsWith("Nothing to do unless it repeats.", line);
     }
 
     [Fact]

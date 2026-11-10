@@ -1461,7 +1461,7 @@ public partial class ServerTab : UserControl
         }
         catch (Exception ex)
         {
-            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshCollectionHealthAsync failed: {ex.Message}");
+            AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshCollectionHealthAsync failed: {ex}");
         }
     }
 

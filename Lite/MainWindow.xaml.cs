@@ -170,6 +170,13 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, bool> _previousCollectorErrorStates = new();
     private readonly Dictionary<string, bool> _previousXeSessionFailureStates = new();
     private readonly DispatcherTimer _statusTimer;
+
+    /* #8533: the collection label's own tick. Its age is worded to the second and a cycle ends once a minute, so the 30 second
+       status timer alone would repaint it at the same two points of every cycle. StartCollectionStatus starts it. */
+    internal DispatcherTimer CollectionAgeTimer { get; } = new() { Interval = CollectionStatusLabel.AgeTick };
+
+    /* True while the status bar shows that the local database stopped collection: the label's tick leaves the field alone then. */
+    private bool _collectionStoppedShown;
     private LocalDataService? _dataService;
     /* Phase-5 slice B: the alert loop's collected-store reads go through this seam (see
        LiteAlertReadAdapter); the shared engine (slice D) consumes the same surface. */
@@ -649,6 +656,7 @@ public partial class MainWindow : Window
             // Update status
             UpdateStatusBar();
             _statusTimer.Start();
+            StartCollectionStatus(_backgroundService, () => DateTime.UtcNow);
 
             await RefreshOverviewAsync();
             StatusText.Text = ReadyStatusText();
@@ -826,6 +834,7 @@ public partial class MainWindow : Window
         }
 
         _statusTimer.Stop();
+        CollectionAgeTimer.Stop();
 
         /* Close the sentinel connection (#4262) now that collection/archival can no longer run against
            it — dispose is a write-lock acquire, and by this point nothing should still be holding a read
@@ -1031,30 +1040,19 @@ public partial class MainWindow : Window
         LocalDatabaseStatusText.Visibility = localDatabase.StatusLine is null ? Visibility.Collapsed : Visibility.Visible;
 
         // Update collection status
+        _collectionStoppedShown = localDatabase.CollectionStopped;
         if (localDatabase.CollectionStopped)
         {
             CollectionStatusText.Text = "Collection: Stopped (local database failed)";
         }
         else if (_backgroundService != null)
         {
-            if (_backgroundService.IsCollecting)
+            /* The loop's own states, in the label's words: the text its one-second tick and the cycle signal paint too. */
+            CollectionStatusText.Text = CollectionStatusLabel.Text(
+                _backgroundService.IsCollecting, _backgroundService.IsPaused, _backgroundService.LastCollectionTime, DateTime.UtcNow);
+            if (_backgroundService.IsCollecting || (!_backgroundService.IsPaused && _backgroundService.LastCollectionTime.HasValue))
             {
-                CollectionStatusText.Text = "Collection: Running";
                 PromoteReadyStatus();
-            }
-            else if (_backgroundService.IsPaused)
-            {
-                CollectionStatusText.Text = "Collection: Paused";
-            }
-            else if (_backgroundService.LastCollectionTime.HasValue)
-            {
-                var ago = DateTime.UtcNow - _backgroundService.LastCollectionTime.Value;
-                CollectionStatusText.Text = $"Collection: {ago.TotalSeconds:F0}s ago";
-                PromoteReadyStatus();
-            }
-            else
-            {
-                CollectionStatusText.Text = "Collection: Starting...";
             }
         }
         else
@@ -1064,6 +1062,37 @@ public partial class MainWindow : Window
 
         // Update collector health
         UpdateCollectorHealth();
+    }
+
+    /// <summary>
+    /// #8533: starts the collection field over <paramref name="loop"/>, and is the one place that does. The field repaints on its
+    /// own one-second tick and when a cycle starts or ends. The loop raises its signal on its own thread, so that repaint is posted
+    /// to this one. The label lives as long as the two signals it subscribes to. The window's load calls this after the status
+    /// bar's first paint.
+    /// </summary>
+    internal void StartCollectionStatus(CollectionBackgroundService loop, Func<DateTime> utcNow)
+    {
+        _ = new CollectionStatusLabel(
+            () => loop.IsCollecting,
+            () => loop.IsPaused,
+            () => loop.LastCollectionTime,
+            utcNow,
+            PaintCollectionStatus,
+            repaint => CollectionAgeTimer.Tick += (s, e) => repaint(),
+            repaint => loop.CycleStateChanged += () => Dispatcher.BeginInvoke(repaint));
+        CollectionAgeTimer.Start();
+    }
+
+    /// <summary>
+    /// #8533: paints the collection field for the label's own tick and the loop's cycle signal. Only the loop's states come
+    /// through here, so while the status bar shows that the local database stopped collection the field is left as it is.
+    /// </summary>
+    private void PaintCollectionStatus(string text)
+    {
+        if (!_collectionStoppedShown)
+        {
+            CollectionStatusText.Text = text;
+        }
     }
 
     private void UpdateCollectorHealth()
