@@ -89,6 +89,8 @@ public sealed class MemoryBrokerShredTests
     [InlineData("SHRIN&#x4B;")]
     [InlineData("SHR<![CDATA[INK]]>")]
     [InlineData("<![CDATA[SHRINK]]>")]
+    [InlineData("<![CDATA[SHR]]>INK")]
+    [InlineData("<![CDATA[S]]>HRIN<![CDATA[K]]>")]
     [InlineData("S<!-- split -->HRINK")]
     [InlineData("SHRIN<!-- split -->K")]
     public void AnEventThatSpellsShrinkAnotherWay_IsStillShreddedAndKept(string notificationXml)
