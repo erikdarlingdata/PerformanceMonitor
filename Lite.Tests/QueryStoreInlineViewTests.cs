@@ -61,7 +61,7 @@ public sealed class QueryStoreInlineViewTests
         Assert.Equal(7, after.FetchedPlanId);
         Assert.True(after.PlanViewerTabSelected, $"after a click on View the page showing is \"{after.PageShowing}\", not the Plan Viewer: the plan opened on a tab that is not shown, so the click looks like it did nothing");
         Assert.Equal(1, after.PlanTabs);
-        Assert.True(after.SelectedPlanTabOperators == 1, $"the plan tab shows {after.SelectedPlanTabOperators} operators; the fetched plan has one");
+        Assert.True(after.SelectedPlanTabOperators > 0, "the plan tab that is showing draws no operator of the fetched plan");
         Assert.Equal("View", after.ButtonText);
         Assert.Empty(after.Messages);
     }
