@@ -17,7 +17,7 @@ using Xunit;
 
 namespace Darling.Tests;
 
-// #1776 own-store: this class creates and drops its own scratch database.
+/* #1776 own-store: this class creates and drops its own scratch database. */
 public sealed class ScopedSweepBatchLiveTests
 {
     [Fact]
@@ -69,7 +69,9 @@ public sealed class ScopedSweepBatchLiveTests
         });
         var report = JsonNode.Parse(scoped[1].ReportJson)!;
         Assert.Equal("finance-departed", report["changes"]!["departed_servers"]![0]!.GetValue<string>());
-        Assert.Single(report["would_have_paged"]!.AsArray());
+        var ledger = Assert.Single(report["would_have_paged"]!.AsArray());
+        Assert.Equal(41, ledger!["server_id"]!.GetValue<int>());
+        Assert.Null(ledger["server_name"]);
         Assert.Null(JsonNode.Parse(scoped[0].ReportJson)!["would_have_paged"]);
 
         var empty = await DarlingWebEndpoints.ScopeSweepsAsync(postgres,
