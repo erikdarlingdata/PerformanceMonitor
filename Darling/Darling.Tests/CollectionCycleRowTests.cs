@@ -596,8 +596,9 @@ VALUES ($1, $2, $3, $4, $5, 100, $6, NULL, $7, 80, 20)",
 
     /// <summary>#8464: the "last collected" reads answer with the newest SUCCESS, not a later failed attempt. Every attempt writes a
     /// row, ERROR and PERMISSIONS included, so a server the service cannot read from writes one per collector per cycle, and the
-    /// Overview card's Last Collect, the sidebar dot, list_servers and get_server_summary must not move forward on them. A server
-    /// whose every attempt failed has no last collection at all. The two servers are seeded here, not in the shared fixture, so
+    /// Overview card's Last Collect, the sidebar dot, list_servers, get_server_summary, the fleet card and the Admin page's
+    /// Servers grid must not move forward on them. A server whose every attempt failed has no last collection at all. The two
+    /// servers are seeded here, not in the shared fixture, so
     /// the fleet-wide counts of Group 8 see only the rows they expect.</summary>
     [Fact]
     public Task Group4b_NewestRowReads_AnswerWithTheNewestSuccess_NotALaterFailedAttempt() => RunReaderAsync(async (f, connection, ct) =>
@@ -644,6 +645,17 @@ VALUES ($1, $2, $3, $4, $5, 100, $6, NULL, $7, 80, 20)",
 
         Assert.Equal(f.OldRun, freshness[ReaderServerFailed]);
         Assert.False(freshness.ContainsKey(ReaderServerDark), "a server whose every attempt failed has no freshness row");
+
+        /* get_fleet_overview and the web fleet card: the card's last_collection, which its freshness band is derived from. */
+        var nowUtc = DateTime.UtcNow;
+        var fleet = await DarlingFleetReader.GetFleetOverviewAsync(f.Postgres, nowUtc.AddHours(-1), nowUtc, nowUtc, cancellationToken: ct);
+        Assert.Equal(f.OldRun, fleet.Cards.Single(c => c.ServerId == ReaderServerFailed).LastCollectionTime);
+        Assert.Null(fleet.Cards.Single(c => c.ServerId == ReaderServerDark).LastCollectionTime);
+
+        /* the Admin page's Servers grid: its freshness word and last_collected stamp come from this value. */
+        var admin = await DarlingAdminServersReader.ReadAsync(f.Postgres, ct);
+        Assert.Equal(f.OldRun, admin.Single(r => r.ServerId == ReaderServerFailed).LastCollection);
+        Assert.Null(admin.Single(r => r.ServerId == ReaderServerDark).LastCollection);
     });
 
     /// <summary>Group 5: the per-day run count is made of collector runs only (text pin: the read takes seven parameters).</summary>

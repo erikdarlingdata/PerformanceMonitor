@@ -55,7 +55,7 @@ internal static class DarlingServerOfflineNote
             SELECT cl.collection_time
             FROM v_collection_log cl
             WHERE cl.server_id = s.server_id
-            AND   {CollectionCycleRow.NotCycleRowSql}
+            AND   {CollectionRunSql.SuccessfulCollectorRun}
             {statusPredicate}
             ORDER BY cl.collection_time DESC
             LIMIT 1

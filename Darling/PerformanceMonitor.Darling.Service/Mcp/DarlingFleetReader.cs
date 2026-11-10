@@ -646,7 +646,7 @@ LEFT JOIN LATERAL
     FROM v_collection_log
     WHERE server_id = s.server_id
     AND   collection_time >= $1
-    AND   {CollectionCycleRow.NotCycleRowSql}
+    AND   {CollectionRunSql.SuccessfulCollectorRun}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest ON TRUE
@@ -669,7 +669,7 @@ CROSS JOIN LATERAL
     FROM v_collection_log
     WHERE server_id = s.server_id
     AND   collection_time < $2
-    AND   {CollectionCycleRow.NotCycleRowSql}
+    AND   {CollectionRunSql.SuccessfulCollectorRun}
     ORDER BY collection_time DESC
     LIMIT 1
 ) AS latest

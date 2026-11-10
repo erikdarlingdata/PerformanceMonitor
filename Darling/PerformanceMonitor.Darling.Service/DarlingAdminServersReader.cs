@@ -80,7 +80,7 @@ internal static class DarlingAdminServersReader
             SELECT cl.collection_time
             FROM v_collection_log cl
             WHERE cl.server_id = c.server_id
-            AND   {CollectionCycleRow.NotCycleRowSql}
+            AND   {CollectionRunSql.SuccessfulCollectorRun}
             ORDER BY cl.collection_time DESC
             LIMIT 1
         ) AS latest ON TRUE
