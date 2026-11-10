@@ -1586,6 +1586,7 @@
     <!-- CheckBox Style                               -->
     <!-- ============================================ -->
     <!-- #8540: the box is outlined like a text box (ControlBorderBrush), so an unchecked box shows against the page and the card. -->
+    <!-- A disabled box takes the pale BorderBrush and a muted mark, so it never reads stronger than an enabled one. -->
     <Style TargetType="CheckBox">
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
@@ -1620,7 +1621,8 @@
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="Border" Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
-                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource ForegroundMutedBrush}"/>
+                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+                            <Setter TargetName="CheckMark" Property="Stroke" Value="{StaticResource ForegroundMutedBrush}"/>
                             <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
@@ -1667,7 +1669,7 @@
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="Border" Property="Fill" Value="{StaticResource BackgroundDarkBrush}"/>
-                            <Setter TargetName="Border" Property="Stroke" Value="{StaticResource ForegroundMutedBrush}"/>
+                            <Setter TargetName="Border" Property="Stroke" Value="{StaticResource BorderBrush}"/>
                             <Setter TargetName="CheckMark" Property="Fill" Value="{StaticResource ForegroundMutedBrush}"/>
                             <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
                         </Trigger>
