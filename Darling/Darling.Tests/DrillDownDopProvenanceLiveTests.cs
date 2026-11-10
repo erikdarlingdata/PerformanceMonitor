@@ -199,6 +199,13 @@ VALUES
                 Assert.Equal(JsonValueKind.Null, top.GetProperty("max_dop_any_plan").ValueKind);
                 Assert.Equal(JsonValueKind.Null, top.GetProperty("max_dop_any_plan_last_seen").ValueKind);
                 Assert.Equal(JsonValueKind.Null, top.GetProperty("dop_note").ValueKind);
+
+                /* The bad-actor reader has its own DOP ordinals, and the same rule: no reading is null, never 0. */
+                var bad = await CollectAsync(postgres, context, "BAD_ACTOR_" + Hash, "bad_actor_query");
+                Assert.Equal(JsonValueKind.Null, bad.GetProperty("max_dop").ValueKind);
+                Assert.Equal(JsonValueKind.Null, bad.GetProperty("max_dop_any_plan").ValueKind);
+                Assert.Equal(JsonValueKind.Null, bad.GetProperty("max_dop_any_plan_last_seen").ValueKind);
+                Assert.Equal(JsonValueKind.Null, bad.GetProperty("dop_note").ValueKind);
             }
 
             /* ── Both plans at the newest snapshot (the stale parallel plan still cached beside the serial

@@ -15,51 +15,36 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Darling's half of the cross-SKU text guard for #3648: the <c>top_cpu_queries</c> and <c>bad_actor_query</c>
-/// drill-down SQL must be BYTE-IDENTICAL between Lite's inline <c>cmd.CommandText</c> and Darling's
-/// <see cref="PgDrillDownCollector.TopCpuQueriesSql"/> / <see cref="PgDrillDownCollector.BadActorDetailSql"/>,
-/// and both must carry the per-plan provenance shape rather than the old hash-folded <c>MAX(max_dop)</c>.
+/// drill-down SQL is one text, <c>PerformanceMonitor.Common.DrillDownSql</c> (#8470), that Darling's
+/// <see cref="PgDrillDownCollector.TopCpuQueriesSql"/> and <see cref="PgDrillDownCollector.BadActorDetailSql"/> are
+/// (<c>DrillDownSqlTests</c> holds them to it) and that Lite's two drill-down methods hand DuckDB when they run (Lite's
+/// <c>DrillDownDopProvenanceParityTests</c> watches them). This class pins what the text Darling runs must carry: the
+/// per-plan provenance shape rather than the old hash-folded <c>MAX(max_dop)</c>, and no zero stand-in for an unknown
+/// DOP. That the readers keep that null is observed on the running collectors, in <c>DrillDownDopProvenanceLiveTests</c>
+/// here and in Lite's parity class.
 ///
-/// <para><b>Why identical text and not two independent pins.</b> #2705 fixed Darling's stale-max_dop
-/// cross-check and closed without a record that Lite had a twin; #2999 is what that cost. The two drill-down
-/// reads here were already character-for-character the same before #3648 (the port kept Lite's text), and the
-/// provenance columns are engine-neutral (<c>ROW_NUMBER() OVER</c>, <c>MAX() OVER</c>, <c>CASE</c> aggregates,
-/// explicit <c>NULLS LAST</c>), so the strongest guard available is equality: a future edit to one SKU's read
-/// fails here until the other is brought along.</para>
-///
-/// <para><b>Why this side hosts the comparison.</b> <c>build.yml</c>'s <c>darling</c> path filter covers
-/// every Lite <c>.cs</c> file as well as the whole Darling tree, so this suite runs on an edit to EITHER
-/// analysis tree; the <c>lite</c> filter does not reach <c>Darling/PerformanceMonitor.Darling.Analysis</c>, and
-/// a guard comparing the two apps cannot live behind a filter that fires for only one of them (#2839,
-/// <c>CrossAppGuardCiGateTests</c>). Lite's <c>DrillDownDopProvenanceParityTests</c> pins Lite's own shape and
-/// meta-pins this file. Darling's text is read from the compiled constants rather than from source, so
-/// nothing here depends on parsing Darling's own file.</para>
+/// <para><b>Why one text and not two independent pins.</b> #2705 fixed Darling's stale-max_dop cross-check and closed
+/// without a record that Lite had a twin; #2999 is what that cost. The two drill-down reads were already
+/// character-for-character the same before #3648 (the port kept Lite's text), and the provenance columns are
+/// engine-neutral (<c>ROW_NUMBER() OVER</c>, <c>MAX() OVER</c>, <c>CASE</c> aggregates, explicit <c>NULLS LAST</c>), so
+/// the strongest guard available is one constant each app is held to: a read that stops running it fails in its own
+/// suite until it is brought back.</para>
 /// </summary>
 public sealed class DrillDownDopProvenanceParityTests
 {
-    private const string LiteFile = "Lite/Analysis/DrillDownCollector.Queries.cs";
-
-    public static TheoryData<string, string> Reads => new()
+    private static string DarlingText(string name) => name switch
     {
-        { "CollectTopCpuQueries", PgDrillDownCollector.TopCpuQueriesSql },
-        { "CollectBadActorDetail", PgDrillDownCollector.BadActorDetailSql },
+        nameof(PgDrillDownCollector.TopCpuQueriesSql) => PgDrillDownCollector.TopCpuQueriesSql,
+        nameof(PgDrillDownCollector.BadActorDetailSql) => PgDrillDownCollector.BadActorDetailSql,
+        _ => throw new ArgumentOutOfRangeException(nameof(name), name, "not a PgDrillDownCollector drill-down text"),
     };
 
     [Theory]
-    [MemberData(nameof(Reads))]
-    public void TheDrillDownSql_IsByteIdenticalAcrossSkus(string liteMethod, string darlingSql)
+    [InlineData(nameof(PgDrillDownCollector.TopCpuQueriesSql))]
+    [InlineData(nameof(PgDrillDownCollector.BadActorDetailSql))]
+    public void TheDrillDownSql_CarriesThePerPlanProvenanceShape_NotTheHashFoldedMaximum(string name)
     {
-        /* Both sides LF-normalised: the constant carries the line endings of the checkout it was compiled
-           from and the source read carries the checkout's on-disk endings, which agree on any one runner but
-           are not the claim under test. */
-        Assert.Equal(Lf(darlingSql), Lf(LiteInlineSql(liteMethod)));
-    }
-
-    [Theory]
-    [MemberData(nameof(Reads))]
-    public void TheDrillDownSql_CarriesThePerPlanProvenanceShape_NotTheHashFoldedMaximum(string liteMethod, string darlingSql)
-    {
-        _ = liteMethod;
-        var sql = Lf(darlingSql);
+        var sql = Lf(DarlingText(name));
 
         /* The headline is the NEWEST plan's reading, picked by a newest-first ranking with the tie-breakers
            spelled out (compile time, then CPU spent) and their null placement made explicit — DuckDB and
@@ -80,41 +65,24 @@ public sealed class DrillDownDopProvenanceParityTests
         Assert.DoesNotContain("MAX(max_dop) AS max_dop", sql, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void NeitherSku_CoercesAnUnknownDopToZero()
+    [Theory]
+    [InlineData(nameof(PgDrillDownCollector.TopCpuQueriesSql))]
+    [InlineData(nameof(PgDrillDownCollector.BadActorDetailSql))]
+    public void TheText_LeavesAnUnknownDopNull_ForTheReaderToKeepNull(string name)
     {
-        /* The DMV never reports 0 — a serial plan is 1 — so `IsDBNull ? 0` on a DOP ordinal was "no reading"
-           rendered as a degree of parallelism. Both readers must project null and hand the four provenance
-           values to the shared note composer. Scoped to the two files' max_dop reads: the other drill-downs'
-           zero-coercions (counts, sums) are legitimately 0-when-absent. */
-        foreach (var source in new[]
-        {
-            RepoFile.ReadRepoFile("Lite", "Analysis", "DrillDownCollector.Queries.cs"),
-            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgDrillDownCollector.Queries.cs"),
-        })
-        {
-            Assert.DoesNotMatch(new Regex(@"max_dop\s*=\s*reader\.IsDBNull\(\d+\)\s*\?\s*0\b"), source);
-            Assert.Matches(new Regex(@"var maxDop = reader\.IsDBNull\(4\) \? \(int\?\)null"), source);
-            Assert.Matches(new Regex(@"var maxDop = reader\.IsDBNull\(10\) \? \(int\?\)null"), source);
-            Assert.Contains("dop_note = QueryDopProvenance.Note(maxDop, maxDopAnyPlan, maxDopAnyPlanLastSeen, planCount)", source, StringComparison.Ordinal);
-        }
+        /* The DMV never reports 0 — a serial plan is 1 — so a 0 on a DOP column is "no reading" rendered as a
+           degree of parallelism. The text's part of that rule: the DOP projections are the bare per-plan readings
+           and their maximum, with no zero stand-in folded in anywhere the text names max_dop. The readers' part,
+           that the null arrives as null on every DOP field and the note is composed from the four provenance
+           values, is observed on the running collectors: DrillDownDopProvenanceLiveTests for Darling and Lite's
+           DrillDownDopProvenanceParityTests for Lite. */
+        var sql = Lf(DarlingText(name));
+
+        Assert.Contains("MAX(CASE WHEN newest_rn = 1 THEN max_dop END) AS max_dop", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(max_dop) OVER (PARTITION BY database_name, query_hash) AS max_dop_any_plan", sql, StringComparison.Ordinal);
+        Assert.DoesNotMatch(new Regex(@"(COALESCE|IFNULL|NVL)\s*\([^)]*max_dop", RegexOptions.IgnoreCase), sql);
+        Assert.DoesNotMatch(new Regex(@"max_dop[^,\n]*,\s*0\s*\)"), sql);
     }
 
     private static string Lf(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
-
-    /// <summary>
-    /// Lite's inline SQL: the first <c>cmd.CommandText = @"..."</c> verbatim literal after the named method's
-    /// declaration. The two reads under test contain no doubled quotes, so the literal ends at the first
-    /// <c>";</c>.
-    /// </summary>
-    private static string LiteInlineSql(string methodName)
-    {
-        var source = RepoFile.ReadRepoFile("Lite", "Analysis", "DrillDownCollector.Queries.cs");
-        var start = source.IndexOf($"Task {methodName}(", StringComparison.Ordinal);
-        Assert.True(start >= 0, $"{methodName} not found in {LiteFile}");
-        const string Marker = "cmd.CommandText = @\"";
-        var literalStart = source.IndexOf(Marker, start, StringComparison.Ordinal) + Marker.Length;
-        var literalEnd = source.IndexOf("\";", literalStart, StringComparison.Ordinal);
-        return source[literalStart..literalEnd];
-    }
 }
