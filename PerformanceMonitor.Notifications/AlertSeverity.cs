@@ -29,9 +29,28 @@ public enum AlertSeverityLevel
 internal static class AlertSeverity
 {
     /// <summary>The tier a notification route's severity filter sees for an alert (#6928): the tier graded at the fire site
-    /// when it carries one, else the metric's own badge (red is Critical, every other badge is Warning).</summary>
-    public static AlertSeverityLevel RouteLevelOf(string metricName, AlertSeverityLevel? overrideLevel) =>
-        overrideLevel ?? (ForMetric(metricName).HexColor == "#DC2626" ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning);
+    /// when it carries one, else the metric's own badge (red is Critical, every other badge is Warning).
+    /// <para>#8525: a recovery the product delivers as an alert of its own (<see cref="AlertFamily.RecoveryPairs"/>) has no tier
+    /// of its own, its badge is RESOLVED green, so it is routed at the tier of the firing it closes, and lands where that firing
+    /// did. Both firings in the census fire Critical at every site, which their red badge states, so a red firing badge gives
+    /// Critical. A firing whose badge is not red fires at a tier the name alone does not say, so its recovery routes with no tier,
+    /// which every route takes; it is never read as a Warning alert.</para></summary>
+    public static AlertSeverityLevel? RouteLevelOf(string metricName, AlertSeverityLevel? overrideLevel)
+    {
+        if (overrideLevel is { } fireSite)
+        {
+            return fireSite;
+        }
+
+        if (AlertFamily.RecoveryPairs.TryGetValue(metricName, out var firing))
+        {
+            return IsRedBadge(firing) ? AlertSeverityLevel.Critical : null;
+        }
+
+        return IsRedBadge(metricName) ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning;
+    }
+
+    private static bool IsRedBadge(string metricName) => ForMetric(metricName).HexColor == "#DC2626";
 
     /// <param name="overrideLevel">
     /// When non-null, forces the tier regardless of <paramref name="metricName"/> — for metrics
