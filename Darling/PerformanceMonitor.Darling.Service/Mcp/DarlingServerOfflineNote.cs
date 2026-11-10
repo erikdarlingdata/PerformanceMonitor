@@ -25,27 +25,20 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// ago has a simpler explanation that outranks every one of them: nothing is reaching the store. So the answer says that first,
 /// with the last collection time.</para>
 ///
-/// <para><b>The rule is Lite's, and it is not <c>list_servers</c>'s.</b> A server counts as offline when
+/// <para><b>One rule, shared with every headline surface.</b> A server counts as offline when
 /// <see cref="DarlingMcpDataTools.FreshnessStatus"/> says <c>Offline</c> for the instant of its newest SUCCESS collector run
-/// (#7167): only a run that reached the server is "heard from". A server the service cannot reach still writes ERROR, PERMISSIONS or
-/// SKIPPED rows every cycle, which keep <c>list_servers</c>'s newest-row probe (<see cref="FreshnessSql"/>, any non-cycle row) fresh
-/// while nothing is being read, so the two can disagree on such a server: <c>list_servers</c> bands it by its failing rows, and the
-/// read says nothing is arriving. That is deliberate, and Lite makes the same split (<c>GetLastSuccessfulCollectionAsync</c> against
-/// its Overview band), so a read answers the same way in both products.</para>
+/// (#7167, <see cref="FreshnessSql"/>): only a run that reached the server is "heard from". <c>list_servers</c>, the Overview card, the
+/// sidebar dot, the fleet card and the Admin grid read the same newest SUCCESS run (#8464), so a server whose collectors all fail reads
+/// offline on every one of them and here; Lite's <c>GetLastSuccessfulCollectionAsync</c> is the same rule, so a read answers the same way in
+/// both products. The one read that still takes any collector row is <c>get_collection_health</c>'s <c>server_connection</c>, and the
+/// stored failed-connect flag every surface heals (<see cref="ConnectDownSinceSql.Healed"/>): there any collector row proves the connect
+/// worked, whatever the collector then found.</para>
 /// </summary>
 internal static class DarlingServerOfflineNote
 {
-    /// <summary>The <c>list_servers</c> probe for one server: its registration instant and its newest non-cycle collection-log row, whatever its status.</summary>
-    internal static readonly string FreshnessSql = BuildFreshnessSql(statusPredicate: "");
-
-    /// <summary>
-    /// #7167: <see cref="FreshnessSql"/> narrowed to the newest SUCCESS run (<c>status = 'SUCCESS'</c>, the status Collection Health counts
-    /// as a run that reached the server), so a server that logs only failed runs still reads as silent. Lite's rule.
-    /// </summary>
-    internal static readonly string SuccessFreshnessSql = BuildFreshnessSql(statusPredicate: "AND   cl.status = 'SUCCESS'");
-
-    /// <summary>The one probe both rules read, with <paramref name="statusPredicate"/> (empty for any row) closing the inner filter.</summary>
-    private static string BuildFreshnessSql(string statusPredicate) => $"""
+    /// <summary>The probe for one server: its registration instant and its newest SUCCESS collector run
+    /// (<see cref="CollectionRunSql.SuccessfulCollectorRun"/>), the row every "last collected" surface reads.</summary>
+    internal const string FreshnessSql = $"""
         SELECT
             s.created_date,
             latest.collection_time AS last_collection
@@ -56,7 +49,6 @@ internal static class DarlingServerOfflineNote
             FROM v_collection_log cl
             WHERE cl.server_id = s.server_id
             AND   {CollectionRunSql.SuccessfulCollectorRun}
-            {statusPredicate}
             ORDER BY cl.collection_time DESC
             LIMIT 1
         ) AS latest ON TRUE
@@ -78,7 +70,7 @@ internal static class DarlingServerOfflineNote
         NpgsqlDataSource postgres, int serverId, string displayName, DateTime nowUtc, DateTime? windowEndUtc,
         CancellationToken cancellationToken)
     {
-        if (await ReadFreshnessAsync(postgres, serverId, cancellationToken, successOnly: true) is not var (registered, last))
+        if (await ReadFreshnessAsync(postgres, serverId, cancellationToken) is not var (registered, last))
         {
             return (null, null);
         }
@@ -95,14 +87,15 @@ internal static class DarlingServerOfflineNote
         return (LeadFor(displayName, last, registered, nowUtc, connectDownSince, lastConnectError), last);
     }
 
-    /// <summary>The registry's failed-connect state for one server (#7590): since when and the last error, or nulls while the last connect succeeded
-    /// or when the read fails (a diagnostic never turns a finding into an error).</summary>
+    /// <summary>The registry's failed-connect state for one server (#7590): since when and the last error, or nulls while the last connect succeeded,
+    /// when a collector row newer than the flag has proved a later connect worked (<see cref="ConnectDownSinceSql.Healed"/>, #8464), or when the
+    /// read fails (a diagnostic never turns a finding into an error).</summary>
     internal static async Task<(DateTime? Since, string? Error)> ReadConnectDownAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         try
         {
-            await using var command = postgres.CreateCommand("SELECT connect_down_since, last_connect_error FROM servers WHERE server_id = $1");
+            await using var command = postgres.CreateCommand("SELECT " + ConnectDownSinceSql.Healed + ", s.last_connect_error FROM servers s WHERE s.server_id = $1");
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -117,15 +110,15 @@ internal static class DarlingServerOfflineNote
     }
 
     /// <summary>
-    /// The <see cref="FreshnessSql"/> probe for one server: its registration instant and its newest collection. Null when the server is
-    /// not registered or the read fails, so a caller's diagnostic never turns a finding into an error.
+    /// The <see cref="FreshnessSql"/> probe for one server: its registration instant and its newest SUCCESS collector run. Null when the
+    /// server is not registered or the read fails, so a caller's diagnostic never turns a finding into an error.
     /// </summary>
     internal static async Task<(DateTime? Registered, DateTime? Last)?> ReadFreshnessAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken, bool successOnly = false)
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         try
         {
-            await using var command = postgres.CreateCommand(successOnly ? SuccessFreshnessSql : FreshnessSql);
+            await using var command = postgres.CreateCommand(FreshnessSql);
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);

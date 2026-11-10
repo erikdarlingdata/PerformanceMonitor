@@ -77,16 +77,20 @@ public sealed class FleetCardTellsDarkFromNeverCollectedTests
     }
 
     /// <summary>
-    /// The boundary is the instant the read's <c>$1</c> is bound to. A server registered AT the window's start
-    /// could only have collected at or after it, which is inside the window the read searched (its predicate
-    /// is <c>collection_time &gt;= $1</c>), so an empty window proves it never has. One tick earlier and a
-    /// collection outside the window is possible, so it is dark.
+    /// The boundaries. A server registered before the window's start may have collected outside what the read searched (its predicate
+    /// is <c>collection_time &gt;= $1</c>), so it is dark. One registered inside the window is dark too once its registration is older
+    /// than the offline threshold (#8464): the worker collects as soon as it connects, and an empty window on a server that old means
+    /// no SUCCESS, which is what a server whose collectors all fail looks like. Registered exactly the threshold ago, or later, it
+    /// keeps the never-collected reading.
     /// </summary>
     [Fact]
-    public void TheBoundary_IsTheInstantTheReadIsBoundTo()
+    public void TheBoundaries_AreTheWindowStartAndTheOfflineThreshold()
     {
-        Assert.Equal(ServerFreshness.NeverCollected, DarlingFleetReader.ClassifyWindowedFreshness(null, WindowStart, Now));
+        var atThreshold = Now - ServerHealthThresholds.OfflineThreshold;
+        Assert.Equal(ServerFreshness.Offline, DarlingFleetReader.ClassifyWindowedFreshness(null, WindowStart, Now));
         Assert.Equal(ServerFreshness.Offline, DarlingFleetReader.ClassifyWindowedFreshness(null, WindowStart.AddTicks(-1), Now));
+        Assert.Equal(ServerFreshness.Offline, DarlingFleetReader.ClassifyWindowedFreshness(null, atThreshold.AddTicks(-1), Now));
+        Assert.Equal(ServerFreshness.NeverCollected, DarlingFleetReader.ClassifyWindowedFreshness(null, atThreshold, Now));
 
         /* One derivation for the bind and the rule: two days, as naive UTC (the store's convention — a
            Kind=Utc value binds as timestamptz and PostgreSQL zone-shifts it against the naive column). */

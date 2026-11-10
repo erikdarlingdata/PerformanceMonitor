@@ -1102,8 +1102,8 @@ public static class FleetSweepEngine
                 Window = spanEndUtc - spanStartUtc,
             };
 
-            /* #6155: a server with nothing in the span gets its newest collection read, through the probe list_servers uses, so the
-               sweep can tell a server that went quiet after the restart from one that was already offline before it. */
+            /* #6155: a server with nothing in the span gets its newest SUCCESS collection read, through the probe the offline note and
+               list_servers share, so the sweep can tell a server that went quiet after the restart from one that was already offline before it. */
             DateTime? lastCollection = null;
             DateTime? registered = null;
             if (!signals.HasData && await DarlingServerOfflineNote.ReadFreshnessAsync(postgres, serverId, cancellationToken).ConfigureAwait(false) is var (reg, last))

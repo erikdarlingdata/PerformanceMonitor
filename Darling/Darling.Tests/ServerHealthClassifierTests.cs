@@ -30,6 +30,30 @@ public sealed class ServerHealthClassifierTests
     public void ClassifyFreshness_NoCollection_IsNeverCollected() =>
         Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, Now));
 
+    /// <summary>#8464: with no collection the read could see, a registration older than the offline threshold is dark, whatever the read's
+    /// reach, and only a registration inside the threshold (or none) keeps the never-collected reading. A server whose every collector fails
+    /// is the case: it connects, so it is registered, and it never writes a SUCCESS.</summary>
+    [Fact]
+    public void ClassifyFreshness_NoCollection_RegisteredLongerAgoThanTheOfflineThreshold_IsOffline()
+    {
+        var retentionHorizon = Now.AddDays(-60);
+        var fleetWindowStart = Now.AddHours(-48);
+        var atThreshold = Now - ServerHealthThresholds.OfflineThreshold;
+
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, Now.AddDays(-10), retentionHorizon, Now));
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, Now.AddDays(-10), fleetWindowStart, Now));
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, atThreshold.AddTicks(-1), retentionHorizon, Now));
+        Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, atThreshold, retentionHorizon, Now));
+        Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, Now.AddMinutes(-1), fleetWindowStart, Now));
+        Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, null, retentionHorizon, Now));
+
+        /* A collection the read found bands on the ladder, whatever the registration. */
+        Assert.Equal(ServerFreshness.Fresh, ServerHealthClassifier.ClassifyFreshness(Now.AddSeconds(-30), Now.AddDays(-10), retentionHorizon, Now));
+        /* The connect-aware overload keeps the same arm. */
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, Now.AddDays(-10), retentionHorizon, Now, null));
+        Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, Now.AddMinutes(-1), retentionHorizon, Now, null));
+    }
+
     [Theory]
     [InlineData(0, ServerFreshness.Fresh)]
     [InlineData(120, ServerFreshness.Fresh)]     // exactly 2x cadence — still fresh

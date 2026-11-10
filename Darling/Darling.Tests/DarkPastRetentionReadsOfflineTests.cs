@@ -49,7 +49,8 @@ public sealed class DarkPastRetentionReadsOfflineTests
     private static DateTime LongAgo => Now.AddDays(-90);
 
     /// <summary>A registration inside the retained span: any collection it made would still be there.</summary>
-    private static DateTime Recently => Now.AddDays(-10);
+    /// <summary>A registration inside the offline threshold (#8464): the only registration with no collection that still reads never-collected.</summary>
+    private static DateTime Recently => Now.AddMinutes(-10);
 
     /// <summary>
     /// The rule. A newest collection bands on the ladder, whatever the registration says; with none, a
@@ -75,15 +76,20 @@ public sealed class DarkPastRetentionReadsOfflineTests
     }
 
     /// <summary>
-    /// The boundary is the instant the read could first see. Registered AT it, any collection would be at or
-    /// after it and so still visible, which proves an empty read means never collected. One tick earlier, a
-    /// collection the read cannot see is possible.
+    /// The boundaries. A registration before the horizon is Offline on its own: a collection the read cannot see is possible. A
+    /// registration at or after it is Offline once it is older than the offline threshold (#8464): the worker collects as soon as it
+    /// connects, so a server registered that long ago with no SUCCESS the read could see is dark. Registered exactly the threshold
+    /// ago, or later, it keeps the never-collected reading, as a quiet server registered then would still read Fresh.
     /// </summary>
     [Fact]
-    public void TheBoundary_IsTheFirstInstantTheReadCouldSee()
+    public void TheBoundaries_AreTheHorizonAndTheOfflineThreshold()
     {
-        Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, Horizon, Horizon, Now));
+        var atThreshold = Now - ServerHealthThresholds.OfflineThreshold;
         Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, Horizon.AddTicks(-1), Horizon, Now));
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, Horizon, Horizon, Now));
+        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, atThreshold.AddTicks(-1), Horizon, Now));
+        Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, atThreshold, Horizon, Now));
+        Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, Now, Horizon, Now));
     }
 
     /// <summary>The horizon an unbounded read of the collection log can see: the log's retention back, as

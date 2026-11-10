@@ -8,8 +8,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// over (Lite's twin is <c>CollectionCycleSkip</c>, #5643, PR #5730). The row is not a collector run: <c>collector_name</c> is
 /// <see cref="CollectorName"/> and <c>status</c> is <see cref="Status"/>. It carries a real <c>server_id</c>, so
 /// the data_retention sentinel trick (server_id 0, left out of every per-server read) does not hide it. Every read of
-/// the log that counts runs, rates, streaks, "last collected" or "any row" leaves it out through
-/// <see cref="NotCycleRowSql"/>; the reads that name one collector, or <c>status = 'SUCCESS'</c>, never see it; the raw
+/// the log that counts runs, rates or streaks, or tests for any row, leaves it out through <see cref="NotCycleRowSql"/>; a
+/// "last collected" read takes <see cref="CollectionRunSql.SuccessfulCollectorRun"/> (#8464), the newest SUCCESS run, whose
+/// predicate names both rows beside <c>status = 'SUCCESS'</c>; the reads that name one collector never see it; the raw
 /// log reads show it on purpose. <c>CollectionCycleReaderCensusTests</c> holds the line for every later reader. The name
 /// is spelled once, in <see cref="CollectionRunSql.CycleRowCollectorName"/> (#8464), and no Darling file spells it as a literal.
 /// </summary>

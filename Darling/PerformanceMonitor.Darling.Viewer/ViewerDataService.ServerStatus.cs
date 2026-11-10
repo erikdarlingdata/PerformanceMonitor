@@ -63,9 +63,13 @@ CROSS JOIN LATERAL
 WHERE s.server_id <> 0";
 
     /// <summary>The servers whose last connect failed (#7590): <c>connect_down_since</c>, the last connect error and the next retry time, from the registry the
-    /// service writes on every connect attempt. Only servers with a failed connect are returned. A store older than the rung that adds the
+    /// service writes on every connect attempt. Only servers with a failed connect are returned, and a flag a newer collector row has proved stale
+    /// (<see cref="ConnectDownSinceSql.Healed"/>, #8464) does not count as one. A store older than the rung that adds the
     /// columns (the undefined column error) answers an empty map, so the dots band as they did before it.</summary>
-    public const string ServerConnectDownSql = "SELECT server_id, connect_down_since, last_connect_error, next_connect_attempt FROM servers WHERE connect_down_since IS NOT NULL AND server_id <> 0";
+    public const string ServerConnectDownSql =
+        "SELECT x.server_id, x.connect_down_since, x.last_connect_error, x.next_connect_attempt FROM (SELECT s.server_id, "
+        + ConnectDownSinceSql.Healed + " AS connect_down_since, s.last_connect_error, s.next_connect_attempt FROM servers s"
+        + " WHERE s.connect_down_since IS NOT NULL AND s.server_id <> 0) AS x WHERE x.connect_down_since IS NOT NULL";
 
     /// <summary>Reads <see cref="ServerConnectDownSql"/>, keyed by server_id.</summary>
     public async Task<Dictionary<int, (DateTime SinceUtc, string? Error, DateTime? NextAttemptUtc)>> GetServerConnectDownAsync(CancellationToken cancellationToken = default)

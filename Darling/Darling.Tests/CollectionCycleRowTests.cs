@@ -16,6 +16,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -247,7 +248,9 @@ public sealed class CollectionCycleRowLiveTests
     private const int ReaderServerOnly = -573505;  // skip rows only
     private const int ReaderServerFailed = -573506;  // a collector SUCCESS, then NEWER failed attempts (#8464)
     private const int ReaderServerDark = -573507;  // failed attempts only (#8464)
-    private static readonly int[] AllIds = [WriterServerId, ServerA, ServerB, ReaderServerOld, ReaderServerOnly, ReaderServerFailed, ReaderServerDark];
+    private const int ReaderServerHealed = -573508;  // a failed connect, then a failed collector attempt after it (#8464)
+    private const int ReaderServerDown = -573509;  // a failed connect and nothing after it (#8464)
+    private static readonly int[] AllIds = [WriterServerId, ServerA, ServerB, ReaderServerOld, ReaderServerOnly, ReaderServerFailed, ReaderServerDark, ReaderServerHealed, ReaderServerDown];
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -610,6 +613,10 @@ VALUES ($1, $2, $3, $4, $5, 100, $6, NULL, $7, 80, 20)",
                 "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, TRUE) ON CONFLICT (server_id) DO NOTHING", id, name);
         }
 
+        /* The all-failed server connected a day ago: long enough ago that nothing is still awaited from it. */
+        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET created_date = $2 WHERE server_id = $1",
+            ReaderServerDark, DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-1)));
+
         /* A SUCCESS 30 minutes ago, then a PERMISSIONS attempt and an ERROR attempt after it; and a server whose every attempt failed. */
         await InsertAsync(connection, ct, ReaderServerFailed, "cycle-reader-failed", "wait_stats", "SUCCESS", f.OldRun, 10);
         await InsertAsync(connection, ct, ReaderServerFailed, "cycle-reader-failed", "query_stats", "PERMISSIONS", MinutesAgo(10), 0);
@@ -656,6 +663,74 @@ VALUES ($1, $2, $3, $4, $5, 100, $6, NULL, $7, 80, 20)",
         var admin = await DarlingAdminServersReader.ReadAsync(f.Postgres, ct);
         Assert.Equal(f.OldRun, admin.Single(r => r.ServerId == ReaderServerFailed).LastCollection);
         Assert.Null(admin.Single(r => r.ServerId == ReaderServerDark).LastCollection);
+
+        /* Registered a day ago and never once successful, the all-failed server is Offline on every surface: list_servers, the Admin grid,
+           the fleet card, the Overview card and sidebar dot, and the offline note, which names the reason. Not awaiting its first collection. */
+        var darkRow = list.Single(s => s.ServerId == ReaderServerDark);
+        Assert.Equal("Offline", DarlingMcpDataTools.FreshnessStatus(darkRow.LastCollection, darkRow.RegisteredAt, nowUtc, darkRow.ConnectDownSince));
+        Assert.Equal("Offline", DarlingAdminServersReader.ToAdminServerRow(admin.Single(r => r.ServerId == ReaderServerDark), nowUtc).freshness);
+        Assert.Equal(ServerCollectionStatus.Offline.Word(), fleet.Cards.Single(c => c.ServerId == ReaderServerDark).Status);
+        Assert.Equal(ServerFreshness.Offline, ServerSummaryItem.ClassifyFreshness(darkRow.LastCollection, darkRow.RegisteredAt, nowUtc));
+        var lead = DarlingServerOfflineNote.LeadFor("cycle-reader-dark", darkRow.LastCollection, darkRow.RegisteredAt, nowUtc);
+        Assert.NotNull(lead);
+        Assert.Contains("no successful collection from it within its retained history", lead, StringComparison.Ordinal);
+    });
+
+    /// <summary>Group 4c (#8464): what proves a connect is one rule on every surface. The registry's <c>connect_down_since</c> is healed by any
+    /// collector row newer than it, a failed attempt included, because a collector runs only over an open connection. So a server whose login
+    /// connects but whose collectors all fail reads "cannot connect" nowhere, and a server with no row since its flag reads it everywhere:
+    /// list_servers, the Admin grid, the fleet card, the sidebar's failed-connect read, the offline note and get_collection_health.</summary>
+    [Fact]
+    public Task Group4c_ConnectDownSince_IsHealedByAnyNewerCollectorRow_OnEverySurface() => RunReaderAsync(async (f, connection, ct) =>
+    {
+        foreach (var (id, name) in new[] { (ReaderServerHealed, "cycle-reader-healed"), (ReaderServerDown, "cycle-reader-down") })
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, id, name, ct);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, TRUE) ON CONFLICT (server_id) DO NOTHING", id, name);
+        }
+
+        /* Both flagged down 20 minutes ago, each with a SUCCESS before the flag; only the first has a collector row (a PERMISSIONS attempt) after it. */
+        var downSince = DarlingMcpTestData.Naive(MinutesAgo(20));
+        foreach (var id in new[] { ReaderServerHealed, ReaderServerDown })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "UPDATE servers SET connect_down_since = $2, last_connect_error = 'Login failed for user' WHERE server_id = $1", id, downSince);
+        }
+
+        await InsertAsync(connection, ct, ReaderServerHealed, "cycle-reader-healed", "wait_stats", "SUCCESS", f.OldRun, 10);
+        await InsertAsync(connection, ct, ReaderServerDown, "cycle-reader-down", "wait_stats", "SUCCESS", f.OldRun, 10);
+        await InsertAsync(connection, ct, ReaderServerHealed, "cycle-reader-healed", "query_stats", "PERMISSIONS", MinutesAgo(10), 0);
+
+        var nowUtc = DateTime.UtcNow;
+        var list = await DarlingDataReader.GetServerListAsync(f.Postgres, ct);
+        var admin = await DarlingAdminServersReader.ReadAsync(f.Postgres, ct);
+        var fleet = await DarlingFleetReader.GetFleetOverviewAsync(f.Postgres, nowUtc.AddHours(-1), nowUtc, nowUtc, cancellationToken: ct);
+        var sidebar = new Dictionary<int, DateTime>();
+        await using (var command = f.Postgres.CreateCommand(ViewerDataService.ServerConnectDownSql))
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                sidebar[reader.GetInt32(0)] = reader.GetDateTime(1);
+            }
+        }
+
+        /* The healed server: no surface says the service cannot connect to it. */
+        Assert.Null(list.Single(s => s.ServerId == ReaderServerHealed).ConnectDownSince);
+        Assert.Null(admin.Single(r => r.ServerId == ReaderServerHealed).ConnectDownSince);
+        Assert.Null(fleet.Cards.Single(c => c.ServerId == ReaderServerHealed).ConnectDownSince);
+        Assert.False(sidebar.ContainsKey(ReaderServerHealed), "the sidebar's failed-connect read lists a server a newer collector row proves connected");
+        Assert.Null((await DarlingServerOfflineNote.ReadConnectDownAsync(f.Postgres, ReaderServerHealed, ct)).Since);
+        Assert.Null(await DarlingMcpDataTools.ReadServerConnectionAsync(f.Postgres, ReaderServerHealed, nowUtc, null, ct));
+
+        /* The server with nothing since its flag: every surface says it cannot connect, since the same instant. */
+        Assert.Equal(downSince, list.Single(s => s.ServerId == ReaderServerDown).ConnectDownSince);
+        Assert.Equal(downSince, admin.Single(r => r.ServerId == ReaderServerDown).ConnectDownSince);
+        Assert.Equal(downSince, fleet.Cards.Single(c => c.ServerId == ReaderServerDown).ConnectDownSince);
+        Assert.Equal(downSince, sidebar[ReaderServerDown]);
+        Assert.Equal(downSince, (await DarlingServerOfflineNote.ReadConnectDownAsync(f.Postgres, ReaderServerDown, ct)).Since);
+        Assert.NotNull(await DarlingMcpDataTools.ReadServerConnectionAsync(f.Postgres, ReaderServerDown, nowUtc, null, ct));
     });
 
     /// <summary>Group 5: the per-day run count is made of collector runs only (text pin: the read takes seven parameters).</summary>

@@ -1654,9 +1654,10 @@ public sealed class ServerSummaryItem
     /// The same derivation with the registration rule (#3967), and the one the sidebar dot and the Overview
     /// card both call. Their newest-collection reads have no window, but the collection log's retention bounds
     /// what they can see (<see cref="DarlingRetentionHorizons.CollectionLogHorizon"/>), so a server whose whole
-    /// history retention has dropped comes back null. Registered before that horizon, it reads Offline;
-    /// registered after it, or with no registration, it keeps the ladder's never-collected reading. One
-    /// horizon for both surfaces, so the dot and the card cannot disagree about the same server.
+    /// history retention has dropped comes back null. Registered before that horizon, or longer ago than the
+    /// offline threshold (#8464), it reads Offline; registered inside the threshold, or with no registration, it
+    /// keeps the ladder's never-collected reading. One horizon for both surfaces, so the dot and the card cannot
+    /// disagree about the same server.
     /// </summary>
     public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc) =>
         ServerHealthClassifier.ClassifyFreshness(

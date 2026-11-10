@@ -72,7 +72,7 @@ internal static class DarlingAdminServersReader
             s.created_date,
             latest.collection_time AS last_collection,
             {DarlingDataReader.SameMachineAsColumnSql},
-            s.connect_down_since
+            {ConnectDownSinceSql.Healed} AS connect_down_since
         FROM config.config_monitored_servers c
         LEFT JOIN servers s ON s.server_id = c.server_id
         LEFT JOIN LATERAL

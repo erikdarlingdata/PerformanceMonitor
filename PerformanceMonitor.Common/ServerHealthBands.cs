@@ -821,12 +821,16 @@ namespace PerformanceMonitor.Common
         ///
         /// <para><b>The rule.</b> A newest collection bands exactly as the ladder bands it. With none, the
         /// server's registration decides: registered before <paramref name="searchedFromUtc"/>, it is Offline;
-        /// registered at or after it, the ladder's never-collected reading stands, and that half is exact. A
+        /// registered at or after it, but longer ago than <see cref="ServerHealthThresholds.OfflineThreshold"/>, it
+        /// is Offline too (#8464); registered inside the threshold, the ladder's never-collected reading stands. A
         /// registration is written when collection can first begin (Darling's registry row at the first
-        /// successful connect, Lite's server entry when it is added), so a server registered inside what the
-        /// read could see could only have collected inside it, and the read found nothing. Registered before
-        /// it, the server had time to collect and has sent nothing the read could see: Offline is the word, and
-        /// it is what a read that could see all of history says whenever the server did once collect.</para>
+        /// successful connect, Lite's server entry when it is added), and the worker collects as soon as it
+        /// connects, so a server registered longer ago than the threshold with no successful collection the read
+        /// could see is dark, not waiting: a server whose every collector fails (a login that connects but lacks
+        /// VIEW SERVER STATE, for example) writes a failed row every cycle and never a SUCCESS, and it reads
+        /// Offline on every surface rather than as one that has not yet been tried. Registered inside the
+        /// threshold, the read could only have found a collection inside it, and the never-collected reading is
+        /// exact for as long as a quiet server would still read Fresh.</para>
         ///
         /// <para><b>No registration keeps the ladder's reading</b>, because nothing then says when collection
         /// could have begun. That is also the reading a caller gets by passing null for a server its read did
@@ -842,7 +846,8 @@ namespace PerformanceMonitor.Common
             DateTime? registeredAtUtc,
             DateTime searchedFromUtc,
             DateTime nowUtc) =>
-            !lastCollectionUtc.HasValue && registeredAtUtc.HasValue && registeredAtUtc.Value < searchedFromUtc
+            !lastCollectionUtc.HasValue && registeredAtUtc.HasValue
+                && (registeredAtUtc.Value < searchedFromUtc || nowUtc - registeredAtUtc.Value > ServerHealthThresholds.OfflineThreshold)
                 ? ServerFreshness.Offline
                 : ClassifyFreshness(lastCollectionUtc, nowUtc);
 

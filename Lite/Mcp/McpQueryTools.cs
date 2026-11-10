@@ -1894,9 +1894,9 @@ public sealed class McpQueryTools
         if (last is not { } newest)
         {
             /* No SUCCESS row in what the log retains. Darling's rule (ServerHealthClassifier.ClassifyFreshness over the retention horizon):
-               a server registered before that horizon has had time to collect and has nothing to show for it, so it is offline, which is
-               what a server whose credentials have been wrong since it was added looks like. One registered inside the horizon, or with no
-               registration known, keeps the tools' own "never collected" answers. */
+               a server registered before that horizon, or longer ago than the offline threshold, has had time to collect and has nothing
+               to show for it, so it is offline, which is what a server whose credentials have been wrong since it was added looks like.
+               One registered inside the threshold, or with no registration known, keeps the tools' own "never collected" answers. */
             var registered = dataService.RegisteredAtUtcLookup?.Invoke(serverId);
             if (ServerHealthClassifier.ClassifyFreshness(null, registered, RetentionService.OldestRetainedInstant(windowEnd), windowEnd)
                 != ServerFreshness.Offline)

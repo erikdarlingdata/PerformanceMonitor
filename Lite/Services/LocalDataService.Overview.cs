@@ -639,8 +639,9 @@ public class ServerSummaryItem
     ///
     /// <para>#3967: the newest-collection read has no window, but the archive's retention bounds what it can
     /// see (<see cref="RetentionService.OldestRetainedInstant"/>), so a server whose whole history has aged out
-    /// comes back null. Added before that instant, it bands Offline; added after it, or with no registration,
-    /// it keeps the ladder's never-collected reading. The same rule the Darling viewer and fleet card apply.</para>
+    /// comes back null. Added before that instant, or longer ago than the offline threshold, it bands Offline;
+    /// added inside the threshold, or with no registration, it keeps the ladder's never-collected reading. The
+    /// same rule the Darling viewer and fleet card apply.</para>
     /// </summary>
     public void ApplyCollectionFreshness(DateTime nowUtc, DateTime? registeredAtUtc) =>
         CollectionFreshness = ServerHealthClassifier.ClassifyFreshness(

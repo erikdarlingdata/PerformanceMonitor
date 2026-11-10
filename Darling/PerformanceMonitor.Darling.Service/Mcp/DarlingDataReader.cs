@@ -3510,7 +3510,7 @@ internal static class DarlingDataReader
             s.sql_engine_edition,
             {SameMachineAsColumnSql},
             COALESCE(c.monthly_cost_usd, 0) AS monthly_cost_usd,
-            s.connect_down_since,
+            {ConnectDownSinceSql.Healed} AS connect_down_since,
             s.last_connect_error
         FROM servers s
         JOIN config.config_monitored_servers c ON c.server_id = s.server_id
