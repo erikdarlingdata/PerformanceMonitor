@@ -6296,7 +6296,7 @@ public static partial class DarlingCliCommands
                     }
                     catch (Exception reopenEx) when (reopenEx is not OperationCanceledException)
                     {
-                        error.WriteLine($"  The collapse failed after {CountText.Plural(removed, "row")}; the slice at {sliceStart:yyyy-MM-dd HH:mm} failed ({FirstLineOf(ex.Message)}) and the store connection could not be reopened: {FirstLineOf(reopenEx.Message)}");
+                        error.WriteLine(Inv($"  The collapse failed after {CountText.Plural(removed, "row")}; the slice at {sliceStart:yyyy-MM-dd HH:mm} failed ({FirstLineOf(ex.Message)}) and the store connection could not be reopened: {FirstLineOf(reopenEx.Message)}"));
                         error.WriteLine("  Slices already committed are safe. Re-run to continue — the repair is idempotent.");
                         return 1;
                     }

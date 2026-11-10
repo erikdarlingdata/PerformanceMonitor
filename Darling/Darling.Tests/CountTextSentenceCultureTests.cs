@@ -19,15 +19,15 @@ namespace Darling.Tests;
 /// <summary>
 /// #8522: a sentence that counts with <c>CountText</c> writes its other numbers in the same convention. <c>CountText</c>
 /// writes "1,500" on every desktop; a figure beside it written in the thread's culture read "1.200" on a German desktop,
-/// so one sentence carried two conventions and the count read as a decimal. Each test sets the thread culture to de-DE
-/// for the call and restores it afterwards; the culture is per thread, so a test running beside it is not touched.
+/// so one sentence carried two conventions and the count read as a decimal. Each test sets the thread culture for the
+/// call and restores it afterwards; the culture is per thread, so a test running beside it is not touched.
 /// </summary>
 public sealed class CountTextSentenceCultureTests
 {
-    private static T OnAGermanDesktop<T>(Func<T> read)
+    private static T InCulture<T>(string name, Func<T> read)
     {
         var saved = CultureInfo.CurrentCulture;
-        CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("de-DE");
+        CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo(name);
         try
         {
             return read();
@@ -37,6 +37,8 @@ public sealed class CountTextSentenceCultureTests
             CultureInfo.CurrentCulture = saved;
         }
     }
+
+    private static T OnAGermanDesktop<T>(Func<T> read) => InCulture("de-DE", read);
 
     [Fact]
     public void PurgeSummary_OnAGermanDesktop_WritesRowsAndTablesInOneConvention()
@@ -57,5 +59,26 @@ public sealed class CountTextSentenceCultureTests
         var text = OnAGermanDesktop(() => PgDisplay.WaitSamplingSummary(rows, serviceTier: true, instrumentKnown: true, cadence: "every minute", reset: false));
 
         Assert.StartsWith("2,500 wait events, 1,500 attributed to a query. ", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LockStatsRowsNote_OnAGermanDesktop_WritesBothCountsInOneConvention()
+    {
+        // The panel text and its hover detail count the same two figures, so both read "1,200 ... 1,500" everywhere.
+        var note = OnAGermanDesktop(() => ViewerServerTab.LockStatsRowsNote(1200, 1500));
+
+        Assert.Equal("1,200 lock queues across 1,500 captures.", note.Text);
+        Assert.StartsWith("1,200 lock queues across 1,500 captures.", note.Detail, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("en-US")]
+    [InlineData("de-DE")]
+    public void PredicateStatsSummary_WritesThePercentWithoutASpace_OnEveryDesktop(string culture)
+    {
+        // The sample rate reads "0.10%" as it always did on an English desktop: no culture puts a space before the sign.
+        var text = InCulture(culture, () => PgDisplay.PredicateStatsSummary(1234, 0.001));
+
+        Assert.Equal("1,234 predicates, sampled at 0.10% of executions", text);
     }
 }

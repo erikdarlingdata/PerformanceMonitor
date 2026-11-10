@@ -128,7 +128,7 @@ public partial class WaitDrillDownWindow : Window
         data = SortByProperty(data, classification.SortProperty);
         _filterManager.UpdateData(data);
         SummaryText.Text = $"{CountText.Plural(data.Count, "snapshot")} | {classification.Description} | {GetTimeRangeDescription(data)}" +
-            (data.Count < totalCount ? $" | showing newest 1,000 of {totalCount:N0}" : "");
+            (data.Count < totalCount ? string.Create(System.Globalization.CultureInfo.InvariantCulture, $" | showing newest 1,000 of {totalCount:N0}") : "");
         ApplyInitialSort(classification.SortProperty);
     }
 

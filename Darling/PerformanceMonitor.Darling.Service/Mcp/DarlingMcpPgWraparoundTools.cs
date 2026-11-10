@@ -137,7 +137,7 @@ public sealed class DarlingMcpPgWraparoundTools
             var omittedNote = omittedDatabases.Count == 0
                 ? null
                 : $"{CountText.Plural(omittedDatabases.Count, "database")} had a stored sample in the window but {(omittedDatabases.Count == 1 ? "is" : "are")} absent from the collector's newest run "
-                  + $"({allRows[0].LatestCaptureAt:yyyy-MM-dd HH:mm:ss} UTC), so {(omittedDatabases.Count == 1 ? "it was dropped since and is" : "they were dropped since and are")} not reported as "
+                  + string.Create(System.Globalization.CultureInfo.InvariantCulture, $"({allRows[0].LatestCaptureAt:yyyy-MM-dd HH:mm:ss} UTC), so {(omittedDatabases.Count == 1 ? "it was dropped since and is" : "they were dropped since and are")} not reported as ")
                   + $"current. {(omittedDatabases.Count == 1 ? "Its" : "Their")} last sample is older than that run.";
 
             if (rows.Count == 0)
