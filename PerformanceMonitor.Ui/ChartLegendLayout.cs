@@ -44,6 +44,7 @@ namespace PerformanceMonitor.Ui;
 /// before the rule above places the entries. It is broken across lines at its spaces, so the whole entry shows. When those lines would
 /// take the plot under <see cref="MinPlotHeight"/> and one line per entry would not, the entry keeps one line and ends in an ellipsis.
 /// A word wider than the row is cut the same way. The hover shows the whole text of an entry that ends in an ellipsis.
+/// While an entry is on more than one line the legend's rows take their own heights (<see cref="RowHeightLegendLayout"/>).
 /// </para>
 /// </remarks>
 internal sealed class WrappedLegendLayout : ILayoutEngine
@@ -60,6 +61,8 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
     private readonly float _defaultMaximum;
     private readonly PixelPadding _basePadding;
     private readonly Alignment _baseAlignment;
+    private readonly ILegendLayout _stockRows;
+    private readonly ILegendLayout _ownRows = new RowHeightLegendLayout();
 
     private LegendItem[] _all = Array.Empty<LegendItem>();
     private readonly Dictionary<string, string> _fitted = new(StringComparer.Ordinal); // a wide entry's text as its plottable names it, to the text the legend shows for it
@@ -76,6 +79,7 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
         _defaultMaximum = panel.MaximumSize;
         _basePadding = panel.Padding;
         _baseAlignment = panel.Alignment;
+        _stockRows = panel.Legend.Layout is RowHeightLegendLayout ? new ScottPlot.LegendLayouts.Wrapping() : panel.Legend.Layout;
     }
 
     /// <summary>The legend panel this engine sizes.</summary>
@@ -339,6 +343,8 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
     {
         var legend = _panel.Legend;
         _panel.Edge = edge;
+        // An entry broken across lines is taller than the rest: each row then takes its own height, not the tallest entry's.
+        legend.Layout = _all.Any(i => i.LabelText.Contains('\n')) ? _ownRows : _stockRows;
         if (edge == Edge.Right)
         {
             legend.Orientation = Orientation.Vertical;
@@ -408,5 +414,56 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
         _panel.MinimumSize = need;
         _panel.MaximumSize = need;
         return (_automatic.GetLayout(figureRect, plot, paint), legendHeight);
+    }
+}
+
+/// <summary>
+/// #8540: ScottPlot's wrapping legend gives every row the height of the tallest entry, so one entry on two lines makes every row two
+/// lines tall. This layout takes ScottPlot's and gives each row the height of its own tallest entry, moving the rows below it up.
+/// A legend whose rows are all one height comes back as ScottPlot laid it out.
+/// </summary>
+internal sealed class RowHeightLegendLayout : ILegendLayout
+{
+    private readonly ScottPlot.LegendLayouts.Wrapping _stock = new();
+
+    public LegendLayout GetLayout(Legend legend, LegendItem[] items, PixelSize maxSize, Paint paint)
+    {
+        if (legend.Orientation != Orientation.Horizontal || items.Length < 2) return _stock.GetLayout(legend, items, maxSize, paint);
+
+        /* ScottPlot's layout cuts an entry's rectangle at the height it is given, and that height is the one this layout's shorter
+           rows need. So the rows are laid out with no height limit first, and take their own heights from there. */
+        var laid = _stock.GetLayout(legend, items, new PixelSize(maxSize.Width, float.PositiveInfinity), paint);
+        if (laid.LegendItems.Length < 2) return _stock.GetLayout(legend, items, maxSize, paint);
+
+        var labels = (PixelRect[])laid.LabelRects.Clone();
+        var symbols = (PixelRect[])laid.SymbolRects.Clone();
+        var unbounded = new PixelSize(float.PositiveInfinity, float.PositiveInfinity);
+        var saved = 0f;
+        foreach (var row in Enumerable.Range(0, labels.Length).GroupBy(i => laid.LabelRects[i].Top).OrderBy(g => g.Key))
+        {
+            // The row's entries laid out alone are one row as tall as the tallest of them.
+            var members = row.ToArray();
+            var own = _stock.GetLayout(legend, members.Select(i => laid.LegendItems[i]).ToArray(), unbounded, paint).LabelRects.Max(r => r.Height);
+            var given = laid.LabelRects[members[0]].Height;
+            if (own > given) own = given;
+            foreach (var i in members)
+            {
+                labels[i] = new PixelRect(new Pixel(labels[i].Left, labels[i].Top - saved), new PixelSize(labels[i].Width, own));
+                symbols[i] = new PixelRect(new Pixel(symbols[i].Left, symbols[i].Top - saved), new PixelSize(symbols[i].Width, own));
+            }
+
+            saved += given - own;
+        }
+
+        if (saved < 0.5f) return _stock.GetLayout(legend, items, maxSize, paint);
+
+        var whole = laid.LegendRect;
+        return new LegendLayout
+        {
+            LegendItems = laid.LegendItems,
+            LegendRect = new PixelRect(new Pixel(whole.Left, whole.Top), new PixelSize(whole.Width, whole.Height - saved)),
+            LabelRects = labels,
+            SymbolRects = symbols,
+        };
     }
 }
