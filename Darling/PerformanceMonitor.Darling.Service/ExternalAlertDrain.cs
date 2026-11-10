@@ -277,8 +277,9 @@ public sealed class ExternalAlertDrain
         var muted = _isMuted(new AlertMuteContext
         {
             ServerName = fired.ServerName,
-            /* A registered server's key is its id (Identify); an unregistered name's key carries a prefix and is no number. */
-            ServerId = int.TryParse(fired.ServerKey, NumberStyles.None, CultureInfo.InvariantCulture, out var keptId) ? keptId : null,
+            /* A registered server's key is its id (Identify), a 32-bit hash that is negative for about half the servers, so the
+               key can open with a minus sign; an unregistered name's key carries a prefix and is no number. */
+            ServerId = int.TryParse(fired.ServerKey, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var keptId) ? keptId : null,
             MetricName = metric,
             /* A mute rule can name the source (#5654): it silences this source's alerts and no other source's. */
             ExternalSource = row.SourceName,
