@@ -46,7 +46,8 @@ public sealed class ViewerFinOpsServerInventoryCellsTests
 
                 var sampled = new ServerPropertyRow { ServerId = 1, ServerName = "inv-cells-sampled", ProvisioningStatus = ProvisioningVerdict.RightSized, HealthScore = 82 };
                 var unsampled = new ServerPropertyRow { ServerId = 2, ServerName = "inv-cells-unsampled" };
-                grid.ItemsSource = new List<ServerPropertyRow> { sampled, unsampled };
+                var cpuOnly = new ServerPropertyRow { ServerId = 3, ServerName = "inv-cells-cpu-only", ProvisioningStatus = ProvisioningVerdict.RightSized };
+                grid.ItemsSource = new List<ServerPropertyRow> { sampled, unsampled, cpuOnly };
                 window.UpdateLayout();
                 ChartLayoutProbe.WaitForIdle();
 
@@ -78,6 +79,28 @@ public sealed class ViewerFinOpsServerInventoryCellsTests
                 if (statusNote != "No CPU sample in the last 24 hours")
                 {
                     found.Add($"the unsampled server's Status cell has the tooltip \"{statusNote}\", not what was not collected");
+                }
+
+                /* A server with a verdict and no score has its CPU sample and no memory sample: Health says which input is missing,
+                   and each Health note names the one cause that applies to its server. */
+                var cpuOnlyHealth = CellText(grid, cpuOnly, "Health");
+                if (cpuOnlyHealth != "No memory sample")
+                {
+                    found.Add($"the Health cell of a server with a verdict and no memory sample reads \"{cpuOnlyHealth}\", not \"No memory sample\"");
+                }
+
+                var healthColumn = grid.Columns.First(c => HeaderText(c) == "Health");
+                var cpuOnlyNote = healthColumn.GetCellContent(cpuOnly) is TextBlock cpuOnlyCell ? cpuOnlyCell.ToolTip as string : null;
+                if (cpuOnlyNote != "No health score: no memory sample has been collected")
+                {
+                    found.Add($"that Health cell has the tooltip \"{cpuOnlyNote}\"");
+                }
+
+                CellText(grid, unsampled, "Health");
+                var unsampledNote = healthColumn.GetCellContent(unsampled) is TextBlock unsampledCell ? unsampledCell.ToolTip as string : null;
+                if (unsampledNote != "No health score: the last 24 hours hold no CPU sample")
+                {
+                    found.Add($"the unsampled server's Health cell has the tooltip \"{unsampledNote}\"");
                 }
 
                 return found;
