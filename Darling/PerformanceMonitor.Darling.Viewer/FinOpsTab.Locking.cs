@@ -163,15 +163,16 @@ public partial class FinOpsTab
         var labelBlock = new TextBlock
         {
             Text = label,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = (Brush)FindResource("ForegroundMutedBrush")
+            FontWeight = FontWeights.SemiBold
         };
         var valueBlock = new TextBlock
         {
             Text = value,
-            Foreground = (Brush)FindResource("ForegroundBrush"),
             HorizontalAlignment = HorizontalAlignment.Right
         };
+        // Resource references, so the row's text follows a theme changed while the detail view is open (#8540).
+        labelBlock.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundMutedBrush");
+        valueBlock.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundBrush");
         Grid.SetColumn(labelBlock, 0);
         Grid.SetColumn(valueBlock, 1);
         grid.Children.Add(labelBlock);
