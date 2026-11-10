@@ -112,7 +112,7 @@ public partial class WebAccessGroupsWindow : Window
         if (TagList is null || ScopeNote is null) return;
         TagList.IsEnabled = Scope != WebAccessGroupScope.AllServers;
         ScopeNote.Text = Scope == WebAccessGroupScope.AllServers
-            ? "All registered servers, including untagged and newly added servers. Administrative pages remain blocked."
+            ? "All registered servers, including untagged and newly added servers. The group reads as a named reader token does and can change nothing."
             : TagIds.Length == 0
                 ? "No tags selected: no server access. This never means All servers."
                 : "Selected tag subtrees are combined. Parent-only and sibling servers are excluded; future tag-assignment changes apply automatically.";

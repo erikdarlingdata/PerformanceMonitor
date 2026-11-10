@@ -186,10 +186,22 @@ public sealed class ManagedWebGroupLiveTests
                 configure:context=>context.Request.Headers.Origin="https://outside.invalid");
             Assert.Equal(403,crossOrigin.Response.StatusCode);
 
-            // All servers includes untagged registrations, but grants no management capability.
+            // All servers includes untagged registrations. The group then reads as a named reader token does: an unscoped
+            // read-only seat that can change nothing.
             await Update(WebAccessGroupScope.AllServers,Array.Empty<int>(),true);
             await Fleet(cookie,3);
-            Assert.Equal(403,(await Read("/api/admin/servers",cookie)).Status);
+            var readerSession=await Read("/api/session",cookie);
+            Assert.Contains("\"can_edit\":false",readerSession.Body,StringComparison.Ordinal);
+            Assert.Contains("\"scoped\":false",readerSession.Body,StringComparison.Ordinal);
+            var write=await server.SendAsync(context=>
+            {
+                context.Request.Method="POST";
+                context.Request.Path="/api/mute-rules";
+                context.Request.Headers.Host=Host;
+                context.Request.Headers.Cookie=cookie;
+                context.Connection.RemoteIpAddress=IPAddress.Parse("10.0.0.4");
+            });
+            Assert.Equal(403,write.Response.StatusCode);
             Assert.Contains("untagged-server",(await Read("/api/read/list_servers",cookie)).Body,StringComparison.Ordinal);
             using(var fleet=JsonDocument.Parse((await Read("/api/read/get_fleet_overview",cookie)).Body))
                 Assert.Equal(3,fleet.RootElement.GetProperty("total_servers").GetInt32());
