@@ -821,6 +821,10 @@ for suffix in (".csproj", ".props", ".targets", ".sln", ".slnx"):
     check(f"harness restore: a {suffix} file is a restore input", cs.restore_input("Some/Folder/Thing" + suffix), True)
 check("harness restore: a source file under the harness folder is not itself a restore input",
       cs.restore_input(HARNESS + "LiteWalkTests.cs"), False)
+# The three Directory.* names end in a listed suffix too, so restore_input answers the same with one of them gone and no
+# row above can fail for it. These read the set, so each of the eleven names and suffixes has a row that fails without it.
+for name in ("directory.build.props", "directory.build.targets", "directory.packages.props"):
+    check(f"harness restore: {name} is listed by name", name in cs._BUILD_INPUT_NAMES, True)
 
 # --- the real filters, three stable paths ----------------------------------------------------------------------
 live = cs.Rules()
