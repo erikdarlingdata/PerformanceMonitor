@@ -515,6 +515,11 @@ public sealed partial class ViewerDataService
         return items;
     }
 
+    /* #8533: the Sweep Pressure tab captions the two panels GetSweepPressureAsync feeds in literals, "Sweep Pressure (trailing 7
+       days)" and "Heaviest Collectors (trailing 7 days)", and that read takes its window from CollectionHealthWindow.Days. This
+       constant compiles only while the window is seven days, so the window cannot change under a caption that says otherwise. */
+    internal const byte SweepPressureCaptionDays = CollectionHealthWindow.Days == 7 ? 7 : -1;
+
     /// <summary>
     /// #6384: the Sweep Pressure and Heaviest Collectors panels' data, the same trailing 7 days <c>get_collection_health</c> reads on the web.
     /// It runs the web's own statement (<see cref="CollectionHealthStatements.ComposedSql"/>, which the service's reader points at too) and

@@ -154,7 +154,7 @@ public static class CollectionConnectionFailures
         var earlier = events.Count switch
         {
             1 when newest.CollectorsWithOtherErrors == 0 => "Nothing to do unless it repeats.",
-            1 => "It has repeated, or those collectors fail for other reasons too: their Collection Log rows say which.",
+            1 => "It has repeated, or those collectors fail for other reasons too: the Collection Log says which once its time range reaches back to those runs.",
             2 => $"One earlier connection failure is {window} too.",
             _ => $"{events.Count - 1} earlier connection failures are {window} too.",
         };

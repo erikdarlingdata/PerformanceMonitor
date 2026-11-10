@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Reflection;
 using PerformanceMonitorLite.Services;
 using Xunit;
 
@@ -19,7 +18,8 @@ namespace PerformanceMonitorLite.Tests;
 /// label repainted only by the status bar's 30 second timer lands on the same two points of every cycle, so it shows the same two
 /// numbers for as long as the window sits idle, and a repaint that lands inside a cycle leaves "Running" up for 30 seconds after
 /// the cycle ended. The label therefore has a tick of its own and repaints when a cycle starts or ends. These drive it with a clock,
-/// a tick and a cycle signal the test owns, so no fact waits, and through reflection so the file compiles whether or not it exists.
+/// a tick and a cycle signal the test owns, so no fact waits. The window's own timer and the loop's own signal are driven in
+/// CollectionStatusCadenceTests.
 /// </summary>
 public sealed class CollectionStatusLabelTests
 {
@@ -41,10 +41,7 @@ public sealed class CollectionStatusLabelTests
     [Fact]
     public void TheLabelsTick_IsOneSecond()
     {
-        var tick = StatusBar.LabelType().GetField("AgeTick", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-
-        Assert.NotNull(tick);
-        Assert.Equal(TimeSpan.FromSeconds(1), (TimeSpan)tick.GetValue(null)!);
+        Assert.Equal(TimeSpan.FromSeconds(1), CollectionStatusLabel.AgeTick);
     }
 
     [Fact]
@@ -102,38 +99,18 @@ public sealed class CollectionStatusLabelTests
 
         public DateTime Now { get; set; }
 
-        /// <summary>Lite's status label type. Fails at an assert, not a compile, where Lite has none.</summary>
-        public static Type LabelType()
-        {
-            var type = typeof(LocalDataService).Assembly.GetType("PerformanceMonitorLite.Services.CollectionStatusLabel");
-            if (type is null)
-            {
-                Assert.Fail("Lite has no status label with a tick of its own: \"Collection: Ns ago\" is repainted only by the status bar's 30 second timer, half the one-minute collection cycle, so an idle window shows the same two numbers and \"Running\" stays up after a cycle has ended.");
-            }
-
-            return type!;
-        }
-
         /// <summary>Builds the label over this state: the loop's three facts, the clock, the paint, then the tick and the cycle signal.</summary>
         public void Build()
         {
-            var label = Activator.CreateInstance(
-                LabelType(),
-                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
-                binder: null,
-                args: new object[]
-                {
-                    (Func<bool>)(() => IsCollecting),
-                    (Func<bool>)(() => IsPaused),
-                    (Func<DateTime?>)(() => LastCollectionUtc),
-                    (Func<DateTime>)(() => Now),
-                    (Action<string>)_painted.Add,
-                    (Action<Action>)(handler => _tick = handler),
-                    (Action<Action>)(handler => _cycleChanged = handler),
-                },
-                culture: null);
+            _ = new CollectionStatusLabel(
+                () => IsCollecting,
+                () => IsPaused,
+                () => LastCollectionUtc,
+                () => Now,
+                _painted.Add,
+                handler => _tick = handler,
+                handler => _cycleChanged = handler);
 
-            Assert.NotNull(label);
             Assert.True(_tick is not null, "the label did not subscribe to its tick");
             Assert.True(_cycleChanged is not null, "the label did not subscribe to the cycle signal");
         }

@@ -10,7 +10,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -31,8 +30,6 @@ namespace PerformanceMonitorLite.Tests;
 [Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class CollectionStatusCadenceTests
 {
-    private const BindingFlags Members = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-
     /// <summary>
     /// The tick is stopped, so only the loop's signal can repaint the field: Running while the pass is held open, and the age from
     /// the new time once it ends.
@@ -40,16 +37,15 @@ public sealed class CollectionStatusCadenceTests
     [Fact]
     public void ACycleStartingAndEnding_RepaintsTheWindowsField_WithItsTickHeld()
     {
-        var seams = Seams.Find();
-        var problems = OnMainWindow(seams, (window, field) =>
+        var problems = OnMainWindow((window, field) =>
         {
             var found = new List<string>();
             var loop = new CollectionBackgroundService(null!);
-            seams.StartCollectionStatus(window, loop, () => loop.LastCollectionTime ?? default);
-            seams.AgeTimer(window).Stop();
+            window.StartCollectionStatus(loop, () => loop.LastCollectionTime ?? default);
+            window.CollectionAgeTimer.Stop();
 
             var held = new TaskCompletionSource();
-            var pass = seams.RunCollectorPass(loop, () => held.Task);
+            var pass = loop.RunCollectorPassAsync(() => held.Task);
             Drain();
             if (field.Text != "Collection: Running")
             {
@@ -81,13 +77,12 @@ public sealed class CollectionStatusCadenceTests
     [Fact]
     public void TheFieldsOwnTick_IsStartedWithTheField_AndRepaintsTheAge()
     {
-        var seams = Seams.Find();
-        var problems = OnMainWindow(seams, (window, field) =>
+        var problems = OnMainWindow((window, field) =>
         {
             var found = new List<string>();
             var loop = new CollectionBackgroundService(null!);
             var age = 0;
-            var timer = seams.AgeTimer(window);
+            var timer = window.CollectionAgeTimer;
             if (timer.Interval != CollectionStatusLabel.AgeTick)
             {
                 found.Add($"the field's tick is {timer.Interval} apart, and the label's is {CollectionStatusLabel.AgeTick}");
@@ -99,7 +94,7 @@ public sealed class CollectionStatusCadenceTests
             }
 
             timer.Interval = TimeSpan.Zero;
-            seams.StartCollectionStatus(window, loop, () => (loop.LastCollectionTime ?? default).AddSeconds(age));
+            window.StartCollectionStatus(loop, () => (loop.LastCollectionTime ?? default).AddSeconds(age));
             if (!timer.IsEnabled)
             {
                 found.Add("starting the field did not start its tick");
@@ -111,7 +106,7 @@ public sealed class CollectionStatusCadenceTests
                 found.Add($"before any cycle, one tick leaves the field reading \"{field.Text}\"");
             }
 
-            var pass = seams.RunCollectorPass(loop, () => Task.CompletedTask);
+            var pass = loop.RunCollectorPassAsync(() => Task.CompletedTask);
             Drain();
             if (!pass.IsCompletedSuccessfully || field.Text != "Collection: 0s ago")
             {
@@ -141,13 +136,12 @@ public sealed class CollectionStatusCadenceTests
     [Fact]
     public async Task TheLoop_SignalsAPassStartingAndEnding_AndTheEndAlreadyHasTheNewTime()
     {
-        var seams = Seams.Find();
         var loop = new CollectionBackgroundService(null!);
         var seen = new List<(bool Collecting, DateTime? Last)>();
         loop.CycleStateChanged += () => seen.Add((loop.IsCollecting, loop.LastCollectionTime));
         var held = new TaskCompletionSource();
 
-        var pass = seams.RunCollectorPass(loop, () => held.Task);
+        var pass = loop.RunCollectorPassAsync(() => held.Task);
 
         var start = Assert.Single(seen);
         Assert.True(start.Collecting, "the pass's first signal was raised with the loop not collecting");
@@ -166,13 +160,12 @@ public sealed class CollectionStatusCadenceTests
     [Fact]
     public async Task APassWhoseCollectorsFail_SignalsItsEnd_AndLeavesTheLastTimeAsItWas()
     {
-        var seams = Seams.Find();
         var loop = new CollectionBackgroundService(null!);
         var seen = new List<(bool Collecting, DateTime? Last)>();
         loop.CycleStateChanged += () => seen.Add((loop.IsCollecting, loop.LastCollectionTime));
 
         await Assert.ThrowsAsync<InvalidOperationException>(
-            () => seams.RunCollectorPass(loop, () => Task.FromException(new InvalidOperationException("the collectors failed"))));
+            () => loop.RunCollectorPassAsync(() => Task.FromException(new InvalidOperationException("the collectors failed"))));
 
         Assert.Equal(2, seen.Count);
         Assert.True(seen[0].Collecting, "the pass's first signal was raised with the loop not collecting");
@@ -191,7 +184,7 @@ public sealed class CollectionStatusCadenceTests
     /// Builds the real main window with the Dark theme in a folder of its own, hosts its content at 900x600 and hands the body the
     /// window and its collection field. The field's tick is stopped afterwards, so it cannot fire in a later test's pump.
     /// </summary>
-    private static List<string> OnMainWindow(Seams seams, Func<MainWindow, TextBlock, List<string>> body) =>
+    private static List<string> OnMainWindow(Func<MainWindow, TextBlock, List<string>> body) =>
         InOwnFolder(dir => StaTestThread.Run(() => WithTheme(() =>
         {
             /* The window reads the app's three store paths when it is built and writes servers.json beside them; it gets a folder of its own (#8434). */
@@ -208,7 +201,7 @@ public sealed class CollectionStatusCadenceTests
             }
             finally
             {
-                seams.AgeTimer(window).Stop();
+                window.CollectionAgeTimer.Stop();
                 host.Close();
             }
         })));
@@ -246,50 +239,5 @@ public sealed class CollectionStatusCadenceTests
         {
             try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
         }
-    }
-
-    /// <summary>
-    /// The three members the facts drive: the window's start of its collection field, the field's tick, and the loop's collector
-    /// pass. Each fact fails at an assert where Lite has none of its own to drive.
-    /// </summary>
-    private sealed class Seams
-    {
-        private readonly MethodInfo _start;
-        private readonly PropertyInfo _timer;
-        private readonly MethodInfo _pass;
-
-        private Seams(MethodInfo start, PropertyInfo timer, MethodInfo pass)
-        {
-            _start = start;
-            _timer = timer;
-            _pass = pass;
-        }
-
-        public static Seams Find()
-        {
-            var missing = new List<string>();
-            var start = typeof(MainWindow).GetMethod("StartCollectionStatus", Members);
-            var timer = typeof(MainWindow).GetProperty("CollectionAgeTimer", Members);
-            if (start is null || timer is null)
-            {
-                missing.Add("The main window has no start of its collection field a test can call: the field's tick, its subscription to the loop's cycle signal and its paint are wired inside the window's load handler, and the tick is started later in the same handler.");
-            }
-
-            var pass = typeof(CollectionBackgroundService).GetMethod("RunCollectorPassAsync", Members);
-            if (pass is null)
-            {
-                missing.Add("The collection loop has no collector pass a test can run: a cycle's two signals and the time it sets sit inside the loop's body, behind its five second start delay and a real collector run.");
-            }
-
-            Assert.True(missing.Count == 0, string.Join(Environment.NewLine, missing));
-            return new Seams(start!, timer!, pass!);
-        }
-
-        public void StartCollectionStatus(MainWindow window, CollectionBackgroundService loop, Func<DateTime> utcNow) =>
-            _start.Invoke(window, new object[] { loop, utcNow });
-
-        public DispatcherTimer AgeTimer(MainWindow window) => (DispatcherTimer)_timer.GetValue(window)!;
-
-        public Task RunCollectorPass(CollectionBackgroundService loop, Func<Task> collect) => (Task)_pass.Invoke(loop, new object[] { collect })!;
     }
 }

@@ -172,8 +172,8 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _statusTimer;
 
     /* #8533: the collection label's own tick. Its age is worded to the second and a cycle ends once a minute, so the 30 second
-       status timer alone would repaint it at the same two points of every cycle. */
-    private readonly DispatcherTimer _collectionAgeTimer = new() { Interval = CollectionStatusLabel.AgeTick };
+       status timer alone would repaint it at the same two points of every cycle. StartCollectionStatus starts it. */
+    internal DispatcherTimer CollectionAgeTimer { get; } = new() { Interval = CollectionStatusLabel.AgeTick };
 
     /* True while the status bar shows that the local database stopped collection: the label's tick leaves the field alone then. */
     private bool _collectionStoppedShown;
@@ -509,19 +509,6 @@ public partial class MainWindow : Window
                 new AppLoggerAdapter<CollectionBackgroundService>(),
                 _scheduleManager);
 
-            /* #8533: the collection label repaints on its own one-second tick and when a cycle starts or ends. The loop raises its
-               signal on its own thread, so the repaint is posted to this one. The label lives as long as the two signals it
-               subscribes to. */
-            CollectionBackgroundService collectionLoop = _backgroundService;
-            _ = new CollectionStatusLabel(
-                () => collectionLoop.IsCollecting,
-                () => collectionLoop.IsPaused,
-                () => collectionLoop.LastCollectionTime,
-                () => DateTime.UtcNow,
-                PaintCollectionStatus,
-                repaint => _collectionAgeTimer.Tick += (s, e) => repaint(),
-                repaint => collectionLoop.CycleStateChanged += () => Dispatcher.BeginInvoke(repaint));
-
             // Start background collection.
             // Off the UI thread on purpose: DuckDB.NET is synchronous and Lite has no
             // ConfigureAwait(false), so starting this from the Loaded handler would run the entire
@@ -664,7 +651,7 @@ public partial class MainWindow : Window
             // Update status
             UpdateStatusBar();
             _statusTimer.Start();
-            _collectionAgeTimer.Start();
+            StartCollectionStatus(_backgroundService, () => DateTime.UtcNow);
 
             await RefreshOverviewAsync();
             StatusText.Text = ReadyStatusText();
@@ -842,7 +829,7 @@ public partial class MainWindow : Window
         }
 
         _statusTimer.Stop();
-        _collectionAgeTimer.Stop();
+        CollectionAgeTimer.Stop();
 
         /* Close the sentinel connection (#4262) now that collection/archival can no longer run against
            it — dispose is a write-lock acquire, and by this point nothing should still be holding a read
@@ -1070,6 +1057,25 @@ public partial class MainWindow : Window
 
         // Update collector health
         UpdateCollectorHealth();
+    }
+
+    /// <summary>
+    /// #8533: starts the collection field over <paramref name="loop"/>, and is the one place that does. The field repaints on its
+    /// own one-second tick and when a cycle starts or ends. The loop raises its signal on its own thread, so that repaint is posted
+    /// to this one. The label lives as long as the two signals it subscribes to. The window's load calls this after the status
+    /// bar's first paint.
+    /// </summary>
+    internal void StartCollectionStatus(CollectionBackgroundService loop, Func<DateTime> utcNow)
+    {
+        _ = new CollectionStatusLabel(
+            () => loop.IsCollecting,
+            () => loop.IsPaused,
+            () => loop.LastCollectionTime,
+            utcNow,
+            PaintCollectionStatus,
+            repaint => CollectionAgeTimer.Tick += (s, e) => repaint(),
+            repaint => loop.CycleStateChanged += () => Dispatcher.BeginInvoke(repaint));
+        CollectionAgeTimer.Start();
     }
 
     /// <summary>
