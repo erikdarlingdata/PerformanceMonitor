@@ -16,7 +16,7 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #8540: an unchecked check box and an unchosen radio button are outlined like the text box beside them in each Lite theme, so the
+/// #8540: an unchecked check box and an unchosen radio button are outlined at least as strongly as the text box beside them in each Lite theme, so the
 /// box shows against the page and the card. Each theme is loaded into the test window's own resources, and every colour is read from
 /// the element its template rendered.
 /// </summary>
@@ -78,11 +78,11 @@ public sealed class CheckBoxOutlineTests
         return (Math.Max(la, lb) + 0.05) / (Math.Min(la, lb) + 0.05);
     }
 
-    /// <summary>The floor is 3:1 on the two light themes. On Dark it is 1.4:1, which the theme's control outline (1.59:1 on the page, 1.41:1 on a card) meets and its grid-line colour (1.25:1 and 1.12:1) does not.</summary>
+    /// <summary>The floor is 3:1 in each theme, which each theme's grid-line colour (1.21:1, 1.53:1 and 1.25:1 against the page) does not meet.</summary>
     [Theory]
     [InlineData("Light", 3.0)]
     [InlineData("CoolBreeze", 3.0)]
-    [InlineData("Dark", 1.4)]
+    [InlineData("Dark", 3.0)]
     public void AnUncheckedCheckBox_IsOutlinedLikeTheTextBoxBesideIt(string theme, double floor)
     {
         var o = Render(theme);
@@ -100,7 +100,7 @@ public sealed class CheckBoxOutlineTests
     [Theory]
     [InlineData("Light", 3.0)]
     [InlineData("CoolBreeze", 3.0)]
-    [InlineData("Dark", 1.4)]
+    [InlineData("Dark", 3.0)]
     public void AnUnchosenRadioButton_IsOutlinedLikeTheTextBoxBesideIt(string theme, double floor)
     {
         var o = Render(theme);
@@ -192,5 +192,57 @@ public sealed class CheckBoxOutlineTests
         Assert.True(disabledRadio <= enabledRadio + 0.01, $"{theme}: a disabled radio button's outline {s.DisabledRadioOutline} is {disabledRadio:0.00}:1 against the page; an enabled one's {o.RadioOutline} is {enabledRadio:0.00}:1");
         Assert.Equal(s.Muted, s.DisabledCheckMark);
         Assert.Equal(s.Muted, s.DisabledRadioMark);
+    }
+
+    private readonly record struct DisabledOutlines(Color CheckOutline, Color RadioOutline);
+
+    /// <summary>A disabled, unchecked check box and a disabled, unchosen radio button, read from the elements their templates rendered.</summary>
+    private static DisabledOutlines RenderDisabledUnchecked(string theme) => StaTestThread.Run(() =>
+    {
+        _ = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        var check = new CheckBox { Content = "Auto-refresh", IsChecked = false, IsEnabled = false };
+        var radio = new RadioButton { Content = "Actual plan", IsChecked = false, IsEnabled = false };
+        var panel = new StackPanel();
+        panel.Children.Add(check);
+        panel.Children.Add(radio);
+        var window = new Window { Content = panel, Width = 400, Height = 300 };
+        window.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = ThemeUri(theme) });
+        StaTestThread.ShowOffScreen(window);
+        try
+        {
+            ClippedTextProbe.Settle(window);
+            var box = (Border)check.Template.FindName("Border", check);
+            var bullet = (Ellipse)radio.Template.FindName("Border", radio);
+            return new DisabledOutlines(ColorOf(box.BorderBrush), ColorOf(bullet.Stroke));
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    /// <summary>
+    /// An unchecked box that cannot be changed has only its outline to show it is there, so the outline is held to 3:1 against the page
+    /// and the card, and to at least 0.3 under an enabled box's outline on the same surface, so the two states do not read alike.
+    /// </summary>
+    [Theory]
+    [InlineData("Light")]
+    [InlineData("CoolBreeze")]
+    [InlineData("Dark")]
+    public void ADisabledUncheckedBox_IsOutlinedAt3To1_AndDimmerThanAnEnabledOne(string theme)
+    {
+        var d = RenderDisabledUnchecked(theme);
+        var o = Render(theme);
+
+        foreach (var (name, surface) in new[] { ("page", o.Page), ("card", o.Card) })
+        {
+            foreach (var (control, disabled, enabled) in new[] { ("check box", d.CheckOutline, o.CheckOutline), ("radio button", d.RadioOutline, o.RadioOutline) })
+            {
+                var off = Contrast(disabled, surface);
+                var on = Contrast(enabled, surface);
+                Assert.True(off >= 3.0, $"{theme}: a disabled, unchecked {control}'s outline {disabled} is {off:0.00}:1 against the {name} {surface}, under 3.0:1");
+                Assert.True(off <= on - 0.3, $"{theme}: a disabled, unchecked {control}'s outline {disabled} is {off:0.00}:1 against the {name} {surface}; an enabled one's {enabled} is {on:0.00}:1, less than 0.3 stronger");
+            }
+        }
     }
 }

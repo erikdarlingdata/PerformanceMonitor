@@ -79,7 +79,7 @@ public sealed class ViewerSeatTextThemeTests
     [InlineData("Dark")]
     public void ReadOnlyAccess_IsReadableOnTheStatusBar_AfterTheThemeChanges(string theme)
     {
-        var (shown, text, bar) = StaTestThread.Run(() =>
+        var (shown, text, bar, warning) = StaTestThread.Run(() =>
         {
             var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
             var before = app.Resources.MergedDictionaries.ToList();
@@ -99,7 +99,7 @@ public sealed class ViewerSeatTextThemeTests
                     ClippedTextProbe.Settle(host);
 
                     var field = (TextBlock)w.FindName("SeatText");
-                    return (field.Text, ColorOf(field.Foreground), ColorOf((Brush)app.FindResource("BackgroundLightBrush")));
+                    return (field.Text, ColorOf(field.Foreground), ColorOf((Brush)app.FindResource("BackgroundLightBrush")), ColorOf((Brush)app.FindResource("WarningBrush")));
                 }
                 finally
                 {
@@ -119,5 +119,6 @@ public sealed class ViewerSeatTextThemeTests
         Assert.Equal("Access: read-only", shown);
         var ratio = Contrast(text, bar);
         Assert.True(ratio >= 4.5, $"{theme}: \"{shown}\" is {text} on the status bar's {bar}, {ratio:0.00}:1, under 4.5:1");
+        Assert.True(text == warning, $"{theme}: \"{shown}\" is {text}; the theme's warning colour, which the window's other warning texts take, is {warning}");
     }
 }

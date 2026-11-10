@@ -12,6 +12,7 @@ using System.Linq;
 using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitor.Ui;
@@ -20,9 +21,10 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #8540: the warning lines of an operator's tooltip in the plan viewer are readable in each Lite theme. The shared control is built on
-/// the STA thread with the theme in its own resources, the tooltip is built for an operator that carries one warning of each severity, and
-/// each line's colour is read from its text block against the tooltip's own background.
+/// #8540: a plan warning's text is readable in each Lite theme wherever the plan viewer paints it by severity: the warning lines of an
+/// operator's tooltip, the warning types the root operator's tooltip lists, and the warning headers of the Properties panel's Plan Warnings
+/// and Warnings sections. The shared control is built on the STA thread with the theme in its own resources, and each line's colour is
+/// read from its text block against the background of the element it sits in: the tooltip, or the section.
 /// </summary>
 public sealed class PlanWarningTextThemeTests
 {
@@ -90,4 +92,109 @@ public sealed class PlanWarningTextThemeTests
 
         Assert.True(weak.Count == 0, string.Join(Environment.NewLine, weak));
     }
+
+    private const string RootTooltip = "the root operator's tooltip";
+
+    /// <summary>One painted warning line: where it is, its text, its colour and the background of the element it sits in.</summary>
+    private readonly record struct Shown(string Where, string Line, Color Colour, Color Background);
+
+    /// <summary>A one-operator statement that carries a warning of each severity on the statement and another of each on its operator.</summary>
+    private static PlanStatement WarnedStatement()
+    {
+        var root = new PlanNode { NodeId = 0, PhysicalOp = "Hash Match", LogicalOp = "Inner Join" };
+        root.Warnings.Add(new PlanWarning { WarningType = "No Join Predicate", Message = "The join has no predicate.", Severity = PlanWarningSeverity.Critical });
+        root.Warnings.Add(new PlanWarning { WarningType = "Memory Grant", Message = "The grant was far larger than the memory used.", Severity = PlanWarningSeverity.Warning });
+        root.Warnings.Add(new PlanWarning { WarningType = "Missing Statistics", Message = "A column has no statistics.", Severity = PlanWarningSeverity.Info });
+        return new PlanStatement
+        {
+            StatementText = "SELECT c.* FROM dbo.Comments AS c JOIN dbo.Users AS u ON u.Id = c.UserId",
+            RootNode = root,
+            PlanWarnings = new List<PlanWarning>
+            {
+                new() { WarningType = "Excessive Grant", Message = "The statement was granted far more memory than it used.", Severity = PlanWarningSeverity.Critical },
+                new() { WarningType = "Compile Timeout", Message = "The optimizer stopped early.", Severity = PlanWarningSeverity.Warning },
+                new() { WarningType = "Query Hint", Message = "The statement carries a hint.", Severity = PlanWarningSeverity.Info },
+            },
+        };
+    }
+
+    /// <summary>
+    /// Renders the statement, reads the warning types the root operator's tooltip lists, then clicks the root operator and reads the
+    /// warning headers of the Properties panel's Plan Warnings and Warnings sections. Each header's background is its own section's.
+    /// </summary>
+    private static List<Shown> RenderAndSelectTheRoot(string theme) => StaTestThread.Run(() =>
+    {
+        _ = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        var control = new PlanViewerControl();
+        control.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = ThemeUri(theme) });
+
+        var render = typeof(PlanViewerControl).GetMethod("RenderStatement", Instance);
+        Assert.True(render is not null, "PlanViewerControl.RenderStatement no longer exists under that name - this test's reflection anchor moved.");
+        render!.Invoke(control, new object[] { WarnedStatement() });
+
+        var canvas = control.FindName("PlanCanvas") as Canvas;
+        Assert.True(canvas is not null, "the plan viewer has no PlanCanvas - the operators' host moved");
+        var root = Assert.Single(canvas!.Children.OfType<Border>(), b => b.Tag is PlanNode);
+        var shown = new List<Shown>();
+
+        var tip = Assert.IsType<ToolTip>(root.ToolTip);
+        var tipBackground = ColorOf(tip.Background);
+        foreach (var line in ((StackPanel)tip.Content).Children.OfType<TextBlock>().Where(t => t.Text.StartsWith('⚠')))
+        {
+            shown.Add(new Shown(RootTooltip, line.Text, ColorOf(line.Foreground), tipBackground));
+        }
+
+        // A click on the operator selects it, which builds the Properties panel.
+        root.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left) { RoutedEvent = UIElement.MouseLeftButtonUpEvent });
+        var content = control.FindName("PropertiesContent") as Panel;
+        Assert.True(content is not null, "the plan viewer has no PropertiesContent panel - the Properties panel's host moved");
+        foreach (var title in new[] { "Plan Warnings", "Warnings" })
+        {
+            var section = Assert.Single(content!.Children.OfType<Expander>(), e => (e.Header as TextBlock)?.Text == title);
+            var sectionBackground = ColorOf(section.Background);
+            foreach (var warning in Assert.IsAssignableFrom<Panel>(section.Content).Children.OfType<StackPanel>())
+            {
+                var header = warning.Children.OfType<TextBlock>().First();
+                shown.Add(new Shown(title, header.Text, ColorOf(header.Foreground), sectionBackground));
+            }
+        }
+
+        return shown;
+    });
+
+    private static void AssertReadable(string theme, string where, int expectedLines, List<Shown> shown)
+    {
+        var lines = shown.Where(s => s.Where == where).ToList();
+        Assert.True(lines.Count == expectedLines, $"{theme}: {where} shows {lines.Count} warning lines, expected {expectedLines}");
+        var weak = new List<string>();
+        foreach (var line in lines)
+        {
+            var ratio = Contrast(line.Colour, line.Background);
+            if (ratio < 4.5)
+            {
+                weak.Add($"{theme}, {where}: \"{line.Line}\" is {line.Colour} on {line.Background}, {ratio:0.00}:1, under 4.5:1");
+            }
+        }
+
+        Assert.True(weak.Count == 0, string.Join(Environment.NewLine, weak));
+    }
+
+    /// <summary>The root operator's tooltip lists each warning type of the statement and its operators once: three from the statement and three from the operator.</summary>
+    [Theory]
+    [InlineData("Light")]
+    [InlineData("CoolBreeze")]
+    [InlineData("Dark")]
+    public void TheRootOperatorsTooltip_ListsItsWarningTypesReadably(string theme) =>
+        AssertReadable(theme, RootTooltip, 6, RenderAndSelectTheRoot(theme));
+
+    /// <summary>The headers sit on their section's background, which is not the tooltip's, so each is held to 4.5:1 against the section it is in.</summary>
+    [Theory]
+    [InlineData("Light", "Plan Warnings")]
+    [InlineData("CoolBreeze", "Plan Warnings")]
+    [InlineData("Dark", "Plan Warnings")]
+    [InlineData("Light", "Warnings")]
+    [InlineData("CoolBreeze", "Warnings")]
+    [InlineData("Dark", "Warnings")]
+    public void APropertiesWarningHeader_IsReadableOnItsSection(string theme, string section) =>
+        AssertReadable(theme, section, 3, RenderAndSelectTheRoot(theme));
 }
