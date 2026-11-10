@@ -222,7 +222,8 @@ public sealed class LockedModeRestoreCoverageTests
     /// SDK rather than this repository's own choices.
     ///
     /// <para>Scoped to <c>build.yml</c> deliberately: that is the release workflow, and its one restore step
-    /// is the only place every project is restored (pr.yml restores the two test projects).
+    /// is the only place every project is restored (pr.yml restores the two test projects, the Exporter pair,
+    /// and the WPF smoke harness when a restore input changed).
     /// <c>nightly.yml</c> restores what it publishes and is a backstop, so requiring whole-tree coverage
     /// there would assert something that workflow is not for.</para>
     /// </summary>

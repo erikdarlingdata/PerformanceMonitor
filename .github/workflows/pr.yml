@@ -97,6 +97,7 @@ jobs:
       legs: ${{ steps.plan.outputs.legs }}
       legs_json: ${{ steps.plan.outputs.legs_json }}
       exporter: ${{ steps.exporter.outputs.exporter }}
+      harness_restore: ${{ steps.harness_restore.outputs.harness_restore }}
     steps:
       # Depth 2: a pull request run checks out the merge commit, and the plan reads the pull request's own change as
       # HEAD^1..HEAD (the map selection below, #7728). A dev push checks out the pushed commit and reads the same range (#7819).
@@ -279,6 +280,46 @@ jobs:
           print("exporter=" + ("true" if run else "false"))
           PY
 
+      # The WPF smoke harness (tools/ui-smoke-wpf) is outside the solution and referenced by no test project, so the build
+      # job's locked-mode restores never reach its lock file, and the nightly's WPF smoke is the only run that does. A package
+      # bump that moves Directory.Packages.props without regenerating that lock file passes the pull request and fails the next
+      # nightly at its restore (#6790, #8529). The build job restores the harness in locked mode when a restore input changed:
+      # a csproj, props, targets or solution file, global.json, nuget.config or any packages.lock.json (ci-select.py's build-input
+      # names and suffixes, so there is one copy of that list), or a file of the harness itself. The runs the exporter rule
+      # above treats as untrusted or whole-tree restore it too.
+      - name: Decide whether the build job restores the WPF smoke harness
+        id: harness_restore
+        if: steps.skip.outputs.skip != 'true'
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref || github.ref_name }}
+          PLAN_AREAS: ${{ steps.plan.outputs.areas }}
+        run: |
+          set -euo pipefail
+
+          python -I - <<'PY' >> "${GITHUB_OUTPUT}"
+          import importlib.util, os, sys
+          spec = importlib.util.spec_from_file_location("ci_select", ".github/scripts/ci-select.py")
+          mod = importlib.util.module_from_spec(spec)
+          sys.modules["ci_select"] = mod
+          spec.loader.exec_module(mod)
+          files = [ln.strip() for ln in open("changed.txt", encoding="utf-8") if ln.strip()]
+          def restore_input(f):
+              return (os.path.basename(f).lower() in mod._BUILD_INPUT_NAMES
+                      or f.lower().endswith(mod._BUILD_INPUT_SUFFIXES)
+                      or f.startswith("tools/ui-smoke-wpf/"))
+          run = (
+              os.environ["EVENT_NAME"] not in ("pull_request", "push")
+              or os.environ["PLAN_AREAS"] == "all"
+              or os.environ["BASE_REF"] != "dev"
+              or not files
+              or any(f.startswith("unknown/") for f in files)
+              or any(restore_input(f) for f in files)
+          )
+          print("harness_restore=" + ("true" if run else "false"))
+          PY
+
       # Pending from the moment the plan says the run goes. A fork's read-only token cannot write it: for a fork pull request,
       # fork-ci-result.yml writes the final state from this run's `CI verdict` job conclusion once the run completes (#8188).
       # A run on the dev ref that plans every area also marks `CI full suite` pending (#7819); the verdict
@@ -363,6 +404,20 @@ jobs:
 
           dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
+
+      # The WPF smoke harness is outside the solution and referenced by no test project, so the step above never reaches its
+      # lock file (the plan job's harness_restore output says when a restore input changed, #8529). The same shell and errexit
+      # line as the step above, so the restore is able to fail this job. The message rides an ERR trap, as build.yml's does,
+      # and names the harness's own project: a solution restore does not rewrite a lock file outside the solution.
+      - name: Restore the WPF smoke harness (locked)
+        if: needs.plan.outputs.harness_restore == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          trap 'echo "::error title=The WPF smoke harness lock file disagrees with Directory.Packages.props::Regenerate it on Windows with '"'"'dotnet restore tools/ui-smoke-wpf/UiSmokeWpf.csproj --force-evaluate'"'"' and commit tools/ui-smoke-wpf/packages.lock.json. The harness is outside PerformanceMonitor.sln, so a solution restore does not rewrite it. Do not remove --locked-mode."' ERR
+
+          dotnet restore tools/ui-smoke-wpf/UiSmokeWpf.csproj --locked-mode
 
       - name: Build the Darling test project
         shell: bash
