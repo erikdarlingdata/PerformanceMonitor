@@ -697,9 +697,24 @@ public partial class ViewerServerTab
         _queryStoreSlicerData = data;
         _queryStoreSlicerMetric = "TotalCpu";
         if (data.Count == 0)
-            QueryStoreSlicer.ShowEmpty("No Query Store data in the selected time window.");
+        {
+            QueryStoreSlicer.ShowEmpty(QueryStoreEmptyWindowText);
+            await ShowQueryStoreEmptyReasonAsync(QueryStoreSlicer, _dataService, _server);
+        }
         else
             QueryStoreSlicer.LoadData(data, "Total CPU (ms)", startUtc, endUtc, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(startUtc, endUtc));
+    }
+
+    /// <summary>What the Query Store panel says over a window that holds no rows.</summary>
+    internal const string QueryStoreEmptyWindowText = "No Query Store data in the selected time window.";
+
+    /// <summary>The step that follows the Query Store panel saying its window is empty. It leaves that sentence as it is.</summary>
+    internal static Task ShowQueryStoreEmptyReasonAsync(TimeRangeSlicerControl slicer, ViewerDataService dataService, DarlingServer server)
+    {
+        ArgumentNullException.ThrowIfNull(slicer);
+        ArgumentNullException.ThrowIfNull(dataService);
+        ArgumentNullException.ThrowIfNull(server);
+        return Task.CompletedTask;
     }
 
     private async void OnQueryStoreSlicerChanged(object? sender, SlicerRangeEventArgs e)

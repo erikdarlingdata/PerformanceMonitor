@@ -749,4 +749,47 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             Assert.Contains("runs hourly", enabledNote, StringComparison.Ordinal);
         });
     }
+
+    /// <summary>One database of an automatic-tuning capture: an enablement row of <c>plan_correction</c> that carries no recommendation.</summary>
+    private static Task TuningAsync(NpgsqlConnection c, int id, string name, TimeSpan age, CancellationToken ct) =>
+        ExecAsync(c,
+            """
+            INSERT INTO plan_correction (collection_id, collection_time, server_id, server_name, database_name,
+                                         force_last_good_plan_desired_state, force_last_good_plan_actual_state)
+            VALUES ($1, $2, $3, $4, 'db1', 'ON', 'ON')
+            """, ct, CollectionIdGenerator.Next(), Naive(DateTime.UtcNow - age), id, name);
+
+    [Fact]
+    public async Task AStaleAutomaticTuningCapture_SaysThePlanCorrectionCollectorIsDisabled_WhereItsScheduleIsOff_AndNamesTheHourlyCadenceOnlyWhereItRuns()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* #8541: two servers whose newest automatic-tuning capture is 19 days old. The first has plan_correction disabled, so
+               the note of get_plan_corrections says no newer capture is taken. The second runs the collector and keeps the cadence. */
+            const int disabledId = 854_171;
+            const string disabled = "plan-correction-disabled";
+            const int enabledId = 854_172;
+            const string enabled = "plan-correction-enabled";
+            foreach (var (id, name) in new[] { (disabledId, disabled), (enabledId, enabled) })
+            {
+                await RegisterAsync(connection, id, name, ct);
+                await TuningAsync(connection, id, name, TimeSpan.FromDays(19), ct);
+            }
+
+            await DisableAsync(connection, disabledId, PlanCorrectionCollector.Instance.Name, ct);
+
+            using var disabledAnswer = JsonDocument.Parse(await DarlingMcpPlanCorrectionTools.GetPlanCorrections(postgres, disabled, cancellationToken: ct));
+            var disabledNote = disabledAnswer.RootElement.GetProperty("automatic_tuning_note").GetString();
+            Assert.NotNull(disabledNote);
+            Assert.DoesNotContain("runs hourly", disabledNote, StringComparison.Ordinal);
+            Assert.Contains("the plan_correction collector is disabled", disabledNote, StringComparison.Ordinal);
+            Assert.Contains("get_collector_schedules", disabledNote, StringComparison.Ordinal);
+
+            using var enabledAnswer = JsonDocument.Parse(await DarlingMcpPlanCorrectionTools.GetPlanCorrections(postgres, enabled, cancellationToken: ct));
+            var enabledNote = enabledAnswer.RootElement.GetProperty("automatic_tuning_note").GetString();
+            Assert.NotNull(enabledNote);
+            Assert.DoesNotContain("is disabled", enabledNote, StringComparison.Ordinal);
+            Assert.Contains("get_collection_health", enabledNote, StringComparison.Ordinal);
+        });
+    }
 }

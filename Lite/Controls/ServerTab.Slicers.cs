@@ -197,7 +197,10 @@ public partial class ServerTab : UserControl
             _queryStoreSlicerMetric = "TotalCpu";
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
             if (data.Count == 0)
-                QueryStoreSlicer.ShowEmpty("No Query Store data in the selected time window.");
+            {
+                QueryStoreSlicer.ShowEmpty(QueryStoreEmptyWindowText);
+                await ShowQueryStoreEmptyReasonAsync(QueryStoreSlicer, _dataService, _serverId, _server.DisplayName, healthCollectorEnabled: true);
+            }
             else
                 QueryStoreSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
         }
@@ -205,6 +208,21 @@ public partial class ServerTab : UserControl
         {
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] LoadQueryStoreSlicerAsync failed: {ex.Message}");
         }
+    }
+
+    /// <summary>What the Query Store panel says over a window that holds no rows.</summary>
+    internal const string QueryStoreEmptyWindowText = "No Query Store data in the selected time window.";
+
+    /// <summary>The step that follows the Query Store panel saying its window is empty. It leaves that sentence as it is.</summary>
+    internal static System.Threading.Tasks.Task ShowQueryStoreEmptyReasonAsync(
+        Controls.TimeRangeSlicerControl slicer, LocalDataService dataService, int serverId, string serverName, bool healthCollectorEnabled)
+    {
+        ArgumentNullException.ThrowIfNull(slicer);
+        ArgumentNullException.ThrowIfNull(dataService);
+        ArgumentNullException.ThrowIfNull(serverName);
+        _ = serverId;
+        _ = healthCollectorEnabled;
+        return System.Threading.Tasks.Task.CompletedTask;
     }
 
     private async void OnQueryStoreSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)
