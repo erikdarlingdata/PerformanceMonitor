@@ -79,13 +79,20 @@ globalThis.sessionStorage = store();
 const writes = [];
 const reply = (status, body) => ({ status, ok: status >= 200 && status < 300, headers: { get: () => null }, text: async () => JSON.stringify(body) });
 const WARNING = "panel 0: the measure 'perfmon_value' charts a running total.";
+/* A saved dashboard whose one panel reads get_alert_history with its own columns (a view built from a sample read keeps each column's key,
+   label and format), and the read's answer: a resolution row (state_only, stored zeros) and a measured row. */
+const SAVED_ALERT_VIEW = { id: 41, name: "Alerts", version: 1, definition: { panels: [{ title: "Alert history", read: "get_alert_history", viz: "table", rowsKey: "alerts", params: { hours: "24" }, columns: [{ key: "metric_name", label: "Metric" }, { key: "current_value", label: "Value", format: "num2" }, { key: "threshold_value", label: "Threshold", format: "num2" }] }] } };
+const ALERT_HISTORY = { alerts: [
+  { alert_time: "2026-01-01T12:00:00Z", server_name: "a", metric_name: "Client Timeouts Cleared", current_value: 0, threshold_value: 0, state_only: true, notification_type: "resolution", muted: false, detail_text: "" },
+  { alert_time: "2026-01-01T11:00:00Z", server_name: "a", metric_name: "High CPU", current_value: 90, threshold_value: 80, state_only: false, notification_type: "alert", muted: false, detail_text: "" },
+] };
 globalThis.fetch = async (url, init = {}) => {
   const u = new URL(String(url), "http://viewer.test");
   const method = (init.method || "GET").toUpperCase();
   if (u.pathname === "/api/session") return reply(200, { can_edit: true });
   if (u.pathname === "/api/catalog") {
     return reply(200, {
-      reads: [], viz: [],
+      reads: [{ name: "get_alert_history" }], viz: [],
       compose: {
         measures: [{ source: "wait_stats", key: "wait_ms", measure: "wait_ms", displayName: "Wait time", label: "Wait time", kind: "measure", validAggs: ["sum"], defaultAgg: "sum", unitFamily: "duration", category: "Waits" }],
         dimensions: [], annotationSources: [],
@@ -94,6 +101,8 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (u.pathname === "/api/fleet") return reply(200, { cards: [] });
   if (u.pathname === "/api/views" && method === "GET") return reply(200, []);
+  if (u.pathname === "/api/views/41" && method === "GET") return reply(200, SAVED_ALERT_VIEW);
+  if (u.pathname.startsWith("/api/read/get_alert_history")) return reply(200, ALERT_HISTORY);
   if (u.pathname === "/api/views" && method === "POST") {
     writes.push({ method, path: u.pathname });
     return reply(201, { id: 41, name: JSON.parse(init.body).name, version: 1, warnings: [WARNING] });
@@ -172,5 +181,26 @@ async function editorRun() {
   return { labelAfterFirst, afterFirst, all: writes.map((w) => `${w.method} ${w.path}`), versions: writes.map((w) => w.version ?? null) };
 }
 
-const result = { notebook: await notebookRun(), editor: await editorRun() };
+/* The dashboard composer opened on the saved alert-history view: its preview must draw what the saved view draws, the dash for a state-only
+   row's stored zeros and a measured row's numbers. The preview's debounce timer is run on the next turn, so nothing waits on the clock. */
+async function previewRun() {
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...rest) => realSetTimeout(fn, ms >= 300 ? 0 : ms, ...rest);
+  try {
+    const main = new FakeNode("main");
+    await editor.renderEditor(main, "41");
+    await flush();
+    const name = byLabel(main, "View name");
+    if (name) { name.fire("input"); }
+    await flush();
+    await flush();
+    const rows = all(main).filter((n) => n.tag === "tr").map((tr) => tr.children.filter((c) => c.tag === "td").map((td) => td.textContent)).filter((r) => r.length);
+    const strips = all(main).filter((n) => /\bstrip\b/.test(n.attrs["class"] || n.className || "")).map((n) => n.textContent);
+    return { rows, strips };
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+}
+
+const result = { notebook: await notebookRun(), editor: await editorRun(), preview: await previewRun() };
 console.log(JSON.stringify(result));
