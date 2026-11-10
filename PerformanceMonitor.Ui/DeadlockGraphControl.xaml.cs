@@ -116,6 +116,7 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
 
         if (_model.IsEmpty)
         {
+            LayoutUpdated -= FitOnceTheViewerHasASize;
             SummaryText.Text = string.Empty;
             ParallelBanner.Visibility = Visibility.Collapsed;
             ShowEmptyState(true);
@@ -133,6 +134,19 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
             ?? (_model.Processes.Count > 0 ? _model.Processes[0] : null);
         if (initial != null)
             SelectNodeByModel(initial);
+
+        // A graph opens fitted (#8534). The viewer's size is known only after a layout pass, and it depends on the properties panel that
+        // the selection above opens, so the fit runs at the end of the first layout pass in which the viewer has a size.
+        LayoutUpdated -= FitOnceTheViewerHasASize;
+        LayoutUpdated += FitOnceTheViewerHasASize;
+    }
+
+    private void FitOnceTheViewerHasASize(object? sender, EventArgs e)
+    {
+        if (GraphScrollViewer.ActualWidth <= 0 || GraphScrollViewer.ActualHeight <= 0) return;
+
+        LayoutUpdated -= FitOnceTheViewerHasASize;
+        ZoomToFit();
     }
 
     private void ShowEmptyState(bool empty)
@@ -895,7 +909,13 @@ public partial class DeadlockGraphControl : UserControl, IGraphViewer
     private void ZoomIn_Click(object sender, RoutedEventArgs e) => SetZoom(_zoomLevel + ZoomStep);
     private void ZoomOut_Click(object sender, RoutedEventArgs e) => SetZoom(_zoomLevel - ZoomStep);
 
-    private void ZoomFit_Click(object sender, RoutedEventArgs e)
+    private void ZoomFit_Click(object sender, RoutedEventArgs e) => ZoomToFit();
+
+    /// <summary>
+    /// Zooms out until the whole graph is inside the viewer, and never above 100%: a graph that already fits is drawn at 100%, where the
+    /// canvas's alignment puts it in the middle of the viewer.
+    /// </summary>
+    private void ZoomToFit()
     {
         if (GraphCanvas.Width <= 0 || GraphCanvas.Height <= 0) return;
         var viewWidth = GraphScrollViewer.ActualWidth;

@@ -1225,6 +1225,9 @@ public sealed partial class DarlingWorker
         var taken = server.CycleSkips.TryTake(now, DarlingCycleSkip.RowMinInterval);
         if (taken is null)
         {
+            /* #8539: no row from this body (nothing is pending, or the last row is under RowMinInterval old). What it
+               measured stays with any slots still pending, so the row that reports them can name it. */
+            server.CycleSkips.NoteCauses(causes);
             return;
         }
 
@@ -1240,6 +1243,11 @@ public sealed partial class DarlingWorker
         if (written)
         {
             server.CycleSkips.Commit(taken, now);
+        }
+        else
+        {
+            /* The slots stay pending for the next body, and so does what this one measured. */
+            server.CycleSkips.NoteCauses(causes);
         }
     }
 

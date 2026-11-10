@@ -129,6 +129,15 @@ public class FindingStore
     }
 
     /// <summary>
+    /// The read-time forcing and automatic-plan-correction state of the findings' force-plan targets
+    /// (#8542), over this store's database, for a reader that renders a finding's copy-paste command.
+    /// Returns the dictionary and a null reason on success, and null with the reason when the read fails.
+    /// </summary>
+    public Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> TryGetForcePlanTargetStatesAsync(
+        int serverId, IEnumerable<AnalysisFinding> findings, CancellationToken cancellationToken = default) =>
+        AnalysisService.ReadForcePlanTargetStatesAsync(_duckDb, serverId, findings, cancellationToken);
+
+    /// <summary>
     /// #2455: finding and mute ids come from the shared process-wide
     /// <see cref="CollectionIdGenerator"/> rather than a per-instance counter.
     ///

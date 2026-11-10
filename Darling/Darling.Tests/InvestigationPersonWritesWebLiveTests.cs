@@ -287,6 +287,34 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
         });
     }
 
+    /// <summary>#8550: a server id is a 32-bit hash of the server's name, negative for about half the servers. The note route
+    /// writes a note for a registered server whose id is negative, refuses 0 (no server) with 400, and answers 404 for a
+    /// negative id that is not registered.</summary>
+    [Fact]
+    public async Task NoteRoute_WritesANoteForARegisteredServerWithANegativeId_RefusesZero_AndAnswers404ForAnUnregisteredOne()
+    {
+        const int negativeId = -1563402511;
+        const string negativeText = "-1563402511";
+        await WithWebRoutesAsync("admin", () => Lee, async (owner, store, Send, ct) =>
+        {
+            await using (var registry = await owner.OpenConnectionAsync(ct))
+            {
+                await DarlingMcpTestData.RegisterServerAsync(registry, negativeId, "SQLNEG", ct);
+            }
+
+            var written = await Send("PUT", "/api/investigation-notes", Json,
+                "{\"note_text\":\"the reporting replica lags on Mondays\",\"server_id\":" + negativeText + "}");
+            Assert.Equal(200, written.Status);
+            Assert.Equal("approved", (string)written.Body!["status"]!);
+            var noteId = (long)written.Body["note_id"]!;
+            Assert.Equal(negativeText, await ScalarAsync(owner, $"SELECT server_id::text FROM config.investigation_notes WHERE note_id = {noteId}", ct));
+
+            Assert.Equal(400, (await Send("PUT", "/api/investigation-notes", Json, "{\"note_text\":\"x\",\"server_id\":0}")).Status);
+            Assert.Equal(404, (await Send("PUT", "/api/investigation-notes", Json, "{\"note_text\":\"x\",\"server_id\":-999999}")).Status);
+            Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*)::text FROM config.investigation_notes WHERE author LIKE 'person:%'", ct));
+        });
+    }
+
     [Fact]
     public async Task PracticeRoute_OpensAJudgedCase_RefusesTheRest_AndJournalsOpenedByThePerson()
     {

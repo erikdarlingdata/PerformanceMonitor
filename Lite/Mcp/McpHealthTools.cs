@@ -18,6 +18,11 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpHealthTools
 {
+    /* #8533: get_collection_health runs the Collection Health read, and its description words that read's window in literals
+       ("7-day", "always 7 days"). This constant compiles only while the window is seven days, so the window cannot change
+       under a description that says otherwise. */
+    internal const byte CollectionHealthDescriptionDays = CollectionHealthWindow.Days == 7 ? 7 : -1;
+
     /// <summary>get_server_summary's description, VERBATIM Darling's (#3541 A10); the cross-SKU census pins them
     /// equal. Names the three clocks the payload carries, because the payload used to carry one.</summary>
     internal const string ServerSummaryDescription =

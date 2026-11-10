@@ -318,7 +318,10 @@ public partial class RecommendationsTab : UserControl
             }
 
             StatusText.Text = string.Empty;
-            var items = LiteRecommendationsReader.MapFindings(findings, serverName);
+            /* #8542: the cards of a fresh analysis follow the store's forcing state the way the stored load's do. */
+            var items = await Task.Run(() => LiteRecommendationsReader.MapWithForcePlanStateAsync(
+                findings, serverName, lens: null,
+                batch => analysisService.TryGetForcePlanTargetStatesAsync(serverId, batch)));
 
             /* #4766: the selected server's own clock, by the serverId the analysis ran for (see RefreshDataAsync). */
             var serverClock = await ReadCardClockAsync(_dataService, serverId, _openTabClock);

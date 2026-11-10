@@ -254,6 +254,6 @@ internal static class WebReadReach
             return null;
         }
 
-        return CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes(collector, serverId ?? -1, overrides);
+        return CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes(collector, serverId, overrides);
     }
 }

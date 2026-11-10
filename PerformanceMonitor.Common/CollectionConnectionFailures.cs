@@ -126,7 +126,10 @@ public static class CollectionConnectionFailures
     /// <summary>
     /// The header sentence for <paramref name="rows"/>, or null when no connection failure reached two or more collectors.
     /// Names the newest event's time (<paramref name="formatTime"/> words a UTC instant in the tab's zone), how many
-    /// collectors it reached, whether each of them missed that one run alone, and how many earlier events the window holds.
+    /// collectors it reached, whether each of them missed that one run alone, and how many earlier events the window holds;
+    /// the window is worded as the last <see cref="CollectionHealthWindow.Days"/> days wherever the sentence speaks of one (#8533).
+    /// The card it sits on also carries the skipped-slots line, which is read over 24 hours, so a sentence that named no window
+    /// would be read against that one.
     /// "Nothing to do unless it repeats" is said only when the window holds one event and none of its collectors has another
     /// error: <see cref="Group"/> reads each collector's newest error alone, so a later drop over the same collectors hides
     /// the earlier one from the event count, and their other errors are the only sign that it has repeated.
@@ -144,15 +147,16 @@ public static class CollectionConnectionFailures
             ? $"at {formatTime(newest.StartUtc)}"
             : $"between {formatTime(newest.StartUtc)} and {formatTime(newest.EndUtc)}";
         var reach = $"reached {newest.Collectors.Count} collectors";
+        var window = $"in the last {CollectionHealthWindow.Days} days";
         var runs = newest.CollectorsWithOtherErrors == 0
-            ? "each missed that one run and has no other error in the window"
-            : $"{newest.CollectorsWithOtherErrors} of them have other errors in the window as well";
+            ? $"each missed that one run and has no other error {window}"
+            : $"{newest.CollectorsWithOtherErrors} of them have other errors {window} as well";
         var earlier = events.Count switch
         {
             1 when newest.CollectorsWithOtherErrors == 0 => "Nothing to do unless it repeats.",
-            1 => "It has repeated, or those collectors fail for other reasons too: their Collection Log rows say which.",
-            2 => "One earlier connection failure is in the window too.",
-            _ => $"{events.Count - 1} earlier connection failures are in the window too.",
+            1 => "It has repeated, or those collectors fail for other reasons too: the Collection Log says which once its time range reaches back to those runs.",
+            2 => $"One earlier connection failure is {window} too.",
+            _ => $"{events.Count - 1} earlier connection failures are {window} too.",
         };
 
         return $"One connection failure {when} {reach}: {runs}. {earlier}";

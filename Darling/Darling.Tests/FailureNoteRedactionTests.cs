@@ -70,12 +70,12 @@ public sealed class FailureNoteRedactionTests
     // ── the force-plan target-state reader, and the bot's own copy of the same read ────
 
     [Theory]
-    [InlineData("Mcp/DarlingForcePlanTargetStateReader.cs")]
-    [InlineData("PgPlanForceActionStore.cs")]
+    [InlineData("PerformanceMonitor.Darling.Analysis/DarlingForcePlanTargetStateReader.cs")]
+    [InlineData("PerformanceMonitor.Darling.Service/PgPlanForceActionStore.cs")]
     public void TheForcePlanReader_LogsOnceAndNeverPutsExMessageInItsReturnedNote(string relativePath)
     {
         var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(Path.Combine(
-            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", relativePath.Replace('/', Path.DirectorySeparatorChar))));
+            RepoRoot(), "Darling", relativePath.Replace('/', Path.DirectorySeparatorChar))));
 
         /* No other ex.Message use exists anywhere in either file (confirmed by reading them) — comments are
            stripped above, so this catches the code, not a remark about the fix. PgPlanForceActionStore's own

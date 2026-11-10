@@ -39,6 +39,13 @@ namespace PerformanceMonitor.Ui;
 /// "+N more" entry that says how many were left out (the hover still names every series). An entry is never cut. The choice
 /// is remembered per chart size and entry list, so a hover or a pan does not re-decide it.
 /// </para>
+/// <para>
+/// #8540: an entry wider than the row under the plot (a sentence, such as the restart marker's, on a narrow chart) is fitted to that row
+/// before the rule above places the entries. It is broken across lines at its spaces, so the whole entry shows. When those lines would
+/// take the plot under <see cref="MinPlotHeight"/> and one line per entry would not, the entry keeps one line and ends in an ellipsis.
+/// A word wider than the row is cut the same way. The hover shows the whole text of an entry that ends in an ellipsis.
+/// While an entry is on more than one line the legend's rows take their own heights (<see cref="RowHeightLegendLayout"/>).
+/// </para>
 /// </remarks>
 internal sealed class WrappedLegendLayout : ILayoutEngine
 {
@@ -54,8 +61,12 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
     private readonly float _defaultMaximum;
     private readonly PixelPadding _basePadding;
     private readonly Alignment _baseAlignment;
+    private readonly ILegendLayout _stockRows;
+    private readonly ILegendLayout _ownRows = new RowHeightLegendLayout();
 
     private LegendItem[] _all = Array.Empty<LegendItem>();
+    private readonly Dictionary<string, string> _fitted = new(StringComparer.Ordinal); // a wide entry's text as its plottable names it, to the text the legend shows for it
+    private readonly Dictionary<LegendItem, string> _named = new(ReferenceEqualityComparer.Instance); // the plottable's text of each entry now showing its fitted text
     private bool _compact;
     private int _more; // 0 "+N more", 1 "+N", 2 no marker (a chart too narrow for an entry and a marker on one row)
     private (Edge Edge, bool Compact, int Fit) _decision;
@@ -68,6 +79,7 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
         _defaultMaximum = panel.MaximumSize;
         _basePadding = panel.Padding;
         _baseAlignment = panel.Alignment;
+        _stockRows = panel.Legend.Layout is RowHeightLegendLayout ? new ScottPlot.LegendLayouts.Wrapping() : panel.Legend.Layout;
     }
 
     /// <summary>The legend panel this engine sizes.</summary>
@@ -100,7 +112,8 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
 
     public Layout GetLayout(PixelRect figureRect, Plot plot, Paint paint)
     {
-        if (!_compact) _all = plot.Legend.GetItems();
+        ShowAsNamed();
+        _all = Entries(plot);
         if (_all.Length == 0) return _automatic.GetLayout(figureRect, plot, paint);
 
         Layout laid;
@@ -111,6 +124,10 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
             {
                 _decision = Decide(figureRect, plot, paint);
                 _decidedFor = key;
+            }
+            else
+            {
+                ShowFitted();
             }
 
             laid = Place(figureRect, plot, paint, _decision.Edge, _decision.Compact, _decision.Fit, Spare).Layout;
@@ -129,7 +146,23 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
         /* #8086: a chart at least three times as wide as it is tall keeps its height for the plot and puts the legend beside it, as
            long as that leaves the plot 60% of the width and the column fits. Any other chart keeps its width, unless under the plot
            would leave it under 120 px, when beside it is tried too. */
+        _fitted.Clear();
         var under = Place(figureRect, plot, paint, Edge.Bottom, compact: false, fit: 0, spare: 0f);
+        /* #8540: an entry wider than the row under the plot is fitted to that row first, so every placement tried below works with
+           entries that fit. Lines are kept when the plot keeps its floor with them, or when it is under its floor either way. */
+        if (FitWideEntries(under.Layout.DataRect.Width, paint, oneLine: false))
+        {
+            var plain = under.Layout.DataRect.Height;
+            under = Place(figureRect, plot, paint, Edge.Bottom, compact: false, fit: 0, spare: 0f);
+            if (under.Layout.DataRect.Height < MinPlotHeight && plain >= MinPlotHeight)
+            {
+                ShowAsNamed();
+                _fitted.Clear();
+                FitWideEntries(under.Layout.DataRect.Width, paint, oneLine: true);
+                under = Place(figureRect, plot, paint, Edge.Bottom, compact: false, fit: 0, spare: 0f);
+            }
+        }
+
         var wide = figureRect.Width >= 3 * figureRect.Height;
         var underFits = under.Layout.DataRect.Height >= MinPlotHeight;
         if (!ForceBottom && (wide || !underFits))
@@ -150,6 +183,130 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
         var oneRow = RowHeight(width, paint);
         if (under.LegendHeight <= oneRow + _panel.Padding.Vertical + 0.5f) return (Edge.Bottom, false, 0);
         return (Edge.Bottom, true, FitOneRow(width, oneRow, paint));
+    }
+
+    /// <summary>The entries the plottables give the legend, read behind any list of its own this engine left the legend showing.</summary>
+    private static LegendItem[] Entries(Plot plot)
+    {
+        var legend = plot.Legend;
+        if (legend.DisplayPlottableLegendItems) return legend.GetItems();
+
+        var shown = legend.ManualItems.ToArray();
+        legend.ManualItems.Clear();
+        legend.DisplayPlottableLegendItems = true;
+        try
+        {
+            return legend.GetItems();
+        }
+        finally
+        {
+            legend.DisplayPlottableLegendItems = false;
+            legend.ManualItems.AddRange(shown);
+        }
+    }
+
+    /// <summary>
+    /// Fits every entry wider than <paramref name="width"/> to it and remembers the fitted text for the layouts that follow. The entry is
+    /// broken across lines at its spaces; with <paramref name="oneLine"/> it keeps one line, cut to the width and ending in an ellipsis.
+    /// A single word wider than the legend keeps a line of its own, cut to the width and ending in an ellipsis. True when an entry was fitted.
+    /// </summary>
+    private bool FitWideEntries(float width, Paint paint, bool oneLine)
+    {
+        foreach (var item in _all)
+        {
+            var text = item.LabelText;
+            if (EntryWidth(item, paint) <= width + 0.5f) continue;
+
+            if (oneLine)
+            {
+                _fitted[text] = Shorten(item, text, width, paint);
+                item.LabelText = text;
+                continue;
+            }
+
+            var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var lines = new List<string>();
+            var line = words.Length > 0 ? words[0] : text;
+            foreach (var word in words.Skip(1))
+            {
+                item.LabelText = line + " " + word;
+                if (EntryWidth(item, paint) <= width + 0.5f)
+                {
+                    line = item.LabelText;
+                    continue;
+                }
+
+                lines.Add(line);
+                line = word;
+            }
+
+            lines.Add(line);
+
+            // A line that is one word wider than the row (a name with no space in it) is cut to the row and ends in an ellipsis.
+            for (var i = 0; i < lines.Count; i++)
+            {
+                item.LabelText = lines[i];
+                if (EntryWidth(item, paint) > width + 0.5f) lines[i] = Shorten(item, lines[i], width, paint);
+            }
+
+            item.LabelText = text;
+            var fitted = string.Join("\n", lines);
+            if (!string.Equals(fitted, text, StringComparison.Ordinal)) _fitted[text] = fitted;
+        }
+
+        ShowFitted();
+        if (_fitted.Count == 0) Apply(Edge.Bottom, compact: false, fit: 0); // measuring left one entry in the legend's list
+        return _fitted.Count > 0;
+    }
+
+    /// <summary>Ends an entry, or a line of one, that does not show its whole text.</summary>
+    internal const string Ellipsis = "\u2026";
+
+    /// <summary>The longest start of <paramref name="text"/> that, with an ellipsis after it, is no wider than <paramref name="width"/> as the entry's label.</summary>
+    private string Shorten(LegendItem item, string text, float width, Paint paint)
+    {
+        var keep = text.Length - 1;
+        for (; keep > 1; keep--)
+        {
+            item.LabelText = text[..keep].TrimEnd() + Ellipsis;
+            if (EntryWidth(item, paint) <= width + 0.5f) break;
+        }
+
+        return text[..Math.Max(keep, 1)].TrimEnd() + Ellipsis;
+    }
+
+    /// <summary>
+    /// The text the plottable named <paramref name="item"/> when the legend shows it fitted (broken across lines, or shortened), else null.
+    /// The hover reads it to show the whole text of an entry that ends in an ellipsis.
+    /// </summary>
+    internal string? NamedText(LegendItem item) => _named.TryGetValue(item, out var named) ? named : null;
+
+    /// <summary>The width one entry takes on a row of its own: its symbol and its label.</summary>
+    private float EntryWidth(LegendItem item, Paint paint)
+    {
+        var legend = _panel.Legend;
+        legend.DisplayPlottableLegendItems = false;
+        legend.ManualItems.Clear();
+        legend.ManualItems.Add(item);
+        return legend.GetLayout(new PixelSize(float.PositiveInfinity, float.PositiveInfinity), paint).LegendRect.Width;
+    }
+
+    /// <summary>Gives each entry that has a fitted text that text.</summary>
+    private void ShowFitted()
+    {
+        foreach (var item in _all)
+        {
+            if (!_fitted.TryGetValue(item.LabelText, out var fitted)) continue;
+            _named[item] = item.LabelText;
+            item.LabelText = fitted;
+        }
+    }
+
+    /// <summary>Puts every fitted entry back to the text its plottable named it, so an entry a plottable hands out again is read as named.</summary>
+    private void ShowAsNamed()
+    {
+        foreach (var (item, text) in _named) item.LabelText = text;
+        _named.Clear();
     }
 
     /// <summary>The height of one row of the legend: the first entry alone.</summary>
@@ -186,6 +343,8 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
     {
         var legend = _panel.Legend;
         _panel.Edge = edge;
+        // An entry broken across lines is taller than the rest: each row then takes its own height, not the tallest entry's.
+        legend.Layout = _all.Any(i => i.LabelText.Contains('\n')) ? _ownRows : _stockRows;
         if (edge == Edge.Right)
         {
             legend.Orientation = Orientation.Vertical;
@@ -204,15 +363,22 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
         }
 
         _compact = compact && fit < _all.Length;
-        if (!_compact)
+        if (!_compact && _named.Count == 0)
         {
             legend.DisplayPlottableLegendItems = true;
             legend.ManualItems.Clear();
             return;
         }
 
+        // The legend shows this engine's own list: the entries with their fitted text, or the first few and a "+N more" entry.
         legend.DisplayPlottableLegendItems = false;
         legend.ManualItems.Clear();
+        if (!_compact)
+        {
+            legend.ManualItems.AddRange(_all);
+            return;
+        }
+
         legend.ManualItems.AddRange(_all.Take(fit));
         if (_more < 2) legend.ManualItems.Add(new LegendItem { LabelText = _more == 1 ? $"+{_all.Length - fit}" : $"+{_all.Length - fit} more" });
     }
@@ -248,5 +414,56 @@ internal sealed class WrappedLegendLayout : ILayoutEngine
         _panel.MinimumSize = need;
         _panel.MaximumSize = need;
         return (_automatic.GetLayout(figureRect, plot, paint), legendHeight);
+    }
+}
+
+/// <summary>
+/// #8540: ScottPlot's wrapping legend gives every row the height of the tallest entry, so one entry on two lines makes every row two
+/// lines tall. This layout takes ScottPlot's and gives each row the height of its own tallest entry, moving the rows below it up.
+/// A legend whose rows are all one height comes back as ScottPlot laid it out.
+/// </summary>
+internal sealed class RowHeightLegendLayout : ILegendLayout
+{
+    private readonly ScottPlot.LegendLayouts.Wrapping _stock = new();
+
+    public LegendLayout GetLayout(Legend legend, LegendItem[] items, PixelSize maxSize, Paint paint)
+    {
+        if (legend.Orientation != Orientation.Horizontal || items.Length < 2) return _stock.GetLayout(legend, items, maxSize, paint);
+
+        /* ScottPlot's layout cuts an entry's rectangle at the height it is given, and that height is the one this layout's shorter
+           rows need. So the rows are laid out with no height limit first, and take their own heights from there. */
+        var laid = _stock.GetLayout(legend, items, new PixelSize(maxSize.Width, float.PositiveInfinity), paint);
+        if (laid.LegendItems.Length < 2) return _stock.GetLayout(legend, items, maxSize, paint);
+
+        var labels = (PixelRect[])laid.LabelRects.Clone();
+        var symbols = (PixelRect[])laid.SymbolRects.Clone();
+        var unbounded = new PixelSize(float.PositiveInfinity, float.PositiveInfinity);
+        var saved = 0f;
+        foreach (var row in Enumerable.Range(0, labels.Length).GroupBy(i => laid.LabelRects[i].Top).OrderBy(g => g.Key))
+        {
+            // The row's entries laid out alone are one row as tall as the tallest of them.
+            var members = row.ToArray();
+            var own = _stock.GetLayout(legend, members.Select(i => laid.LegendItems[i]).ToArray(), unbounded, paint).LabelRects.Max(r => r.Height);
+            var given = laid.LabelRects[members[0]].Height;
+            if (own > given) own = given;
+            foreach (var i in members)
+            {
+                labels[i] = new PixelRect(new Pixel(labels[i].Left, labels[i].Top - saved), new PixelSize(labels[i].Width, own));
+                symbols[i] = new PixelRect(new Pixel(symbols[i].Left, symbols[i].Top - saved), new PixelSize(symbols[i].Width, own));
+            }
+
+            saved += given - own;
+        }
+
+        if (saved < 0.5f) return _stock.GetLayout(legend, items, maxSize, paint);
+
+        var whole = laid.LegendRect;
+        return new LegendLayout
+        {
+            LegendItems = laid.LegendItems,
+            LegendRect = new PixelRect(new Pixel(whole.Left, whole.Top), new PixelSize(whole.Width, whole.Height - saved)),
+            LabelRects = labels,
+            SymbolRects = symbols,
+        };
     }
 }

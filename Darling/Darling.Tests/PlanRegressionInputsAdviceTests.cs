@@ -228,11 +228,12 @@ public sealed class PlanRegressionInputsAdviceTests
     [InlineData(0)]
     [InlineData(1)]
     [InlineData(2)]
-    public void PlanRegressionWithParameterSensitivity_SaysNotToForce_WhateverTheBasis(int basis)
+    public void PlanRegressionWithParameterSensitivity_CautionsAgainstForcing_WhateverTheBasis(int basis)
     {
         var advice = Compose("PLAN_REGRESSION", PlanRegressionWithBasis(basis), ParameterSensitivity());
 
-        Assert.Contains("do not force a query that also shows that signature", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("be cautious about forcing a query that also shows that signature", advice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("do not force", advice.Remediation, StringComparison.Ordinal);
         Assert.Contains("OPTION (RECOMPILE)", advice.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("stops the bleeding", advice.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("so this is a plan choice that got worse", advice.Investigation, StringComparison.Ordinal);
@@ -247,7 +248,8 @@ public sealed class PlanRegressionInputsAdviceTests
             PlanRegressionWithBasis(1, new Dictionary<string, double> { ["latest_is_forced"] = 1, ["force_failure_count"] = 3 }),
             ParameterSensitivity());
 
-        Assert.Contains("do not force a query that also shows that signature", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("be cautious about forcing a query that also shows that signature", advice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("do not force", advice.Remediation, StringComparison.Ordinal);
         Assert.Contains("clear the broken force", advice.Remediation, StringComparison.Ordinal);
         Assert.Contains("failing to apply", advice.Investigation, StringComparison.Ordinal);
     }

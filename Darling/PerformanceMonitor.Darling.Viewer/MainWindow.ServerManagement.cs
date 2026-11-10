@@ -581,7 +581,7 @@ public partial class MainWindow
     private async void ServerContextMenu_Remove_Click(object sender, RoutedEventArgs e)
     {
         var server = GetServerFromContextMenu(sender);
-        if (server is null || _dataService is null)
+        if (server is null || _dataService is null || _dataService.IsReadOnly)
         {
             return;
         }
@@ -641,7 +641,7 @@ public partial class MainWindow
     private async void ServerContextMenu_Silence_Click(object sender, RoutedEventArgs e)
     {
         var server = GetServerFromContextMenu(sender);
-        if (server is null || _dataService is null)
+        if (server is null || _dataService is null || _dataService.IsReadOnly)
         {
             return;
         }
@@ -690,7 +690,7 @@ public partial class MainWindow
     private async void ServerContextMenu_Unsilence_Click(object sender, RoutedEventArgs e)
     {
         var server = GetServerFromContextMenu(sender);
-        if (server is null || _dataService is null)
+        if (server is null || _dataService is null || _dataService.IsReadOnly)
         {
             return;
         }

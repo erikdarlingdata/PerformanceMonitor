@@ -519,11 +519,16 @@ public sealed class RecommendationsViewModel
     /// rows arrive pre-sorted (severity band desc, raw desc, database, title) from the read, and grouping
     /// preserves that order. <paramref name="insufficientData"/> and <paramref name="windowEmpty"/> default
     /// false so the callers that carry no marker keep the prior loaded/empty behavior.
+    /// <paramref name="forcePlanStates"/> is the store's forcing and automatic-plan-correction state for the rows'
+    /// force-plan targets and <paramref name="forcePlanStateUnavailableReason"/> is why that read failed; each card's
+    /// copy-paste command is rendered against them (<see cref="BuildCopyPasteSql"/>).
     /// </summary>
     public static RecommendationsViewModel FromFindings(
         IReadOnlyList<ViewerFindingRow> rows, string serverName, ServerClock? serverClock = null,
         bool insufficientData = false, string? insufficientDataMessage = null,
-        bool windowEmpty = false, string? windowEmptyMessage = null, bool isPostgres = false)
+        bool windowEmpty = false, string? windowEmptyMessage = null, bool isPostgres = false,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? forcePlanStates = null,
+        string? forcePlanStateUnavailableReason = null)
     {
         if (rows is null || rows.Count == 0)
             return ZeroFindingState(insufficientData, insufficientDataMessage, windowEmpty, windowEmptyMessage);
@@ -533,7 +538,7 @@ public sealed class RecommendationsViewModel
         {
             if (row is null)
                 continue;
-            items.Add(MapItem(row, serverName, isPostgres));
+            items.Add(MapItem(row, serverName, isPostgres, forcePlanStates, forcePlanStateUnavailableReason));
         }
 
         if (items.Count == 0)
@@ -567,9 +572,13 @@ public sealed class RecommendationsViewModel
     /// the grid mapping exactly), and derives the advice prose + copy-paste SQL + incident/window from
     /// the carried <see cref="AnalysisFinding"/>. Advice comes from <see cref="FactAdvice"/> for the
     /// root fact key; copy-paste SQL comes from the PERSISTED remediation action
-    /// (<see cref="BuildCopyPasteSql"/>). Exposed <c>internal</c> for tests.
+    /// (<see cref="BuildCopyPasteSql"/>), rendered against <paramref name="forcePlanStates"/> and
+    /// <paramref name="forcePlanStateUnavailableReason"/>. Exposed <c>internal</c> for tests.
     /// </summary>
-    internal static RecommendationItem MapItem(ViewerFindingRow row, string serverName, bool isPostgres = false)
+    internal static RecommendationItem MapItem(
+        ViewerFindingRow row, string serverName, bool isPostgres = false,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? forcePlanStates = null,
+        string? forcePlanStateUnavailableReason = null)
     {
         var finding = row.Finding;
         var advice = FactAdvice.GetComposedForFinding(finding);
@@ -585,7 +594,7 @@ public sealed class RecommendationsViewModel
             AdviceText = PgTargetAdvice.IsPgKey(finding.RootFactKey)
                 ? ComposeShortPostgresAdvice(advice)
                 : ComposeAdvice(advice),
-            CopyPasteSql = BuildCopyPasteSql(finding.Remediation),
+            CopyPasteSql = BuildCopyPasteSql(finding.Remediation, forcePlanStates, forcePlanStateUnavailableReason),
             Remediation = finding.Remediation,
             IncidentId = finding.IncidentId,
             ServerName = serverName ?? string.Empty,
@@ -688,9 +697,19 @@ public sealed class RecommendationsViewModel
     /// (RCSI) carrying its two-sided risk disclosure as a comment header. Kept as a thin
     /// <c>internal</c> seam (exercised directly by the viewer tests) over the shared renderer so the
     /// viewer and the Dashboard reader cannot drift. Null when the action carries no renderable target.
+    /// <para>
+    /// <paramref name="states"/> is the store's forcing and automatic-plan-correction state for the action's
+    /// force-plan targets: a target that state blocks gets no force statement, only its blockers in comments. Null
+    /// <paramref name="states"/> with a <paramref name="stateUnavailableReason"/> means the state read failed: every
+    /// statement stays and the text opens with <see cref="FactRemediation.StateNotReadPrefix"/> and the reason. The
+    /// other remediation shapes ignore both.
+    /// </para>
     /// </summary>
-    internal static string? BuildCopyPasteSql(RemediationAction? action) =>
-        FactRemediation.RenderCopyPasteCommand(action);
+    internal static string? BuildCopyPasteSql(
+        RemediationAction? action,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states = null,
+        string? stateUnavailableReason = null) =>
+        FactRemediation.RenderCopyPasteCommand(action, states, stateUnavailableReason);
 
     /// <summary>
     /// Appends a "what else fired in this analysis window" cross-reference to each card's advice text

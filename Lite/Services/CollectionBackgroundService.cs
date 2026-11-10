@@ -170,7 +170,32 @@ public class CollectionBackgroundService : BackgroundService
 
     public bool IsPaused { get; set; }
     public DateTime? LastCollectionTime { get; private set; }
-    public bool IsCollecting { get; private set; }
+
+    /// <summary>
+    /// #8533: raised on the loop's own thread when a cycle starts and when it ends, after <see cref="IsCollecting"/> has changed
+    /// and, for a cycle that finished, after <see cref="LastCollectionTime"/> has. The status bar repaints its collection label
+    /// from it. A listener that throws is logged and does not reach the loop.
+    /// </summary>
+    public event Action? CycleStateChanged;
+
+    private volatile bool _isCollecting;
+
+    public bool IsCollecting
+    {
+        get => _isCollecting;
+        private set
+        {
+            _isCollecting = value;
+            try
+            {
+                CycleStateChanged?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "A cycle-state listener failed");
+            }
+        }
+    }
 
     public CollectionBackgroundService(
         RemoteCollectorService collectorService,
@@ -190,6 +215,26 @@ public class CollectionBackgroundService : BackgroundService
         _retentionService = retentionService;
         _notificationService = notificationService;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// #8533: one cycle's collector pass, between its two cycle signals. <see cref="IsCollecting"/> is true while
+    /// <paramref name="collect"/> runs. A pass that finishes sets <see cref="LastCollectionTime"/> before it clears
+    /// <see cref="IsCollecting"/>, so a listener to the cycle-end signal reads the new time. A pass that fails or is cancelled
+    /// clears <see cref="IsCollecting"/>, leaves the time as it was, and throws to the loop.
+    /// </summary>
+    internal async Task RunCollectorPassAsync(Func<Task> collect)
+    {
+        try
+        {
+            IsCollecting = true;
+            await collect();
+            LastCollectionTime = DateTime.UtcNow;
+        }
+        finally
+        {
+            IsCollecting = false;
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -272,9 +317,7 @@ public class CollectionBackgroundService : BackgroundService
 
                 try
                 {
-                    IsCollecting = true;
-                    await _collectorService.RunDueCollectorsAsync(cycleStart, stoppingToken);
-                    LastCollectionTime = DateTime.UtcNow;
+                    await RunCollectorPassAsync(() => _collectorService.RunDueCollectorsAsync(cycleStart, stoppingToken));
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
@@ -283,10 +326,6 @@ public class CollectionBackgroundService : BackgroundService
                 catch (Exception ex)
                 {
                     _logger?.LogError(ex, "Collection cycle failed");
-                }
-                finally
-                {
-                    IsCollecting = false;
                 }
 
                 Lap("collectors");

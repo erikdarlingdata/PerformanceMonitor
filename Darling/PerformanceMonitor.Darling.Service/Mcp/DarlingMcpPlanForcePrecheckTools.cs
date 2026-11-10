@@ -609,7 +609,7 @@ public sealed class DarlingMcpPlanForcePrecheckTools
             RootFactKey = "PLAN_REGRESSION",
             Remediation = new RemediationAction("PLAN_REGRESSION", "force", new[] { target }),
         };
-        var (states, reason) = await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, serverId, new[] { carrier }, windowEnd, logger, ct);
+        var (states, reason) = await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, serverId, new[] { carrier }, McpCommandDeadlines.ReadSeconds, windowEnd, logger, ct);
         ForcePlanTargetState? state = null;
         states?.TryGetValue(ForcePlanTargetKey.Of(target), out state);
         var selfForced = state?.PlanIsForced == true;

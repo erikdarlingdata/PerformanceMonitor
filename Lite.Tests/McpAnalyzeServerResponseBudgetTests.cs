@@ -88,7 +88,12 @@ public sealed class McpAnalyzeServerResponseBudgetTests : IClassFixture<SharedDu
         Assert.True(root.TryGetProperty("findings_returned", out var returned), "findings_returned rides beside finding_count");
         var findings = root.GetProperty("findings");
         Assert.Equal(returned.GetInt32(), findings.GetArrayLength());
-        Assert.InRange(returned.GetInt32(), 1, findingCount - 1);
+        /* #8569: a finding that does not fit the room left is trimmed and flagged rather than skipped, so every finding rides
+           or is named in findings_left_out, and the reply is cut either way. */
+        var leftOut = root.TryGetProperty("findings_left_out", out var leftOutList) ? leftOutList.GetArrayLength() : 0;
+        var trimmedCount = findings.EnumerateArray().Count(f => f.TryGetProperty("trimmed", out _));
+        Assert.True(returned.GetInt32() >= 1 && leftOut + trimmedCount >= 1, "a cut reply trims or leaves out at least one finding");
+        Assert.Equal(findingCount, returned.GetInt32() + leftOut);
         Assert.True(root.GetProperty("persisted").GetBoolean());
         Assert.Contains("get_analysis_findings", root.GetProperty("truncation_note").GetString()!, StringComparison.Ordinal);
 
