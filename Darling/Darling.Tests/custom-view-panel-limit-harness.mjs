@@ -129,14 +129,27 @@ try {
   fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
-  modules = { views: await load(path.join("pages", "views.js")) };
+  modules = { views: await load(path.join("pages", "views.js")), util: await load("util.js") };
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
 
 const all = (n, out = []) => { out.push(n); for (const c of n.children) all(c, out); return out; };
 const flush = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 0)); };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/* #8511: the page's Retry-After wait (retryOnceWhenBusy, util.js) runs on util's busyRetryClock, which the harness drives: a timer is held,
+   with the delay the page asked for, and fires nothing on its own, so a capture made while the panel waits sees the page before the retry
+   however long the turns before it take. releaseBusyRetry fires the held timers, runs the turns that follow them, and returns the delays
+   the page asked for. Nothing waits on wall-clock time. */
+const busyRetryTimers = [];
+modules.util.busyRetryClock.setTimeout = (fn, ms) => { const timer = { fn, ms, cleared: false }; busyRetryTimers.push(timer); return timer; };
+modules.util.busyRetryClock.clearTimeout = (timer) => { if (timer) timer.cleared = true; };
+const releaseBusyRetry = async () => {
+  await flush(); /* the turns in which the page reads the refusal and arms its wait */
+  const held = busyRetryTimers.splice(0);
+  for (const timer of held) if (!timer.cleared) timer.fn();
+  await flush();
+  return held.map((t) => t.ms);
+};
 const panel = (source, extra = {}) => ({ title: "Panel " + source, source, viz: "table", measure: "m", ...extra });
 const rpanel = (read, extra = {}) => ({ title: "Read " + read, read, viz: "table", columns: [{ key: "n", label: "n" }], rowsKey: "rows", ...extra });
 const dashboard = (panels) => ({ id: "v1", name: "V", definition: { panels } });
@@ -184,8 +197,7 @@ const out = {};
   await flush();
   out.busyOnceStrips = stripsOf(main).map((s) => s.text);
   out.busyOnceCallsWhileWaiting = sourcesOf(calls);
-  await sleep(1300);
-  await flush();
+  out.busyOnceRetryDelaysMs = await releaseBusyRetry();
   out.busyOnceCallsAfterWait = sourcesOf(calls);
   answer(calls[2], 200);
   answer(calls[1], 200);
@@ -203,8 +215,7 @@ const out = {};
   answer(calls[1], 200);
   await flush();
   answer(calls[0], 429);
-  await sleep(1300);
-  await flush();
+  out.busyTwiceRetryDelaysMs = await releaseBusyRetry();
   answer(calls[2], 429);
   await flush();
   out.busyTwiceCalls = sourcesOf(calls);
@@ -304,8 +315,7 @@ const out = {};
   await flush();
   out.readBusyOnceStrips = stripsOf(main).map((s) => s.text);
   out.readBusyOnceCallsWhileWaiting = sourcesOf(calls);
-  await sleep(1300);
-  await flush();
+  out.readBusyOnceRetryDelaysMs = await releaseBusyRetry();
   out.readBusyOnceCallsAfterWait = sourcesOf(calls);
   answer(calls[2], 200);
   answer(calls[1], 200);
@@ -325,8 +335,7 @@ const out = {};
   answer(calls[1], 200);
   await flush();
   answer(calls[0], 429);
-  await sleep(1300);
-  await flush();
+  out.readBusyTwiceRetryDelaysMs = await releaseBusyRetry();
   answer(calls[2], 429);
   await flush();
   out.readBusyTwiceCalls = sourcesOf(calls);
