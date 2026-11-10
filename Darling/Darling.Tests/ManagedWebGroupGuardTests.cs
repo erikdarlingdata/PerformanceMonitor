@@ -215,7 +215,7 @@ public sealed class ManagedWebGroupGuardTests
         Assert.Equal(otherString.Response.StatusCode, liveToken.Response.StatusCode);
         Assert.NotEqual(503, liveToken.Response.StatusCode);
         Assert.Equal(await Body(otherString), await Body(liveToken));
-        Assert.Empty(liveToken.Response.Headers.SetCookie);
+        Assert.Equal(0, liveToken.Response.Headers.SetCookie.Count);
 
         async Task<(int Status, string Body)> Read(string path, string? cookie)
         {
