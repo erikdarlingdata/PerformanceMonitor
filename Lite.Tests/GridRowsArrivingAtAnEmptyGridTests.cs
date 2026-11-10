@@ -35,24 +35,53 @@ public sealed class GridRowsArrivingAtAnEmptyGridTests
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
 
     /// <summary>What a grid built for the rows it was handed.</summary>
-    private sealed record Built(int Rows, int Containers, int RowsInView, bool EmptyGridScrolledByPixel, bool ScrollsByRow);
+    private sealed record Built(int Rows, int Containers, int RowsInView, bool EmptyGridScrolledByPixel, bool ScrollsByRow, bool UnloadedWhenTheRowsArrived = false);
 
     /// <summary>
     /// Hands <paramref name="grid"/>, empty and shown, <paramref name="rows"/>, lays the window out once and counts. The count is taken
     /// straight after that one layout pass, with nothing pumped in between, so it is what the pass built.
     /// </summary>
-    private static Built HandRows(Window window, DataGrid grid, System.Collections.IList rows)
+    private static Built HandRows(Window window, DataGrid grid, System.Collections.IList rows, bool whileItsTabIsDeselected = false)
     {
         ClippedTextProbe.Settle(window);
         var scroll = (ScrollViewer)grid.Template.FindName("DG_ScrollViewer", grid);
         var emptyScrolledByPixel = grid.Items.Count == 0 && !scroll.CanContentScroll;
+        var unloaded = false;
 
-        grid.ItemsSource = rows;
+        if (whileItsTabIsDeselected)
+        {
+            /* A reader who leaves the tab before its read lands: the rows arrive at a grid that is not loaded, and the reader comes back. */
+            var (tabs, own) = OwnTab(grid);
+            StaTestThread.WithDispatcherContext(() => tabs.SelectedItem = tabs.Items.OfType<TabItem>().First(item => !ReferenceEquals(item, own)));
+            ClippedTextProbe.Settle(window);
+            unloaded = !grid.IsLoaded;
+            grid.ItemsSource = rows;
+            StaTestThread.WithDispatcherContext(() => tabs.SelectedItem = own);
+        }
+        else
+        {
+            grid.ItemsSource = rows;
+        }
+
         window.UpdateLayout();
 
         var containers = ClippedTextProbe.Descendants(grid).OfType<DataGridRow>().ToList();
         var shortest = containers.Count == 0 ? 1 : containers.Min(r => r.ActualHeight);
-        return new Built(rows.Count, containers.Count, (int)Math.Ceiling(scroll.ActualHeight / Math.Max(1, shortest)), emptyScrolledByPixel, scroll.CanContentScroll);
+        return new Built(rows.Count, containers.Count, (int)Math.Ceiling(scroll.ActualHeight / Math.Max(1, shortest)), emptyScrolledByPixel, scroll.CanContentScroll, unloaded);
+    }
+
+    /// <summary>The tab <paramref name="element"/> sits on, and the tab control that tab belongs to.</summary>
+    private static (TabControl Tabs, TabItem Own) OwnTab(DependencyObject element)
+    {
+        for (var at = element; at is not null; at = LogicalTreeHelper.GetParent(at))
+        {
+            if (at is TabItem item && ItemsControl.ItemsControlFromItemContainer(item) is TabControl owner)
+            {
+                return (owner, item);
+            }
+        }
+
+        throw new Xunit.Sdk.XunitException("the grid is on no tab");
     }
 
     /// <summary>
@@ -120,6 +149,32 @@ public sealed class GridRowsArrivingAtAnEmptyGridTests
         AssertBuiltOnlyTheRowsInView(OnTheServerTab("BlockedProcessReportGrid", rows), "Blocking > Blocked Process Reports at 900x600");
     }
 
+    /// <summary>
+    /// The reader leaves Blocked Process Reports before its read lands and comes back: the reports arrive while the sub-tab is deselected,
+    /// so the grid is not loaded when it gets them. It still builds only the rows in view when it is shown again.
+    /// </summary>
+    [Fact]
+    public void BlockedProcessReports_BuildsOnlyTheRowsInView_WhenReportsArriveWhileItsSubTabIsDeselected()
+    {
+        var rows = Enumerable.Range(0, 200).Select(i => new BlockedProcessReportRow
+        {
+            CollectionTime = new DateTime(2026, 11, 10, 12, 0, 0).AddSeconds(-i),
+            EventTime = new DateTime(2026, 11, 10, 12, 0, 0).AddSeconds(-i),
+            DatabaseName = "db" + (i % 7),
+            BlockedSpid = 50 + i,
+            BlockingSpid = 100 + (i % 11),
+            WaitTimeMs = 5000 + i,
+            LockMode = "U",
+            BlockedSqlText = "UPDATE dbo.orders SET status = @p0 WHERE order_id = " + i,
+            BlockingSqlText = "SELECT o.* FROM dbo.orders AS o WHERE o.customer_id = " + i,
+        }).ToList();
+
+        var built = OnTheServerTab("BlockedProcessReportGrid", rows, whileItsTabIsDeselected: true);
+
+        Assert.True(built.UnloadedWhenTheRowsArrived, "the grid of a deselected sub-tab should not be loaded, or this test hands rows to a grid that is on screen");
+        AssertBuiltOnlyTheRowsInView(built, "Blocking > Blocked Process Reports at 900x600, filled while another sub-tab was selected");
+    }
+
     [Fact]
     public void MemoryBroker_BuildsOnlyTheRowsInView_WhenNotificationsArriveAtTheEmptyGrid()
     {
@@ -183,7 +238,7 @@ public sealed class GridRowsArrivingAtAnEmptyGridTests
     }
 
     /// <summary>The named grid of a real server tab in a 900x600 window, shown empty on its own sub-tab and then handed <paramref name="rows"/>.</summary>
-    private static Built OnTheServerTab(string gridName, System.Collections.IList rows)
+    private static Built OnTheServerTab(string gridName, System.Collections.IList rows, bool whileItsTabIsDeselected = false)
     {
         var dir = Path.Combine(Path.GetTempPath(), "GridRowsArrive_" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
@@ -202,7 +257,7 @@ public sealed class GridRowsArrivingAtAnEmptyGridTests
                 {
                     var grid = (DataGrid)tab.FindName(gridName);
                     StaTestThread.Reveal(grid);
-                    return HandRows(window, grid, rows);
+                    return HandRows(window, grid, rows, whileItsTabIsDeselected);
                 }
                 finally
                 {
