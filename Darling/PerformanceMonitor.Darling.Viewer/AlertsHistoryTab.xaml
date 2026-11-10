@@ -35,14 +35,14 @@
                     <MenuItem.Icon><TextBlock Text="&#x1F4CA;"/></MenuItem.Icon>
                 </MenuItem>
                 <Separator/>
-                <MenuItem Header="_Mute This Alert..." Click="MuteThisAlert_Click">
+                <MenuItem Header="_Mute This Alert..." Tag="AlertWriteItem" Click="MuteThisAlert_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F515;"/></MenuItem.Icon>
                 </MenuItem>
-                <MenuItem Header="Mute _Similar Alerts..." Click="MuteSimilarAlerts_Click">
+                <MenuItem Header="Mute _Similar Alerts..." Tag="AlertWriteItem" Click="MuteSimilarAlerts_Click">
                     <MenuItem.Icon><TextBlock Text="&#x1F507;"/></MenuItem.Icon>
                 </MenuItem>
                 <Separator/>
-                <MenuItem Header="Dismiss Se_lected" Click="DismissSelected_Click">
+                <MenuItem Header="Dismiss Se_lected" Tag="AlertWriteItem" Click="DismissSelected_Click">
                     <MenuItem.Icon><TextBlock Text="&#x2717;"/></MenuItem.Icon>
                 </MenuItem>
             </ContextMenu>

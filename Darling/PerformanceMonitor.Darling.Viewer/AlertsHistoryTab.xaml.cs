@@ -88,22 +88,37 @@ public partial class AlertsHistoryTab : UserControl
         _staleDataTimer.Tick += StaleDataTimer_Tick;
     }
 
+    /// <summary>The Tag on the row context menu's write items (#8547), which a read-only seat disables.</summary>
+    internal const string AlertWriteMenuItemTag = "AlertWriteItem";
+
+    /// <summary>The tooltip on every alert write control a read-only seat has disabled: the two Dismiss buttons and the row menu's write items.</summary>
+    private const string ReadOnlyAlertWriteTip = "This viewer is connected read-only, so alert dismissal and muting are disabled. " + ViewerReadOnlyException.HowToConnectAsAdmin;
+
     /// <summary>Wires the data service and the column-filter manager, and starts the stale-data ticker.</summary>
     public void Initialize(ViewerDataService dataService)
     {
         _dataService = dataService;
         _filterManager = new DataGridFilterManager<ViewerAlertRow>(AlertsDataGrid);
 
-        /* V8 security hardening: a read-only (viewer-role) connection can't dismiss alerts, so disable
-           the Dismiss buttons up front with an explaining tooltip (the Dismiss Selected button is also
-           selection-gated below). Mute-from-alert and context-menu Dismiss stay clickable but surface
-           the read-only message via StatusChanged if used — the reactive backstop. */
+        /* V8 security hardening: a read-only (viewer-role) connection can't dismiss or mute alerts, so the Dismiss
+           buttons and the three write items of the row context menu (Mute This Alert, Mute Similar Alerts, Dismiss
+           Selected) are disabled up front with an explaining tooltip (the Dismiss Selected button is also
+           selection-gated below). The three handlers also return early on a read-only seat (#8547), so no other path
+           opens the Create Mute Rule dialog or dismisses. */
         if (dataService.IsReadOnly)
         {
-            const string readOnlyTip = "This viewer is connected read-only, so alert dismissal is disabled. " + ViewerReadOnlyException.HowToConnectAsAdmin;
             DismissAllButton.IsEnabled = false;
-            DismissAllButton.ToolTip = readOnlyTip;
-            DismissSelectedButton.ToolTip = readOnlyTip;
+            DismissAllButton.ToolTip = ReadOnlyAlertWriteTip;
+            DismissSelectedButton.ToolTip = ReadOnlyAlertWriteTip;
+            if (TryFindResource("DataGridContextMenu") is ContextMenu rowMenu)
+            {
+                foreach (var item in rowMenu.Items.OfType<MenuItem>().Where(m => (m.Tag as string) == AlertWriteMenuItemTag))
+                {
+                    item.IsEnabled = false;
+                    item.ToolTip = ReadOnlyAlertWriteTip;
+                    ToolTipService.SetShowOnDisabled(item, true);
+                }
+            }
         }
 
         _staleDataTimer.Start();
@@ -406,7 +421,7 @@ public partial class AlertsHistoryTab : UserControl
 
     private async void DismissSelected_Click(object sender, RoutedEventArgs e)
     {
-        if (_dataService == null)
+        if (_dataService == null || _dataService.IsReadOnly)
         {
             return;
         }
@@ -577,7 +592,7 @@ public partial class AlertsHistoryTab : UserControl
 
     private async void MuteThisAlert_Click(object sender, RoutedEventArgs e)
     {
-        if (_dataService == null || sender is not MenuItem menuItem)
+        if (_dataService == null || _dataService.IsReadOnly || sender is not MenuItem menuItem)
         {
             return;
         }
@@ -595,7 +610,7 @@ public partial class AlertsHistoryTab : UserControl
 
     private async void MuteSimilarAlerts_Click(object sender, RoutedEventArgs e)
     {
-        if (_dataService == null || sender is not MenuItem menuItem)
+        if (_dataService == null || _dataService.IsReadOnly || sender is not MenuItem menuItem)
         {
             return;
         }
