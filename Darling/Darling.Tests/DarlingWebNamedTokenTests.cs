@@ -549,6 +549,29 @@ public sealed class DarlingWebNamedTokenTests
         Assert.Equal(canned, still);
     }
 
+    /// <summary>A registry read that fails is a fault of the store on the catalog route for a reader with no scope, as it is for a
+    /// scoped one: the fixed failure body, one service log line that names the registry, and a run recorded as an error. The store
+    /// here is a disposed data source, so the registry read is the first thing the route asks it for and it fails at once.</summary>
+    [Fact]
+    public async Task TheCatalog_AnswersARegistryFaultAsTheStoreFault_ForAnUnscopedReader()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        var log = new CapturingTestLogger();
+        var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        using var server = await BuildServer(ReaderAndOperator(), log, postgres, new ReadAdmission(TimeProvider.System, TimeSpan.Zero, null), readLatency);
+        var cookie = await SignIn(server, SharedToken);
+        await postgres.DisposeAsync();
+
+        var (answer, body) = await Send(server, HttpMethods.Get, "/api/catalog?server=finance-server", cookie);
+
+        Assert.Equal(StatusCodes.Status500InternalServerError, answer.Response.StatusCode);
+        Assert.Contains(PerformanceMonitor.Darling.Service.Hosting.DarlingWebFailureLog.GenericMessage, body, StringComparison.Ordinal);
+        Assert.Equal(1, log.Lines.Count(line => line.Contains(DarlingServerResolver.RegistryReadFaultPrefix, StringComparison.Ordinal)));
+        var recorded = readLatency.Drain().Where(sample => sample.Route == DarlingWebEndpoints.CatalogRoute)
+            .Select(sample => sample.Outcome + " x" + sample.Count).ToArray();
+        Assert.Equal([ReadOutcome.Error + " x1"], recorded);
+    }
+
     private sealed class HostLogger(CapturingTestLogger inner) : ILogger<DarlingWebHostService>
     {
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => inner.BeginScope(state);
