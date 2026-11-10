@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Models;
 
@@ -76,11 +77,14 @@ internal static class FinOpsServerInventory
     /// <param name="readLive">One server's live properties (a real network call to the monitored server).</param>
     /// <param name="readCollected">One server's newest collected <c>server_properties</c> row, or null when the store holds none.</param>
     /// <param name="readCollectedMetrics">The fleet-wide collected overlay, keyed by the storage-name hash id.</param>
+    /// <param name="readClock">One server's own clock, the one its Last Updated cell reads in Server Time. Null leaves a live row
+    /// without one (it reads the active tab's) and a last-known row with the clock its collected row recorded.</param>
     public static async Task<InventoryBuild> BuildAsync(
         IEnumerable<ServerConnection> servers,
         Func<ServerConnection, Task<ServerPropertyRow>> readLive,
         Func<ServerConnection, Task<ServerPropertiesRow?>> readCollected,
-        Func<Task<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>> readCollectedMetrics)
+        Func<Task<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>> readCollectedMetrics,
+        Func<ServerConnection, Task<ServerClock>>? readClock = null)
     {
         var fleetMetrics = await ReadCollectedMetricsAsync(readCollectedMetrics);
 
@@ -101,6 +105,9 @@ internal static class FinOpsServerInventory
 
             item.ServerName = server.DisplayName;
             item.MonthlyCost = server.MonthlyCostUsd;
+
+            /* The row's own server's clock, guarded on its own (see StampClockAsync), so a failed read costs the row nothing else. */
+            if (readClock != null) await StampClockAsync(item, server, readClock);
 
             /* Step 2: lay this server's collected metrics from the fleet-wide read on top. Guarded on its
                own (see ApplyCollectedMetrics), so it cannot cost the row above its place. */
@@ -149,8 +156,9 @@ internal static class FinOpsServerInventory
     /// replica role for the inventory, so those cells stay blank, and a 0 socket or core count is a value the store never
     /// had, so it reads as blank too. A row with no CPU count and no memory is one the collector stored when the monitoring
     /// login was denied the hardware read, so it carries the Hardware Note a live row gets for that denial
-    /// (<see cref="LocalDataService.HardwareUnavailableNote"/>). Last Updated is the row's collection time on the machine's
-    /// clock, the clock a live row's read time is shown on.
+    /// (<see cref="LocalDataService.HardwareUnavailableNote"/>). Last Updated is the row's collection time, an instant in UTC as
+    /// a live row's read time is, and the row carries the clock its collected row recorded for the server (none when that row
+    /// has no UTC offset), which the Last Updated cell reads in Server Time.
     /// </summary>
     internal static ServerPropertyRow FromCollected(ServerPropertiesRow collected)
     {
@@ -174,8 +182,25 @@ internal static class FinOpsServerInventory
             IsClustered = collected.IsClustered,
             AgReplicaRole = "",
             IsLastKnown = true,
-            LastUpdated = DateTime.SpecifyKind(collected.CollectionTime, DateTimeKind.Utc).ToLocalTime(),
+            LastUpdated = DateTime.SpecifyKind(collected.CollectionTime, DateTimeKind.Utc),
+            Clock = collected.UtcOffsetMinutes.HasValue ? ServerClock.Resolve(collected.TimeZoneId, collected.UtcOffsetMinutes) : null,
         };
+    }
+
+    /// <summary>
+    /// Gives <paramref name="item"/> its server's clock from <paramref name="readClock"/>. A read that throws is logged and never
+    /// propagates: the row keeps the clock it has, and with none its Last Updated reads the active tab's clock.
+    /// </summary>
+    internal static async Task StampClockAsync(ServerPropertyRow item, ServerConnection server, Func<ServerConnection, Task<ServerClock>> readClock)
+    {
+        try
+        {
+            item.Clock = await readClock(server);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("FinOps", $"Failed to read the clock of {server.DisplayName}, so its Last Updated is not shown on its own clock: {ex.Message}", ex);
+        }
     }
 
     /// <summary>

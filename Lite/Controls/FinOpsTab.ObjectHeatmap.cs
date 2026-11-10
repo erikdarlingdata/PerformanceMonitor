@@ -164,9 +164,11 @@ public partial class FinOpsTab : UserControl
                 ObjectGrowthHeatmapChart,
                 _objHeatmapMatrix,
                 "Reserved (MB)",
-                $"{databaseName} — Object Reserved Footprint",
+                $"{databaseName}: Object Reserved Footprint",
                 _objHeatmapHandle);
             _objHeatmapPlottable = _objHeatmapHandle.Plottable;
+            /* The hover reads the matrix the chart drew, whose columns include the days with no sample. */
+            _objHeatmapMatrix = _objHeatmapHandle.Matrix ?? _objHeatmapMatrix;
         }
         catch (Exception ex)
         {

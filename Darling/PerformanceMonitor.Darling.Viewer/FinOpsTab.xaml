@@ -374,7 +374,7 @@
                                     <Grid Margin="0,0,0,8">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="120"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
                                         <TextBlock Grid.Column="0" Text="Stolen Mem %" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"
-                                                   ToolTip="(Total Server Memory - Buffer Pool) / Total Server Memory — memory used by plan cache, locks, grants, CLR, etc."/>
+                                                   ToolTip="(Total Server Memory - Buffer Pool) / Total Server Memory: memory used by plan cache, locks, grants, CLR, etc."/>
                                         <Grid Grid.Column="1" Margin="0,0,8,0">
                                             <Border Height="16" CornerRadius="3" Background="{DynamicResource BarTrackBrush}" BorderBrush="{DynamicResource ControlBorderBrush}" BorderThickness="1"/>
                                             <Grid>
@@ -387,7 +387,7 @@
                                     <Grid Margin="0,0,0,8">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="120"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
                                         <TextBlock Grid.Column="0" Text="Buffer Pool %" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"
-                                                   ToolTip="Buffer Pool / Physical Memory — how much of physical RAM is used by the buffer pool. On an Azure SQL Database it is the share of the database's memory limit."/>
+                                                   ToolTip="Buffer Pool / Physical Memory: how much of physical RAM is used by the buffer pool. On an Azure SQL Database it is the share of the database's memory limit."/>
                                         <Grid Grid.Column="1" Margin="0,0,8,0">
                                             <Border Height="16" CornerRadius="3" Background="{DynamicResource BarTrackBrush}" BorderBrush="{DynamicResource ControlBorderBrush}" BorderThickness="1"/>
                                             <Grid>
@@ -600,10 +600,15 @@
                                 <TextBlock x:Name="FinOpsNoStorageGrowthMessage" Style="{StaticResource EmptyHint}" Text="No storage growth data available yet"/>
                             </Grid>
 
-                            <Grid x:Name="FinOpsStorageObjectView" Visibility="Collapsed">
-                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="2*"/><RowDefinition Height="3*"/></Grid.RowDefinitions>
+                            <!-- The chart is as tall as its rows need (FinOpsHeatmapRenderer sets its MinHeight from the object count), so the
+                                 view scrolls as one page when the chart and the grid cannot both fit. The grid lists every object and
+                                 takes the room that is left, and the wheel over either moves the page. -->
+                            <ScrollViewer x:Name="FinOpsStorageObjectView" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                          PreviewMouseWheel="FinOpsPageScroll_PreviewMouseWheel">
+                            <Grid MinHeight="{Binding ViewportHeight, ElementName=FinOpsStorageObjectView}">
+                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                                 <TextBlock Grid.Row="0" TextWrapping="Wrap" Margin="0,0,0,4" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                           Text="Object / reserved footprint (daily). This is per-object reservation, not file allocation — it may not fully explain a database's file-level growth (log / free space)."/>
+                                           Text="Object / reserved footprint (daily). This is per-object reservation, not file allocation, so it may not fully explain a database's file-level growth (log / free space)."/>
                                 <ui:ChartPanel Title="Object Growth Heatmap" Grid.Row="1">
                                     <scottplot:WpfPlot x:Name="FinOpsObjectGrowthHeatmapChart" MouseMove="FinOpsObjectHeatmapChart_MouseMove" MouseLeave="FinOpsObjectHeatmapChart_MouseLeave"/>
                                 </ui:ChartPanel>
@@ -624,6 +629,7 @@
                                 <TextBlock Grid.Row="1" Grid.RowSpan="2" x:Name="FinOpsObjectGrowthNoDataMessage" Style="{StaticResource EmptyHint}"
                                            Text="No object size data for this database yet. Index/object stats are collected daily."/>
                             </Grid>
+                            </ScrollViewer>
 
                             <Grid x:Name="FinOpsStorageIndexView" Visibility="Collapsed">
                                 <DataGrid x:Name="FinOpsObjectIndexDetailGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" HorizontalScrollBarVisibility="Auto">
@@ -779,7 +785,7 @@
                         <Grid Height="{Binding ViewportHeight, ElementName=PvsScroll}" MinHeight="600">
                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
-                            <TextBlock Text="Accelerated Database Recovery — Persistent Version Store" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
+                            <TextBlock Text="Accelerated Database Recovery: Persistent Version Store" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="FinOpsRefreshPvsStats_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                             <TextBlock x:Name="FinOpsPvsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                         </StackPanel>
@@ -1105,7 +1111,7 @@
                                     <DataGridTextColumn Header="Monitoring" Binding="{Binding MonitoringStatus}" Width="120"/>
                                     <DataGridTextColumn Header="Monthly ($)" Binding="{Binding MonthlyCost, StringFormat=N0}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Annual ($)" Binding="{Binding AnnualCost, StringFormat=N0}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Health" Binding="{Binding HealthScore, TargetNullValue='-'}" Width="60">
+                                    <DataGridTextColumn Header="Health" Binding="{Binding HealthScore, TargetNullValue='Not collected'}" Width="Auto" MinWidth="60">
                                         <DataGridTextColumn.ElementStyle>
                                             <Style TargetType="TextBlock">
                                                 <Setter Property="HorizontalAlignment" Value="Center"/><Setter Property="FontWeight" Value="Bold"/>
@@ -1329,7 +1335,7 @@
                                 </DataGrid.Columns>
                             </DataGrid>
 
-                            <TextBlock x:Name="FinOpsRecommendationsNoDataMessage" Style="{StaticResource EmptyHint}" Text="No recommendations — nothing needs attention, or not enough has been collected yet."/>
+                            <TextBlock x:Name="FinOpsRecommendationsNoDataMessage" Style="{StaticResource EmptyHint}" Text="No recommendations: nothing needs attention, or not enough has been collected yet."/>
                         </Grid>
                     </Grid>
                 </TabItem>

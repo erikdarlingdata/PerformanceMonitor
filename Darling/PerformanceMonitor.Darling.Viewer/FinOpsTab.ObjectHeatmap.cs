@@ -188,9 +188,11 @@ public partial class FinOpsTab
             FinOpsObjectGrowthHeatmapChart,
             _finopsObjHeatmapMatrix,
             "Reserved (MB)",
-            $"{databaseName} — Object Reserved Footprint",
+            $"{databaseName}: Object Reserved Footprint",
             _finopsObjHeatmapHandle);
         _finopsObjHeatmapPlottable = _finopsObjHeatmapHandle.Plottable;
+        /* The hover reads the matrix the chart drew, whose columns include the days with no sample. */
+        _finopsObjHeatmapMatrix = _finopsObjHeatmapHandle.Matrix ?? _finopsObjHeatmapMatrix;
     }
 
     private async Task LoadFinOpsObjectIndexDetailAsync(string databaseName, string schemaName, string tableName)

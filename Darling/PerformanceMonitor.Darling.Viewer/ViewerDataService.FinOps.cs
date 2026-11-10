@@ -661,18 +661,18 @@ public sealed class ServerPropertyRow
     }
     public string HadrDisplay => IsHadrEnabled.HasValue ? (IsHadrEnabled.Value ? "Yes" : "No") : "";
     public string ClusteredDisplay => IsClustered.HasValue ? (IsClustered.Value ? "Yes" : "No") : "";
-    public string AgReplicaRoleDisplay => string.Equals(AgReplicaRole, "Standalone", StringComparison.OrdinalIgnoreCase) ? "—" : AgReplicaRole;
-    public string ProvisioningDisplay => string.IsNullOrEmpty(ProvisioningStatus) ? "" : ProvisioningVerdict.StatusLabel(ProvisioningStatus);
+    public string AgReplicaRoleDisplay => string.Equals(AgReplicaRole, "Standalone", StringComparison.OrdinalIgnoreCase) ? "-" : AgReplicaRole;
+    public string ProvisioningDisplay => string.IsNullOrEmpty(ProvisioningStatus) ? ProvisioningVerdict.NotCollectedLabel : ProvisioningVerdict.StatusLabel(ProvisioningStatus);
 
     /// <summary>License-limit warning for Standard edition (CPU/RAM caps). Same math as Lite.</summary>
     public string? LicenseWarning => FinOpsInventoryFigures.LicenseWarning(Edition, EngineEdition, _cpuCount, _physicalMemoryMb);
 
-    /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server: the grid shows a dash,
+    /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server: the grid says Not collected,
     /// not a score built from the memory and storage defaults (<see cref="FinOpsUtilizationFigures.HealthScore(bool, decimal, int, int, decimal)"/>).</summary>
     public int? HealthScore { get; set; }
     public string HealthScoreColor => HealthScore is int score ? FinOpsHealthCalculator.ScoreColor(score) : FinOpsHealthCalculator.NoScoreColor;
 
-    /// <summary>The tooltip on the dash shown in place of a score; null when there is a score.</summary>
+    /// <summary>The tooltip on the words shown in place of a score; null when there is a score.</summary>
     public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoInventoryScoreNote;
 }
 

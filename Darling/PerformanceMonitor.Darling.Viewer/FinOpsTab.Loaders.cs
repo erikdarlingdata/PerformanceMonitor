@@ -601,12 +601,12 @@ public partial class FinOpsTab
         var now = DateTime.UtcNow;
         var (_, clamped) = RetentionTierRouter.ClampToTextHorizon(now, now.AddHours(-hoursBack));
         var coverageNote = clamped
-            ? $" — showing the last {RetentionTierRouter.RawTextHorizon.TotalDays:N0} days; query text and plans are not retained beyond that"
+            ? $", showing the last {RetentionTierRouter.RawTextHorizon.TotalDays:N0} days; query text and plans are not retained beyond that"
             : "";
 
         FinOpsExpensiveQueriesCountIndicator.Text = data.Count > 0
             ? $"{PerformanceMonitor.Common.CountText.Plural(data.Count, "query", "queries")}{coverageNote}"
-            : clamped ? coverageNote.TrimStart(' ', '—', ' ') : "";
+            : clamped ? coverageNote.TrimStart(',', ' ') : "";
     }
 
     private async Task LoadFinOpsMemoryGrantEfficiencyAsync()
@@ -644,7 +644,7 @@ public partial class FinOpsTab
                 if (row.IdleDbCount.HasValue) item.IdleDbCount = row.IdleDbCount;
                 if (row.ProvisioningStatus != null) item.ProvisioningStatus = row.ProvisioningStatus;
 
-                /* The Utilization view's own score for this server (same p95 CPU, buffer pool and free space); null (a dash) with no CPU sample. */
+                /* The Utilization view's own score for this server (same p95 CPU, buffer pool and free space); null (the cell says Not collected) with no CPU sample. */
                 item.HealthScore = row.HealthScore;
             }
         }

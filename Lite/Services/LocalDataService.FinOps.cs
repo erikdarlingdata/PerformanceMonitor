@@ -396,17 +396,43 @@ public class ServerPropertyRow
     /// <summary>The start instant in UTC, worked out at read time from the uptime the server itself measured as two tick counts
     /// (<c>(ms_ticks - sqlserver_start_time_ms_ticks) / 1000</c>), so neither the client's zone nor a daylight saving change enters it (#7176). Null when unknown.</summary>
     public DateTime? SqlServerStartUtc { get; set; }
+
+    /// <summary>The instant the row's figures are from, in UTC: when a live row was read, or the collection time of a row built
+    /// from the store. Null on a row nothing stamped. The Last Updated column sorts on it.</summary>
     public DateTime? LastUpdated { get; set; }
+
+    /// <summary>
+    /// The row's own server's clock (#4766): the one the store collected for it, else its open tab's, else the machine's, set by
+    /// the loader. The inventory lists every server, so each row reads its own server's wall time in Server mode. Null (a row
+    /// built without one) falls back to the active tab's clock.
+    /// </summary>
+    public ServerClock? Clock { get; set; }
+
+    /// <summary><see cref="LastUpdated"/> on the clock of the selected display mode: UTC as stored, this machine's zone, or the
+    /// row's server's own clock (<see cref="Clock"/>). The Last Updated column filters on it, so a filter reads the times the
+    /// cells show.</summary>
+    public DateTime? LastUpdatedLocal => LastUpdated is { } utc ? DisplayZone.ToDisplay(utc, DisplayZoneNow) : null;
 
     /// <summary>True when the row was built from the newest collected <c>server_properties</c> row because the server could not be
     /// reached (<see cref="FinOpsServerInventory.FromCollected"/>); <see cref="LastUpdated"/> is then that row's collection time.</summary>
     public bool IsLastKnown { get; set; }
 
     /// <summary>The Last Updated cell: the time a live row was read, or "last known, " and the collection time of a row built from the
-    /// store. The column sorts on <see cref="LastUpdated"/>.</summary>
-    public string LastUpdatedDisplay => LastUpdated is { } at
-        ? (IsLastKnown ? $"last known, {at:yyyy-MM-dd HH:mm}" : at.ToString("yyyy-MM-dd HH:mm"))
-        : "";
+    /// store, as <see cref="ServerTimeHelper.FormatInstant"/> words <see cref="LastUpdated"/> on the selected display mode's clock, so
+    /// in the repeated autumn hour it carries its UTC offset. The column sorts on <see cref="LastUpdated"/>.</summary>
+    public string LastUpdatedDisplay
+    {
+        get
+        {
+            if (LastUpdated is not { } utc) return "";
+            var text = ServerTimeHelper.FormatInstant(utc, DisplayZoneNow, "yyyy-MM-dd HH:mm");
+            return IsLastKnown ? "last known, " + text : text;
+        }
+    }
+
+    private TimeZoneInfo DisplayZoneNow =>
+        ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, Clock ?? ServerTimeHelper.ActiveServerClock);
+
     public bool? IsHadrEnabled { get; set; }
     public bool? IsClustered { get; set; }
     public string AgReplicaRole { get; set; } = "Standalone";
@@ -443,8 +469,11 @@ public class ServerPropertyRow
     }
     public string HadrDisplay => IsHadrEnabled.HasValue ? (IsHadrEnabled.Value ? "Yes" : "No") : "";
     public string ClusteredDisplay => IsClustered.HasValue ? (IsClustered.Value ? "Yes" : "No") : "";
-    public string AgReplicaRoleDisplay => string.Equals(AgReplicaRole, "Standalone", StringComparison.OrdinalIgnoreCase) ? "—" : AgReplicaRole;
-    public string ProvisioningDisplay => string.IsNullOrEmpty(ProvisioningStatus) ? "" : ProvisioningVerdict.StatusLabel(ProvisioningStatus);
+    public string AgReplicaRoleDisplay => string.Equals(AgReplicaRole, "Standalone", StringComparison.OrdinalIgnoreCase) ? "-" : AgReplicaRole;
+
+    /// <summary>The Status cell: the verdict's words, or <see cref="ProvisioningVerdict.NotCollectedLabel"/> for a server with no
+    /// verdict (the last 24 hours hold no CPU sample to judge it by), never an empty cell.</summary>
+    public string ProvisioningDisplay => string.IsNullOrEmpty(ProvisioningStatus) ? ProvisioningVerdict.NotCollectedLabel : ProvisioningVerdict.StatusLabel(ProvisioningStatus);
 
     // FinOps cost — from server config
     public decimal MonthlyCost { get; set; }
@@ -464,13 +493,13 @@ public class ServerPropertyRow
     }
 
     // Health score (Increment 6)
-    /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server: the grid shows a dash,
+    /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server: the grid says Not collected,
     /// not a score built from memory and storage alone. It is the Utilization tab's score for the same server
     /// (<see cref="FinOpsHealthCalculator.Score"/>), read by <see cref="LocalDataService.GetServerMetricsAsync"/>.</summary>
     public int? HealthScore { get; set; }
     public string HealthScoreColor => HealthScore is int score ? FinOpsHealthCalculator.ScoreColor(score) : FinOpsHealthCalculator.NoScoreColor;
 
-    /// <summary>The tooltip on the dash shown in place of a score; null when there is a score.</summary>
+    /// <summary>The tooltip on the words shown in place of a score; null when there is a score.</summary>
     public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoInventoryScoreNote;
 }
 
@@ -555,7 +584,7 @@ public static class FinOpsHealthCalculator
 
     /// <summary>The tooltip on the dash shown in place of a health score when the last 24 hours hold no CPU sample.</summary>
     public const string NoScoreNote = "No health score: the last 24 hours hold no CPU sample.";
-    /// <summary>The tooltip on the dash shown in place of a health score on the Server Inventory. That score is null for two reasons: the last 24 hours hold no
+    /// <summary>The tooltip on the words shown in place of a health score on the Server Inventory. That score is null for two reasons: the last 24 hours hold no
     /// CPU sample, or no memory sample has been collected (memory_stats off in the schedule, or not yet run on a new server). The row does not say which,
     /// so the note names both. The Utilization view keeps <see cref="NoScoreNote"/>: it has no row at all without a memory sample.</summary>
     public const string NoInventoryScoreNote = "No health score: the last 24 hours hold no CPU sample, or no memory sample has been collected.";

@@ -109,6 +109,38 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
+        /// <paramref name="matrix"/> with a column for every calendar day from its first day to its last. A day the matrix has no
+        /// column for (no object had a sample that day: a collection gap) gets a blank one, so a day axis drawn from the result
+        /// reads as a calendar and the gap shows as empty columns. A matrix with no missing day is returned as it is.
+        /// </summary>
+        public static FinOpsHeatmapMatrix WithEveryCalendarDay(FinOpsHeatmapMatrix matrix)
+        {
+            if (matrix == null) throw new ArgumentNullException(nameof(matrix));
+            if (matrix.IsEmpty) return matrix;
+
+            var first = matrix.Days[0].Date;
+            int span = (matrix.Days[^1].Date - first).Days + 1;
+            if (span <= matrix.Days.Length) return matrix;
+
+            int rows = matrix.Intensities.GetLength(0);
+            var cells = new double[rows, span];
+            for (int c = 0; c < matrix.Days.Length; c++)
+            {
+                int at = (matrix.Days[c].Date - first).Days;
+                if (at < 0 || at >= span) continue;
+                for (int r = 0; r < rows; r++)
+                    cells[r, at] += matrix.Intensities[r, c];
+            }
+
+            return new FinOpsHeatmapMatrix
+            {
+                Intensities = cells,
+                RowLabels = matrix.RowLabels,
+                Days = Enumerable.Range(0, span).Select(i => first.AddDays(i)).ToArray()
+            };
+        }
+
+        /// <summary>
         /// Puts every cell of a heatmap matrix into one of <paramref name="bandCount"/> discrete bands, the discrete form of
         /// the desktop's single colour scale. Each cell above 0 is placed by <c>log1p(value)</c>, normalised across the
         /// WHOLE matrix from <c>log1p</c> of the smallest positive cell to <c>log1p</c> of the largest:

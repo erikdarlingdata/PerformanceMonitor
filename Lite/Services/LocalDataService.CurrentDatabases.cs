@@ -82,6 +82,28 @@ public partial class LocalDataService
     /// read as asked), when nothing was dropped, or when the set is unknown (no recent snapshot). A window that ended in the past is
     /// anchored at its end, as the MCP tool's as_of read is, so a database dropped since still ranks for a window it existed in.
     /// </summary>
+    /// <summary>
+    /// The databases the Index Analysis picker offers for a server: its current ones (<see cref="GetCurrentDatabasesAsync"/>) when the
+    /// store holds a recent <c>database_states</c> snapshot, else the databases of its newest <c>database_size_stats</c> snapshot,
+    /// however old, so a store with no recent state snapshot (collection paused, or that collector off) still lists the databases
+    /// it last knew. Empty when the store knows none; the picker is then a free text box.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> GetIndexAnalysisDatabasesAsync(int serverId)
+    {
+        if (await GetCurrentDatabasesAsync(serverId) is { Count: > 0 } current)
+        {
+            return current;
+        }
+
+        return (await GetDatabaseSizeLatestAsync(serverId))
+            .Select(row => row.DatabaseName)
+            .Where(name => name.Length > 0)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(name => name, StringComparer.Ordinal)
+            .ToList();
+    }
+
     public async Task<IReadOnlyList<string>?> GetDatabasesLeftOutOfRankingAsync(
         int serverId, IReadOnlyList<string>? chosenDatabases, DateTime startUtc, DateTime endUtc, DateTime? nowUtc = null)
     {

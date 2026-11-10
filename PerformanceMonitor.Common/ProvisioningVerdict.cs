@@ -88,6 +88,10 @@ public static class ProvisioningVerdict
     /// <summary>What a grid cell shows for <see cref="NotEnoughData"/>, where the row carries no sample count.</summary>
     public const string NotEnoughDataShortLabel = "not enough data yet";
 
+    /// <summary>What a Server Inventory Status cell shows for a server with no verdict at all: the last 24 hours hold no CPU sample
+    /// to judge it by. The Viewer and Lite both show it, so the cell is never empty.</summary>
+    public const string NotCollectedLabel = "Not collected";
+
     /// <summary>What the verdict badge shows for <see cref="NotEnoughData"/>: "not enough data yet (6 samples)".</summary>
     public static string NotEnoughDataLabel(long samples) =>
         string.Create(System.Globalization.CultureInfo.CurrentCulture, $"{NotEnoughDataShortLabel} ({samples:N0} {(samples == 1 ? "sample" : "samples")})");
