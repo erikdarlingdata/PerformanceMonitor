@@ -45,12 +45,16 @@ public sealed class RecoveryRouteSeverityTests
     /// <summary>Where the send lands <paramref name="metric"/> with the tier the send path computes for it: the fire site's tier when it
     /// carries one, else what the tier rule says for the name.</summary>
     private static string? SlackFor(string metric, AlertSeverityLevel? fireSite, IReadOnlyList<NotificationRoute> routes) =>
-        NotificationRouter.Resolve(metric, routes, Defaults(), severity: AlertSeverity.RouteLevelOf(metric, fireSite)).Slack.Destination;
+        NotificationRouter.Resolve(metric, routes, Defaults(),
+            severity: AlertSeverity.RouteTierOf(metric, new AlertContext { SeverityOverride = fireSite })).Slack.Destination;
 
-    /// <summary>An alert as a fire site hands it to the deliverer: the tier is the site's, or null for a site that grades nothing.</summary>
-    private static AlertOutcome Outcome(string metric, string value, string threshold, AlertSeverityLevel? severity) =>
-        new("7", "SQL01", metric, value, threshold, Context: null, DetailText: null,
+    /// <summary>An alert as a fire site hands it to the deliverer: the tier is the site's, or null for a site that grades nothing, and the
+    /// context is the site's (an AG edge carries its replica identity).</summary>
+    private static AlertOutcome Outcome(string metric, string value, string threshold, AlertSeverityLevel? severity, AlertContext? context = null) =>
+        new("7", "SQL01", metric, value, threshold, Context: context, DetailText: null,
             NumericCurrentValue: null, NumericThresholdValue: null, Muted: false, Severity: severity);
+
+    private static AlertContext Replica(string name) => new() { AgReplicaIdentity = "AG1:" + name };
 
     /// <summary>A deliverer over the issue's two PagerDuty routes with auto-resolve on, capturing every PagerDuty post. The history
     /// store is <paramref name="history"/>, so a second deliverer over the same store stands for the service after a restart.</summary>
@@ -262,5 +266,58 @@ public sealed class RecoveryRouteSeverityTests
         await after.DeliverAsync(Outcome(recovery, recoveryValue, "CONNECTED", null), TestContext.Current.CancellationToken);
 
         Assert.Equal(new[] { ("resolve", "rk-critical") }, postedAfter.Select(Posted).ToArray());
+    }
+
+    /// <summary>The tier the senders hand a route filter: the route-only tier on the context wins over the fire site's tier and over the
+    /// badge, a context with neither falls through to the fire site's tier, and no context falls through to the badge rule.</summary>
+    [Fact]
+    public void RouteTierOf_ReadsTheRouteOnlyTier_ElseTheFireSitesTier_ElseTheBadge()
+    {
+        Assert.Equal(AlertSeverityLevel.Warning, AlertSeverity.RouteTierOf("Server Unreachable",
+            new AlertContext { RouteSeverity = AlertSeverityLevel.Warning, SeverityOverride = AlertSeverityLevel.Critical }));
+        Assert.Equal(AlertSeverityLevel.Warning, AlertSeverity.RouteTierOf("Server Restored", new AlertContext { RouteSeverity = AlertSeverityLevel.Warning }));
+        Assert.Equal(AlertSeverityLevel.Warning, AlertSeverity.RouteTierOf("Server Unreachable", new AlertContext { SeverityOverride = AlertSeverityLevel.Warning }));
+        Assert.Equal(AlertSeverity.RouteLevelOf("Server Restored", null), AlertSeverity.RouteTierOf("Server Restored", new AlertContext()));
+        Assert.Equal(AlertSeverity.RouteLevelOf("High CPU", null), AlertSeverity.RouteTierOf("High CPU", null));
+    }
+
+    /// <summary>Two replicas of one server, graded differently: each reconnect routes at its own replica's fired tier, in either order,
+    /// because the AG pair is one incident per replica and the record is read by replica identity.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TwoReplicasGradedDifferently_EachReconnectResolvesOnItsOwnReplicasKey(bool criticalReplicaReconnectsFirst)
+    {
+        var (deliverer, posted) = PagerDutyDeliverer();
+        await deliverer.DeliverAsync(Outcome("AG Replica Disconnected", "DISCONNECTED", "CONNECTED", AlertSeverityLevel.Warning, Replica("A")), TestContext.Current.CancellationToken);
+        await deliverer.DeliverAsync(Outcome("AG Replica Disconnected", "DISCONNECTED", "CONNECTED", AlertSeverityLevel.Critical, Replica("B")), TestContext.Current.CancellationToken);
+        Assert.Equal(new[] { ("trigger", "rk-warning"), ("trigger", "rk-critical") }, posted.Select(Posted).ToArray());
+        posted.Clear();
+
+        var first = criticalReplicaReconnectsFirst ? "B" : "A";
+        var second = criticalReplicaReconnectsFirst ? "A" : "B";
+        await deliverer.DeliverAsync(Outcome("AG Replica Reconnected", "CONNECTED", "CONNECTED", null, Replica(first)), TestContext.Current.CancellationToken);
+        await deliverer.DeliverAsync(Outcome("AG Replica Reconnected", "CONNECTED", "CONNECTED", null, Replica(second)), TestContext.Current.CancellationToken);
+
+        var expected = criticalReplicaReconnectsFirst
+            ? new[] { ("resolve", "rk-critical"), ("resolve", "rk-warning") }
+            : new[] { ("resolve", "rk-warning"), ("resolve", "rk-critical") };
+        Assert.Equal(expected, posted.Select(Posted).ToArray());
+    }
+
+    /// <summary>After a restart, two replicas of one server graded alike: history cannot tell the replicas apart, but every open row
+    /// carries the one tier, so each reconnect routes at it.</summary>
+    [Fact]
+    public async Task ARestartedDeliverer_RoutesEachReplicasReconnectAtTheTierEveryOpenRowAgreesOn()
+    {
+        var history = new GenericWebhookStatusDedupTests.HistoryBackedStore();
+        var (before, _) = PagerDutyDeliverer(history);
+        await before.DeliverAsync(Outcome("AG Replica Disconnected", "DISCONNECTED", "CONNECTED", AlertSeverityLevel.Warning, Replica("A")), TestContext.Current.CancellationToken);
+        await before.DeliverAsync(Outcome("AG Replica Disconnected", "DISCONNECTED", "CONNECTED", AlertSeverityLevel.Warning, Replica("B")), TestContext.Current.CancellationToken);
+
+        var (after, posted) = PagerDutyDeliverer(history);
+        await after.DeliverAsync(Outcome("AG Replica Reconnected", "CONNECTED", "CONNECTED", null, Replica("B")), TestContext.Current.CancellationToken);
+
+        Assert.Equal(new[] { ("resolve", "rk-warning") }, posted.Select(Posted).ToArray());
     }
 }
