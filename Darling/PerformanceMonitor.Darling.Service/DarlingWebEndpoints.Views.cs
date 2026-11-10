@@ -201,7 +201,7 @@ public static partial class DarlingWebEndpoints
         }
 
         stopwatch.Restart();
-        var outcome = await ComposePanelRunner.RunComposedPanelCoreAsync(ComposeHost, postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, nowUtc, authorizedServerIds);
+        var outcome = await ComposePanelRunner.RunComposedPanelCoreAsync(ComposeHost, postgres, body, clientDeadlineHeadroomSeconds, remapClientTimeout, includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, authorizedServerIds, nowUtc);
         /* Round 1, C1: the text the host answers, taken once here so a cached copy of it is the same bytes. */
         if (cacheHost is { } host && outcome.Payload is { } payload)
         {

@@ -141,7 +141,9 @@ public sealed class McpToolLatencyFilter
                or runs once and is stored. A hit skips admission. */
             /* #6800: a whole-fleet read of get_resource_use_by_tag (no server_name) over a window of 24 hours or more is cached for its own TTL. */
             var fleetRead = IsFleetRead(request);
-            /* The one-server form of a held view (get_finops view=optimization) is kept for the view's own TTL from the moment it is stored. */
+            /* The one-server form of a held view (get_finops view=optimization) is kept for the view's own TTL from the moment it is stored.
+               No scoped caller reaches this hold: a scoped web token exists only on the web surface, whose /api/read handler calls the
+               tool methods directly and skips its own cache for that seat; an MCP token carries no tag grant. */
             var (serverHeld, view) = ServerHeldReadOf(request);
             if (_admission is { } admission && admission.IsCached(ReadSurface.Mcp, toolName, windowBand, fleetRead, serverHeld))
             {

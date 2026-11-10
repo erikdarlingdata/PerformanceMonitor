@@ -515,7 +515,7 @@ const ACCESS_HOVER = {
 function seatLabel(session) {
   if (!session) return null;
   if (session.probe_failed) return { text: "Access: not connected", title: ACCESS_HOVER.none };
-  if (session.scoped) return { text: "Access: scoped read-only", title: "Monitoring data is limited to this token’s permitted server tags." };
+  if (session.scoped) return { text: "Access: scoped read-only", title: "Monitoring data is limited to this token's permitted server tags." };
   return session.can_edit ? { text: "Access: read-write", title: ACCESS_HOVER.write } : { text: "Access: read-only", title: ACCESS_HOVER.read };
 }
 

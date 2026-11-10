@@ -158,7 +158,7 @@ public class ComposeHourlyEdgesRunnerTests
         var code = Web();
         Assert.Contains("DateTime? nowUtc = null)", code, StringComparison.Ordinal);
         Assert.Contains("var now = nowUtc ?? DateTime.UtcNow;", code, StringComparison.Ordinal);
-        Assert.Contains("includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, nowUtc);", code, StringComparison.Ordinal);
+        Assert.Contains("includeDataStartFields, cancellationToken, readLatency?.Logger, onRunException, authorizedServerIds, nowUtc);", code, StringComparison.Ordinal);
         Assert.DoesNotContain("nowUtc:", Source("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpCustomViewTools.cs"), StringComparison.Ordinal);
         Assert.Contains("internal static JsonValue? DbValueToJson(object value)", code, StringComparison.Ordinal);
     }

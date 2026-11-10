@@ -152,7 +152,8 @@ public sealed class ComposeParameterCoverageTests
     internal static int PredictedParameterCount(PanelPlan plan, bool serverScoped, ComposeRunContext context) =>
         2
         + (serverScoped ? 1 : 0)
-        + (serverScoped && context.UnregisteredServers is { Count: > 0 } ? 1 : 0)
+        + ((serverScoped || context.AuthorizedServerIds is not null) && context.UnregisteredServers is { Count: > 0 } ? 1 : 0)
+        + (context.AuthorizedServerIds is not null ? 1 : 0)
         + (PredictsWideStartBind(plan, context) ? 1 : 0)
         + (PredictsStampThroughBind(plan, context) ? 1 : 0)
         + (PredictsSplitRawServersBind(plan, context) ? 1 : 0)
@@ -402,9 +403,11 @@ public sealed class ComposeParameterCoverageTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
         var sites = Regex.Matches(code, @"\bp\.Add[A-Za-z]+\s*\(").Count;
 
-        /* 29: the 27 before #5582 part 3, plus the one $stampThrough bind (PredictsStampThroughBind), plus the one split bind of the servers
-           read raw (#6115, PredictsSplitRawServersBind). A spelling failure: this pin counts call sites, and the new site is predicted. */
-        Assert.Equal(29, sites);
+        /* 32: the 27 before #5582 part 3, plus the one $stampThrough bind (PredictsStampThroughBind), plus the one split bind of the servers
+           read raw (#6115, PredictsSplitRawServersBind), plus the three binds of a scoped web token's permitted server ids (the fact
+           relation, the server-local clock read and the annotation read; one int[] per statement, predicted by AuthorizedServerIds).
+           A spelling failure: this pin counts call sites, and each new site is predicted. */
+        Assert.Equal(32, sites);
     }
 
     /// <summary>
@@ -684,6 +687,23 @@ public sealed class ComposeParameterCoverageTests
             }
         }
 
+        /* A scoped web token's grant: the permitted server ids ride as one int[] bind beside the window, with and without a
+           requested server list, so the grant's predicate is in the population in both of its shapes. */
+        Add(
+            corpus,
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}",
+            null,
+            "wait_time_ms",
+            authorizedServerIds: [41, 42]);
+        Add(
+            corpus,
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\","
+            + "\"filters\":[{\"dimension\":\"wait_type\",\"op\":\"eq\",\"value\":\"PAGEIOLATCH_SH\"}]}",
+            TwoServers,
+            "wait_time_ms",
+            filterOp: "eq",
+            authorizedServerIds: [41]);
+
         /* A variable-resolved filter value: the same bind, reached through the $var path rather than a
            literal, so a future divergence between the two resolutions is in the population. */
         Add(
@@ -749,7 +769,8 @@ public sealed class ComposeParameterCoverageTests
         IReadOnlyDictionary<string, string?>? variables = null,
         string[]? declaredVariables = null,
         (bool Eligible, DateTime? Start)? wide = null,
-        DateTime? stampThrough = null)
+        DateTime? stampThrough = null,
+        IReadOnlyList<int>? authorizedServerIds = null)
     {
         var (plan, parseError) = ComposeSpec.TryParsePanel(
             (JsonObject)JsonNode.Parse(json)!,
@@ -762,7 +783,7 @@ public sealed class ComposeParameterCoverageTests
             return;
         }
 
-        var context = Context(servers, variables, wide, stampThrough);
+        var context = Context(servers, variables, wide, stampThrough) with { AuthorizedServerIds = authorizedServerIds };
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, context);
         if (compileError is not null)
         {
@@ -771,6 +792,7 @@ public sealed class ComposeParameterCoverageTests
 
         corpus.Add(new Statement(
             $"{measureKey} {plan!.Mode} ({(servers is null ? "fleet" : "scoped")})"
+            + (authorizedServerIds is null ? "" : " grant")
             + (wide is null ? "" : $" wide:{wide.Value.Start:HH:mm}")
             + (stampThrough is null ? "" : $" stamp:{stampThrough.Value:HH:mm}")
             + (filterOp is null ? "" : $" filter:{filterOp}"),

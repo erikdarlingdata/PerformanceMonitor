@@ -2404,7 +2404,8 @@ public sealed class WebNetworkConfig
 /// </summary>
 public sealed class WebTokenEntry
 {
-    /// <summary>Optional fleet tag IDs for a scoped reader, including each tag’s descendants.</summary>
+    /// <summary>Optional server tag ids for a scoped reader: the reader sees the servers under these tags and their descendants, and
+    /// nothing else. Null is an unscoped reader. Only a <c>web.network.tokens</c> entry with the reader role carries one.</summary>
     [JsonPropertyName("allowedTagIds")]
     public List<int>? AllowedTagIds { get; set; }
 

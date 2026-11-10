@@ -135,6 +135,8 @@ public static partial class DarlingWebEndpoints
         app.MapGet("/api/views/{id:long}", async (HttpContext context, long id) =>
         {
             var result = await store.GetAsync(id, DarlingWebSeat.FromContext(context).OwnerKey, context.RequestAborted);
+            /* A scoped seat never reaches this route: the host's gate answers 403 to every path outside SupportsScopedRead. The
+               personal-view check below is defence in depth for that seat. */
             return result is CustomViewResult.Ok ok &&
                 !(DarlingWebSeat.FromContext(context).AllowedTagIds is not null && ok.View!.Personal)
                 ? JsonNodeResult(BuildFullViewNode(ok.View!))

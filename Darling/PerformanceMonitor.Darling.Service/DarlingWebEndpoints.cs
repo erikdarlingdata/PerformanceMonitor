@@ -713,9 +713,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                                 scopedServerId = await AuthorizedWebServerAsync(postgres, context, allowedTagIds, allowedServerIds);
                                 if (scopedServerId is null)
                                 {
-                                    return new WebReadAnswer(DarlingWebStatementSweep.JsonText("""{"error":"Server data is unavailable to this token."}""",
+                                    /* The fixed sentence, swept like every other answer, with the seat's 403; never the registry's names. */
+                                    return new WebReadAnswer(ToHttpResult("""{"error":"Server data is unavailable to this token."}""",
                                         DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds,
-                                        context.RequestAborted, StatusCodes.Status403Forbidden), null, ReadOutcome.Ok);
+                                        context.RequestAborted, statusCode: StatusCodes.Status403Forbidden), null, ReadOutcome.Ok);
                                 }
                             }
                         }

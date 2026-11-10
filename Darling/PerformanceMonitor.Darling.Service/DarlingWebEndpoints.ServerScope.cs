@@ -141,7 +141,6 @@ public static partial class DarlingWebEndpoints
         "/api/read/get_plan_cache_bloat",
         "/api/read/get_running_jobs",
         "/api/read/get_agent_alerts",
-        "/api/read/get_job_history",
         "/api/read/get_plan_xml",
         "/api/read/get_query_store_plan_xml",
         "/api/read/get_procedure_plan_xml",
