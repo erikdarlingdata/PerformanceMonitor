@@ -61,7 +61,7 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Scope the route to this server tag id and every tag under it. Omit for fleet-wide. Not with scope_server_id.")] int? scope_tag_id = null,
         [Description("inherit (default: each channel's own setting), always (send the clear message to the channels this route resolves to) or never.")] string? send_resolutions = null,
         [Description("The route_id of an existing route an expired investigation request goes to first. Omit for none.")] int? fallback_route_id = null,
-        [Description("Which alerts the route takes by severity: critical, warning or both (default, case-insensitive). An alert that is not Critical counts as Warning.")] string? severities = null,
+        [Description("Which alerts the route takes by severity: critical, warning or both (default, case-insensitive). An alert that is not Critical counts as Warning. A recovery (Server Restored, AG Replica Reconnected) routes at its firing's tier.")] string? severities = null,
         [Description("The route's own Teams webhook URL (absolute http or https). Sealed for this route; never shown back. Omit for none.")] string? teams_webhook_url = null,
         [Description("The route's own Slack webhook URL (absolute http or https). Sealed for this route; never shown back. Omit for none.")] string? slack_webhook_url = null,
         [Description("The route's own generic webhook URL (absolute http or https). Sealed for this route; never shown back. Omit for none.")] string? generic_webhook_url = null,
@@ -790,7 +790,7 @@ public sealed partial class DarlingMcpAlertTools
     /// any spelling of the every-analysis-finding match is <c>Analysis: *</c> (#7999).</summary>
     internal static string NormalizeRouteMatch(string? match) => NotificationRouteKinds.MatchToSave(null, match);
 
-    private const string SeveritiesHelp = "critical, warning or both; both is the default and takes every alert. An alert that is not Critical counts as Warning. A route whose filter excludes an alert does not match it, and matching goes on to the next route and ends at the default channels";
+    private const string SeveritiesHelp = "critical, warning or both; both is the default and takes every alert. An alert that is not Critical counts as Warning, except a recovery delivered as an alert of its own (Server Restored, AG Replica Reconnected), which is routed at the tier of the firing it closes. A route whose filter excludes an alert does not match it, and matching goes on to the next route and ends at the default channels";
 
     /// <summary>The severity filter word (#6928): critical, warning or both, any case. Blank is both. Anything else is refused with the sentence returned.</summary>
     private static string? ParseSeverities(string? text, out string word)

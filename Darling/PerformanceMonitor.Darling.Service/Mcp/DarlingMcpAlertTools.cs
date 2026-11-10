@@ -789,7 +789,7 @@ public sealed partial class DarlingMcpAlertTools
                         .Where(p => p.Family == family)
                         .Select(p => p.Prefix + "*"),
                 }),
-                recoveries_route_as_their_firing = AlertFamily.RecoveryPairs.Select(kv => new { recovery = kv.Key, firing = kv.Value }),
+                recoveries_route_as_their_firing = AlertFamily.RecoveryPairs.Select(kv => new { recovery = kv.Key, firing = kv.Value, tier = "the tier the firing it closes was delivered at" }),
                 unclassified_metrics_route_as = AlertFamily.Performance,
                 resolution_order = new[] { "server-scoped route", "tag-scoped route (deeper tag first)", "fleet-wide route", "parent channel (Settings > Notifications)" },
                 resolution_within_a_scope = new[] { "exact metric", "family", "* (scoped routes only)" },
