@@ -10,6 +10,7 @@ using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
@@ -112,7 +113,7 @@ public partial class ManageMuteRulesWindow : Window
         if (removed > 0)
         {
             RefreshList();
-            MessageBox.Show($"Removed {removed} expired rule(s).", "Purge Complete",
+            MessageBox.Show($"Removed {CountText.Plural(removed, "expired rule")}.", "Purge Complete",
                 MessageBoxButton.OK, MessageBoxImage.Information);
         }
         else

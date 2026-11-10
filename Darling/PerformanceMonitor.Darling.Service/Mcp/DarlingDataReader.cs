@@ -299,7 +299,8 @@ internal static class DarlingDataReader
         IReadOnlyList<string>? SameMachineAs = null,
         decimal MonthlyCostUsd = 0m,
         DateTime? ConnectDownSince = null,
-        string? LastConnectError = null);
+        string? LastConnectError = null,
+        bool Attempted = false);
 
     /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).
     /// <paramref name="UtcOffsetMinutes"/> is the offset IN FORCE at that collection (V16; null on a pre-V16 row)
@@ -3466,7 +3467,10 @@ internal static class DarlingDataReader
         """;
 
     /// <summary>
-    /// Every enabled server plus its newest collection instant — the list_servers read. Drives the
+    /// Every enabled server plus its newest successful collection instant — the list_servers read. #8464: only a
+    /// <c>SUCCESS</c> row counts (<see cref="CollectionRunSql.SuccessfulCollectorRun"/>). Every attempt writes a row, a
+    /// failed one included, so a read over every row moved a dark server's <c>last_collection</c> forward on each failed
+    /// attempt, and the freshness-derived status with it. Drives the
     /// freshness-derived status the tool assigns (the headless viewer has no live ping either — see
     /// <c>ServerSummaryItem.ClassifyFreshness</c>). <c>created_date</c> rides on the same registry row for the
     /// retention rule <see cref="ServerListRow"/> describes (#3967). $-free (no parameters, no bare now()) so a
@@ -3507,8 +3511,9 @@ internal static class DarlingDataReader
             s.sql_engine_edition,
             {SameMachineAsColumnSql},
             COALESCE(c.monthly_cost_usd, 0) AS monthly_cost_usd,
-            s.connect_down_since,
-            s.last_connect_error
+            {ConnectDownSinceSql.Healed} AS connect_down_since,
+            s.last_connect_error,
+            {CollectionAttemptSql.Attempted} AS attempted
         FROM servers s
         JOIN config.config_monitored_servers c ON c.server_id = s.server_id
         LEFT JOIN LATERAL
@@ -3516,7 +3521,7 @@ internal static class DarlingDataReader
             SELECT cl.collection_time
             FROM v_collection_log cl
             WHERE cl.server_id = s.server_id
-            AND   {CollectionCycleRow.NotCycleRowSql}
+            AND   {CollectionRunSql.SuccessfulCollectorRun}
             ORDER BY cl.collection_time DESC
             LIMIT 1
         ) AS latest ON TRUE
@@ -3546,7 +3551,8 @@ internal static class DarlingDataReader
                 reader.IsDBNull(9) ? null : reader.GetFieldValue<string[]>(9),
                 reader.GetDecimal(10),
                 reader.IsDBNull(11) ? null : reader.GetDateTime(11),
-                reader.IsDBNull(12) ? null : reader.GetString(12)));
+                reader.IsDBNull(12) ? null : reader.GetString(12),
+                reader.GetBoolean(13)));
         }
 
         return rows;

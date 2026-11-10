@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// STA thread, narrower and wider than their columns, and read back the width each column was actually given. Lite's twin, for Lite's
 /// themes, is FillColumnTests in Lite.Tests.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerFillColumnTests
 {
     private static string ViewerDir([CallerFilePath] string thisFile = "") =>

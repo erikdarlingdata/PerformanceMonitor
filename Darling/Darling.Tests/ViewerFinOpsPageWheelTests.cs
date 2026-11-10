@@ -27,6 +27,7 @@ namespace Darling.Tests;
 /// height instead of stretching the page by its whole length. The real tab is hosted on the shared STA thread with the theme merged,
 /// the wheel is raised over the grid the way the input system raises it, and the page's offset is read.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerFinOpsPageWheelTests
 {
     private const string ViewerPack = "pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/";

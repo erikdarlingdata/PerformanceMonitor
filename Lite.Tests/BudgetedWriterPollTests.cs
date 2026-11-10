@@ -9,7 +9,6 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Reflection;
 using System.Threading;
 using Darling.Tests;
 using PerformanceMonitorLite.Database;
@@ -42,11 +41,10 @@ public sealed class BudgetedWriterPollTests : IDisposable
 
     private static readonly TimeSpan HangBackstop = TimeSpan.FromSeconds(10);
 
-    /* How many budgeted writers are between asking for the write lock and holding it. The lock's own waiting-writer count
-       sees a parked writer only; a store whose budgeted writers poll first counts them through its pending-writer seam,
-       read by reflection so this file compiles against a store without one and then falls back to the parked count. */
-    private static readonly PropertyInfo? s_pendingWriters =
-        typeof(DuckDbInitializer).GetProperty("PendingWriteCountForTests", BindingFlags.NonPublic | BindingFlags.Static);
+    /* A writer with the shipped tail polls for the first two of its three seconds; one parked this soon parked at once. The
+       writer's mode is read from its own initializer's counts (#8490). This class runs alone, in the timing collection, so no
+       other class's writer is on the lock while it measures how the lock treats a new reader. */
+    private static readonly TimeSpan ParkedTooSoon = TimeSpan.FromMilliseconds(500);
 
     private readonly string _tempDir;
     private readonly string _dbPath;
@@ -71,9 +69,6 @@ public sealed class BudgetedWriterPollTests : IDisposable
         }
     }
 
-    private static int PendingWriters() =>
-        s_pendingWriters is null ? DuckDbInitializer.WaitingWriteCountForTests : (int)s_pendingWriters.GetValue(null)!;
-
     private static Thread StartThread(Action body)
     {
         var thread = new Thread(() => body()) { IsBackground = true };
@@ -85,6 +80,8 @@ public sealed class BudgetedWriterPollTests : IDisposable
     public void ANewReaderGetsTheLockWhileABudgetedWriterWaitsBehindALongRead()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
+        /* The shipped tail: this class's subject is the poll, and the host starts every other initializer parked (#8490). */
+        initializer.WriteLockParkTail = DuckDbInitializer.DefaultWriteLockParkTail;
         var longReadHeld = new ManualResetEventSlim(false);
         var releaseLongRead = new ManualResetEventSlim(false);
         var longRead = StartThread(() =>
@@ -102,7 +99,6 @@ public sealed class BudgetedWriterPollTests : IDisposable
         {
             Assert.True(longReadHeld.Wait(HangBackstop), "the long read never took the read lock");
 
-            var pendingBefore = PendingWriters();
             writer = StartThread(() =>
             {
                 try
@@ -117,10 +113,13 @@ public sealed class BudgetedWriterPollTests : IDisposable
                 }
             });
             TestWait.WaitUntil(
-                () => PendingWriters() > pendingBefore,
+                () => initializer.PollingWriterCountForTests + initializer.ParkedWriterCountForTests > 0,
                 HangBackstop,
                 TimeSpan.FromMilliseconds(5),
                 "the writer reached the lock wait");
+
+            /* The writer's own mode, from its own initializer: behind the long read it polls, and does not park before its tail. */
+            Assert.Equal(0, initializer.ParkedWriterCountForTests);
 
             /* The tab read: it arrives while the writer is pending behind the long read, and the long read is shared. */
             using var newRead = initializer.TryAcquireReadLock(NewReaderBound);
@@ -144,6 +143,8 @@ public sealed class BudgetedWriterPollTests : IDisposable
     public void AWriterPollingAgainstReadersThatNeverLeaveAGap_GetsTheLockWithinItsBudget_AndTheReadersFlowUntilItParks()
     {
         using var initializer = new DuckDbInitializer(_dbPath);
+        /* The shipped tail: this class's subject is the poll, and the host starts every other initializer parked (#8490). */
+        initializer.WriteLockParkTail = DuckDbInitializer.DefaultWriteLockParkTail;
         using var stop = new CancellationTokenSource();
         long entries = 0;
 
@@ -178,6 +179,16 @@ public sealed class BudgetedWriterPollTests : IDisposable
                     writerFailure = ex;
                 }
             });
+            TestWait.WaitUntil(
+                () => initializer.PollingWriterCountForTests + initializer.ParkedWriterCountForTests > 0,
+                HangBackstop,
+                TimeSpan.FromMilliseconds(5),
+                "the writer reached the lock wait");
+
+            /* The writer's own mode, from its own initializer: it polls first, and parks only in its tail. */
+            Assert.False(
+                TestWait.TryWaitUntil(() => initializer.ParkedWriterCountForTests > 0, ParkedTooSoon, TimeSpan.FromMilliseconds(5)),
+                "the writer parked at once instead of polling first");
             Assert.True(writer.Join(WriterBudget + HangBackstop), "the writer neither got the lock nor gave up");
         }
         finally

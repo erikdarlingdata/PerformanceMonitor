@@ -1,5 +1,6 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:ui="clr-namespace:PerformanceMonitor.Ui">
     <!--
         #8144: the text styles both apps share, so a title is the same size in Lite and in the Viewer. ThemeManager.Apply merges
         this dictionary after the color theme, so a theme switch keeps it. It holds no colors of its own: every brush is looked up
@@ -47,6 +48,8 @@
 
     <!-- #8219: a server toolbar row with the app's colors: no gradient, no grip, and an overflow button that opens the controls that did not fit. A ToolBar gives its own flat face to every Button in it, so a Button in one names the theme's Button style (Style="{DynamicResource {x:Type Button}}") to keep the face. Both apps' server tabs use it (#8266). -->
     <Style x:Key="ServerToolbarStyle" TargetType="ToolBar">
+        <!-- Escape closes the "..." overflow however it was opened; a mouse click leaves focus outside the popup, where the toolbar alone would not hear the key. -->
+        <Setter Property="ui:ToolBarOverflowEscape.Enabled" Value="True"/>
         <Setter Property="Background" Value="Transparent"/>
         <Setter Property="Foreground" Value="{DynamicResource ForegroundBrush}"/>
         <Setter Property="Padding" Value="0,2"/>

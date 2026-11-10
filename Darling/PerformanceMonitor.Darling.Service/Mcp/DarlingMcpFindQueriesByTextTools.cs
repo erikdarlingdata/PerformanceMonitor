@@ -103,6 +103,10 @@ public sealed class DarlingMcpFindQueriesByTextTools
         /// <summary>#7849 test seam: called on the source's connection, in its transaction, just before the statement that follows a read in the same
         /// budget (the all-servers sample statement), once its <c>statement_timeout</c> is the remainder, so a test can read the setting back.</summary>
         public Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task>? BeforeStatement { get; init; }
+
+        /// <summary>#8408 test seam: called with the step and the statement's bound parameters just before it runs, so a test can read what
+        /// one step carries into the next (the one-server search binds the digests it has judged so far and their verdicts).</summary>
+        public Action<int, NpgsqlParameterCollection>? StatementBound { get; init; }
     }
 
     /// <summary>Query Store text. $1 server_id, $2 database or null, $3 the escaped pattern, $4 row cap + 1. The whole text comes back so the judge
@@ -121,12 +125,27 @@ AND   t.query_sql_text ILIKE '%' || $3 || '%' ESCAPE '\'
 ORDER BY t.database_name, t.query_id
 LIMIT $4";
 
-    /// <summary>Plan-cache text of the raw tier. $1 server_id, $2 database or null, $3 the escaped pattern, $4 row cap + 1,
-    /// $5 the raw-tier floor (naive UTC). The server's distinct (hash, database, digest) in the window come first, so the pattern is tested
-    /// once per distinct text instead of once per sample; one row per query_hash and database, the newest sighting of each (#7905: a statement
-    /// that runs in several databases lists once per database, each with the <c>database_name</c> that <c>get_query_trend</c> takes). The match and the page carry the digest
-    /// only: the whole text (<c>query_text_dim.query_text</c> has no size cap) is read by primary key for the at most $4 rows of the page, so a
-    /// common pattern never sorts every matching text.
+    /// <summary>Plan-cache text of one span of the raw tier. $1 server_id, $2 database or null, $3 the escaped pattern, $4 the rows still wanted
+    /// (the page cap + 1 less the rows earlier spans found), $5 and $6 the span's floor and ceiling (naive UTC, floor inclusive), $7 and $8 the
+    /// query_hash and database_name of every row an earlier span already found, so a statement seen again here is not listed twice. The
+    /// one-server search runs this once per span of the raw window, newest span first (<see cref="RawTierSpans"/>), inside the source's one
+    /// transaction and one budget: a span is one bounded statement, so a budget that runs out between spans leaves the rows the earlier spans
+    /// found. The server's distinct (hash, database, digest) in the span come first; one row per query_hash and database, the newest sighting
+    /// of each (#7905: a statement that runs in several databases lists once per database, each with the <c>database_name</c> that
+    /// <c>get_query_trend</c> takes), and a statement's first span, the newest it ran in, carries its newest sighting. The match and the page
+    /// carry the digest only: the whole text (<c>query_text_dim.query_text</c> has no size cap) is read by primary key for the at most $4 rows
+    /// of the page, so a common pattern never sorts every matching text.
+    /// <para>Each text is judged once per search, whichever spans it runs in, and the search carries the verdicts itself: the transaction is a
+    /// pure read, with no temp table, because the <c>mcp</c> role the read runs as has CONNECT on the managed store's database and nothing
+    /// else at the database level, TEMPORARY included. $9 and $10 are the digests the earlier spans judged and their verdicts (<c>known</c>),
+    /// bound the way $7 and $8 carry the found keys. The digests this span sees for the first time (<c>judged</c>) are tested against the
+    /// pattern, and the span's hits take their verdict from this span's judgement or from <c>known</c>. The statement hands back two kinds of
+    /// row, told apart by the first column: the page's <c>hit</c> rows first, in page order, then one <c>judged</c> row per digest this span
+    /// judged, with its verdict, which the search appends to what it binds to the next span. A statement sampled in every span, which is most
+    /// procedure and parameterized text, therefore has its text tested in its newest span only, and a span whose distinct texts number in the
+    /// tens of thousands, where the planner tests the pattern by scanning every text rather than reading each by key, pays that scan once per
+    /// search instead of once per span. The carried arrays grow to the server's distinct digests in the window, 32 bytes and a boolean each.
+    /// Measured: see <see cref="RawTierSpanCount"/>. A digest with no text row is judged unmatched.</para>
     /// <para>#7674: the match is <c>(d.query_text || '') ILIKE</c>, not <c>d.query_text ILIKE</c>, on purpose. With the opt-in trigram index on
     /// <c>query_text_dim.query_text</c> the planner would otherwise run a bitmap scan of that index over the whole table and join it to this server's
     /// digests, which the issue measured at 1.7 to 2.0 s cold for one server and one database against 0.2 to 0.7 s without the index. The concatenation is
@@ -138,16 +157,32 @@ WITH seen AS MATERIALIZED (
     FROM query_stats
     WHERE server_id = $1
     AND   collection_time >= $5
+    AND   collection_time < $6
     AND   query_text_digest IS NOT NULL
     AND   ($2::text IS NULL OR database_name = $2)
     GROUP BY query_hash, database_name, query_text_digest
+),
+known AS MATERIALIZED (
+    SELECT digest, matched
+    FROM unnest($9::bytea[], $10::boolean[]) AS k(digest, matched)
+),
+judged AS MATERIALIZED (
+    SELECT f.digest, COALESCE((d.query_text || '') ILIKE '%' || $3 || '%' ESCAPE '\', FALSE) AS matched
+    FROM (SELECT DISTINCT s.query_text_digest AS digest
+          FROM seen AS s
+          WHERE NOT EXISTS (SELECT 1 FROM known AS k WHERE k.digest = s.query_text_digest)) AS f
+    LEFT JOIN query_text_dim AS d ON d.digest = f.digest
 ),
 hits AS (
     SELECT DISTINCT ON (s.query_hash, s.database_name)
            s.query_hash, s.database_name, s.last_collected, s.query_text_digest
     FROM seen AS s
-    JOIN query_text_dim AS d ON d.digest = s.query_text_digest
-    WHERE (d.query_text || '') ILIKE '%' || $3 || '%' ESCAPE '\'
+    WHERE (EXISTS (SELECT 1 FROM judged AS j WHERE j.digest = s.query_text_digest AND j.matched)
+           OR EXISTS (SELECT 1 FROM known AS k WHERE k.digest = s.query_text_digest AND k.matched))
+    AND   NOT EXISTS (SELECT 1
+                      FROM unnest($7::text[], $8::text[]) AS k(query_hash, database_name)
+                      WHERE k.query_hash IS NOT DISTINCT FROM s.query_hash
+                      AND   k.database_name IS NOT DISTINCT FROM s.database_name)
     ORDER BY s.query_hash, s.database_name, s.last_collected DESC
 ),
 page AS (
@@ -156,10 +191,17 @@ page AS (
     ORDER BY last_collected DESC, query_hash, database_name
     LIMIT $4
 )
-SELECT p.query_hash, p.database_name, p.last_collected, d.query_text
+SELECT 'hit' AS kind, p.query_hash, p.database_name, p.last_collected, d.query_text, NULL::bytea AS digest, NULL::boolean AS matched
 FROM page AS p
 JOIN query_text_dim AS d ON d.digest = p.query_text_digest
-ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
+UNION ALL
+SELECT 'judged', NULL, NULL, NULL, NULL, j.digest, j.matched
+FROM judged AS j
+ORDER BY kind, last_collected DESC, query_hash, database_name";
+
+    /// <summary>The first column of a <see cref="PlanCacheSql"/> row: <c>hit</c> is a row of the page, <c>judged</c> a digest this span judged
+    /// and its verdict, carried to the spans after it.</summary>
+    internal const string PlanCacheJudgedRowKind = "judged";
 
     /// <summary>#7674: the plan-cache text of every enabled server, served by the trigram index on <c>query_text_dim.query_text</c>. Only offered when
     /// <see cref="QueryTextTrigramIndex"/> reports <c>Ready</c>. $1 the escaped pattern, $2 row cap + 1, $3 the raw-tier floor (naive UTC). The match is
@@ -204,6 +246,50 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
     /// the join, 0.33 s through the probe with no index on the digest, and 0.11 s with the sample index.
     /// </summary>
     public const int ProbeDigestCap = 1000;
+
+    /// <summary>
+    /// How many spans the one-server plan-cache search cuts the raw window into. Each span is one statement (<see cref="PlanCacheSql"/>) under
+    /// what is left of the source's budget, run newest span first, so a budget that runs out leaves the rows the earlier spans found and the
+    /// reply says how much of the window they cover. Sixteen spans of a four-day window are six hours each: a window whose whole-window
+    /// statement takes twice the budget still answers from its newest two days. Each text is judged once per search whichever spans it
+    /// runs in (see <see cref="PlanCacheSql"/>), which keeps the sixteen statements at about the cost of one. Measured warm on a seeded
+    /// large store (330,000 texts; a server with 30,000 distinct texts in 970,000 samples over four days, the older half compressed): the
+    /// whole window in one statement takes 0.50 s, and in sixteen spans carrying the judged digests 0.66 s (0.40 s and 0.24 s with a
+    /// database named; about 36 ms a span while carrying 20,000 to 30,000 digests), where sixteen spans that each judge every text they
+    /// see take 4.9 s, more than the budget, because a span with tens of thousands of distinct texts judges them by scanning every text in
+    /// the store and pays that scan once per span; seven coarser spans cut that only to 2.2 s.
+    /// </summary>
+    public const int RawTierSpanCount = 16;
+
+    /// <summary>
+    /// The spans of the raw window <paramref name="floor"/> to <paramref name="now"/>, newest first: equal lengths, each one's floor the next
+    /// one's ceiling, the oldest starting exactly at the floor and the newest open a day past <paramref name="now"/>, so a sample stamped
+    /// slightly ahead of this host's clock is still in the first span.
+    /// </summary>
+    internal static IReadOnlyList<(DateTime Floor, DateTime Ceiling)> RawTierSpans(DateTime floor, DateTime now)
+    {
+        var length = (now - floor) / RawTierSpanCount;
+        var spans = new (DateTime Floor, DateTime Ceiling)[RawTierSpanCount];
+        for (var i = 0; i < RawTierSpanCount; i++)
+        {
+            var spanFloor = i == RawTierSpanCount - 1 ? floor : now - length * (i + 1);
+            var ceiling = i == 0 ? now.AddDays(1) : now - length * i;
+            spans[i] = (spanFloor, ceiling);
+        }
+
+        return spans;
+    }
+
+    /// <summary>How much of the raw window the spans a search finished cover, for the stopped message: "6 hours", "1 day", "1.5 days". The
+    /// number is rendered first and the unit's word follows the rendered number, so the newest day of the tier, a hair over 24 hours once the
+    /// Query Store source's time is in the window, reads "1 day".</summary>
+    internal static string DescribeSearched(int completedSpans, DateTime floor, DateTime now)
+    {
+        var searched = (now - floor) / RawTierSpanCount * completedSpans;
+        var (value, unit) = searched.TotalHours < 24 ? (searched.TotalHours, "hour") : (searched.TotalDays, "day");
+        var rendered = value.ToString("0.#", CultureInfo.InvariantCulture);
+        return rendered + " " + unit + (rendered == "1" ? string.Empty : "s");
+    }
 
     /// <summary>#7849: the matched digests, read first so the sample read can take them as an array. $1 the escaped pattern, $2 the cap + 1: a result
     /// that fills the cap + 1 rows says the pattern matched more texts than the probe takes, and the sample read is the window join instead.</summary>
@@ -293,7 +379,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
         + " days, one row per server, query_hash and database. A statement that left the plan cache before that, or ran only before the server was monitored, is not here.";
 
     [McpServerTool(Name = "find_queries_by_text"), Description(
-        "Finds statements whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. Name a server with server_name: database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. There is no index on the text unless the operator turned one on, so each source has a 4 second budget; a source that runs out is reported stopped (name a database to narrow it). Leave server_name out to search the plan-cache text of every server: that is served only when the opt-in trigram index is ready (darling.json queryTextTrigramIndexEnabled; get_store_metrics query_text_index says its state), is refused with the state otherwise, and does not search Query Store text, which is searched one server at a time. The trigram index finds the matching texts; the samples are then read by those texts' digests (sample_read probe, with matched_texts saying how many matched), which a second index the same option builds on query_stats serves on uncompressed chunks, and a pattern more than 1000 texts contain joins the whole raw window instead (sample_read join), which on a large store can reach the 4 second budget and report stopped. Each source in the reply carries a status: ok (rows found), empty (searched, nothing matched), stopped (the budget ran out, so the rows listed may be incomplete) or not_searched (the all-servers scope does not search that source, Query Store text). Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text; a statement the sensitive-statement filter withholds is listed with the withheld marker in place of the excerpt.")]
+        "Finds statements whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. Name a server with server_name: database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. There is no index on the text unless the operator turned one on, so each source has a 4 second budget; a source that runs out is reported stopped with the rows it had found by then (the plan-cache text of one server is searched newest first, in spans of the raw window, so those rows are the newest matches and the message says how much of the window was searched; name a database to narrow it). Leave server_name out to search the plan-cache text of every server: that is served only when the opt-in trigram index is ready (darling.json queryTextTrigramIndexEnabled; get_store_metrics query_text_index says its state), is refused with the state otherwise, and does not search Query Store text, which is searched one server at a time. The trigram index finds the matching texts; the samples are then read by those texts' digests (sample_read probe, with matched_texts saying how many matched), which a second index the same option builds on query_stats serves on uncompressed chunks, and a pattern more than 1000 texts contain joins the whole raw window instead (sample_read join), which on a large store can reach the 4 second budget and report stopped. Each source in the reply carries a status: ok (rows found), empty (searched, nothing matched), stopped (the budget ran out, so the rows listed may be incomplete) or not_searched (the all-servers scope does not search that source, Query Store text). Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text; a statement the sensitive-statement filter withholds is listed with the withheld marker in place of the excerpt.")]
     public static Task<string> FindQueriesByText(
         NpgsqlDataSource postgres,
         [Description("Text to find in the statement. A literal substring, matched ignoring case; % and _ match themselves. At least 3 characters.")] string pattern,
@@ -372,10 +458,44 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
                     };
                 }, cancellationToken);
 
-            var planCache = await RunSourceAsync(
-                postgres, PlanCacheSql, planCacheBudget, limit, p => BindOneServer(p, resolved.ServerId, database, escaped, limit, floor), PlanCacheHorizon, StoppedAdvice(database),
-                r => (Hash: r.IsDBNull(0) ? null : r.GetString(0), Database: r.IsDBNull(1) ? null : r.GetString(1), LastCollected: r.GetDateTime(2),
-                    Stored: r.IsDBNull(3) ? null : r.GetString(3)),
+            /* The raw window newest span first, one statement per span inside the one transaction and budget (see RawTierSpanCount): the rows
+               a span finds are kept whatever happens to the spans after it, a span already-found statements ran in again does not list them
+               twice, and the digests each span judged, with their verdicts, are carried to the spans after it, so a text is judged once. */
+            var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var spans = RawTierSpans(floor, now);
+            var judgedDigests = new List<byte[]>();
+            var judgedVerdicts = new List<bool>();
+            var planCacheOutcome = await RunSourceAsync<PlanCacheHit, object>(
+                postgres, planCacheBudget, limit,
+                (_, _, step, collected, _) =>
+                {
+                    if (step >= spans.Count || collected.Count > limit)
+                    {
+                        return Task.FromResult<SourceStatement?>(null);
+                    }
+
+                    var span = spans[step];
+                    var wanted = limit + 1 - collected.Count;
+                    return Task.FromResult<SourceStatement?>(new SourceStatement(
+                        PlanCacheSql, p => BindPlanCacheSpan(p, resolved.ServerId, database, escaped, wanted, span, collected, judgedDigests, judgedVerdicts)));
+                },
+                StoppedAdvice(database),
+                completedSpans => completedSpans == 0
+                    ? $"before the newest span of the {RawTierDays} raw tier had been searched"
+                    : $"after the newest {DescribeSearched(completedSpans, floor, now)} of the {RawTierDays} raw tier had been searched, newest first, and the rest had not",
+                r => new PlanCacheHit(r.IsDBNull(1) ? null : r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2), r.GetDateTime(3), r.IsDBNull(4) ? null : r.GetString(4)),
+                r =>
+                {
+                    /* A judged row is a digest this span judged and its verdict, for the spans after it; it is not a row of the page. */
+                    if (!string.Equals(r.GetString(0), PlanCacheJudgedRowKind, StringComparison.Ordinal))
+                    {
+                        return false;
+                    }
+
+                    judgedDigests.Add((byte[])r[5]);
+                    judgedVerdicts.Add(r.GetBoolean(6));
+                    return true;
+                },
                 raw =>
                 {
                     var (textLength, excerpt) = Shape(raw.Stored, text);
@@ -388,6 +508,15 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
                         excerpt,
                     };
                 }, cancellationToken);
+            var planCache = new
+            {
+                status = planCacheOutcome.Status,
+                message = planCacheOutcome.Message,
+                horizon = PlanCacheHorizon,
+                returned = planCacheOutcome.Returned,
+                truncated = planCacheOutcome.Truncated,
+                rows = planCacheOutcome.Rows,
+            };
 
             return JsonSerializer.Serialize(new
             {
@@ -438,8 +567,13 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
             string? sampleRead = null;
             var planCache = await RunSourceAsync(
                 postgres, planCacheBudget, limit,
-                async (connection, transaction, ct) =>
+                async (connection, transaction, step, _, ct) =>
                 {
+                    if (step > 0)
+                    {
+                        return null;
+                    }
+
                     /* #7849: the matched digests first, in the same budget, then the sample read that fits them: the array probe under the cap, the window join past it. */
                     var digests = await ReadMatchedDigestsAsync(connection, transaction, escaped, ct);
                     if (digests.Count > ProbeDigestCap)
@@ -468,8 +602,10 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
                     });
                 },
                 "Use a longer, more specific pattern, or name a server with server_name (and database_name) to search it directly.",
+                null,
                 r => (ServerId: r.GetInt32(0), Hash: r.IsDBNull(1) ? null : r.GetString(1), Database: r.IsDBNull(2) ? null : r.GetString(2), LastCollected: r.GetDateTime(3),
                     Stored: r.IsDBNull(4) ? null : r.GetString(4)),
+                null,
                 raw =>
                 {
                     var (textLength, excerpt) = Shape(raw.Stored, text);
@@ -564,6 +700,38 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
             ? "Name a database with database_name to narrow the search; one server and one database is much faster."
             : "The database named is large; use a longer, more specific pattern.";
 
+    /// <summary>One plan-cache row as the statement hands it back, before the judge sees its text.</summary>
+    private sealed record PlanCacheHit(string? Hash, string? Database, DateTime LastCollected, string? Stored);
+
+    /// <summary>The raw tier's length, for the stopped message: "4-day".</summary>
+    private static string RawTierDays { get; } = ((int)TimescaleSupport.RawRetentionSpan.TotalDays).ToString(CultureInfo.InvariantCulture) + "-day";
+
+    /// <summary><see cref="PlanCacheSql"/>'s parameters for one span: the server, the database filter, the pattern, the rows still wanted, the
+    /// span's floor and ceiling, the keys of the rows earlier spans found, and the digests earlier spans judged with their verdicts.</summary>
+    private static void BindPlanCacheSpan(
+        NpgsqlParameterCollection parameters, int serverId, string? database, string escaped, int wanted, (DateTime Floor, DateTime Ceiling) span,
+        IReadOnlyList<PlanCacheHit> found, List<byte[]> judgedDigests, List<bool> judgedVerdicts)
+    {
+        parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)database ?? DBNull.Value });
+        parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = escaped });
+        parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = wanted });
+        parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = span.Floor });
+        parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = span.Ceiling });
+        var hashes = new string?[found.Count];
+        var databases = new string?[found.Count];
+        for (var i = 0; i < found.Count; i++)
+        {
+            hashes[i] = found[i].Hash;
+            databases[i] = found[i].Database;
+        }
+
+        parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = hashes });
+        parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = databases });
+        parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = judgedDigests.ToArray() });
+        parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Boolean, Value = judgedVerdicts.ToArray() });
+    }
+
     private static void BindOneServer(NpgsqlParameterCollection parameters, int serverId, string? database, string escaped, int limit, DateTime? floor)
     {
         parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
@@ -588,7 +756,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
         string horizon, string stoppedAdvice, Func<NpgsqlDataReader, TRaw> read, Func<TRaw, TRow> shape, CancellationToken cancellationToken)
     {
         var outcome = await RunSourceAsync(
-            postgres, budget, limit, (_, _, _) => Task.FromResult<SourceStatement?>(new SourceStatement(sql, bind)), stoppedAdvice, read, shape, cancellationToken);
+            postgres, budget, limit, (_, _, step, _, _) => Task.FromResult(step == 0 ? new SourceStatement(sql, bind) : null), stoppedAdvice, null, read, null, shape, cancellationToken);
         return new
         {
             status = outcome.Status,
@@ -606,26 +774,36 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
     /// <summary>What one source's read came to, before the reply names its horizon.</summary>
     private sealed record SourceOutcome<TRow>(string Status, string? Message, int Returned, bool Truncated, IReadOnlyList<TRow> Rows);
 
-    /// <summary>The source read with its statement chosen inside the transaction (#7849): <paramref name="choose"/> may read first, and hand back the
-    /// statement that fits what it found, or null when there is nothing left to read and the source is empty. One budget covers the source:
-    /// <c>statement_timeout</c> starts at the budget, and the statement that follows the read runs under what the read left of it, so the source
-    /// takes at most the budget before it is <c>stopped</c>, whichever statement runs out and even when the read spent it all.</summary>
+    /// <summary>The source read as a sequence of statements inside one transaction and one budget. <paramref name="next"/> is asked for the
+    /// statement of each step in turn, with the rows the earlier steps found, and may read first (#7849: the all-servers scope reads the matched
+    /// digests, then hands back the sample statement that fits them); null ends the source. <c>statement_timeout</c> starts at the budget, and each
+    /// statement runs under what the steps before it left, so the source takes at most the budget before it is <c>stopped</c>, whichever
+    /// statement runs out and even when a read spent it all. A source that stops keeps the rows the completed steps found: the stopped message
+    /// counts them and, when <paramref name="searched"/> is given, says what the completed steps covered. <paramref name="aside"/>, when given,
+    /// sees each row first and takes the rows that are not rows of the page (the one-server search's judged digests, which it carries to the
+    /// next step itself); a row it returns true for is not read as a page row.</summary>
     private static async Task<SourceOutcome<TRow>> RunSourceAsync<TRaw, TRow>(
         NpgsqlDataSource postgres, SourceBudget budget, int limit,
-        Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<SourceStatement?>> choose,
-        string stoppedAdvice, Func<NpgsqlDataReader, TRaw> read, Func<TRaw, TRow> shape, CancellationToken cancellationToken)
+        Func<NpgsqlConnection, NpgsqlTransaction, int, IReadOnlyList<TRaw>, CancellationToken, Task<SourceStatement?>> next,
+        string stoppedAdvice, Func<int, string>? searched, Func<NpgsqlDataReader, TRaw> read, Func<NpgsqlDataReader, bool>? aside, Func<TRaw, TRow> shape,
+        CancellationToken cancellationToken)
     {
         var rows = new List<TRaw>();
+        var completed = 0;
         var stopwatch = new System.Diagnostics.Stopwatch();
         TimeSpan Elapsed() => budget.ElapsedClock?.Invoke() ?? stopwatch.Elapsed;
-        SourceOutcome<TRow> Stopped() => new(
-            "stopped",
-            $"Stopped after {Elapsed().TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s: the {budget.Milliseconds / 1000.0:0.#} s budget for this source ran out before the search finished, "
-                + "so the rows below (none) are not a complete answer. "
-                + stoppedAdvice,
-            0,
-            false,
-            Array.Empty<TRow>());
+        string? stoppedMessage = null;
+        void Stop()
+        {
+            var count = rows.Count == 0 ? "none" : Math.Min(rows.Count, limit).ToString(CultureInfo.InvariantCulture);
+            var head = $"Stopped after {Elapsed().TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s: the {budget.Milliseconds / 1000.0:0.#} s budget for this source ran out ";
+            stoppedMessage = searched is null
+                ? head + "before the search finished, so the rows below (" + count + ") are not a complete answer. " + stoppedAdvice
+                : head + searched(completed) + ", so the rows below (" + count + ") are "
+                    + (completed == 0 ? "not an answer: nothing was searched. " : "the matches in the part searched and not a complete answer. ")
+                    + stoppedAdvice;
+        }
+
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
@@ -644,14 +822,20 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
                 await delay.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            var statement = await choose(connection, transaction, cancellationToken);
-            if (statement is not null)
+            for (var step = 0; ; step++)
             {
-                /* The statement after a read in this transaction gets what the read left of the budget, not the budget again. */
+                var statement = await next(connection, transaction, step, rows, cancellationToken);
+                if (statement is null)
+                {
+                    break;
+                }
+
+                /* Each statement gets what the steps before it left of the budget, not the budget again. */
                 var remaining = budget.Milliseconds - (long)Elapsed().TotalMilliseconds;
                 if (remaining <= 0)
                 {
-                    return Stopped();
+                    Stop();
+                    break;
                 }
 
                 var armSql = "SET LOCAL statement_timeout = " + remaining.ToString(CultureInfo.InvariantCulture);
@@ -668,22 +852,38 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
                 await using var command = new NpgsqlCommand(statement.Sql, connection, transaction);
                 command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                 statement.Bind(command.Parameters);
+                budget.StatementBound?.Invoke(step, command.Parameters);
 
-                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                while (await reader.ReadAsync(cancellationToken))
+                await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
                 {
-                    rows.Add(read(reader));
+                    while (await reader.ReadAsync(cancellationToken))
+                    {
+                        if (aside is not null && aside(reader))
+                        {
+                            continue;
+                        }
+
+                        rows.Add(read(reader));
+                    }
                 }
+
+                completed++;
             }
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.QueryCanceled)
         {
-            return Stopped();
+            /* The statement the timeout cancelled handed back nothing; the rows are the completed steps' own. */
+            Stop();
         }
 
         var truncated = rows.Count > limit;
-        if (truncated) rows.RemoveAt(rows.Count - 1);
+        if (truncated) rows.RemoveRange(limit, rows.Count - limit);
         var shaped = rows.ConvertAll(r => shape(r));
+        if (stoppedMessage is not null)
+        {
+            return new SourceOutcome<TRow>("stopped", stoppedMessage, shaped.Count, truncated, shaped);
+        }
+
         return new SourceOutcome<TRow>(
             shaped.Count == 0 ? "empty" : "ok",
             shaped.Count == 0 ? "No statement in this source contains the pattern. Only what the horizon covers was searched." : null,

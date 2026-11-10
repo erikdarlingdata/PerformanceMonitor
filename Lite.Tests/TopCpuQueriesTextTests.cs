@@ -15,6 +15,7 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Tests;
@@ -24,8 +25,9 @@ namespace Lite.Tests;
 
 /// <summary>
 /// #3959, Lite's twin of Darling's <c>TopCpuQueriesTextLiveTests</c>: the top-CPU drill-down ranks and cuts to
-/// five without the statement text, then reads the text for the five that print. The SQL is byte-identical to
-/// Darling's (<c>DrillDownDopProvenanceParityTests</c>), so this proves the same text on DuckDB.
+/// five without the statement text, then reads the text for the five that print. The SQL is the text both apps run
+/// (<c>PerformanceMonitor.Common.DrillDownSql</c>, held there by <c>DrillDownDopProvenanceParityTests</c>), so this
+/// proves the one text on DuckDB.
 ///
 /// <para>The oracle is the old SQL verbatim, and every column of every row must match it. The seed breaks a
 /// restriction that is almost right:
@@ -42,7 +44,6 @@ public sealed class TopCpuQueriesTextTests : IClassFixture<SharedDuckDbFixture>,
     private const int ServerId = 39590;
     private const int OtherServerId = 39591;
     private const string ServerName = "TopCpuTextSrv";
-    private const string LiteFile = "Lite/Analysis/DrillDownCollector.Queries.cs";
 
     /// <summary>The pre-#3959 read, verbatim — the oracle the shipped read must match row for row.</summary>
     private const string OracleSql = @"
@@ -100,6 +101,9 @@ LIMIT 5";
     private DuckDBConnection? _seedConn;
     private long _nextId = 1;
 
+    /// <summary>The statement the top-CPU drill-down handed DuckDB on its last run.</summary>
+    private string? _shippedSql;
+
     public TopCpuQueriesTextTests(SharedDuckDbFixture fixture)
     {
         fixture.ResetData();
@@ -152,9 +156,12 @@ LIMIT 5";
     }
 
     [Fact]
-    public void TheShippedSql_ReadsTheTextAfterTheCut_NotInsideTheWindow()
+    public async Task TheShippedSql_ReadsTheTextAfterTheCut_NotInsideTheWindow()
     {
-        var sql = Regex.Replace(LiteInlineSql("CollectTopCpuQueries"), @"--[^\r\n]*", string.Empty);
+        /* The statement as Lite hands it to DuckDB, with its comments stripped. */
+        await EnrichAsync();
+        Assert.True(_shippedSql is not null, "top_cpu_queries did not run");
+        var sql = Regex.Replace(_shippedSql, @"--[^\r\n]*", string.Empty);
 
         var cut = sql.IndexOf("LIMIT 5", StringComparison.Ordinal);
         Assert.True(cut >= 0, "the cut to five should still be there");
@@ -170,6 +177,16 @@ LIMIT 5";
 
     private async Task<List<JsonElement>> DrillDownRowsAsync()
     {
+        var finding = await EnrichAsync();
+
+        Assert.NotNull(finding.DrillDown);
+        Assert.True(finding.DrillDown.TryGetValue("top_cpu_queries", out var raw), "top_cpu_queries was not collected");
+        return [.. JsonSerializer.SerializeToElement(raw).EnumerateArray()];
+    }
+
+    /// <summary>Runs the top-CPU drill-down over the seed, keeping the statement Lite handed DuckDB in <see cref="_shippedSql"/>.</summary>
+    private async Task<AnalysisFinding> EnrichAsync()
+    {
         var finding = new AnalysisFinding
         {
             RootFactKey = "CPU_SQL_PERCENT",
@@ -180,11 +197,15 @@ LIMIT 5";
             Severity = 1.0,
         };
 
-        await new DrillDownCollector(_duckDb).EnrichFindingsAsync([finding], Context());
-
-        Assert.NotNull(finding.DrillDown);
-        Assert.True(finding.DrillDown.TryGetValue("top_cpu_queries", out var raw), "top_cpu_queries was not collected");
-        return [.. JsonSerializer.SerializeToElement(raw).EnumerateArray()];
+        var collector = new DrillDownCollector(_duckDb)
+        {
+            StatementObserver = (key, sql) =>
+            {
+                if (key == "top_cpu_queries") _shippedSql = sql;
+            },
+        };
+        await collector.EnrichFindingsAsync([finding], Context());
+        return finding;
     }
 
     private async Task<List<object?[]>> ReadOracleAsync()
@@ -287,20 +308,5 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, 10, $10, $11, $12)";
     {
         var head = string.Create(CultureInfo.InvariantCulture, $"SELECT /* group {group:D3} row {row} */ col FROM dbo.TopCpu{group}");
         return group == 3 ? head + " WHERE " + string.Concat(Enumerable.Repeat("col = 1 AND ", 60)) + "1 = 1" : head;
-    }
-
-    /// <summary>
-    /// Lite's inline SQL: the first <c>cmd.CommandText = @"..."</c> verbatim literal after the named method's
-    /// declaration (the read contains no doubled quotes, so the literal ends at the first <c>";</c>).
-    /// </summary>
-    private static string LiteInlineSql(string methodName)
-    {
-        var source = ParitySource.ReadFile(LiteFile);
-        var start = source.IndexOf($"Task {methodName}(", StringComparison.Ordinal);
-        Assert.True(start >= 0, $"{methodName} not found in {LiteFile}");
-        const string Marker = "cmd.CommandText = @\"";
-        var literalStart = source.IndexOf(Marker, start, StringComparison.Ordinal) + Marker.Length;
-        var literalEnd = source.IndexOf("\";", literalStart, StringComparison.Ordinal);
-        return source[literalStart..literalEnd];
     }
 }

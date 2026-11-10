@@ -18,6 +18,7 @@ namespace Darling.Tests;
 /// The members the fix adds are reached by name, so this class builds against a tree without them and fails at the lookup
 /// with the member's name.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerWalkthroughLows8115Tests
 {
     private const string ThemeUri = "pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml";

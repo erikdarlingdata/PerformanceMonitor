@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// everywhere, each wait row is trimmed inside its card. A narrow window still scrolls to every card
 /// (<see cref="ViewerLiveScreenTextTests.TheInsightCards_StayReachable_InA900PixelWindow"/>).
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class PlanViewerInsightsStripWidthTests
 {
     /// <summary>The Wait Stats column's minimum width, which the grid keeps when the strip is narrower than the cards' minimums.</summary>

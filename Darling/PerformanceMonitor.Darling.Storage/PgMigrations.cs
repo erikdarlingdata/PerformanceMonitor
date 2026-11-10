@@ -3386,6 +3386,7 @@ $rung$;";
         new Migration(254, "slack-chat-requests", V254Sql),
         new Migration(255, "wait-stats-cadence-baseline", V255Sql),
         new Migration(256, "schema-tracking", V256Sql),
+        new Migration(257, "collection-log-status-time", V257Sql),
     };
 
     /* V256 (#7643): schema tracking. Versioned table and view definitions, kept by the schema_objects collector (Darling only).
@@ -3558,6 +3559,21 @@ CREATE TABLE IF NOT EXISTS collect.schema_capture_state (
     last_reconcile_reason text,
     PRIMARY KEY (server_id, database_name)
 );";
+
+
+    /* V257 (#8464): idx_collection_log_status_time, a B-tree on collect.collection_log (server_id, status, collection_time DESC). Every
+       "last collected" read (the Overview card, the sidebar dot, list_servers, get_server_summary, the fleet card, the Admin grid, the
+       offline note and the FinOps inventory) descends a server's collection_log newest-first to its newest SUCCESS row.
+       idx_collection_log_time (server_id, collection_time) orders that descent but holds no status, so on an uncompressed chunk every failed
+       row is fetched from the heap and rejected before the next is tried, and for a server whose every collector fails the descent fetches
+       the chunk's every row. With status in the key the descent reads SUCCESS entries only, and an all-failed server's probe of a chunk is
+       one empty index probe. On a chunk TimescaleDB compresses after this rung the index also gives status a bloom sparse index
+       (auto_sparse_indexes builds one for each column a B-tree index names), so a compressed batch that holds no SUCCESS is skipped without
+       being decompressed; a chunk compressed before this rung keeps the batch metadata it has and is decompressed as before until retention
+       drops it. Not CONCURRENTLY: TimescaleDB refuses it on a hypertable, so this is the plain form every other index rung on this table
+       uses, inside the ladder's own transaction. Idempotent. */
+    private const string V257Sql = @"
+CREATE INDEX IF NOT EXISTS idx_collection_log_status_time ON collect.collection_log (server_id, status, collection_time DESC);";
 
     /// <summary>
     /// V235 (#7083): the blocking alert pages on blocked wait time. The shipped bars move: <c>blocking_count_threshold</c> 1 to 3,

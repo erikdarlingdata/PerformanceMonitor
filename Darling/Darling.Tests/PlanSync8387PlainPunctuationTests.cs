@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// name-and-figure separators keep their dash, as PerformanceStudio's viewer prints them: the "Wait Stats — N ms
 /// total" header and the missing index row's " — Impact: " lead.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class PlanSync8387PlainPunctuationTests
 {
     private const string EmDash = "—";
@@ -173,7 +174,8 @@ public sealed class PlanSync8387PlainPunctuationTests
                 Assert.NotEmpty(texts);
 
                 var tooltips = texts.Select(t => t.ToolTip as string).Where(t => t != null).Select(t => t!).ToList();
-                Assert.Contains("Runtime value differs from compiled: possible parameter sniffing", tooltips);
+                // #8455: a sniffed cell's tooltip leads with its value, so the note is one line of it.
+                Assert.Contains(tooltips, t => t.Split(Environment.NewLine).Contains("Runtime value differs from compiled: possible parameter sniffing", StringComparer.Ordinal));
 
                 var lines = texts.Select(t => t.Text).ToList();
                 Assert.Contains("Unresolved variables: @extra, not in parameter list", lines);

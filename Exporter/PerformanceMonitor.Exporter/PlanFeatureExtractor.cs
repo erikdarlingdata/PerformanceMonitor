@@ -90,6 +90,14 @@ public sealed record PlanMissingIndexRow(
 public static class PlanFeatureExtractor
 {
     /// <summary>
+    /// 7 since the Key Lookup residual line reads "filtered 1 row", its no-statement-time line and the Row Estimate Mismatch and Nested
+    /// Loops outer-side sentences write every number in the invariant culture and read "1 row x 500 executions" and "estimated
+    /// 1 row", every other analyzer and parser sentence writes its numbers in the invariant culture, a percentage keeps its sign
+    /// beside the number, and the many-to-many worktable reads "1 logical read", so the old and new warning rows stay apart.
+    /// 6 since the exchange spill warning reads "1 write to TempDB" and "4 writes to TempDB", the Key Lookup grade "over 1 lookup"
+    /// and the Lazy Spool message "1 rewind (cache hit)", so the old and new warning rows stay apart.
+    /// 5 since the warning messages that carry a count write it as a person says it: the Bare Scan message reads "1 column" and
+    /// "3 columns" and the three spill prefixes "1 thread" and "2 threads", so the old and new warning rows stay apart.
     /// 4 since the analyzer's warning set changed in one release: Bare Scan and Scan With Predicate need 10,000 rows read
     /// and a tenth of the statement's time when the plan carries those figures (#7891, #8381), Top Above Scan is quiet over
     /// an ordered scan that the Top stops early (#7890), the Data Type Mismatch and Table-Valued Function text changed and
@@ -103,7 +111,7 @@ public static class PlanFeatureExtractor
     /// 2 since the pin moved to 4d730bb42: the parser reads an IF condition's query plan (#4470), and the analyzer's
     /// warning set changed.
     /// </summary>
-    public const int FeatureVersion = 4;
+    public const int FeatureVersion = 7;
 
     /// <summary>
     /// Parse cap (16 MiB). Measured real plans top out at 3.6 MB; this guards against a runaway document: it is never

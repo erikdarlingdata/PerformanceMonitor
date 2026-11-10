@@ -235,7 +235,9 @@ public partial class FinOpsTab
             var chartCaption = DatabaseSizeRow.ChartCaption(dbSizes, dbSizeSummary.Select(b => b.DatabaseName));
             FinOpsDbSizeChartCaption.Text = chartCaption ?? "";
             FinOpsDbSizeChartCaption.Visibility = chartCaption is null ? Visibility.Collapsed : Visibility.Visible;
-            FinOpsProvisioningTrendGrid.ItemsSource = await _dataService.GetProvisioningTrendAsync(_server.ServerId);
+            /* The trend's days are counted in the selected time display on this server's clock, as every other time on the page reads. */
+            var dayZone = await _dataService.DisplayDayZoneAsync(_server.ServerId);
+            FinOpsProvisioningTrendGrid.ItemsSource = await _dataService.GetProvisioningTrendAsync(_server.ServerId, dayZone);
         }
         else
         {
@@ -432,9 +434,9 @@ public partial class FinOpsTab
         FinOpsNoTableSizesMessage.Visibility = page.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         FinOpsTableSizesNote.Text = page.Count == 0
             ? ""
-            : $"{page.Count} table(s), largest first, at the {HistoryTime.SnapshotCollected(page[0].LatestSnapshotTime, "--")} snapshot"
+            : $"{CountText.Plural(page.Count, "table")}, largest first, at the {HistoryTime.SnapshotCollected(page[0].LatestSnapshotTime, "--")} snapshot"
               + (truncated ? $"; the {DarlingTableSizeGrowthReader.TopTables} largest of more" : "")
-              + (page[0].DaysOfData < 30 ? $"; the store holds {page[0].DaysOfData} day(s) of snapshots, so growth the history does not reach shows n/a" : "");
+              + (page[0].DaysOfData < 30 ? $"; the store holds {CountText.Plural(page[0].DaysOfData, "day")} of snapshots, so growth the history does not reach shows n/a" : "");
     }
 
     // ── Version Store (PVS) ──
@@ -609,7 +611,9 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsMemoryGrantEfficiencyAsync()
     {
-        var data = await _dataService.GetMemoryGrantEfficiencyAsync(_server.ServerId);
+        /* The rows' days are counted in the selected time display on this server's clock, as every other time on the page reads. */
+        var dayZone = await _dataService.DisplayDayZoneAsync(_server.ServerId);
+        var data = await _dataService.GetMemoryGrantEfficiencyAsync(_server.ServerId, dayZone);
         _finopsMemoryGrantFilterMgr!.UpdateData(data);
         FinOpsMemoryGrantEfficiencyNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }

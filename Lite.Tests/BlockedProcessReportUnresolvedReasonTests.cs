@@ -266,7 +266,7 @@ public sealed class BlockedProcessReportUnresolvedReasonTests
         var failure = Assert.Single(outcome.ProbeFailures);
         Assert.Equal("StackOverflow2013", failure.Item);
         Assert.Contains("page reallocated", failure.Error, StringComparison.Ordinal);
-        Assert.Contains("1 item(s) failed their enumeration probe", outcome.Note);
+        Assert.Contains("1 item failed the enumeration probe", outcome.Note);
     }
 
     [Fact]

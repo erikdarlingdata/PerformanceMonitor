@@ -1809,6 +1809,9 @@ public partial class MainWindow : Window
                        tells a server whose history retention has dropped (Offline) from one that has never
                        collected. The sidebar dot reads the same field off the same row. */
                     summary.RegisteredAt = server.RegisteredAt;
+                    /* #8464: and whether any collector has run against it, so a server tried and refused on every attempt bands Offline
+                       and not as awaiting its first collection. */
+                    summary.Attempted = server.Attempted;
                     /* #7590: the sidebar row already carries the registry's failed-connect state from the status poll. */
                     summary.ConnectDownSince = server.ConnectDownSince;
                     summary.LastConnectError = server.LastConnectError;

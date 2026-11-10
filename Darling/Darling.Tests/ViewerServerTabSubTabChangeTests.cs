@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// the handler, and the run prints an unhandled thread error that fails no test. The shared tab-revealing helper installs the context, so a
 /// handler the selection fires resumes on the tab's own thread, where the test's next pump runs it.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerServerTabSubTabChangeTests
 {
     [Fact]

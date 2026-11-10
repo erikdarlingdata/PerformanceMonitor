@@ -48,7 +48,12 @@ class FakeNode {
   removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parent = null; return c; }
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
   fire(t, e = {}) { for (const fn of this.listeners[t] || []) fn({ preventDefault() {}, target: this, ...e }); }
+  click() { this.fire("click", { target: this }); }
 }
+/* Export CSV hands the browser a Blob through an object URL and a click on an anchor; the harness keeps each Blob instead. */
+const downloads = [];
+URL.createObjectURL = (blob) => { downloads.push(blob); return "blob:kept"; };
+URL.revokeObjectURL = () => {};
 globalThis.Node = FakeNode;
 globalThis.document = {
   body: new FakeNode("body"),
@@ -72,17 +77,23 @@ globalThis.location = { hash: "#/view/v1" };
 /* The scripted service. A view is a list of panels (or notebook cells) by id. Every compose run is held until the test answers it:
    `calls` is every run the page sent, in order, and `answer(call, status)` settles one (200 with a one-row table, or 429 with Retry-After 1). */
 const SOURCES = ["s1", "s2", "s3", "s4", "s5", "s6", "s7"];
-const READS = ["r1", "r2", "r3", "r4"];
+const READS = ["r1", "r2", "r3", "r4", "get_alert_history"];
 let view = null;
 const calls = [];
 let autoAnswer = false;
 const BUSY_TEXT = "The service is running as many long reads as it allows (2), and 0 more are waiting. Try again in about 48 seconds.";
 const reply = (status, body, headers = {}) => ({ status, ok: status >= 200 && status < 300, headers: { get: (h) => headers[h.toLowerCase()] ?? null }, text: async () => JSON.stringify(body) });
 const okBody = () => ({ columns: [{ name: "n", label: "n" }], rows: [{ n: 1 }], row_count: 1 });
+/* get_alert_history as the service answers it: a resolution row (state_only, with the stored 0 that is not a reading on both sides) and a
+   measured row. */
+const ALERT_HISTORY = { alerts: [
+  { alert_time: "2026-01-01T12:00:00Z", server_name: "a", metric_name: "Client Timeouts Cleared", current_value: 0, threshold_value: 0, state_only: true, notification_type: "resolution", muted: false, detail_text: "" },
+  { alert_time: "2026-01-01T11:00:00Z", server_name: "a", metric_name: "High CPU", current_value: 90, threshold_value: 80, state_only: false, notification_type: "alert", muted: false, detail_text: "" },
+] };
 function answer(call, status) {
   if (!call) return; /* a read the page never sent: the test then sees the missing call in what it recorded */
   call.answered = status;
-  call.resolve(status === 400 ? reply(400, { error: "hours exceeds maximum of 24 hours for this read." }) : status === 429 ? reply(429, { error: BUSY_TEXT }, { "retry-after": "1" }) : status === 500 ? reply(500, { error: "The read failed." }) : reply(200, call.source.startsWith("r") ? { rows: [{ n: 1 }] } : okBody()));
+  call.resolve(status === 400 ? reply(400, { error: "hours exceeds maximum of 24 hours for this read." }) : status === 429 ? reply(429, { error: BUSY_TEXT }, { "retry-after": "1" }) : status === 500 ? reply(500, { error: "The read failed." }) : reply(200, call.source === "get_alert_history" ? ALERT_HISTORY : call.source.startsWith("r") ? { rows: [{ n: 1 }] } : okBody()));
 }
 globalThis.fetch = async (url, init) => {
   const u = new URL(String(url), "http://viewer.test");
@@ -118,14 +129,27 @@ try {
   fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   const load = (rel) => import(pathToFileURL(path.join(scratch, rel)).href);
-  modules = { views: await load(path.join("pages", "views.js")) };
+  modules = { views: await load(path.join("pages", "views.js")), util: await load("util.js") };
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
 
 const all = (n, out = []) => { out.push(n); for (const c of n.children) all(c, out); return out; };
 const flush = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 0)); };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/* #8511: the page's Retry-After wait (retryOnceWhenBusy, util.js) runs on util's busyRetryClock, which the harness drives: a timer is held,
+   with the delay the page asked for, and fires nothing on its own, so a capture made while the panel waits sees the page before the retry
+   however long the turns before it take. releaseBusyRetry fires the held timers, runs the turns that follow them, and returns the delays
+   the page asked for. Nothing waits on wall-clock time. */
+const busyRetryTimers = [];
+modules.util.busyRetryClock.setTimeout = (fn, ms) => { const timer = { fn, ms, cleared: false }; busyRetryTimers.push(timer); return timer; };
+modules.util.busyRetryClock.clearTimeout = (timer) => { if (timer) timer.cleared = true; };
+const releaseBusyRetry = async () => {
+  await flush(); /* the turns in which the page reads the refusal and arms its wait */
+  const held = busyRetryTimers.splice(0);
+  for (const timer of held) if (!timer.cleared) timer.fn();
+  await flush();
+  return held.map((t) => t.ms);
+};
 const panel = (source, extra = {}) => ({ title: "Panel " + source, source, viz: "table", measure: "m", ...extra });
 const rpanel = (read, extra = {}) => ({ title: "Read " + read, read, viz: "table", columns: [{ key: "n", label: "n" }], rowsKey: "rows", ...extra });
 const dashboard = (panels) => ({ id: "v1", name: "V", definition: { panels } });
@@ -173,8 +197,7 @@ const out = {};
   await flush();
   out.busyOnceStrips = stripsOf(main).map((s) => s.text);
   out.busyOnceCallsWhileWaiting = sourcesOf(calls);
-  await sleep(1300);
-  await flush();
+  out.busyOnceRetryDelaysMs = await releaseBusyRetry();
   out.busyOnceCallsAfterWait = sourcesOf(calls);
   answer(calls[2], 200);
   answer(calls[1], 200);
@@ -192,8 +215,7 @@ const out = {};
   answer(calls[1], 200);
   await flush();
   answer(calls[0], 429);
-  await sleep(1300);
-  await flush();
+  out.busyTwiceRetryDelaysMs = await releaseBusyRetry();
   answer(calls[2], 429);
   await flush();
   out.busyTwiceCalls = sourcesOf(calls);
@@ -293,8 +315,7 @@ const out = {};
   await flush();
   out.readBusyOnceStrips = stripsOf(main).map((s) => s.text);
   out.readBusyOnceCallsWhileWaiting = sourcesOf(calls);
-  await sleep(1300);
-  await flush();
+  out.readBusyOnceRetryDelaysMs = await releaseBusyRetry();
   out.readBusyOnceCallsAfterWait = sourcesOf(calls);
   answer(calls[2], 200);
   answer(calls[1], 200);
@@ -314,8 +335,7 @@ const out = {};
   answer(calls[1], 200);
   await flush();
   answer(calls[0], 429);
-  await sleep(1300);
-  await flush();
+  out.readBusyTwiceRetryDelaysMs = await releaseBusyRetry();
   answer(calls[2], 429);
   await flush();
   out.readBusyTwiceCalls = sourcesOf(calls);
@@ -338,6 +358,25 @@ const out = {};
   await flush();
   out.rangeNotice = stripsOf(main).map((s) => s.text);
   out.rangeRetryButtons = retryButtons(main).length;
+}
+
+/* A saved view whose table reads get_alert_history with its own columns (a view built from a sample read keeps each column's key, label and
+   format): a resolution row's stored zeros show as the dash Alert History shows for them, and a measured row keeps its numbers. */
+{
+  const columns = [
+    { key: "metric_name", label: "Metric" },
+    { key: "current_value", label: "Value", format: "num2" },
+    { key: "threshold_value", label: "Threshold", format: "num2" },
+  ];
+  const main = await open(dashboard([rpanel("get_alert_history", { columns, rowsKey: "alerts" })]));
+  answer(calls[0], 200);
+  await flush();
+  out.alertHistoryViewRows = all(main).filter((n) => n.tag === "tr").map((tr) => tr.children.filter((c) => c.tag === "td").map((td) => td.textContent)).filter((r) => r.length);
+  out.alertHistoryViewErrors = stripsOf(main).filter((s) => /\berror\b/.test(s.cls)).map((s) => s.text);
+  /* Export CSV on the same table: the lines the file carries, with the byte-order mark dropped. */
+  const exportButton = all(main).find((n) => n.tag === "button" && n.textContent === "Export CSV");
+  if (exportButton) { exportButton.fire("click"); await flush(); }
+  out.alertHistoryViewCsv = !exportButton ? ["no Export CSV button"] : !downloads.length ? ["no download"] : (await downloads[downloads.length - 1].text()).replace(/^\uFEFF/, "").split(/\r?\n/).filter((l) => l.length);
 }
 
 console.log(JSON.stringify(out));

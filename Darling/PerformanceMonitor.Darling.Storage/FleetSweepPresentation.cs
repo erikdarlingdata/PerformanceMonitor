@@ -155,6 +155,17 @@ public static class FleetSweepPresentation
 
         var node = BuildRunNode(run);
 
+        /* The detail carries every server's verdict below, band and reason included, so the document's
+           critical_servers (the critical verdicts' names and reasons again) is not embedded beside them:
+           the three surfaces that read a detail (the web feed, the Viewer, get_sweep_reports' latest and
+           by-id answers) ship the list once, in verdicts. The same render-over-the-embed rule as the
+           would_have_paged strip above: the stored row keeps what was written, and a timeline entry, which
+           has no verdicts beside it, keeps the list in its embedded document. */
+        if (node["report"] is JsonObject embedded)
+        {
+            embedded.Remove("critical_servers");
+        }
+
         var verdictArray = new JsonArray();
         var namesById = new Dictionary<int, string>();
         foreach (var verdict in verdicts)

@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// that width, rows are bound, and the realized cells are measured (<see cref="GridColumnLayoutProbe"/>). Lite's twin
 /// is <c>ServerTabGridColumnLayoutTests</c>.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerServerTabGridColumnLayoutTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

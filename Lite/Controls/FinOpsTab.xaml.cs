@@ -81,9 +81,27 @@ public partial class FinOpsTab : UserControl
        _perfmonPickerGen); this is that idiom with the key spelled once. */
     private readonly ScopedLoadGenerations _loads = new();
 
+    /// <summary>The Server Inventory grid's filters, for the tests that drive a column filter the way the funnel does.</summary>
+    internal DataGridFilterManager<ServerPropertyRow>? ServerInventoryFilters => _serverInventoryFilterMgr;
+
+    /// <summary>#8474: the Hardware Note column is on screen only while a bound inventory row carries a note (a server whose hardware
+    /// read was denied), so a column blank on every server takes no width from the text columns beside it. The rows are re-read on every
+    /// reload and filter, because each one binds the grid again. It reads the unfiltered rows, not the grid's filtered items, and keeps the
+    /// column while a filter is set on it: a filter on the column itself (IsEmpty hides every noted row) must not collapse the column and
+    /// with it the funnel that clears the filter. Before the first load the grid's own items are all there is.</summary>
+    private void ShowHardwareNoteColumnWhenAnyRowHasANote()
+    {
+        var rows = _serverInventoryFilterMgr?.UnfilteredRows ?? ServerInventoryDataGrid.Items.OfType<ServerPropertyRow>().ToList();
+        var any = rows.Any(r => !string.IsNullOrEmpty(r.HardwareUnavailableReason))
+            || (_serverInventoryFilterMgr?.HasActiveFilterOn(nameof(ServerPropertyRow.HardwareUnavailableReason)) ?? false);
+        HardwareNoteColumn.Visibility = any ? Visibility.Visible : Visibility.Collapsed;
+    }
+
     public FinOpsTab()
     {
         InitializeComponent();
+        ((System.Collections.Specialized.INotifyCollectionChanged)ServerInventoryDataGrid.Items).CollectionChanged += (_, _) => ShowHardwareNoteColumnWhenAnyRowHasANote();
+        ShowHardwareNoteColumnWhenAnyRowHasANote();
         DataGridNumberHeaders.Apply(this); // #8223: a number column's header on the same edge as its values
         /* #5562: every list opened on the last 24 hours (1d); the heatmap on 30 days (1mo). */
         /* R5: the lists and the heatmap read "hours back from now", so each picker is rolling only (the heatmap in whole days). */
@@ -502,7 +520,9 @@ public partial class FinOpsTab : UserControl
                 dbSizeSummary = await Task.Run(() => _dataService.GetDatabaseSizeSummaryAsync(serverId, 10, sizeChartFilter));
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
 
-                provisioningTrend = await Task.Run(() => _dataService.GetProvisioningTrendAsync(serverId));
+                var dayZone = await SelectedServerDayZoneAsync(serverId);
+                if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
+                provisioningTrend = await Task.Run(() => _dataService.GetProvisioningTrendAsync(serverId, dayZone));
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
             }
 
@@ -701,6 +721,20 @@ public partial class FinOpsTab : UserControl
         {
             AppLogger.Error("FinOps", $"Failed to load database resources: {ex.Message}", ex);
         }
+    }
+
+    /// <summary>
+    /// The zone the selected server's days are counted in for the 7-Day Provisioning Trend, Memory Grant Efficiency and the Object
+    /// Growth heatmap: the selected time display on that server's clock (its own collected clock, else its open tab's, else the machine's), the rule
+    /// the Application Connections rows and the PVS trend use. The open tab is asked here, on the UI thread, because the tabs are
+    /// UI objects.
+    /// </summary>
+    private async System.Threading.Tasks.Task<TimeZoneInfo> SelectedServerDayZoneAsync(int serverId)
+    {
+        var openTab = _openTabClock.Invoke(serverId);
+        var dataService = _dataService!;
+        var collected = await Task.Run(() => dataService.GetServerClockAsync(serverId));
+        return ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, ServerTimeHelper.ClockForServer(collected, openTab));
     }
 
     private async System.Threading.Tasks.Task LoadApplicationConnectionsAsync(int serverId)
@@ -1173,7 +1207,9 @@ public partial class FinOpsTab : UserControl
 
         try
         {
-            var data = await Task.Run(() => _dataService.GetMemoryGrantEfficiencyAsync(serverId));
+            var dayZone = await SelectedServerDayZoneAsync(serverId);
+            if (_loads.Superseded(nameof(LoadMemoryGrantEfficiencyAsync), gen)) return;
+            var data = await Task.Run(() => _dataService.GetMemoryGrantEfficiencyAsync(serverId, dayZone: dayZone));
             if (_loads.Superseded(nameof(LoadMemoryGrantEfficiencyAsync), gen)) return;
             _memoryGrantFilterMgr!.UpdateData(data);
             MemoryGrantEfficiencyNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -1227,6 +1263,7 @@ public partial class FinOpsTab : UserControl
         _pvsStatsFilterMgr?.UpdateData(new List<PvsStatsRow>());
         _storageGrowthFilterMgr?.UpdateData(new List<StorageGrowthRow>());
         _indexLockingFilterMgr?.UpdateData(new List<IndexLockingRow>());
+        IndexLockingDataGrid.HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden;
         _idleDbsFilterMgr?.UpdateData(new List<IdleDatabaseRow>());
         _tempdbFilterMgr?.UpdateData(new List<TempdbSummaryRow>());
         _waitCategoryFilterMgr?.UpdateData(new List<WaitCategorySummaryRow>());

@@ -239,10 +239,10 @@ public partial class MainWindow
             return;
         }
 
-        Dictionary<int, DateTime> freshness;
+        Dictionary<int, (DateTime? LastCollectionUtc, bool Attempted)> freshness;
         try
         {
-            freshness = await _dataService.GetServerFreshnessAsync();
+            freshness = await _dataService.GetServerCollectionStateAsync();
         }
         catch (Exception ex)
         {
@@ -277,7 +277,10 @@ public partial class MainWindow
 
         foreach (var s in servers)
         {
-            DateTime? last = freshness.TryGetValue(s.ServerId, out var t) ? t : null;
+            DateTime? last = freshness.TryGetValue(s.ServerId, out var t) ? t.LastCollectionUtc : null;
+            /* #8464: whether any collector has run against the server, refreshed with its newest success so a server the collectors
+               start failing against after the registry read bands Offline on this tick, not as awaiting its first collection. */
+            s.Attempted = t.Attempted || s.Attempted;
             s.ConnectDownSince = connectDown.TryGetValue(s.ServerId, out var down) ? down.SinceUtc : null;
             s.LastConnectError = connectDown.TryGetValue(s.ServerId, out var down2) ? down2.Error : null;
             s.NextConnectAttemptUtc = connectDown.TryGetValue(s.ServerId, out var down3) ? down3.NextAttemptUtc : null;
@@ -733,7 +736,7 @@ public partial class MainWindow
             server.SetSilenced(false);
             StatusText.Text = plan.CreateRules.Count == 0
                 ? $"Unsilenced '{server.DisplayName}'."
-                : $"Unsilenced '{server.DisplayName}'; kept {plan.CreateRules.Count} other server(s) that shared its legacy silence silenced, now keyed by server.";
+                : $"Unsilenced '{server.DisplayName}'; kept {CountText.Plural(plan.CreateRules.Count, "other server")} that shared its legacy silence silenced, now keyed by server.";
             if (plan.CreateRules.Count > 0)
             {
                 ViewerLogger.Info("ServerManagement", StatusText.Text);
@@ -845,11 +848,11 @@ public partial class MainWindow
         if (dialog.ShowDialog() == true && dialog.AddedCount > 0)
         {
             await LoadServersAsync(preserveSelection: true);
-            var msg = $"Added {dialog.AddedCount} server(s)";
-            if (dialog.SkippedCount > 0) msg += $", skipped {dialog.SkippedCount} duplicate(s)";
+            var msg = $"Added {CountText.Plural(dialog.AddedCount, "server")}";
+            if (dialog.SkippedCount > 0) msg += $", skipped {CountText.Plural(dialog.SkippedCount, "duplicate")}";
             if (dialog.CollidedCount > 0) msg += $", {dialog.CollidedCount} collided (id matches another server)";
             if (dialog.FailedCount > 0) msg += $", {dialog.FailedCount} failed";
-            StatusText.Text = msg + ". The Darling service will start collecting them on its next reload.";
+            StatusText.Text = msg + $". The Darling service will start collecting {(dialog.AddedCount == 1 ? "it" : "them")} on its next reload.";
         }
     }
 
@@ -1032,13 +1035,13 @@ public partial class MainWindow
             var registrySaved = imported == 0 || _serverStore.LastSaveSucceeded;
 
             var message = registrySaved
-                ? $"Imported {imported} server definition(s)."
-                : $"Read {imported} server definition(s), but they could not be saved to "
-                  + $"{Path.GetFileName(ViewerServerStore.DefaultFilePath())} — see the viewer log. They will "
+                ? $"Imported {CountText.Plural(imported, "server definition")}."
+                : $"Read {CountText.Plural(imported, "server definition")}, but {(imported == 1 ? "it" : "they")} could not be saved to "
+                  + $"{Path.GetFileName(ViewerServerStore.DefaultFilePath())} — see the viewer log. {(imported == 1 ? "It" : "They")} will "
                   + "not be there on the next launch.";
             if (skipped > 0)
             {
-                message += $"\nSkipped {skipped} already-configured server(s).";
+                message += $"\nSkipped {CountText.Plural(skipped, "already-configured server")}.";
             }
             if (pushedToStore > 0)
             {
@@ -1054,7 +1057,7 @@ public partial class MainWindow
             }
             if (copied > 0)
             {
-                message += $"\nCopied {copied} settings file(s). Restart the viewer to apply them.";
+                message += $"\nCopied {CountText.Plural(copied, "settings file")}. Restart the viewer to apply {(copied == 1 ? "it" : "them")}.";
             }
             message += "\n\nServer credentials are NOT importable (they live only in Windows Credential Manager, " +
                        "per user). Re-enter any SQL/service-principal secret in Manage Servers.";

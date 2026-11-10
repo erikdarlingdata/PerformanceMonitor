@@ -720,7 +720,7 @@ public sealed class AlertReadFailureCounter
                         + "deadline on its store reads, an elapsed at or about that bound means this "
                         + "process stopped waiting while the statement was still running on the store, "
                         + "and one well below it means the store returned a fault. A figure well ABOVE "
-                        + "that bound means the failure was not a single bounded read at all — some "
+                        + "that bound means the failure was not a single bounded read at all: some "
                         + "entries cover a whole alert pass rather than one command, so read the elapsed "
                         + "against what the named read actually is",
                         reading.LastFailureElapsedMs.Value)
@@ -730,7 +730,7 @@ public sealed class AlertReadFailureCounter
             CultureInfo.InvariantCulture,
             "{9} for this server failed and {12} logged but reached no health "
             + "surface{1}, over {10} since {3:yyyy-MM-dd HH:mm}Z. Each one is a condition this "
-            + "server was not judged on for that pass — not a fired alert that was lost, and not a collector "
+            + "server was not judged on for that pass, not a fired alert that was lost, and not a collector "
             + "failure.{4} Across this whole service {11} failed: {0} here, {6} on "
             + "store self-alerts that belong to no server, and {7} on other servers.{8}",
             reading.ServerReadFailures,
@@ -862,8 +862,8 @@ public sealed class AlertReadFailureCounter
         + "gate kept off the paging channels (#3712), the daily documents' delivery-stamp read that gates the "
         + "digest, the rollup and the singles digest on delivered-today (#3580), the store background-job "
         + "health reads behind compression-job health, store-job cadence and retention holds, and the two "
-        + "informational store self-alerts #3826 added — the plan dimension's TOAST slack read and the "
-        + "store checkpointer pressure read behind the WAL levers, and the store settings self-alert's "
+        + "informational store self-alerts #3826 added (the plan dimension's TOAST slack read and the "
+        + "store checkpointer pressure read behind the WAL levers), and the store settings self-alert's "
         + "managed-conf verdicts read (#4215), the daily collection-history audit's rollup read (#5450), and the "
         + "external-alert delivery self-alert's count of undelivered rows (#5654), and the threshold-override "
         + "reload (#5916), daily report (#7041), store autovacuum (#7368), and the stale daily rollup self-alert's "
@@ -879,8 +879,8 @@ public sealed class AlertReadFailureCounter
     /// </summary>
     public const string WindowNote =
         "alert_read_health is the ONLY block on this response that is not measured over the trailing seven "
-        + "days. It is an in-memory count kept by the running service or app, from counting_since — which is "
-        + "when this process began counting, early in its own startup — to now, and a restart takes it to "
+        + "days. It is an in-memory count kept by the running service or app, from counting_since, which is "
+        + "when this process began counting, early in its own startup, to now, and a restart takes it to "
         + "zero. So a zero here means \"none since counting_since\" and NOT \"none in seven days\": check "
         + "counting_since before reading "
         + "the zero as reassurance, because a process that started a minute ago can only report on a minute. "
@@ -907,7 +907,7 @@ public sealed class AlertReadFailureCounter
         + "no command deadline of their own, so the figure there is a plain duration - it says a read became "
         + "slow, and nothing about who ended it. Either way it is null exactly when last_failure_at is null, "
         + "so an elapsed never describes an event with no stamp. It does NOT count fired "
-        + "alerts that failed to DELIVER, and it makes no claim about them — that is the alert-history read's "
+        + "alerts that failed to DELIVER, and it makes no claim about them: that is the alert-history read's "
         + "question, not this one. retried_reads is the SECOND population, and on the Darling service it is "
         + "where most of what this block used to count now lands: reads that crossed the 10 s deadline once "
         + "and succeeded on the single retry two seconds later - the write bands' cost, counted rather than "

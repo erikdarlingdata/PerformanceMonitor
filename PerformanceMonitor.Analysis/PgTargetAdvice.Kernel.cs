@@ -9,6 +9,7 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -106,7 +107,7 @@ public static partial class PgTargetAdvice
         sb.Append(". ");
         AppendTopStatement(sb, burn);
         if (resets > 0)
-            sb.Append("Statistics were reset ").Append(KnobNum(resets)).Append(" time(s) inside the window, so the sums are a floor. ");
+            sb.Append("Statistics were reset ").Append(CountText.Plural((long)resets, "time")).Append(" inside the window, so the sums are a floor. ");
         sb.Append("Context, not a finding: no core count is collected for this server, so ").Append(Cores(peak))
           .Append(" busy is not a percentage of anything: it is graded only by ANOMALY_PG_CPU_BURN against this server's own hour-of-week " +
                   "routine. The figure is pg_stat_kcache's, per top-level statement: background processes, autovacuum and nested statements " +

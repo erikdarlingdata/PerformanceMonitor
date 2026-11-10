@@ -25,6 +25,7 @@ namespace Darling.Tests;
 /// 450 px window, and a DockPanel clips its last children first. The dialog is shown at its default width and every
 /// mode of it (Add and Edit, SQL Server and PostgreSQL) must have Save and Cancel fully inside the window.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class AddServerDialogFooterTests
 {
     private const string ThemeUri = "pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml";

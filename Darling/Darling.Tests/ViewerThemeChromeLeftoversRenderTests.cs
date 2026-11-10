@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// The Viewer's chrome that stayed on the stock Windows look, or on the dark look, after a theme switch: the scroll viewer's
 /// corner square, the expander's header circle, the scroll bar thumb and the lanes' crosshair tooltip (#8306). Each test renders the real control under each Viewer theme and reads the painted colours back.
 /// </summary>
+[Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerThemeChromeLeftoversRenderTests
 {
     public static TheoryData<string> Themes => new() { "Dark", "Light", "CoolBreeze" };

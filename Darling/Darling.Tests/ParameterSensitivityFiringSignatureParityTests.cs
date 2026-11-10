@@ -12,14 +12,15 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Common;
 using Xunit;
 
 namespace Darling.Tests;
 
 /// <summary>
 /// Cross-SKU parity guard for the PARAMETER_SENSITIVITY firing signature: the four floors that decide
-/// whether the finding fires, written out SIX times across two stores and otherwise held equal by
-/// nothing.
+/// whether the finding fires, spliced from <c>PerformanceMonitor.Common.ParameterSensitivitySignature</c> at six
+/// sites across two stores (#8471). The census counts the sites and judges the builder's output at each.
 ///
 /// <para><b>What the signature is.</b> Three floors and a ratio, applied as one contiguous predicate
 /// block: <c>min_worker_time &gt;= 10000</c>, <c>max_worker_time &gt;= 250000</c>,
@@ -128,6 +129,14 @@ public sealed class ParameterSensitivityFiringSignatureParityTests
         + @"NULLIF\(min_worker_time,[ \t]*0\)[ \t]*>=[ \t]*(?<ratio>\d+)",
         RegexOptions.IgnoreCase);
 
+    /// <summary>
+    /// A site that takes the signature from the one builder (#8471): the call, with the store's compiled-before-the-window
+    /// test and, inside a subquery, its indent. The census counts these where it counted spelled-out copies, and the
+    /// canonical check runs each call and holds its output to the canonical signature through the same discriminator.
+    /// </summary>
+    private static readonly Regex SignatureUse = new(
+        @"ParameterSensitivitySignature\.PredicateSql\(""(?<line>[^""]*)""(?:,[ \t]*""(?<indent>[^""]*)"")?\)");
+
     [Fact]
     public void EveryCopyOfTheFiringSignature_IsAccountedFor_InBothStores()
     {
@@ -136,7 +145,7 @@ public sealed class ParameterSensitivityFiringSignatureParityTests
             var path = RepoPath(relativePath);
             Assert.True(File.Exists(path), $"{relativePath} is gone — update this guard deliberately");
 
-            var actual = FiringSignature.Matches(ReadNormalizedSource(path)).Count;
+            var actual = SignatureUse.Matches(ReadNormalizedSource(path)).Count;
 
             Assert.True(
                 actual == expected,
@@ -160,11 +169,6 @@ public sealed class ParameterSensitivityFiringSignatureParityTests
 
         foreach (var path in scanned)
         {
-            if (declared.Contains(path))
-            {
-                continue;
-            }
-
             var count = FiringSignature.Matches(ReadNormalizedSource(path)).Count;
             if (count > 0)
             {
@@ -189,7 +193,7 @@ public sealed class ParameterSensitivityFiringSignatureParityTests
 
         Assert.True(
             strays.Count == 0,
-            "the firing signature appears in analysis files this guard does not declare:"
+            "the firing signature is spelled out in an analysis file rather than taken from ParameterSensitivitySignature.PredicateSql:"
             + Environment.NewLine + string.Join(Environment.NewLine, strays) + Environment.NewLine
             + "Add them to ExpectedCopies — and add the mirror copy to the other store — in the same commit.");
     }
@@ -204,14 +208,18 @@ public sealed class ParameterSensitivityFiringSignatureParityTests
         {
             var store = relativePath.StartsWith("Lite/", StringComparison.Ordinal) ? "Lite" : "Darling";
 
-            foreach (Match m in FiringSignature.Matches(ReadNormalizedSource(RepoPath(relativePath))))
+            foreach (Match use in SignatureUse.Matches(ReadNormalizedSource(RepoPath(relativePath))))
             {
                 perStore[store]++;
+
+                /* The site's own call, run: the block the read splices is what the discriminator judges. */
+                var m = FiringSignature.Match(ParameterSensitivitySignature.PredicateSql(use.Groups["line"].Value, use.Groups["indent"].Value));
+                Assert.True(m.Success, $"{relativePath} @ char {use.Index}: the builder's block does not carry the firing signature's shape");
 
                 if (!string.Equals(Normalize(m.Value), CanonicalFiringSignature, StringComparison.Ordinal))
                 {
                     skewed.Add(
-                        $"{relativePath} @ char {m.Index}: min_worker_time={m.Groups["minWorker"].Value}, "
+                        $"{relativePath} @ char {use.Index}: min_worker_time={m.Groups["minWorker"].Value}, "
                         + $"max_worker_time={m.Groups["maxWorker"].Value}, "
                         + $"execution_count={m.Groups["executions"].Value}, "
                         + $"ratio={m.Groups["ratio"].Value}");

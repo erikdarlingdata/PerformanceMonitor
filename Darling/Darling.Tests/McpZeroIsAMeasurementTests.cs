@@ -417,8 +417,12 @@ public sealed class McpZeroIsAMeasurementTests
 
         var darling = DarlingObjectStatsReader.ObjectSizeGrowthSql;
         Assert.DoesNotMatch(FoldedBaseline, darling);
-        Assert.Contains("MAX(collection_time) FILTER (WHERE collection_time <= $2) AS snapshot_7d_time", darling, StringComparison.Ordinal);
-        Assert.Contains("MAX(collection_time) FILTER (WHERE collection_time <= $3) AS snapshot_30d_time", darling, StringComparison.Ordinal);
+        /* Each baseline is the snapshot NEAREST its cutoff within a day either side, the storage-growth read's rule (the later
+           one on a tie), never the newest at or before the cutoff however far before: one missed daily run at the mark then
+           resolves to the snapshot a day inside it rather than a day outside. */
+        Assert.Contains("WHEN after_7d - $2::timestamp <= $2::timestamp - before_7d THEN after_7d", darling, StringComparison.Ordinal);
+        Assert.Contains("WHEN after_30d - $3::timestamp <= $3::timestamp - before_30d THEN after_30d", darling, StringComparison.Ordinal);
+        Assert.DoesNotContain("FILTER (WHERE collection_time <= $2) AS snapshot_7d_time", darling, StringComparison.Ordinal);
         foreach (var column in new[] { "reserved_mb_7d_ago", "reserved_mb_30d_ago", "reserved_mb_oldest", "b.snapshot_7d_time", "b.snapshot_30d_time", "b.earliest_time", "b.latest_time", "b.days_of_data" })
         {
             Assert.Contains(column, darling, StringComparison.Ordinal);
@@ -429,7 +433,8 @@ public sealed class McpZeroIsAMeasurementTests
         var read = lite[lite.IndexOf("GetObjectSizeGrowthAsync(", StringComparison.Ordinal)..];
         read = read[..read.IndexOf("return items;", StringComparison.Ordinal)];
         Assert.DoesNotMatch(FoldedBaseline, read);
-        Assert.Contains("MAX(collection_time) FILTER (WHERE collection_time <= $2) AS snapshot_7d_time", read, StringComparison.Ordinal);
+        Assert.Contains("WHEN epoch(after_7d) - epoch(CAST($2 AS TIMESTAMP)) <= epoch(CAST($2 AS TIMESTAMP)) - epoch(before_7d) THEN after_7d", read, StringComparison.Ordinal);
+        Assert.DoesNotContain("FILTER (WHERE collection_time <= $2) AS snapshot_7d_time", read, StringComparison.Ordinal);
         Assert.Contains("ReservedMb30dAgo = reader.IsDBNull(8) ? null", read, StringComparison.Ordinal);
 
         foreach (var file in new[] { DarlingMcp + "/DarlingMcpObjectStatsTools.cs", LiteMcp + "/McpObjectStatsTools.cs" })

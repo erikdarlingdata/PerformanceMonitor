@@ -102,7 +102,7 @@ public sealed class DarlingMcpPgSlotTools
             var omittedNote = omittedSlots.Count == 0
                 ? null
                 : $"{CountText.Plural(omittedSlots.Count, "slot")} had a stored sample in the window but {(omittedSlots.Count == 1 ? "is" : "are")} absent from the collector's newest run "
-                  + $"({allRows[0].LatestCaptureAt:yyyy-MM-dd HH:mm:ss} UTC), so {(omittedSlots.Count == 1 ? "it was dropped since and is" : "they were dropped since and are")} not reported as "
+                  + string.Create(System.Globalization.CultureInfo.InvariantCulture, $"({allRows[0].LatestCaptureAt:yyyy-MM-dd HH:mm:ss} UTC), so {(omittedSlots.Count == 1 ? "it was dropped since and is" : "they were dropped since and are")} not reported as ")
                   + $"current. {(omittedSlots.Count == 1 ? "Its" : "Their")} last sample is older than that run.";
 
             /* No slots is the common, healthy case on most servers — say so rather than returning an

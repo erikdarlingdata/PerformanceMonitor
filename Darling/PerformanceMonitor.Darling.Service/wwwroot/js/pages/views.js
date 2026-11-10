@@ -25,7 +25,7 @@
  * descriptions) reaches the DOM through el()/textContent (R4 — never innerHTML).
  */
 
-import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, localizeIsoText, localizeAlertDetail, fmtNum, storeHash } from "../util.js";
+import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, noticeStrip, relTime, localTime, localizeIsoText, localizeAlertDetail, fmtNum, isStateZero, storeHash } from "../util.js";
 import { rollingHoursPicker } from "../page-range.js";
 import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
 import { holdsPage, keepScroll, refreshGridInPlace, showAround, showPage, showRefreshError } from "../refresh-in-place.js";
@@ -35,7 +35,7 @@ import { keepLonePanelsWide } from "../panel-layout.js";
 import { renderMarkdown } from "../markdown.js";
 import { NOTEBOOK_TEMPLATES, isNotebookDefinition } from "../notebook.js";
 import { DASHBOARD_TEMPLATES } from "../view-templates.js";
-import { resolveReadTable } from "../read-fields.js";
+import { resolveReadTable, withCatalogWords } from "../read-fields.js";
 import * as api from "../views-api.js";
 import { refreshChoiceOf } from "../refresh-policy.js";
 import { buildRefreshControl } from "../refresh-control.js";
@@ -1072,6 +1072,12 @@ function notShownCard(title, message) {
   ]);
 }
 
+/* One side of the alert's value line: a state-only row's stored 0 (util.js's isStateZero, the rule Alert History applies) is not a
+   reading and shows as the dash Alert History shows; anything else is the number, in this page's format. */
+function stateOrNum(a, key) {
+  return isStateZero(a, key) ? "—" : fmtNum(a[key], 1);
+}
+
 /* The header cell: the endpoint's own alert facts, rendered directly (no read — they arrived with the envelope).
    A null `alert` (stale/no match) renders the honest empty state instead of blank fields. */
 function renderAlertHeaderCell(cell, opts) {
@@ -1086,10 +1092,17 @@ function renderAlertHeaderCell(cell, opts) {
     if (a.database) rows.push(["Database", a.database]);
     if (typeof a.total_occurrences === "number") rows.push(["Total occurrences", String(a.total_occurrences)]);
     /* current_value/threshold_value (#4368): same fmtNum(_, 1) triage.js's alertFields uses for the matched
-       alert card, so the two pages format the same fields the same way. Omitted only when BOTH are absent —
-       fmtNum already renders a lone missing side as "\u2014" rather than dropping the whole line. */
+       alert card, so the two pages format the same fields the same way. Omitted when both sides are absent, or when both
+       are a state-only row's stored zeros (below); fmtNum renders a lone missing side as "\u2014" rather than dropping
+       the whole line. */
     if (typeof a.current_value === "number" || typeof a.threshold_value === "number") {
-      rows.push(["Value vs threshold", "current " + fmtNum(a.current_value, 1) + " vs threshold " + fmtNum(a.threshold_value, 1)]);
+      /* A state-only row's stored zeros are not readings (stateOrNum): the line is left out when both sides are dashes
+         rather than print 0 against 0, the way Alert History shows a dash in each column. */
+      const current = stateOrNum(a, "current_value");
+      const threshold = stateOrNum(a, "threshold_value");
+      if (current !== "—" || threshold !== "—") {
+        rows.push(["Value vs threshold", "current " + current + " vs threshold " + threshold]);
+      }
     }
   }
   const body = a
@@ -1305,7 +1318,10 @@ function panelOrError(p, readSet, sourceSet, scope, onSettled, slot = null, gate
   if (p.source != null) {
     return renderComposedPanelCard(p, scope, onSettled, slot, gate);
   }
-  return renderPanel(p, onSettled, gate);
+  /* #8492: a read table that carries its own columns takes the catalog's words and rules for the same keys (withCatalogWords), so a saved
+     view's alert-history table shows a state-only row's stored zeros as the dash Alert History shows. A panel with no columns of its own
+     is unchanged. */
+  return renderPanel(withCatalogWords(p), onSettled, gate);
 }
 
 /* Why a panel cannot start a read (the catalog check), as {title, message}, or null when it can. A panel with a problem

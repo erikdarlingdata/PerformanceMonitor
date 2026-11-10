@@ -72,7 +72,8 @@ internal static class DarlingAdminServersReader
             s.created_date,
             latest.collection_time AS last_collection,
             {DarlingDataReader.SameMachineAsColumnSql},
-            s.connect_down_since
+            {ConnectDownSinceSql.Healed} AS connect_down_since,
+            {CollectionAttemptSql.Attempted} AS attempted
         FROM config.config_monitored_servers c
         LEFT JOIN servers s ON s.server_id = c.server_id
         LEFT JOIN LATERAL
@@ -80,7 +81,7 @@ internal static class DarlingAdminServersReader
             SELECT cl.collection_time
             FROM v_collection_log cl
             WHERE cl.server_id = c.server_id
-            AND   {CollectionCycleRow.NotCycleRowSql}
+            AND   {CollectionRunSql.SuccessfulCollectorRun}
             ORDER BY cl.collection_time DESC
             LIMIT 1
         ) AS latest ON TRUE
@@ -109,7 +110,8 @@ internal static class DarlingAdminServersReader
         DateTime? RegisteredAt,
         DateTime? LastCollection,
         IReadOnlyList<string>? SameMachineAs = null,
-        DateTime? ConnectDownSince = null);
+        DateTime? ConnectDownSince = null,
+        bool Attempted = false);
 
     internal static async Task<List<Row>> ReadAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
@@ -140,7 +142,8 @@ internal static class DarlingAdminServersReader
                 reader.IsDBNull(17) ? null : reader.GetDateTime(17),
                 reader.IsDBNull(18) ? null : reader.GetDateTime(18),
                 reader.IsDBNull(19) ? null : reader.GetFieldValue<string[]>(19),
-                reader.IsDBNull(20) ? null : reader.GetDateTime(20)));
+                reader.IsDBNull(20) ? null : reader.GetDateTime(20),
+                reader.GetBoolean(21)));
         }
 
         return rows;
@@ -192,7 +195,7 @@ internal static class DarlingAdminServersReader
             engine = engineKind,
             version = MonitoredEngineVersion.DescribeEngineVersion(
                 engineKind, r.SqlMajorVersion, r.PostgresMajorVersion, r.SqlEngineEdition),
-            freshness = DarlingMcpDataTools.FreshnessStatus(r.LastCollection, r.RegisteredAt, nowUtc, r.ConnectDownSince),
+            freshness = DarlingMcpDataTools.FreshnessStatus(r.LastCollection, r.RegisteredAt, nowUtc, r.ConnectDownSince, r.Attempted),
             read_only = r.ReadOnlyIntent || serverName.EndsWith(":RO", StringComparison.Ordinal),
             last_collected = r.LastCollection?.ToString("o", CultureInfo.InvariantCulture),
             status = r.IsEnabled ? "Enabled" : "Disabled",

@@ -41,12 +41,14 @@ WHERE d.name = @database_name;", connection);
     }
 
     /// <summary>
-    /// Gets top queries by CPU for a server over a time period.
+    /// Gets the Top Queries strip's buckets for a server over a time period, at the width <see cref="SlicerBuckets"/> picks for the
+    /// window: a minute over a short window, an hour over a day.
     /// </summary>
     public async Task<List<TimeSliceBucket>> GetQueryStatsSlicerDataAsync(
         int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+        var bucketMinutes = SlicerBuckets.MinutesFor(startTime, endTime);
 
         /* #7256: a window that starts after the newest archived row reads the hot table alone. */
         return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
@@ -55,11 +57,13 @@ WHERE d.name = @database_name;", connection);
         {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        /* $4 is the bucket width in minutes, on the grid every width of SlicerBuckets divides. */
+        var bucket = $"time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql})";
 
         command.CommandText = @"
 SELECT
-    date_trunc('hour', collection_time) AS bucket,
+    " + bucket + @" AS bucket,
     COUNT(DISTINCT query_hash) AS query_count,
     COALESCE(SUM(delta_worker_time), 0) / 1000.0 AS total_cpu_ms,
     COALESCE(SUM(delta_elapsed_time), 0) / 1000.0 AS total_elapsed_ms,
@@ -70,13 +74,14 @@ FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3" + dbClause + @"
-GROUP BY date_trunc('hour', collection_time)
+GROUP BY " + bucket + @"
 ORDER BY bucket";
 
         command.CommandText = SwapArchiveView(command.CommandText, "query_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
@@ -1039,12 +1044,14 @@ OPTION(RECOMPILE);',
     }
 
     /// <summary>
-    /// Gets top procedures by CPU for a server.
+    /// Gets the Top Procedures strip's buckets for a server, at the width <see cref="SlicerBuckets"/> picks for the window: a minute
+    /// over a short window, an hour over a day.
     /// </summary>
     public async Task<List<TimeSliceBucket>> GetProcStatsSlicerDataAsync(
         int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+        var bucketMinutes = SlicerBuckets.MinutesFor(startTime, endTime);
 
         /* #7256: a window that starts after the newest archived row reads the hot table alone. */
         return await ReadWindowSkippingEmptyArchiveAsync("procedure_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
@@ -1053,11 +1060,13 @@ OPTION(RECOMPILE);',
         {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        /* $4 is the bucket width in minutes, on the grid every width of SlicerBuckets divides. */
+        var bucket = $"time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql})";
 
         command.CommandText = @"
 SELECT
-    date_trunc('hour', collection_time) AS bucket,
+    " + bucket + @" AS bucket,
     /* #5449: a procedure that did no work in a cycle has no stored row now (old data still has its zero-delta row), so
        the count is of procedures WITH work: the same number on both. */
     COUNT(DISTINCT object_name) FILTER (WHERE COALESCE(delta_execution_count, 0) > 0 OR COALESCE(delta_worker_time, 0) > 0 OR COALESCE(delta_elapsed_time, 0) > 0) AS proc_count,
@@ -1070,13 +1079,14 @@ FROM v_procedure_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3" + dbClause + @"
-GROUP BY date_trunc('hour', collection_time)
+GROUP BY " + bucket + @"
 ORDER BY bucket";
 
         command.CommandText = SwapArchiveView(command.CommandText, "procedure_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 

@@ -10,6 +10,7 @@ using System;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -53,7 +54,7 @@ internal static class SkippedCycleLine
             + ViewerTimeHelper.GetTimezoneLabel(ViewerTimeHelper.CurrentDisplayMode, ViewerTimeHelper.ActiveServerClock, lastAtUtc);
 
         return string.Create(CultureInfo.InvariantCulture,
-            $"Skipped collection slots in 24 h: {summary.SlotsSkipped:N0} slot(s) in {summary.Count:N0} late stretch(es). Last {when}: {step}.");
+            $"Skipped collection slots in 24 h: {CountText.Plural(summary.SlotsSkipped, "slot")} in {CountText.Plural(summary.Count, "late stretch", "late stretches")}. Last {when}: {step}.");
     }
 
     /// <summary>The line when the read failed: nothing is known, which is not the all-clear.</summary>
