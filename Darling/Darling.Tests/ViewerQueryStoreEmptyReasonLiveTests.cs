@@ -72,6 +72,12 @@ public sealed class ViewerQueryStoreEmptyReasonLiveTests
             "INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) VALUES ($1, $2, 60, 30, FALSE)",
             ct, id, QueryStoreHealthCollector.Instance.Name);
 
+    /// <summary>A schedule row that runs <c>query_store_health</c> on the server every <paramref name="minutes"/> minutes.</summary>
+    private static Task ScheduleHealthAsync(NpgsqlConnection c, int id, int minutes, CancellationToken ct) =>
+        ExecAsync(c,
+            "INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) VALUES ($1, $2, $3, 30, TRUE)",
+            ct, id, QueryStoreHealthCollector.Instance.Name, minutes);
+
     /// <summary>A successful <c>query_store_hints</c> run two minutes old that stored no row and logged <paramref name="note"/>.</summary>
     private static Task HintsRunAsync(NpgsqlConnection c, int id, string name, string note, CancellationToken ct) =>
         ExecAsync(c,
@@ -155,6 +161,23 @@ public sealed class ViewerQueryStoreEmptyReasonLiveTests
         Assert.StartsWith(ViewerServerTab.QueryStoreEmptyWindowText, shown, StringComparison.Ordinal);
         Assert.Contains("19 days", shown, StringComparison.Ordinal);
         Assert.Contains("the query_store_health collector is disabled for this server", shown, StringComparison.Ordinal);
+        Assert.DoesNotContain("runs hourly", shown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OnAServerWhoseHealthCaptureIsWeeksOld_AndItsCollectorRunsEveryTwoHours_ThePanelNamesThatCadence_NotTheShippedHourlyOne()
+    {
+        /* Not a secondary: one READ_WRITE database in a capture 19 days old, and query_store_health scheduled every two hours. */
+        const string name = "viewer-qs-stale-two-hourly";
+        var shown = await ShownAsync(854_184, name, async (connection, ct) =>
+        {
+            await CaptureAsync(connection, 854_184, name, TimeSpan.FromDays(19), ct);
+            await ScheduleHealthAsync(connection, 854_184, 120, ct);
+        });
+
+        Assert.NotNull(shown);
+        Assert.StartsWith(ViewerServerTab.QueryStoreEmptyWindowText, shown, StringComparison.Ordinal);
+        Assert.Contains("the query_store_health collector runs every 2 hours", shown, StringComparison.Ordinal);
         Assert.DoesNotContain("runs hourly", shown, StringComparison.Ordinal);
     }
 

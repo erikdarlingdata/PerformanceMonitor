@@ -199,7 +199,7 @@ public partial class ServerTab : UserControl
             if (data.Count == 0)
             {
                 QueryStoreSlicer.ShowEmpty(QueryStoreEmptyWindowText);
-                await ShowQueryStoreEmptyReasonAsync(QueryStoreSlicer, _dataService, _serverId, _server.DisplayName, _isQueryStoreHealthEnabled());
+                await ShowQueryStoreEmptyReasonAsync(QueryStoreSlicer, _dataService, _serverId, _server.DisplayName, _isQueryStoreHealthEnabled(), healthIntervalMinutes: 60);
             }
             else
                 QueryStoreSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
@@ -221,11 +221,12 @@ public partial class ServerTab : UserControl
     /// while the store was asked (it loaded data, or says something else).
     /// </summary>
     internal static async System.Threading.Tasks.Task ShowQueryStoreEmptyReasonAsync(
-        Controls.TimeRangeSlicerControl slicer, LocalDataService dataService, int serverId, string serverName, bool healthCollectorEnabled)
+        Controls.TimeRangeSlicerControl slicer, LocalDataService dataService, int serverId, string serverName, bool healthCollectorEnabled, int healthIntervalMinutes)
     {
         ArgumentNullException.ThrowIfNull(slicer);
         ArgumentNullException.ThrowIfNull(dataService);
         ArgumentNullException.ThrowIfNull(serverName);
+        ArgumentOutOfRangeException.ThrowIfNegative(healthIntervalMinutes);
 
         var shown = slicer.EmptyText;
         if (shown is null)

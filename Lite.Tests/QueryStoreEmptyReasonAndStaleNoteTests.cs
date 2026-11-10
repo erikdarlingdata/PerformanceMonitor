@@ -77,12 +77,12 @@ public sealed class QueryStoreEmptyReasonAndStaleNoteTests : IClassFixture<Share
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private McpCollectorRunTimes HealthSchedule(bool enabled)
+    private McpCollectorRunTimes HealthSchedule(bool enabled, int frequencyMinutes = 60)
     {
         var schedules = new ScheduleManager(_configDir);
         schedules.SetScheduleForServer(_serverManager.GetAllServers().Single().Id, new List<CollectorSchedule>
         {
-            new() { Name = "query_store_health", Enabled = enabled, FrequencyMinutes = 60, RetentionDays = 30 },
+            new() { Name = "query_store_health", Enabled = enabled, FrequencyMinutes = frequencyMinutes, RetentionDays = 30 },
         });
         return new McpCollectorRunTimes(schedules, _serverManager);
     }
@@ -108,11 +108,36 @@ public sealed class QueryStoreEmptyReasonAndStaleNoteTests : IClassFixture<Share
         Assert.Contains("the query_store_health collector runs hourly", enabledNote, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task GetQueryStoreHealth_OverAStaleCapture_NamesTheCadenceItsCollectorIsScheduledAt_NotTheShippedHourlyOne()
+    {
+        await SeedCaptureAsync("READ_WRITE", 0, StaleCapture);
+
+        var note = await HealthNoteAsync(HealthSchedule(enabled: true, frequencyMinutes: 30));
+        Assert.NotNull(note);
+        Assert.Contains("the query_store_health collector runs every 30 minutes", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("runs hourly", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetQueryStoreHealth_WithNoCapture_NamesTheCadenceItsCollectorIsScheduledAt_NotTheShippedHourlyOne()
+    {
+        /* The store holds no query_store_health row for the server, and its schedule runs the collector every 30 minutes. */
+        using var answer = JsonDocument.Parse(await McpConfigTools.GetQueryStoreHealth(
+            _dataService, _serverManager, runTimes: HealthSchedule(enabled: true, frequencyMinutes: 30)));
+
+        Assert.Equal("unavailable", answer.RootElement.GetProperty("status").GetString());
+        var message = answer.RootElement.GetProperty("message").GetString();
+        Assert.NotNull(message);
+        Assert.Contains("The query_store_health collector runs every 30 minutes (SQL Server 2016+)", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("runs hourly", message, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// What the Query Store panel's message host shows once the panel has said its window is empty and run its reason step: the
     /// host's text, or null when the host is hidden.
     /// </summary>
-    private string? Shown(bool healthCollectorEnabled)
+    private string? Shown(bool healthCollectorEnabled, int healthIntervalMinutes = 60)
     {
         string? shown = null;
         StaTestThread.Run(async () =>
@@ -120,7 +145,7 @@ public sealed class QueryStoreEmptyReasonAndStaleNoteTests : IClassFixture<Share
             var host = new TextBlock { Visibility = Visibility.Collapsed };
             var slicer = new TimeRangeSlicerControl { EmptyMessage = host };
             slicer.ShowEmpty(ServerTab.QueryStoreEmptyWindowText);
-            await ServerTab.ShowQueryStoreEmptyReasonAsync(slicer, _dataService, _serverId, ServerName, healthCollectorEnabled);
+            await ServerTab.ShowQueryStoreEmptyReasonAsync(slicer, _dataService, _serverId, ServerName, healthCollectorEnabled, healthIntervalMinutes);
             shown = host.Visibility == Visibility.Visible ? host.Text : null;
         });
         return shown;
@@ -150,6 +175,19 @@ public sealed class QueryStoreEmptyReasonAndStaleNoteTests : IClassFixture<Share
         Assert.NotNull(shown);
         Assert.StartsWith(ServerTab.QueryStoreEmptyWindowText, shown, StringComparison.Ordinal);
         Assert.Contains("the query_store_health collector is disabled for this server", shown, StringComparison.Ordinal);
+        Assert.DoesNotContain("runs hourly", shown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OnAServerWhoseHealthCaptureIsStale_AndItsCollectorRunsEveryThirtyMinutes_ThePanelNamesThatCadence_NotTheShippedHourlyOne()
+    {
+        await SeedCaptureAsync("READ_WRITE", 0, StaleCapture);
+
+        var shown = Shown(healthCollectorEnabled: true, healthIntervalMinutes: 30);
+
+        Assert.NotNull(shown);
+        Assert.StartsWith(ServerTab.QueryStoreEmptyWindowText, shown, StringComparison.Ordinal);
+        Assert.Contains("the query_store_health collector runs every 30 minutes", shown, StringComparison.Ordinal);
         Assert.DoesNotContain("runs hourly", shown, StringComparison.Ordinal);
     }
 

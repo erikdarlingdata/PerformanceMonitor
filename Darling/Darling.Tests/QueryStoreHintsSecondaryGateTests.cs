@@ -750,6 +750,54 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
         });
     }
 
+    /// <summary>A schedule row that runs <paramref name="collector"/> on the server every <paramref name="minutes"/> minutes.</summary>
+    private static Task ScheduleAsync(NpgsqlConnection c, int id, string collector, int minutes, CancellationToken ct) =>
+        ExecAsync(c,
+            "INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) VALUES ($1, $2, $3, 30, TRUE)",
+            ct, id, collector, minutes);
+
+    [Fact]
+    public async Task AStaleHealthCapture_NamesTheCadenceItsCollectorIsScheduledAt_WhereTheScheduleMovedItOffTheHour()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* #8541: query_store_health ships hourly. This server's schedule runs it every two hours, so the note of a capture
+               19 days old names that cadence and not the shipped one. */
+            const int id = 854_191;
+            const string name = "qs-health-two-hourly";
+            await RegisterAsync(connection, id, name, ct);
+            await CaptureAsync(connection, id, name, "db1", 0, TimeSpan.FromDays(19), ct);
+            await ScheduleAsync(connection, id, QueryStoreHealthCollector.Instance.Name, 120, ct);
+
+            using var answer = JsonDocument.Parse(await DarlingMcpConfigHistoryTools.GetQueryStoreHealth(postgres, name));
+            var note = answer.RootElement.GetProperty("note").GetString();
+            Assert.NotNull(note);
+            Assert.Contains("the query_store_health collector runs every 2 hours", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("runs hourly", note, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task AServerWithNoHealthCapture_IsToldTheCadenceItsCollectorIsScheduledAt_NotTheShippedHourlyOne()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* #8541: a server the store holds no query_store_health row for, whose schedule runs the collector every two hours.
+               The unavailable answer of get_query_store_health names that cadence. */
+            const int id = 854_192;
+            const string name = "qs-health-no-capture";
+            await RegisterAsync(connection, id, name, ct);
+            await ScheduleAsync(connection, id, QueryStoreHealthCollector.Instance.Name, 120, ct);
+
+            using var answer = JsonDocument.Parse(await DarlingMcpConfigHistoryTools.GetQueryStoreHealth(postgres, name));
+            Assert.Equal("unavailable", answer.RootElement.GetProperty("status").GetString());
+            var message = answer.RootElement.GetProperty("message").GetString();
+            Assert.NotNull(message);
+            Assert.Contains("The query_store_health collector runs every 2 hours (SQL Server 2016+)", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("runs hourly", message, StringComparison.Ordinal);
+        });
+    }
+
     /// <summary>One database of an automatic-tuning capture: an enablement row of <c>plan_correction</c> that carries no recommendation.</summary>
     private static Task TuningAsync(NpgsqlConnection c, int id, string name, TimeSpan age, CancellationToken ct) =>
         ExecAsync(c,
@@ -760,13 +808,13 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             """, ct, CollectionIdGenerator.Next(), Naive(DateTime.UtcNow - age), id, name);
 
     [Fact]
-    public async Task AStaleAutomaticTuningCapture_SaysThePlanCorrectionCollectorIsDisabled_WhereItsScheduleIsOff_AndPointsAtCollectionHealthWhereItRuns()
+    public async Task AStaleAutomaticTuningCapture_SaysThePlanCorrectionCollectorIsDisabled_WhereItsScheduleIsOff_AndNamesItsFiveMinuteCadenceWhereItRuns()
     {
         await RunAsync(async (connection, postgres, ct) =>
         {
             /* #8541: two servers whose newest automatic-tuning capture is 19 days old. The first has plan_correction disabled, so
-               the note of get_plan_corrections says no newer capture is taken. The second runs the collector, and its note points at
-               get_collection_health for why no newer capture exists. */
+               the note of get_plan_corrections says no newer capture is taken. The second runs the collector on its shipped schedule,
+               every 5 minutes, and its note names that cadence and points at get_collection_health. */
             const int disabledId = 854_171;
             const string disabled = "plan-correction-disabled";
             const int enabledId = 854_172;
@@ -790,6 +838,8 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             var enabledNote = enabledAnswer.RootElement.GetProperty("automatic_tuning_note").GetString();
             Assert.NotNull(enabledNote);
             Assert.DoesNotContain("is disabled", enabledNote, StringComparison.Ordinal);
+            Assert.Contains("the plan_correction collector runs every 5 minutes", enabledNote, StringComparison.Ordinal);
+            Assert.DoesNotContain("runs hourly", enabledNote, StringComparison.Ordinal);
             Assert.Contains("get_collection_health", enabledNote, StringComparison.Ordinal);
         });
     }
