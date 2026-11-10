@@ -2284,11 +2284,39 @@ public sealed partial class DarlingWorker
            does not hold collection back: no body is waiting for a slot (for up to the yield limit past the pass's due
            time), and passes hold less than their share of the slots. A pass that does not start keeps its stamp, so it
            is still due on this server's next body. */
-        var dueUtc = CollectorCadence.ClampDue(server.NextAnalysisDue, nowUtc, TimeSpan.FromMinutes(analysisIntervalMinutes));
-        if (ScheduledAnalysisAdmission.GivesWay(Volatile.Read(ref _bodiesWaitingForSlot), dueUtc, nowUtc)
-            || !ScheduledAnalysisAdmission.TryTakePlace(ref _analysisPassesInSlot, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps)))
+        var interval = TimeSpan.FromMinutes(analysisIntervalMinutes);
+
+        /* A stamp more than one interval ahead of the clock is due at once and has no due time of its own, and neither
+           has a stamp never set. The first body that finds either due gives it one and writes it back, so the give-way
+           limit and the late warning count from that body on every later ask. Any other stamp is written back as it is. */
+        var dueUtc = ScheduledAnalysisAdmission.DueSince(server.NextAnalysisDue, nowUtc, interval);
+        server.NextAnalysisDue = dueUtc;
+
+        var fleetSlots = StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps);
+        var answer = ScheduledAnalysisAdmission.Ask(Volatile.Read(ref _bodiesWaitingForSlot), dueUtc, nowUtc, ref _analysisPassesInSlot, fleetSlots);
+        if (answer != ScheduledAnalysisAdmission.Answer.Starts)
         {
-            server.AnalysisYields++;
+            if (answer == ScheduledAnalysisAdmission.Answer.GivesWayToCollection)
+            {
+                server.AnalysisGaveWay++;
+            }
+            else
+            {
+                server.AnalysisShareFull++;
+            }
+
+            /* A pass that is never admitted writes no ANALYZED row, so this line is the trace of a server that is not
+               being analysed: once per interval, from one interval past due. */
+            if (ScheduledAnalysisAdmission.WarnsLate(dueUtc, nowUtc, interval, server.AnalysisLateWarnedUtc))
+            {
+                server.AnalysisLateWarnedUtc = nowUtc;
+                var lateMinutes = (long)(nowUtc - dueUtc).TotalMinutes;
+                var share = ScheduledAnalysisAdmission.SlotShare(fleetSlots);
+                _logger.LogWarning(
+                    "[{Server}] Scheduled analysis is {LateMinutes} minutes past due and has not started. Collection passes it did not start on: {GaveWay} giving way to waiting collection, {ShareFull} because the analysis share is full ({Share} of {Slots} fleet slots). It asks again on every collection pass",
+                    server.Config.DisplayName, lateMinutes, server.AnalysisGaveWay, server.AnalysisShareFull, share, fleetSlots);
+            }
+
             return;
         }
 
@@ -2297,13 +2325,16 @@ public sealed partial class DarlingWorker
         var analysisStarted = Stopwatch.GetTimestamp();
         try
         {
-            if (server.AnalysisYields > 0)
+            if (server.AnalysisGaveWay > 0 || server.AnalysisShareFull > 0)
             {
                 _logger.LogInformation(
-                    "[{Server}] Scheduled analysis starts after giving way to collection on {Yields} of this server's collection passes",
-                    server.Config.DisplayName, server.AnalysisYields);
-                server.AnalysisYields = 0;
+                    "[{Server}] Scheduled analysis starts. Collection passes it did not start on: {GaveWay} giving way to waiting collection, {ShareFull} because the analysis share is full",
+                    server.Config.DisplayName, server.AnalysisGaveWay, server.AnalysisShareFull);
+                server.AnalysisGaveWay = 0;
+                server.AnalysisShareFull = 0;
             }
+
+            server.AnalysisLateWarnedUtc = DateTime.MinValue;
 
             server.NextAnalysisDue = DateTime.UtcNow.AddMinutes(analysisIntervalMinutes);
 
