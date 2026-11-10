@@ -229,10 +229,11 @@ public sealed class ManagedWebGroupGuardTests
             return (response.Response.StatusCode, await Body(response));
         }
 
+        // The test server's response stream is a forward-only reader over what the pipeline wrote, so it is read from where it stands.
         static async Task<string> Body(HttpContext response)
         {
-            response.Response.Body.Position = 0;
-            return await new StreamReader(response.Response.Body).ReadToEndAsync();
+            using var reader = new StreamReader(response.Response.Body);
+            return await reader.ReadToEndAsync();
         }
     }
 
