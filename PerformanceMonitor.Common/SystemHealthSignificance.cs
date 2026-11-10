@@ -157,6 +157,24 @@ public static class SystemHealthSignificance
         string.Equals(record.Notification, BrokerShrinkNotification, StringComparison.Ordinal);
 
     /// <summary>
+    /// The significant memory-broker records of <paramref name="eventXmls"/>, in their order: the rows a Memory Broker grid shows. Each
+    /// event is shredded with <paramref name="shred"/> (<see cref="SystemHealthParser.ParseMemoryBroker"/> when none is given) and kept
+    /// when <see cref="IsSignificant(MemoryBrokerRecord)"/> says so. An event that does not shred is skipped.
+    /// </summary>
+    public static List<MemoryBrokerRecord> SignificantBrokerRecords(IEnumerable<string> eventXmls, Func<string, MemoryBrokerRecord?>? shred = null)
+    {
+        shred ??= SystemHealthParser.ParseMemoryBroker;
+        var records = new List<MemoryBrokerRecord>();
+        foreach (var xml in eventXmls)
+        {
+            if (shred(xml) is { } record && IsSignificant(record))
+                records.Add(record);
+        }
+
+        return records;
+    }
+
+    /// <summary>
     /// Counts memory-broker events by their <c>notification</c> value, as the MCP reads report what a window held
     /// before the gate (#7466): <c>{"GROW": 12, "SHRINK": 3, "STABLE": 40}</c>. An event with no notification counts
     /// under <see cref="NoBrokerNotification"/>. Sorted by value so the payload is stable.

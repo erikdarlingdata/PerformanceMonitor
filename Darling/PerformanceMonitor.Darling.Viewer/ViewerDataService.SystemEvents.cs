@@ -460,17 +460,9 @@ public sealed partial class ViewerDataService
         var xmls = await ReadSystemHealthEventXmlAsync(
             serverId, startUtc, endUtc, SystemHealthParser.MemoryBrokerEvent, cancellationToken);
 
-        return await Task.Run(() =>
-        {
-            var rows = new List<MemoryBrokerRow>();
-            foreach (var xml in xmls)
-            {
-                var record = SystemHealthParser.ParseMemoryBroker(xml);
-                if (record != null && SystemEventSignificance.IsSignificant(record))
-                    rows.Add(new MemoryBrokerRow(record));
-            }
-            return rows;
-        }, cancellationToken);
+        return await Task.Run(
+            () => SystemEventSignificance.SignificantBrokerRecords(xmls).Select(r => new MemoryBrokerRow(r)).ToList(),
+            cancellationToken);
     }
 
     // ── Memory Node OOM ──
