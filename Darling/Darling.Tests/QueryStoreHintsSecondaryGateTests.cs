@@ -122,7 +122,8 @@ public sealed class QueryStoreHintsSecondaryGateTests
 /// <summary>
 /// The same gate read from the store's own facts, not the seam: the newest <c>query_store_health</c> capture and the newest
 /// <c>ag_replica_role</c>. A capture decides while the <c>query_store_health</c> collector can refresh it on that server; when its
-/// effective schedule disables it, the capture is frozen and only a PRIMARY or SECONDARY role overrules it, so a failover reaches the
+/// effective schedule disables it, the capture is frozen: the collector's own run that captured no database keeps it counting
+/// (#8541), and otherwise only a PRIMARY or SECONDARY role overrules it, so a failover reaches the
 /// gate while a readable standby with no Availability Group role stays gated. The Query Store reads reach the same verdict.
 /// </summary>
 public sealed class QueryStoreHintsSecondaryGateLiveTests

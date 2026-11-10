@@ -28,8 +28,10 @@ public static class QueryStoreSnapshotStaleness
         first is null ? second : second is null ? first : first + " " + second;
 
     /// <summary>The note for a capture at <paramref name="capturedUtc"/> read at <paramref name="nowUtc"/>, or null while it is fresh.
-    /// <paramref name="collectorName"/> names the hourly collector that writes it.</summary>
-    public static string? Note(DateTime capturedUtc, DateTime nowUtc, string collectorName)
+    /// <paramref name="collectorName"/> names the hourly collector that writes it. <paramref name="collectorEnabled"/> is whether that
+    /// collector's schedule runs it on this server: a disabled collector takes no newer capture, and the note says that instead of
+    /// naming a cadence and sending the reader to look for a failed run.</summary>
+    public static string? Note(DateTime capturedUtc, DateTime nowUtc, string collectorName, bool collectorEnabled = true)
     {
         var age = nowUtc - capturedUtc;
         if (age < Threshold) return null;
@@ -38,6 +40,13 @@ public static class QueryStoreSnapshotStaleness
         var ago = days > 0
             ? string.Format(CultureInfo.InvariantCulture, "{0} day{1} {2} hour{3}", days, days == 1 ? "" : "s", hours, hours == 1 ? "" : "s")
             : string.Format(CultureInfo.InvariantCulture, "{0} hour{1}", hours, hours == 1 ? "" : "s");
+        if (!collectorEnabled)
+        {
+            return $"This is the newest capture, and it is {ago} old: the {collectorName} collector is disabled for this server, so no "
+                + "newer capture is taken and the state shown is the server's as of captured_at, not now. get_collector_schedules "
+                + "shows the schedule.";
+        }
+
         return $"This is the newest capture, and it is {ago} old: the {collectorName} collector runs hourly, so the state shown is "
             + "the server's as of captured_at, not now. Check get_collection_health for why no newer capture exists.";
     }

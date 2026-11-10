@@ -198,7 +198,11 @@ public sealed class DarlingMcpPlanCorrectionTools
                    end (as_of when given), so a read of a past instant is not graded against the present. */
                 automatic_tuning_note = QueryStoreSnapshotStaleness.Join(
                     tuning.Count > 0 ? await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken) : null,
-                    tuning.Count > 0 ? QueryStoreSnapshotStaleness.Note(DateTime.SpecifyKind(tuning.Max(t => t.CollectionTime), DateTimeKind.Utc), now, "plan_correction") : null),
+                    tuning.Count > 0
+                        ? QueryStoreSnapshotStaleness.Note(
+                            DateTime.SpecifyKind(tuning.Max(t => t.CollectionTime), DateTimeKind.Utc), now, "plan_correction",
+                            await DarlingGatedCollectorRows.CollectorEnabledAsync(postgres, resolved.ServerId, "plan_correction", cancellationToken))
+                        : null),
                 /* #3541 A3: the page described as a page. Newest-capture-first makes it a contiguous slice of
                    the window's tail, so the oldest stamp IS the reach; null when the window held no
                    recommendation rows and only the tuning snapshot answered. */
