@@ -115,7 +115,15 @@ public static class DataGridFillColumn
     /// <summary>Gives each fill column of <paramref name="grid"/> the viewport width the fixed columns leave, not below the floor. Public for a test that changes a column and fits again.</summary>
     public static void Fit(DataGrid grid)
     {
-        if (!grid.IsLoaded || s_fitting.Contains(grid))
+        if (s_fitting.Contains(grid))
+        {
+            return;
+        }
+
+        /* #8534: before the loaded check. Rows can arrive at a grid that is not loaded (its tab was left before the read landed), and the
+           grid is laid out again before Loaded is raised, so the scroll viewer has to scroll by row by then. */
+        ScrollByRowOnceRowsArrive(grid);
+        if (!grid.IsLoaded)
         {
             return;
         }
@@ -211,24 +219,47 @@ public static class DataGridFillColumn
                 presenter.MinWidth = total;
             }
         }
-        else if (s_emptyScroll.TryGetValue(scroll, out var before))
+        else
         {
-            s_emptyScroll.Remove(scroll);
-            if (before is BindingBase binding)
-            {
-                BindingOperations.SetBinding(scroll, ScrollViewer.CanContentScrollProperty, binding);
-            }
-            else if (before == DependencyProperty.UnsetValue)
-            {
-                scroll.ClearValue(ScrollViewer.CanContentScrollProperty);
-            }
-            else
-            {
-                scroll.SetValue(ScrollViewer.CanContentScrollProperty, before);
-            }
-
-            presenter.ClearValue(FrameworkElement.MinWidthProperty);
+            ScrollAsBefore(scroll);
         }
+    }
+
+    /// <summary>
+    /// A grid that scrolled by pixel while empty has rows: its scroll viewer goes back to what it held. This needs only the grid's template,
+    /// not a loaded grid, so it also runs for rows that arrive while the grid's tab is not selected.
+    /// </summary>
+    private static void ScrollByRowOnceRowsArrive(DataGrid grid)
+    {
+        if (grid.Items.Count > 0 && grid.Template?.FindName("DG_ScrollViewer", grid) is ScrollViewer scroll)
+        {
+            ScrollAsBefore(scroll);
+        }
+    }
+
+    /// <summary>Puts back what <paramref name="scroll"/> held before it was made to scroll by pixel, and lets its content be as narrow as it likes again. Nothing to do for a scroll viewer that was not.</summary>
+    private static void ScrollAsBefore(ScrollViewer scroll)
+    {
+        if (!s_emptyScroll.TryGetValue(scroll, out var before))
+        {
+            return;
+        }
+
+        s_emptyScroll.Remove(scroll);
+        if (before is BindingBase binding)
+        {
+            BindingOperations.SetBinding(scroll, ScrollViewer.CanContentScrollProperty, binding);
+        }
+        else if (before == DependencyProperty.UnsetValue)
+        {
+            scroll.ClearValue(ScrollViewer.CanContentScrollProperty);
+        }
+        else
+        {
+            scroll.SetValue(ScrollViewer.CanContentScrollProperty, before);
+        }
+
+        (scroll.Content as FrameworkElement)?.ClearValue(FrameworkElement.MinWidthProperty);
     }
 
     /// <summary>
