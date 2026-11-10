@@ -358,11 +358,12 @@ jobs:
 
           # NU1004 offers two remedies and one of them is dropping locked mode, which trades the closure pin
           # rather than restoring it. Dependabot moves Directory.Packages.props and does not regenerate the
-          # lock files that belong with it, so its weekly pull request lands on this step; naming the command
-          # that reconciles them is the difference between a red check that gets acted on and one that gets
-          # waited out. The message rides an ERR trap rather than a following step, so nothing can report
-          # green beside a red restore.
-          trap 'echo "::error title=Lock files disagree with Directory.Packages.props::Regenerate with '"'"'dotnet restore PerformanceMonitor.sln --force-evaluate'"'"' and commit every packages.lock.json it rewrites. Do not remove --locked-mode: the lock files are the only pin on the transitive closure, and the props diff does not show it moving."' ERR
+          # lock files that belong with it, so its weekly pull request lands on this step; naming the commands
+          # that reconcile them is the difference between a red check that gets acted on and one that gets
+          # waited out. There are two, because the WPF smoke harness is outside the solution and a solution
+          # restore does not rewrite its lock file. The message rides an ERR trap rather than a following
+          # step, so nothing can report green beside a red restore.
+          trap 'echo "::error title=Lock files disagree with Directory.Packages.props::Regenerate with '"'"'dotnet restore PerformanceMonitor.sln --force-evaluate'"'"' and, on Windows, '"'"'dotnet restore tools/ui-smoke-wpf/UiSmokeWpf.csproj --force-evaluate'"'"' (the WPF smoke harness is outside the solution, so the first command does not rewrite its lock file), and commit every packages.lock.json they rewrite. Do not remove --locked-mode: the lock files are the only pin on the transitive closure, and the props diff does not show it moving."' ERR
 
           dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode

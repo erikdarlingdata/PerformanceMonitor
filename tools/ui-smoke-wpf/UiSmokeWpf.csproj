@@ -1,7 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!-- #5745: the WPF smoke check. Starts the real Lite exe on a seeded data folder and walks it with FlaUI (UI Automation).
        Kept out of Lite.Tests and Darling.Tests on purpose (no test shard runs it; the wpf-smoke workflow does), and out of
-       PerformanceMonitor.sln. The lock file is covered by a locked-mode restore in build.yml
+       PerformanceMonitor.sln, so a solution restore does not rewrite its lock file: regenerate that with a restore of this
+       project. The lock file is covered by a locked-mode restore in build.yml and in pr.yml
        (LockedModeRestoreCoverageTests). -->
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>

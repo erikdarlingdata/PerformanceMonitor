@@ -4,14 +4,16 @@
 # NuGet projects commit packages.lock.json, and Dependabot does NOT regenerate them. It edits the one
 # PackageVersion line in Directory.Packages.props and leaves every lock file pinned to the old version, so
 # CI's locked-mode restore fails NU1004 before a test runs — measured on two consecutive pull requests, a
-# grouped patch-and-minor and a major (#3143). Every NuGet pull request from here therefore needs one command
+# grouped patch-and-minor and a major (#3143). Every NuGet pull request from here therefore needs two commands
 # before it can go green:
 #
 #     dotnet restore PerformanceMonitor.sln --force-evaluate
+#     dotnet restore tools/ui-smoke-wpf/UiSmokeWpf.csproj --force-evaluate
 #
-# then a commit of every packages.lock.json it rewrites. On a checkout with CRLF line endings that is only the
-# files whose CONTENT moved; a restore run on Linux or macOS also rewrites the rest with LF, and git
-# normalises those back on add.
+# then a commit of every packages.lock.json they rewrite. The second is the WPF smoke harness, which is outside
+# the solution, so the first does not rewrite its lock file (#8529); run it on Windows. On a checkout with CRLF
+# line endings that is only the files whose CONTENT moved; a restore run on Linux or macOS also rewrites the
+# rest with LF, and git normalises those back on add.
 #
 # This is a step the updater does not perform, not a workaround for something misconfigured here, and the
 # lock files are worth the step: they are the only pin on the TRANSITIVE closure, which no props diff shows
