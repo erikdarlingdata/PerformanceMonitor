@@ -1038,6 +1038,15 @@ def with_reads_traits(classes: "dict[str, dict[str, set[str]]]", root: str = ROO
 # When the changed file list is unknown (the API call failed, or it came back empty) nothing is skipped.
 
 SLOW_TRAIT = "Cost=Slow"
+# Two rules read _BUILD_INPUT_NAMES and _BUILD_INPUT_SUFFIXES: SlowIndex.skip below, and restore_input, through which
+# pr.yml's plan job decides whether the build job restores the WPF smoke harness in locked mode (harness_restore). A name or
+# suffix taken out for one rule is taken out for both. ci-plan-test.py's harness rows hold all eleven: the five suffixes and
+# the three names no suffix matches by what restore_input answers, and the three Directory.* names, which a suffix matches
+# too, by reading the set.
+#
+# CI runs those rows only on a "CI scripts only" plan (ci-plan.py's script_tests, #7743): documentation plus files under
+# .github/scripts/ that no area knows. A change to these constants that also touches any other file plans every area, and
+# that plan runs no Python check, so run `python -I .github/scripts/tests/ci-plan-test.py` by hand on such a change.
 _BUILD_INPUT_NAMES = {"directory.build.props", "directory.build.targets", "directory.packages.props", "global.json",
                       "nuget.config", "packages.lock.json"}
 _BUILD_INPUT_PATHS = {".github/workflows/build.yml", ".github/scripts/ci-select.py", ".github/darling-paths-filter.yml",
@@ -1132,6 +1141,40 @@ class SlowIndex:
                     out[suite].append(name)
             out[suite].sort()
         return out
+
+
+# ---------------------------------------------------------------------------------------------------------
+# The WPF smoke harness: pr.yml's build job restores it in locked mode when a restore input changed (#8529).
+# ---------------------------------------------------------------------------------------------------------
+#
+# tools/ui-smoke-wpf is outside the solution and referenced by no test project, so the locked-mode restores of the test
+# projects do not reach its lock file. pr.yml's plan job calls harness_restore and the build job restores the harness
+# when it answers true.
+
+HARNESS_DIR = "tools/ui-smoke-wpf/"
+
+
+def restore_input(path: str) -> bool:
+    """Whether a changed file can move what a locked-mode restore resolves: a csproj, props, targets or solution file,
+    global.json, nuget.config or a packages.lock.json, in any folder. The file name is matched in lower case."""
+    low = path.lower()
+    return low.rsplit("/", 1)[-1] in _BUILD_INPUT_NAMES or low.endswith(_BUILD_INPUT_SUFFIXES)
+
+
+def harness_restore(event: str, base_ref: str, plan_areas: str, files: list[str]) -> bool:
+    """Whether pr.yml's build job restores the WPF smoke harness in locked mode.
+
+    True when a changed file is a restore input or a file of the harness itself. Also true on every run whose file list
+    cannot narrow anything: an event that is not a pull request or a push, a plan of every area, a base other than dev,
+    an empty list, and a list that cannot be trusted (an unknown/ path)."""
+    return (
+        event not in ("pull_request", "push")
+        or plan_areas == "all"
+        or base_ref != "dev"
+        or not files
+        or any(f.startswith("unknown/") for f in files)
+        or any(restore_input(f) or f.startswith(HARNESS_DIR) for f in files)
+    )
 
 
 def changed_files_of_pr(repo: str, pr: str) -> list[str]:

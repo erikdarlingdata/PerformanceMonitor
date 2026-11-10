@@ -810,6 +810,15 @@ public sealed partial class DarlingWorker
         string.Equals(collectorName, DeadlocksCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
+    /// #8528: whether a dispatched collector reads one of the always-on capture sessions (deadlock, blocked process, client timeouts),
+    /// the sessions <see cref="EnsureAlwaysOnXeSessionsAsync"/> keeps and the Capture Down self-alert watches.
+    /// </summary>
+    internal static bool IsCaptureSessionCollector(string collectorName) =>
+        IsDeadlocksCollector(collectorName)
+        || string.Equals(collectorName, BlockedProcessReportCollector.Instance.Name, StringComparison.OrdinalIgnoreCase)
+        || IsAttentionCollector(collectorName);
+
+    /// <summary>
     /// #6893, #7639: the run of a deadlock or blocked-process collector whose last ensure could not create the session. It always ends by
     /// throwing the ensure's failure, so the row is PERMISSIONS or SESSION_MISSING. On Azure SQL Database the deadlock read goes ahead
     /// first: it still has the logical server's durable telemetry arm (the master item, no session needed, #2641), so a create refused

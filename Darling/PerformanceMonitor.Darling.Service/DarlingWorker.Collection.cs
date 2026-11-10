@@ -2178,7 +2178,7 @@ public sealed partial class DarlingWorker
                session dropped from outside comes back within the hour. */
             await EnsureAlwaysOnXeSessionsAsync(
                 server, runner, DateTime.UtcNow, _logger, stoppingToken,
-                attentionEnabled: StoreConfigProvider.ResolveSchedule("attention", server.Config.ServerId, _scheduleOverrides).Enabled);
+                attentionEnabled: AttentionCollectorEnabled(server));
 
             await RunDueCollectorsAsync(server, runner, stoppingToken);
 
@@ -2445,6 +2445,24 @@ public sealed partial class DarlingWorker
 
         return new LongQueryTraceInstanceGuard(ownName, keepers);
     }
+
+    /// <summary>
+    /// Whether the client-timeout (attention) collector is enabled for the server, the switch its always-on session follows
+    /// (<see cref="EnsureAlwaysOnXeSessionsAsync"/>): the sweep body's hourly ensure and the capture run's ensure after an identity
+    /// change (#8528) resolve it the same way.
+    /// </summary>
+    private bool AttentionCollectorEnabled(ServerLoopState server) =>
+        StoreConfigProvider.ResolveSchedule("attention", server.Config.ServerId, _scheduleOverrides).Enabled;
+
+    /// <summary>
+    /// #8528: what the fleet self-alert pass hands the Capture Down self-alert for a server: the loop state's report as of now, with
+    /// each capture collector's effective schedule, so a collector that is turned off is neither held nor judged and a started
+    /// session awaits its read for two of its collector's intervals at most.
+    /// </summary>
+    internal CaptureSessionEnsureReport CaptureSessionReportFor(ServerLoopState server) =>
+        server.CaptureSessionReportAt(
+            DateTime.UtcNow,
+            collectorName => StoreConfigProvider.ResolveSchedule(collectorName, server.Config.ServerId, _scheduleOverrides));
 
     /// <summary>
     /// #4961: a SQL Server restart stops the long-query trace's session, because the per-install session is created
