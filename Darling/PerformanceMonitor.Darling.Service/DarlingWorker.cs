@@ -1868,10 +1868,11 @@ LIMIT 1";
 
         /* #8539: how many of this server's bodies in a row left its due scheduled analysis pass unstarted, by reason: it
            gave way to a collection body waiting for a fleet slot, or the analysis share was full
-           (ScheduledAnalysisAdmission). And when the pass was last reported as more than one interval past due. All three
-           reset when the pass starts. Written only by the server's own body. */
+           (ScheduledAnalysisAdmission). When the first of them did, and when the pass was last reported as refused for
+           more than one interval. All four reset when the pass starts. Written only by the server's own body. */
         public int AnalysisGaveWay;
         public int AnalysisShareFull;
+        public DateTime AnalysisFirstRefusedUtc = DateTime.MinValue;
         public DateTime AnalysisLateWarnedUtc = DateTime.MinValue;
 
         /// <summary>#5597: the UTC ticks at which the connect body finished seeding this server's collector due stamps (0 =

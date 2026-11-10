@@ -14,17 +14,20 @@ namespace PerformanceMonitor.Darling.Service;
 /// <summary>
 /// #8539: when a due scheduled analysis pass may start. The pass runs inside its server's fleet collection slot, after the
 /// collectors, and holds the slot for its whole length, so every pass that is running is a slot collection cannot use. After
-/// a service restart every server's first pass comes due within a few minutes; on a store whose pass is long they took most
-/// of the slots at once, and collection bodies waited minutes for one and stepped over their one-minute slots. Two rules keep
-/// collection ahead of the passes:
+/// a service restart every server's first pass comes due within a few minutes. Two rules keep collection ahead of the
+/// passes:
 /// <list type="bullet">
-/// <item>passes hold at most <see cref="SlotShare"/> of the fleet's slots at once, so collection always has the rest;</item>
-/// <item>a due pass does not start while a collection body is waiting for a slot, for up to <see cref="YieldLimit"/> past
-/// its due time. After that it starts within the share, so a fleet whose bodies always queue is still analysed.</item>
+/// <item>passes hold at most <see cref="SlotShare"/> of the fleet's slots at once: half of them, and the only slot of a
+/// gate one wide, so collection has the rest on any gate wider than one;</item>
+/// <item>a due pass does not start while a collection body has waited <see cref="WaitFloor"/> or longer for a slot, for
+/// up to <see cref="YieldLimit"/> past its due time. After that it starts within the share, so a fleet whose bodies
+/// always wait that long is still analysed.</item>
 /// </list>
-/// A pass that does not start keeps its due stamp, and the server's next body asks again. Both rules count from the pass's
-/// due time, so a stamp that has none is given one by the first body that finds it due (<see cref="DueSince"/>). A pass
-/// that is still refused more than one analysis interval past its due time is reported once per interval
+/// A shorter wait holds nothing back. Every sweep tick launches a body for every server, so on a fleet larger than its
+/// gate all but the first few park for a moment on every tick, and that queue drains inside the tick and costs no
+/// collection slot. A pass that does not start keeps its due stamp, and the server's next body asks again. Both rules count
+/// from the pass's due time, so a stamp that has none is given one by the first body that finds it due
+/// (<see cref="DueSince"/>). A pass that has been refused for more than one analysis interval is reported once per interval
 /// (<see cref="WarnsLate"/>), so reaching the share is never silent.
 /// </summary>
 internal static class ScheduledAnalysisAdmission
@@ -35,7 +38,8 @@ internal static class ScheduledAnalysisAdmission
         /// <summary>It took a place in the share and runs.</summary>
         Starts,
 
-        /// <summary>A collection body is waiting for a fleet slot and the pass is under <see cref="YieldLimit"/> past due.</summary>
+        /// <summary>A collection body has waited <see cref="WaitFloor"/> or longer for a fleet slot and the pass is under
+        /// <see cref="YieldLimit"/> past due.</summary>
         GivesWayToCollection,
 
         /// <summary>Passes already hold the whole <see cref="SlotShare"/>.</summary>
@@ -71,24 +75,40 @@ internal static class ScheduledAnalysisAdmission
         return TryTakePlace(ref passesInSlot, fleetSlots) ? Answer.Starts : Answer.ShareIsFull;
     }
 
-    /// <summary>Whether a refused pass is reported now: it is more than one <paramref name="interval"/> past its due time,
-    /// and the last report is at least one interval old. A last report ahead of the clock (a clock that stepped back)
-    /// counts as old.</summary>
-    internal static bool WarnsLate(DateTime dueUtc, DateTime nowUtc, TimeSpan interval, DateTime lastWarnedUtc) =>
-        nowUtc - dueUtc > interval && (lastWarnedUtc > nowUtc || nowUtc - lastWarnedUtc >= interval);
+    /// <summary>Whether a refused pass is reported now: it has been refused for more than one <paramref name="interval"/>,
+    /// counted from its first refusal (<paramref name="refusedSinceUtc"/>), and the last report is at least one interval
+    /// old. The count starts at the first refusal and not at the due time, because a due time keeps ageing while no body
+    /// asks (collection paused, analysis turned off), and that time is not time the pass was refused. A last report ahead
+    /// of the clock (a clock that stepped back) counts as old.</summary>
+    internal static bool WarnsLate(DateTime refusedSinceUtc, DateTime nowUtc, TimeSpan interval, DateTime lastWarnedUtc) =>
+        nowUtc - refusedSinceUtc > interval && (lastWarnedUtc > nowUtc || nowUtc - lastWarnedUtc >= interval);
 
     /// <summary>The longest a due pass gives way to waiting collection bodies: the shortest analysis interval.</summary>
     internal static readonly TimeSpan YieldLimit = TimeSpan.FromMinutes(5);
 
+    /// <summary>The wait for a fleet slot a due pass gives way to: the wait a <c>collection_cycle</c> row names as the
+    /// cause of a lost slot (<see cref="DarlingCycleSkip.CauseFloorMs"/>, 30 s), two sweep ticks. The longest wait is read
+    /// and not the age of the queue, because a gate whose every tick drains just after the next one launches is never
+    /// empty while no body in it waits longer than a tick.</summary>
+    internal static readonly TimeSpan WaitFloor = TimeSpan.FromMilliseconds(DarlingCycleSkip.CauseFloorMs);
+
     /// <summary>How many of <paramref name="fleetSlots"/> scheduled passes may hold at once: half of them, and never fewer
-    /// than one.</summary>
+    /// than one, which on a gate one wide is the whole gate.</summary>
     internal static int SlotShare(int fleetSlots) => Math.Max(1, fleetSlots / 2);
 
-    /// <summary>Whether a pass due since <paramref name="dueUtc"/> gives way: a collection body is waiting for a fleet slot
-    /// (<paramref name="longestWait"/> is how long the one that has waited longest has waited, null when none is waiting)
-    /// and the pass is not yet <see cref="YieldLimit"/> past due.</summary>
+    /// <summary>
+    /// The longest a due pass is deferred in the ordinary run of things: <see cref="YieldLimit"/> of giving way, and then
+    /// one <paramref name="passBudget"/>, within which a pass that holds a place in a full share ends and frees it. The
+    /// PLAN_REGRESSION candidate reuse window is one cadence plus this, so the candidates a pass read are still served
+    /// while the pass that replaces them is deferred. A pass kept out of the share for longer leaves them to expire.
+    /// </summary>
+    internal static TimeSpan OrdinaryDeferral(TimeSpan passBudget) => YieldLimit + passBudget;
+
+    /// <summary>Whether a pass due since <paramref name="dueUtc"/> gives way: a collection body has waited
+    /// <see cref="WaitFloor"/> or longer for a fleet slot (<paramref name="longestWait"/> is how long the one that has
+    /// waited longest has waited, null when none is waiting) and the pass is not yet <see cref="YieldLimit"/> past due.</summary>
     internal static bool GivesWay(TimeSpan? longestWait, DateTime dueUtc, DateTime nowUtc) =>
-        longestWait is not null && nowUtc - dueUtc < YieldLimit;
+        longestWait >= WaitFloor && nowUtc - dueUtc < YieldLimit;
 
     /// <summary>
     /// Takes one of the share's places for a pass that is starting, or returns false when passes already hold the whole

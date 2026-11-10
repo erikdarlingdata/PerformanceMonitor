@@ -2122,8 +2122,8 @@ public sealed partial class DarlingWorker
            cancel records nothing (the throw skips the line below), like the permit it never took. */
         var gateWaitStarted = Stopwatch.GetTimestamp();
 
-        /* #8539: counted for as long as it waits, a cancelled wait included, so a due scheduled analysis pass gives way to
-           it rather than take a slot it is waiting for. */
+        /* #8539: kept with the time it started waiting for as long as it waits, a cancelled wait included, so a due
+           scheduled analysis pass gives way once this wait is long enough to cost a collection slot. */
         var waiter = SlotWaiters.Enter(DateTime.UtcNow);
         try
         {
@@ -2244,7 +2244,7 @@ public sealed partial class DarlingWorker
         CancellationToken stoppingToken)
     {
         /* AN3: the scheduled analysis pipeline, per-server. The cadence, the enabled gate, and the notify
-           gate are now control-plane knobs read LIVE from config.Analysis (a reload takes effect on the next
+           gate are control-plane settings read LIVE from config.Analysis (a reload takes effect on the next
            tick). When analysis is disabled the pass is skipped and NextAnalysisDue is left in the past, so
            re-enabling runs immediately. The next-due stamp advances up front (Lite's scheduler shape), so a
            timed-out pass is skipped, not retried immediately. Delivery is gated on the master switch
@@ -2256,9 +2256,11 @@ public sealed partial class DarlingWorker
            body reads its length as a candidate cause of any slot this server steps over. */
         server.LastAnalysisMs = 0;
         var analysisIntervalMinutes = Math.Clamp(config.Analysis.IntervalMinutes, MinAnalysisIntervalMinutes, MaxAnalysisIntervalMinutes);
-        /* #5812: an MCP or viewer call reuses PLAN_REGRESSION candidates for one analysis cadence, never
-           longer than the scheduled pass that replaces them. */
-        PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RefreshAfter = TimeSpan.FromMinutes(analysisIntervalMinutes);
+        /* #5812, #8539: an MCP or viewer call reuses PLAN_REGRESSION candidates for one analysis cadence plus the longest
+           the scheduled pass that replaces them is ordinarily deferred (the give-way limit, then one pass budget for a
+           place in a full share), so the entry does not expire in front of a pass that is giving way. A pass kept out of
+           the share for longer leaves it to expire, and the call reads live. */
+        PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RefreshAfter = TimeSpan.FromMinutes(analysisIntervalMinutes) + ScheduledAnalysisAdmission.OrdinaryDeferral(s_analysisTimeout);
         if (config.Analysis.Enabled && StampIsDue(server.NextAnalysisDue, TimeSpan.FromMinutes(analysisIntervalMinutes), DateTime.UtcNow))
         {
             await RunDueScheduledAnalysisAsync(
@@ -2281,14 +2283,14 @@ public sealed partial class DarlingWorker
         CancellationToken stoppingToken)
     {
         /* #8539: the pass holds this body's fleet collection slot for its whole length, so it starts only when that
-           does not hold collection back: no body is waiting for a slot (for up to the yield limit past the pass's due
-           time), and passes hold less than their share of the slots. A pass that does not start keeps its stamp, so it
-           is still due on this server's next body. */
+           does not hold collection back: no body has waited the floor or longer for a slot (for up to the yield limit
+           past the pass's due time), and passes hold less than their share of the slots. A pass that does not start
+           keeps its stamp, so it is still due on this server's next body. */
         var interval = TimeSpan.FromMinutes(analysisIntervalMinutes);
 
         /* A stamp more than one interval ahead of the clock is due at once and has no due time of its own, and neither
            has a stamp never set. The first body that finds either due gives it one and writes it back, so the give-way
-           limit and the late warning count from that body on every later ask. Any other stamp is written back as it is. */
+           limit counts from that body on every later ask. Any other stamp is written back as it is. */
         var dueUtc = ScheduledAnalysisAdmission.DueSince(server.NextAnalysisDue, nowUtc, interval);
         server.NextAnalysisDue = dueUtc;
 
@@ -2296,6 +2298,11 @@ public sealed partial class DarlingWorker
         var answer = ScheduledAnalysisAdmission.Ask(SlotWaiters.LongestWait(nowUtc), dueUtc, nowUtc, ref _analysisPassesInSlot, fleetSlots);
         if (answer != ScheduledAnalysisAdmission.Answer.Starts)
         {
+            if (server.AnalysisGaveWay == 0 && server.AnalysisShareFull == 0)
+            {
+                server.AnalysisFirstRefusedUtc = nowUtc;
+            }
+
             if (answer == ScheduledAnalysisAdmission.Answer.GivesWayToCollection)
             {
                 server.AnalysisGaveWay++;
@@ -2306,8 +2313,9 @@ public sealed partial class DarlingWorker
             }
 
             /* A pass that is never admitted writes no ANALYZED row, so this line is the trace of a server that is not
-               being analysed: once per interval, from one interval past due. */
-            if (ScheduledAnalysisAdmission.WarnsLate(dueUtc, nowUtc, interval, server.AnalysisLateWarnedUtc))
+               being analysed: once per interval, from one interval after its first refusal. The minutes it gives are
+               from the due time. */
+            if (ScheduledAnalysisAdmission.WarnsLate(server.AnalysisFirstRefusedUtc, nowUtc, interval, server.AnalysisLateWarnedUtc))
             {
                 server.AnalysisLateWarnedUtc = nowUtc;
                 var lateMinutes = (long)(nowUtc - dueUtc).TotalMinutes;
@@ -2334,21 +2342,18 @@ public sealed partial class DarlingWorker
                 server.AnalysisShareFull = 0;
             }
 
+            server.AnalysisFirstRefusedUtc = DateTime.MinValue;
             server.AnalysisLateWarnedUtc = DateTime.MinValue;
 
-            server.NextAnalysisDue = DateTime.UtcNow.AddMinutes(analysisIntervalMinutes);
+            /* Due again one interval after the ask that started it. */
+            server.NextAnalysisDue = nowUtc.AddMinutes(analysisIntervalMinutes);
 
-            /* Every engine takes the pass (#3542). Until the PostgreSQL-target analysis engine existed,
-               this site gated on the target engine and wrote a tombstone into analysis_state for a
-               PostgreSQL server instead of running: the pipeline was SQL-Server-shaped, its data-span
-               gate read wait_stats, and a PostgreSQL server_id would have sat at "0 hours, still
-               collecting" for the life of the deployment. That gate is gone, and the invariant that
-               replaced it lives one layer down: the pass ROUTES BY THE REGISTRY'S engine_kind INSIDE
-               DarlingAnalysisService (its ResolveEngineAsync picks the PostgreSQL-target component set
-               and the pg_database_stats span gate for a postgres / aurora-postgres row), so the worker
-               no longer knows or cares which engine it is scheduling. The first real pass then
-               overwrites any tombstone row still standing with the honest state (D7 — the lazy
-               overwrite, no migration). */
+            /* Every engine takes the pass (#3542), and nothing here gates on the target engine: the pass ROUTES BY
+               THE REGISTRY'S engine_kind INSIDE DarlingAnalysisService (its ResolveEngineAsync picks the
+               PostgreSQL-target component set and the pg_database_stats span gate for a postgres / aurora-postgres
+               row), so the worker does not know which engine it is scheduling. A tombstone row in analysis_state
+               from a build that did not analyse PostgreSQL servers is overwritten by the first real pass with the
+               honest state (D7 — the lazy overwrite, no migration). */
             if (ScheduledAnalysisOverride is { } standIn)
             {
                 await standIn(server, stoppingToken);
