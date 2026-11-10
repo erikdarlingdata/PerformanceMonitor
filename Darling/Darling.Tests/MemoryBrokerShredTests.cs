@@ -103,6 +103,40 @@ public sealed class MemoryBrokerShredTests
         Assert.Equal(new[] { "12:00:29|29|MEMORYBROKER_FOR_CACHE|SHRINK" }, kept);
     }
 
+    /// <summary>
+    /// A broker whose name ends in S puts an S straight before an angle bracket in every one of its events, in the broker value, which sits
+    /// before the notification. That is not a split notification, so its STABLE and GROW events do not reach the shred.
+    /// </summary>
+    [Fact]
+    public void ABrokerWhoseNameEndsInS_SendsOnlyItsShrinkEventToTheShred()
+    {
+        const string broker = "MEMORYBROKER_FOR_HASHED_DATA_PAGES";
+        string[] window = [Event(40, "STABLE", broker), Event(39, "GROW", broker), Event(38, "SHRINK", broker), Event(37, "STABLE", broker)];
+        var shredded = new List<string>();
+
+        var kept = SystemHealthSignificance.SignificantBrokerRecords(window, xml =>
+        {
+            shredded.Add(xml);
+            return SystemHealthParser.ParseMemoryBroker(xml);
+        }).Select(Key).ToList();
+
+        Assert.True(shredded.SequenceEqual(new[] { window[2] }),
+            $"{shredded.Count} of the 4 events of a broker whose name ends in S reached the shred, where only its SHRINK event can be one");
+        Assert.Equal(new[] { "12:00:38|38|MEMORYBROKER_FOR_HASHED_DATA_PAGES|SHRINK" }, kept);
+    }
+
+    /// <summary>A notification split by markup is still shredded and kept when the broker before it ends in S.</summary>
+    [Fact]
+    public void ASplitNotificationAfterABrokerWhoseNameEndsInS_IsStillShreddedAndKept()
+    {
+        string[] window = [Event(36, "GROW", "MEMORYBROKER_FOR_HASHED_DATA_PAGES"), Event(35, "SHR<!-- split -->INK", "MEMORYBROKER_FOR_HASHED_DATA_PAGES")];
+
+        var kept = SystemHealthSignificance.SignificantBrokerRecords(window).Select(Key).ToList();
+
+        Assert.Equal(ShredEveryEvent(window), kept);
+        Assert.Equal(new[] { "12:00:35|35|MEMORYBROKER_FOR_HASHED_DATA_PAGES|SHRINK" }, kept);
+    }
+
     [Fact]
     public void AnEventThatNamesShrinkSomewhereElse_IsShredded_AndLeftOutByTheGate()
     {
