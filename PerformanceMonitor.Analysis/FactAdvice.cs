@@ -183,9 +183,8 @@ public static class FactAdvice
 
     /// <summary>
     /// <see cref="GetForFinding(AnalysisFinding)"/> with the read-time forcing and automatic-plan-correction
-    /// state of the finding's force-plan targets (#8542), so the generated T-SQL gives a statement only
-    /// for an eligible target. A null <paramref name="forcePlanStates"/> judges each target on the
-    /// evidence it carries alone.
+    /// state of the finding's force-plan targets (#8542), so the generated T-SQL gives no statement for
+    /// a target that state blocks. A null <paramref name="forcePlanStates"/> withholds nothing.
     /// </summary>
     public static AdviceBlock? GetForFinding(
         AnalysisFinding finding,
