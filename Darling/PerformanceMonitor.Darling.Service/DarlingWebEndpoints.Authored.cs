@@ -106,6 +106,7 @@ public static partial class DarlingWebEndpoints
                 var authorizedId = await AuthorizedWebServerAsync(postgres, context, catalogTags);
                 if (authorizedId is null)
                 {
+                    run.Complete(ReadOutcome.Ok);
                     return ErrorResult("Server data is unavailable to this token.", StatusCodes.Status403Forbidden);
                 }
 

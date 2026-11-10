@@ -283,6 +283,26 @@ try {
     out.keyGone = sdata["darling.local.viewGroups.v1"] === undefined;
     local.reload();
     out.afterReload = local.isViewGroupCollapsed("folder:Secret plans");
+  } else if (scenario === "scope") {
+    // The shipped scope verdict (app.js): only a session that says scoped gates a route or hides a nav link; no session and a
+    // failed probe render as before.
+    const vm = await import("node:vm");
+    const full = fs.readFileSync(path.join(jsDir, "app.js"), "utf8").replace(/\r\n/g, "\n");
+    const a = full.indexOf("const scopedRoutes = new Set(");
+    const b = full.indexOf("function route(opts)", a);
+    if (a < 0 || b < a) throw new Error("app.js layout changed: scopedRoutes");
+    const ctx = vm.createContext({ Set });
+    vm.runInContext(full.slice(a, b).replace(/^export /gm, "") + "\nthis.scopeVerdict = scopeVerdict;", ctx);
+    const v = (s, r) => ctx.scopeVerdict(s, r);
+    out.probeFailedFleet = v({ can_edit: false, probe_failed: true }, "fleet").blocked;
+    out.probeFailedAdmin = v({ can_edit: false, probe_failed: true }, "admin").blocked;
+    out.probeFailedNavAdmin = v({ can_edit: false, probe_failed: true }, "fleet").hidesNav("admin");
+    out.noSessionAdmin = v(null, "admin").blocked;
+    out.scopedAdmin = v({ scoped: true }, "admin").blocked;
+    out.scopedFleet = v({ scoped: true }, "fleet").blocked;
+    out.scopedNavAdmin = v({ scoped: true }, "fleet").hidesNav("admin");
+    out.scopedNavFleet = v({ scoped: true }, "fleet").hidesNav("fleet");
+    out.unscopedNavAdmin = v({ scoped: false, can_edit: true }, "fleet").hidesNav("admin");
   } else if (scenario === "expired") {
     // The shipped app.js pieces (the view list, the fleet sidebar and the signed-out takeover), run against stand-ins: once the
     // session is expired, nothing repaints the old session's lists, and the cached list is dropped.

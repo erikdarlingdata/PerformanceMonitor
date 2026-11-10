@@ -704,13 +704,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     try
                     {
                         int? scopedServerId = null;
+                        (int ServerId, string ServerName, string DisplayName)? scopedServer = null;
                         int[]? allowedServerIds = null;
                         if (allowedTagIds is not null)
                         {
                             allowedServerIds = await AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
                             if (!IsScopedFleetRead(name) || !string.IsNullOrWhiteSpace(Server(context)))
                             {
-                                scopedServerId = await AuthorizedWebServerAsync(postgres, context, allowedTagIds, allowedServerIds);
+                                scopedServer = await AuthorizedWebServerRowAsync(postgres, context, allowedTagIds, allowedServerIds);
+                                scopedServerId = scopedServer?.ServerId;
                                 if (scopedServerId is null)
                                 {
                                     /* The fixed sentence, swept like every other answer, with the seat's 403; never the registry's names. */
@@ -734,10 +736,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                         if (allowedServerIds is not null)
                         {
                             result = await DarlingServerResolver.ReadWebScopeAsync(allowedServerIds, allowedTagIds!,
-                                () => scopedServerId is int serverId
-                                    ? DarlingServerResolver.ReadWebServerAsync(serverId, () => handler(context, postgres, analysis))
+                                () => scopedServer is { } pinnedServer
+                                    ? DarlingServerResolver.ReadWebServerAsync(pinnedServer, () => handler(context, postgres, analysis))
                                     : handler(context, postgres, analysis));
-                            if (result.TrimStart().StartsWith('{') && System.Text.Json.Nodes.JsonNode.Parse(result) is System.Text.Json.Nodes.JsonObject scopedResult)
+                            /* Only an answer that writes separately_monitored_databases (the fleet overview and the blocking reads) is reshaped;
+                               every other answer is handed on byte for byte. */
+                            if (result.Contains("\"separately_monitored_databases\"", StringComparison.Ordinal)
+                                && System.Text.Json.Nodes.JsonNode.Parse(result) is System.Text.Json.Nodes.JsonObject scopedResult)
                             {
                                 scopedResult.Remove("separately_monitored_databases");
                                 result = scopedResult.ToJsonString();
@@ -756,10 +761,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                            start. Added to the web mirror only, never to the tool, so the MCP payloads are unchanged. A
                            failed probe returns the tool's answer as it was. */
                         var askedHours = QueryInt(context, "hours", "hours_back", 0);
-                        if (allowedServerIds is null)
+                        /* A scoped per-server read takes the note too: its name is canonical and inside the grant by now, so the probe names
+                           no other server. The fleet form of a scoped read stays without it, where the probe would range over the fleet. */
+                        if (allowedServerIds is null || scopedServer is not null)
                         {
-                            result = await WebDataStartNote.AddAsync(
-                                postgres, name, Server(context), askedHours > 0 ? askedHours : null, askedAsOf, result, logger, context.RequestAborted);
+                            var noted = result;
+                            Func<Task<string>> addNote = async () => await WebDataStartNote.AddAsync(
+                                postgres, name, Server(context), askedHours > 0 ? askedHours : null, askedAsOf, noted, logger, context.RequestAborted);
+                            result = allowedServerIds is null
+                                ? await addNote()
+                                : await DarlingServerResolver.ReadWebScopeAsync(allowedServerIds, allowedTagIds!,
+                                    () => DarlingServerResolver.ReadWebServerAsync(scopedServer.GetValueOrDefault(), addNote));
                         }
                     }
                     catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)

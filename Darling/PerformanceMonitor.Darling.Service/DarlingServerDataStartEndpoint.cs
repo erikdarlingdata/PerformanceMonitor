@@ -57,25 +57,20 @@ internal static class DarlingServerDataStartEndpoint
         {
             var stopwatch = Stopwatch.StartNew();
             var allowedTagIds = DarlingWebSeat.FromContext(context).AllowedTagIds;
-            var scopedServerId = allowedTagIds is null
+            var scopedServer = allowedTagIds is null
                 ? null
-                : await DarlingWebEndpoints.AuthorizedWebServerAsync(postgres, context, allowedTagIds);
-            if (allowedTagIds is not null && scopedServerId is null)
+                : await DarlingWebEndpoints.AuthorizedWebServerRowAsync(postgres, context, allowedTagIds);
+            if (allowedTagIds is not null && scopedServer is null)
             {
                 return DarlingWebStatementSweep.JsonText("""{"error":"Server data is unavailable to this token."}""",
                     Route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
             }
 
             var serverName = DarlingWebEndpoints.First(context, "server") ?? DarlingWebEndpoints.First(context, "server_name");
-            var (resolved, error) = scopedServerId is int permittedId
-                ? await DarlingServerResolver.ReadWebServerAsync(permittedId,
-                    () => DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, context.RequestAborted))
+            /* The authorized registry row is the resolution: the scoped form reads the registry once, in AuthorizedWebServerRowAsync. */
+            var (resolved, error) = scopedServer is { } permitted
+                ? (permitted, (string?)null)
                 : await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, context.RequestAborted);
-            if (scopedServerId is int authorizedId && (error is not null || resolved.ServerId != authorizedId))
-            {
-                return DarlingWebStatementSweep.JsonText("""{"error":"Server data is unavailable to this token."}""",
-                    Route, logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, StatusCodes.Status403Forbidden);
-            }
 
             if (error is not null)
             {

@@ -62,6 +62,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal static class DarlingServerResolver
 {
     private static readonly AsyncLocal<int?> WebServerId = new();
+    private static readonly AsyncLocal<(int ServerId, string ServerName, string DisplayName)?> WebPinnedServer = new();
     private static readonly AsyncLocal<(IReadOnlyList<int> Ids, IReadOnlyList<int> Tags)?> WebScope = new();
 
     internal static IReadOnlyList<int>? WebAllowedServerIds => WebScope.Value?.Ids;
@@ -78,6 +79,22 @@ internal static class DarlingServerResolver
         finally
         {
             WebScope.Value = previous;
+        }
+    }
+
+    /// <summary>Keep every resolution in an authorized web read on the same server, and answer the exact canonical name from this row
+    /// without a registry read.</summary>
+    internal static async Task<T> ReadWebServerAsync<T>((int ServerId, string ServerName, string DisplayName) server, Func<Task<T>> read)
+    {
+        var previous = WebPinnedServer.Value;
+        WebPinnedServer.Value = server;
+        try
+        {
+            return await ReadWebServerAsync(server.ServerId, read);
+        }
+        finally
+        {
+            WebPinnedServer.Value = previous;
         }
     }
 
@@ -131,6 +148,13 @@ ORDER BY server_name";
         NameClash nameClash = NameClash.StoredNameWins)
     #pragma warning restore CA1068
     {
+        /* An authorized web read already resolved this exact name against the registry: answer from that row instead of reading it again. */
+        if (WebPinnedServer.Value is { } pinned && WebServerId.Value == pinned.ServerId && pinned.ServerName.Length > 0
+            && string.Equals(serverName?.Trim(), pinned.ServerName, StringComparison.OrdinalIgnoreCase))
+        {
+            return (pinned, null);
+        }
+
         var (servers, fault) = await LoadEnabledOrFaultAsync(postgres, cancellationToken);
         if (fault is not null)
         {

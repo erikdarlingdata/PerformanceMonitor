@@ -13,6 +13,7 @@
  * API reports it (band = Warning, status text verbatim) — never the red offline treatment.
  */
 
+import { peekSession } from "../views-api.js";
 import { holdsPage, keepScroll, noteRefreshError, replaceNodes, showPage, showRefreshError } from "../refresh-in-place.js";
 import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, windowPhrase, bandClass, rollupTextId, tagPill, frontDoor, currentStore } from "../util.js";
 import { frontDoorStores, healthBandClass, healthLabel, currentFirst, currentMark } from "../store-picker.js";
@@ -353,7 +354,7 @@ function showStoreFailure(body, inPlace, message) {
 }
 
 function storeFleetBody(d, store, own) {
-  if (!d.total_servers) return [emptyStrip("No servers are enabled in this store yet.")];
+  if (!d.total_servers) return [emptyStrip(peekSession()?.scoped ? "No servers are in this token's scope." : "No servers are enabled in this store yet.")];
   const cards = (d.cards || []).slice().sort(SORTS.severity);
   /* #8095: the single-store page's reading aids, inside the section: the problem list, its overflow line and the updated stamp. The controls
      (Search, the attention filter, grouping, Silence) stay out, as renderStoreFleets says. The overflow line is a count alone here, because
@@ -420,7 +421,9 @@ export async function renderFleet(main, opts) {
 
   if (!d.total_servers) {
     nodes.push(
-      emptyStrip("No servers are enabled yet. Add one in the desktop Viewer (Add Server) or with --add-server, and cards appear here as collection begins.")
+      emptyStrip(peekSession()?.scoped
+        ? "No servers are in this token's scope."
+        : "No servers are enabled yet. Add one in the desktop Viewer (Add Server) or with --add-server, and cards appear here as collection begins.")
     );
     showPage(main, "fleet", nodes);
     return;

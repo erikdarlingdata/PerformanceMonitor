@@ -268,6 +268,24 @@ public sealed class CustomViewFoldersWebTests
         Assert.False(r.GetProperty("afterReload").GetBoolean());
     }
 
+    /// <summary>#7988: the shell gates routes and hides nav links only for a session that says scoped. No session yet and a failed
+    /// probe are an unknown seat: the page renders as before (#7928), and the server answers whatever the seat may not read.</summary>
+    [Fact]
+    public void TheShell_GatesRoutesAndNavOnlyForAScopedSession_AndRendersWhenTheProbeFailed()
+    {
+        if (!TryRun("scope", out var r)) return;
+
+        Assert.False(r.GetProperty("probeFailedFleet").GetBoolean());
+        Assert.False(r.GetProperty("probeFailedAdmin").GetBoolean());
+        Assert.False(r.GetProperty("probeFailedNavAdmin").GetBoolean());
+        Assert.False(r.GetProperty("noSessionAdmin").GetBoolean());
+        Assert.True(r.GetProperty("scopedAdmin").GetBoolean());
+        Assert.False(r.GetProperty("scopedFleet").GetBoolean());
+        Assert.True(r.GetProperty("scopedNavAdmin").GetBoolean());
+        Assert.False(r.GetProperty("scopedNavFleet").GetBoolean());
+        Assert.False(r.GetProperty("unscopedNavAdmin").GetBoolean());
+    }
+
     [Fact]
     public void ASignedOutPage_NeverRepaintsTheOldSessionsLists_AndDropsTheCachedViewList()
     {

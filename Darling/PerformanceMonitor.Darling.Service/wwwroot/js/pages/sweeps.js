@@ -30,7 +30,7 @@ import { gridTable } from "../panels.js";
 import { pageRangePicker, windowOfSpec } from "../page-range.js";
 import { relativeSpec } from "../time-range.js";
 import { showPageWhenSettled } from "../refresh-in-place.js";
-import { getSession } from "../views-api.js";
+import { getSession, peekSession } from "../views-api.js";
 
 /* The watch-item state vocabulary — the label each FleetSweepWatchStateMachine state owes an operator. The
    KEYS are the machine's own constants; Darling.Tests.FleetSweepWebFeedTests parses THIS OBJECT and compares
@@ -98,6 +98,8 @@ export async function renderSweeps(main, opts) {
 /* The effective cadence, read from the same get_alert_settings the Settings window edits. Display only:
    the web feed reads the knob, it never writes it (lane 2's V124 owns the writes). */
 async function renderCadence(meta) {
+  /* The alert settings are outside a scoped seat's reads; the cadence line is left out rather than asked for and refused. */
+  if (peekSession()?.scoped) return;
   const res = await readTool("get_alert_settings", {});
   const fs = res.kind === "data" && res.data ? res.data.fleet_sweep : null;
   if (!fs) return;
