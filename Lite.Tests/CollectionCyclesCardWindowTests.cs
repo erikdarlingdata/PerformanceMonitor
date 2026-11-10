@@ -132,9 +132,17 @@ public sealed class CollectionCyclesCardWindowTests
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
-    /// <summary>Runs the tab's own Collection Health refresh to its end on the STA thread.</summary>
-    private static void Refresh(ServerTab tab) =>
-        Pump((Task)Invoke(tab, "RefreshCollectionHealthAsync", 24, null, null, CancellationToken.None)!);
+    /// <summary>
+    /// Runs the tab's own Collection Health refresh to its end on the STA thread. The refresh starts under the dispatcher's context, as the
+    /// app starts it from the tab's own handlers, so its code after each await resumes on the tab's thread and writes the card. Started
+    /// with no context it resumes on a worker, the first write to the card throws, and the refresh logs that and leaves the card as it was.
+    /// </summary>
+    private static void Refresh(ServerTab tab)
+    {
+        Task refresh = Task.CompletedTask;
+        StaTestThread.WithDispatcherContext(() => refresh = (Task)Invoke(tab, "RefreshCollectionHealthAsync", 24, null, null, CancellationToken.None)!);
+        Pump(refresh);
+    }
 
     private static void Seed(DuckDbInitializer duckDb, int serverId, long logId, string collector, DateTime collectionTimeUtc, string error)
     {
