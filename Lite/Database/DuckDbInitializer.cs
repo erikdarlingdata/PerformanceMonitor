@@ -254,7 +254,20 @@ public partial class DuckDbInitializer : IDisposable
         CancellationToken cancellationToken,
         [CallerMemberName] string? holderMember = null, [CallerFilePath] string? holderFile = null)
     {
+        /* Counted as this initializer's waiting reader from the ask to the hold (#8490). */
         Interlocked.Increment(ref _waitingReaders);
+        try
+        {
+            return AcquireReadLockCore(holderMember, holderFile, cancellationToken);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _waitingReaders);
+        }
+    }
+
+    private IDisposable AcquireReadLockCore(string? holderMember, string? holderFile, CancellationToken cancellationToken)
+    {
         try
         {
             if (!cancellationToken.CanBeCanceled)
@@ -277,10 +290,6 @@ public partial class DuckDbInitializer : IDisposable
                protected" case, not a bug to surface. Either way, return a no-op disposable so the caller
                proceeds normally. */
             return NoOpDisposable.Instance;
-        }
-        finally
-        {
-            Interlocked.Decrement(ref _waitingReaders);
         }
         return new LockReleaser(s_dbLock, write: false, StoreLockHolders.Register(holderMember, holderFile, write: false));
     }
@@ -737,23 +746,20 @@ public partial class DuckDbInitializer : IDisposable
         /* Counted as this initializer's parked writer while it waits (#8490), so a test that holds the lock against the cycle can
            tell this cycle's wait from another initializer's. Zero wait outside tests, so the count is never raised there. */
         Interlocked.Increment(ref _parkedWriters);
-        bool trimWriteHeld;
         try
         {
-            trimWriteHeld = s_dbLock.TryEnterWriteLock(TrimLockWaitForTests);
+            if (!s_dbLock.TryEnterWriteLock(TrimLockWaitForTests))
+            {
+                RecordTrimSkip();
+                _logger?.LogDebug(
+                    "Trim cycle: skipped, write lock unavailable ({BeforeMb:F0} MiB in use)",
+                    beforeBytes.Value / (1024.0 * 1024.0));
+                return;
+            }
         }
         finally
         {
             Interlocked.Decrement(ref _parkedWriters);
-        }
-
-        if (!trimWriteHeld)
-        {
-            RecordTrimSkip();
-            _logger?.LogDebug(
-                "Trim cycle: skipped, write lock unavailable ({BeforeMb:F0} MiB in use)",
-                beforeBytes.Value / (1024.0 * 1024.0));
-            return;
         }
         var writeHoldId = StoreLockHolders.Register(nameof(RunMemoryTrimCycle), "DuckDbInitializer.cs", write: true);
 
