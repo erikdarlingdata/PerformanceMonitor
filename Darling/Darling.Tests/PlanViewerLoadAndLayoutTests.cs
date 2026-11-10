@@ -14,6 +14,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitor.Ui;
 using Xunit;
@@ -298,6 +299,237 @@ public sealed class PlanViewerLoadAndLayoutTests
         });
 
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    [Fact]
+    public void NarrowingAWideViewerTo900_WithBothPanelsOpen_FitsThePanelsAgain()
+    {
+        var problems = new List<string>();
+        StaTestThread.Run(async () =>
+        {
+            var control = NewControl();
+            try
+            {
+                var host = Host(control, 1600, 600);
+                await control.LoadPlan(Plan(Statement(1, Scan(0)), Statement(2, Scan(0))), "Stored Plan");
+                LayOut(host);
+                ClickFirstOperator(control);
+                LayOut(host);
+
+                var statements = (FrameworkElement)control.FindName("StatementsPanel");
+                var properties = (FrameworkElement)control.FindName("PropertiesPanel");
+                var scroller = (ScrollViewer)control.FindName("PlanScrollViewer");
+                Assert.Equal(Visibility.Visible, statements.Visibility);
+                Assert.Equal(Visibility.Visible, properties.Visibility);
+                Assert.True(Math.Abs(statements.ActualWidth - 450) < 0.5, $"the Statements panel is {statements.ActualWidth:F0} px wide in a 1600 px viewer");
+
+                StaTestThread.Step("narrowing the viewer to 900 px");
+                host.Width = 900;
+                LayOut(host);
+
+                var found = new List<string>();
+                var propertiesRight = properties.TransformToAncestor(control).TransformBounds(new Rect(properties.RenderSize)).Right;
+                if (propertiesRight > 900 + 0.5)
+                    found.Add($"the Properties panel ends at {propertiesRight:F0} px in a viewer narrowed from 1600 px to 900 px: {propertiesRight - 900:F0} px of it is past the viewer's edge");
+                if (statements.ActualWidth > 450 - 0.5)
+                    found.Add($"the Statements panel is still {statements.ActualWidth:F0} px wide in a viewer narrowed from 1600 px to 900 px: it narrows to make room for the canvas");
+                if (statements.ActualWidth < StatementsMinimum - 0.5)
+                    found.Add($"the Statements panel is {statements.ActualWidth:F0} px wide; it narrows no further than {StatementsMinimum} px");
+                if (properties.ActualWidth < PropertiesMinimum - 0.5)
+                    found.Add($"the Properties panel is {properties.ActualWidth:F0} px wide; it narrows no further than {PropertiesMinimum} px");
+                if (scroller.ActualWidth < CanvasMinimum - 0.5)
+                    found.Add($"the plan canvas is {scroller.ActualWidth:F0} px wide in a viewer narrowed from 1600 px to 900 px: it keeps {CanvasMinimum} px");
+                problems.AddRange(found);
+            }
+            finally
+            {
+                control.Cleanup();
+            }
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>A 600 px viewer is the plan viewer in either app's 900 px minimum window with the sidebar open. It cannot hold
+    /// both panels at their minimums and a 240 px canvas, so one panel shows at a time, the one opened last, and the
+    /// Statements button brings the list back.</summary>
+    [Fact]
+    public void InAViewerTooNarrowForBothPanels_ThePanelOpenedLastShows_AndTheCanvasKeepsItsRoom()
+    {
+        var problems = new List<string>();
+        StaTestThread.Run(async () =>
+        {
+            var control = NewControl();
+            try
+            {
+                var host = Host(control, 600, 600);
+                await control.LoadPlan(Plan(Statement(1, Scan(0)), Statement(2, Scan(0))), "Stored Plan");
+                LayOut(host);
+                var statements = (FrameworkElement)control.FindName("StatementsPanel");
+                var properties = (FrameworkElement)control.FindName("PropertiesPanel");
+                var scroller = (ScrollViewer)control.FindName("PlanScrollViewer");
+                Assert.Equal(Visibility.Visible, statements.Visibility);
+
+                StaTestThread.Step("clicking the rendered operator, so the Properties panel opens");
+                ClickFirstOperator(control);
+                LayOut(host);
+                Assert.Equal(Visibility.Visible, properties.Visibility);
+
+                var found = new List<string>();
+                if (statements.Visibility == Visibility.Visible)
+                    found.Add($"the Statements panel ({statements.ActualWidth:F0} px) stays open beside the Properties panel ({properties.ActualWidth:F0} px) in a 600 px viewer, which cannot hold both and the canvas");
+                if (((UIElement)control.FindName("StatementsButton")).Visibility != Visibility.Visible)
+                    found.Add("the Statements button is gone with its panel: nothing reopens the statement list");
+                if (scroller.ActualWidth < CanvasMinimum - 0.5)
+                    found.Add($"the plan canvas is {scroller.ActualWidth:F0} px wide in a 600 px viewer with an operator selected: it keeps {CanvasMinimum} px");
+                var first = OperatorBorders(control).First();
+                var drawn = first.TransformToAncestor(scroller).TransformBounds(new Rect(first.RenderSize));
+                if (drawn.Left < -0.5 || drawn.Right > scroller.ActualWidth + 0.5)
+                    found.Add($"the first operator spans {drawn.Left:F0} to {drawn.Right:F0} px in a canvas {scroller.ActualWidth:F0} px wide: no operator shows whole");
+                var propertiesRight = properties.TransformToAncestor(control).TransformBounds(new Rect(properties.RenderSize)).Right;
+                if (propertiesRight > 600 + 0.5)
+                    found.Add($"the Properties panel ends at {propertiesRight:F0} px in a 600 px viewer");
+
+                StaTestThread.Step("the Statements button, with the Properties panel open");
+                Click((Button)control.FindName("StatementsButton"));
+                LayOut(host);
+                if (statements.Visibility != Visibility.Visible)
+                    found.Add("the Statements button did not reopen the statement list");
+                if (statements.Visibility == Visibility.Visible && properties.Visibility == Visibility.Visible)
+                    found.Add($"the Properties panel ({properties.ActualWidth:F0} px) stays open beside the reopened Statements panel ({statements.ActualWidth:F0} px) in a 600 px viewer");
+                if (scroller.ActualWidth < CanvasMinimum - 0.5)
+                    found.Add($"the plan canvas is {scroller.ActualWidth:F0} px wide in a 600 px viewer with the statement list reopened: it keeps {CanvasMinimum} px");
+                problems.AddRange(found);
+            }
+            finally
+            {
+                control.Cleanup();
+            }
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    [Fact]
+    public void AClickOnTheStatementsSplitter_IsNotADraggedWidth()
+    {
+        var problems = new List<string>();
+        StaTestThread.Run(async () =>
+        {
+            var control = NewControl();
+            try
+            {
+                var host = Host(control, 900, 600);
+                await control.LoadPlan(Plan(Statement(1, Scan(0)), Statement(2, Scan(0))), "Stored Plan");
+                LayOut(host);
+                ClickFirstOperator(control);
+                LayOut(host);
+                var statements = (FrameworkElement)control.FindName("StatementsPanel");
+                Assert.True(statements.ActualWidth < 450 - 0.5, $"the Statements panel is {statements.ActualWidth:F0} px wide beside the Properties panel in a 900 px viewer; this test starts from a narrowed panel");
+
+                StaTestThread.Step("a mouse-down and mouse-up on the Statements splitter with no movement");
+                ((GridSplitter)control.FindName("StatementsSplitter")).RaiseEvent(new DragCompletedEventArgs(0, 0, false));
+                host.Width = 1600;
+                LayOut(host);
+
+                if (Math.Abs(statements.ActualWidth - 450) > 0.5)
+                    problems.Add($"the Statements panel is {statements.ActualWidth:F0} px wide in a 1600 px viewer after a click on its splitter at 900 px: a click that moves nothing is not a dragged width, so the panel takes its 450 px");
+            }
+            finally
+            {
+                control.Cleanup();
+            }
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>A plan over the parser's size limit and a plan with no statement to draw are plans all the same: the viewer
+    /// cannot draw them, and Save .sqlplan is what takes them to a tool that can.</summary>
+    [Fact]
+    public void SaveStaysEnabled_ForAPlanTheViewerDoesNotDraw()
+    {
+        var problems = new List<string>();
+        StaTestThread.Run(async () =>
+        {
+            var control = NewControl();
+            try
+            {
+                var host = Host(control, 1000, 700);
+
+                StaTestThread.Step("LoadPlan: a plan over the parser's size limit");
+                await control.LoadPlan(Plan(Statement(1, Scan(0))) + new string(' ', 16_777_217), "Stored Plan");
+                LayOut(host);
+                Assert.Contains("size limit", ((TextBlock)control.FindName("EmptyStateTitle")).Text, StringComparison.Ordinal);
+                problems.AddRange(SaveAloneIsEnabled(control, "for a plan over the parser's size limit"));
+
+                StaTestThread.Step("LoadPlan: a plan with no statement");
+                await control.LoadPlan(Plan(), "Stored Plan");
+                LayOut(host);
+                Assert.Empty(OperatorBorders(control));
+                problems.AddRange(SaveAloneIsEnabled(control, "for a plan with no statement to draw"));
+
+                StaTestThread.Step("LoadPlan: text that does not parse");
+                await control.LoadPlan("not a plan", "Pasted Plan");
+                LayOut(host);
+                if (ToolbarButton(control, "Save .sqlplan").IsEnabled)
+                    problems.Add("after text that does not parse, the \"Save .sqlplan\" button is enabled");
+            }
+            finally
+            {
+                control.Cleanup();
+            }
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>A withheld plan is not drawn, and Save stays enabled for it: its click is what says why that plan is not
+    /// saved.</summary>
+    [Fact]
+    public void AWithheldPlan_KeepsSaveEnabled_AndDisablesTheRest()
+    {
+        var problems = new List<string>();
+        StaTestThread.Run(async () =>
+        {
+            var control = NewControl();
+            try
+            {
+                var host = Host(control, 1000, 700);
+                Assert.True(WithheldPlanGuard.WithheldSentence(SensitiveStatements.PlaceholderText) is not null, "the placeholder text is not the withheld-plan marker");
+                await control.LoadPlan(Plan(Statement(1, Scan(0))), "Stored Plan");
+                LayOut(host);
+                problems.AddRange(ButtonsNotIn(control, enabled: true, "with a plan drawn"));
+
+                StaTestThread.Step("LoadPlan: the withheld-plan marker, over the plan on screen");
+                await control.LoadPlan(SensitiveStatements.PlaceholderText, "Stored Plan");
+                LayOut(host);
+                Assert.Empty(OperatorBorders(control));
+                problems.AddRange(SaveAloneIsEnabled(control, "for a withheld plan"));
+
+                StaTestThread.Step("LoadPlan: a plan that parses, over the withheld one");
+                await control.LoadPlan(Plan(Statement(1, Scan(3))), "Pasted Plan");
+                LayOut(host);
+                problems.AddRange(ButtonsNotIn(control, enabled: true, "with a plan drawn after a withheld one"));
+            }
+            finally
+            {
+                control.Cleanup();
+            }
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>What is wrong when Save .sqlplan is not the one enabled button of the five.</summary>
+    private static IEnumerable<string> SaveAloneIsEnabled(PlanViewerControl control, string when)
+    {
+        foreach (var content in new[] { "+", "\u2212", "Fit", "Save .sqlplan", "Minimap" })
+        {
+            var expected = content == "Save .sqlplan";
+            if (ToolbarButton(control, content).IsEnabled != expected)
+                yield return $"{when}, the \"{content}\" button is {(expected ? "disabled" : "enabled")}";
+        }
     }
 
     /// <summary>The toolbar buttons that act on a drawn plan and are not in the <paramref name="enabled"/> state.</summary>
