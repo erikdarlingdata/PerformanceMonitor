@@ -130,6 +130,8 @@ public sealed class LongQueryTraceRunRowLiveTests
             };
             var server = new DarlingWorker.ServerLoopState { Config = config, Runtime = runtime };
             server.CaptureEnsure.Deadlock = new DarlingXeSessions.XeEnsureFailure("The deadlock create was refused in every database.", IsPermission: false);
+            /* The fault is the connect-time ensure's, so the sessions count as ensured: a run with the stamp clear would ensure again first (#8528). */
+            server.XeSessionsEnsuredAtUtc = DateTime.UtcNow;
 
             var runner = new DarlingCollectorRunner(
                 postgres,

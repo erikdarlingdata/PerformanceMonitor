@@ -42,7 +42,8 @@ internal static class DarlingAlwaysOnXeSessions
         AlwaysOnXeSessionKind kind,
         string captureName,
         ILogger? logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        DarlingXeSessions.CaptureEnsureOutcome? outcome = null)
     {
         try
         {
@@ -51,6 +52,13 @@ internal static class DarlingAlwaysOnXeSessions
             var result = await AlwaysOnXeAzureEnsure.RunAsync(database, kind, ownName, current, cancellationToken, ringBufferMaxEvents: runner.RingBufferMaxEvents);
             runner.AlwaysOnChoices.Set(ServerKey(server), databaseName, kind, result.Choice);
             runner.AlwaysOnChoices.ClearReadOnlyRefusal(ServerKey(server), databaseName, kind);
+
+            /* #8528: a session this pass created or started was not running when the collector last read it, so its newest row is from
+               before the start. The Capture Down self-alert holds its verdict for the collector until it reads again. */
+            if (result.Change is AlwaysOnXeChange.Created or AlwaysOnXeChange.CreatedWithoutStatementText or AlwaysOnXeChange.Started)
+            {
+                outcome?.Started.Add(DarlingXeSessions.CaptureEnsureOutcome.CollectorNameOf(kind));
+            }
 
             switch (result.Change)
             {
@@ -106,7 +114,7 @@ internal static class DarlingAlwaysOnXeSessions
                not a permission), so the caller can name the databases that refused it in the run note, as Lite does; the caller's
                PERMISSIONS rule still looks at IsPermission alone. */
             return kind == AlwaysOnXeSessionKind.Attention && DarlingXeSessions.AttentionFaultFor(ex) is { } attentionFault
-                ? new DarlingXeSessions.XeEnsureFailure(attentionFault.Message, IsPermission: true)
+                ? new DarlingXeSessions.XeEnsureFailure(attentionFault.Message, IsPermission: true) { ServerText = ex.Message }
                 : DarlingXeSessions.CaptureFaultFor(ex, captureName);
         }
     }

@@ -33,3 +33,20 @@ public interface IDeliveredFireReader
     Task<DeliveredFireHistory?> GetOpenDeliveredFiresAsync(
         string serverKey, string metricName, string resolutionTitle, CancellationToken cancellationToken = default);
 }
+
+/// <summary>
+/// The titles an alert's episode closes under, for the readers that look for an open episode: a fire is open when no row
+/// under any of them is newer than it. Capture Down closes as "Capture Restored" when the captures are running again and as
+/// "Capture Cleared" when they left the alert some other way, so both of its readers take the pair from here.
+/// </summary>
+public static class AlertClosingTitles
+{
+    /// <summary>The two titles a Capture Down episode closes under.</summary>
+    public static readonly string[] CaptureDown = { "Capture Restored", "Capture Cleared" };
+
+    /// <summary>Every title the metric's episodes close under, given the one being written now.</summary>
+    public static string[] For(string metricName, string resolutionTitle) =>
+        string.Equals(metricName, "Capture Down", StringComparison.Ordinal) && Array.IndexOf(CaptureDown, resolutionTitle) >= 0
+            ? CaptureDown
+            : new[] { resolutionTitle };
+}
