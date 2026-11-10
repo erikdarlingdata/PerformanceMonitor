@@ -52,8 +52,9 @@ public sealed class RecoveryRouteSeverityTests
         new("7", "SQL01", metric, value, threshold, Context: null, DetailText: null,
             NumericCurrentValue: null, NumericThresholdValue: null, Muted: false, Severity: severity);
 
-    /// <summary>A deliverer over the issue's two PagerDuty routes with auto-resolve on, capturing every PagerDuty post.</summary>
-    private static (DarlingAlertDeliverer Deliverer, List<string> Posted) PagerDutyDeliverer()
+    /// <summary>A deliverer over the issue's two PagerDuty routes with auto-resolve on, capturing every PagerDuty post. The history
+    /// store is <paramref name="history"/>, so a second deliverer over the same store stands for the service after a restart.</summary>
+    private static (DarlingAlertDeliverer Deliverer, List<string> Posted) PagerDutyDeliverer(IAlertHistoryStore? history = null)
     {
         var config = new DarlingConfig();
         config.Webhooks.PagerDutyAutoResolve = true;
@@ -64,7 +65,7 @@ public sealed class RecoveryRouteSeverityTests
         };
         var settings = new DarlingAlertSettings(config);
         var posted = new List<string>();
-        var history = new CapturingHistoryStore();
+        history ??= new CapturingHistoryStore();
         var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history)
         {
             PostPagerDutyAsyncOverride = (_, payload) =>
@@ -221,5 +222,45 @@ public sealed class RecoveryRouteSeverityTests
             context: null, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal(new[] { ("resolve", "rk-critical") }, posted.Select(Posted).ToArray());
+    }
+
+    /// <summary>After a restart emptied the deliverer's memory, the recovery still routes at the tier its firing was delivered at, read
+    /// from the firing's open history row: the firing's delivered rows written after the last row stored under the recovery's own
+    /// name. The history outlives the deliverer, as the store does; the second deliverer is the service after the restart.</summary>
+    [Theory]
+    [InlineData("AG Replica Disconnected", "DISCONNECTED", "AG Replica Reconnected", "CONNECTED")]
+    [InlineData("Server Unreachable", "Login timeout", "Server Restored", "Online")]
+    public async Task ARestartedDeliverer_RoutesTheRecoveryAtTheTierTheFiringsHistoryRowCarries(
+        string firing, string firingValue, string recovery, string recoveryValue)
+    {
+        var history = new GenericWebhookStatusDedupTests.HistoryBackedStore();
+        var (before, postedBefore) = PagerDutyDeliverer(history);
+        await before.DeliverAsync(Outcome(firing, firingValue, "CONNECTED", AlertSeverityLevel.Warning), TestContext.Current.CancellationToken);
+        Assert.Equal(new[] { ("trigger", "rk-warning") }, postedBefore.Select(Posted).ToArray());
+
+        var (after, postedAfter) = PagerDutyDeliverer(history);
+        await after.DeliverAsync(Outcome(recovery, recoveryValue, "CONNECTED", null), TestContext.Current.CancellationToken);
+
+        Assert.Equal(new[] { ("resolve", "rk-warning") }, postedAfter.Select(Posted).ToArray());
+    }
+
+    /// <summary>The boundary of the history read is the recovery's own row: a firing the recovery already closed before the restart is
+    /// not read again, so a recovery that arrives with no open firing takes the fallback, its firing's tierless rule, Critical.</summary>
+    [Theory]
+    [InlineData("AG Replica Disconnected", "DISCONNECTED", "AG Replica Reconnected", "CONNECTED")]
+    [InlineData("Server Unreachable", "Login timeout", "Server Restored", "Online")]
+    public async Task ARestartedDeliverer_DoesNotReadAFiringTheRecoveryAlreadyClosed(
+        string firing, string firingValue, string recovery, string recoveryValue)
+    {
+        var history = new GenericWebhookStatusDedupTests.HistoryBackedStore();
+        var (before, postedBefore) = PagerDutyDeliverer(history);
+        await before.DeliverAsync(Outcome(firing, firingValue, "CONNECTED", AlertSeverityLevel.Warning), TestContext.Current.CancellationToken);
+        await before.DeliverAsync(Outcome(recovery, recoveryValue, "CONNECTED", null), TestContext.Current.CancellationToken);
+        Assert.Equal(new[] { ("trigger", "rk-warning"), ("resolve", "rk-warning") }, postedBefore.Select(Posted).ToArray());
+
+        var (after, postedAfter) = PagerDutyDeliverer(history);
+        await after.DeliverAsync(Outcome(recovery, recoveryValue, "CONNECTED", null), TestContext.Current.CancellationToken);
+
+        Assert.Equal(new[] { ("resolve", "rk-critical") }, postedAfter.Select(Posted).ToArray());
     }
 }
