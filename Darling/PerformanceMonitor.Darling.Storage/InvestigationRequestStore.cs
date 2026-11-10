@@ -145,11 +145,14 @@ WHERE route_id = $1
   AND trigger_kind <> 'chat'
   AND opened_at > $2 - interval '1 day'";
 
+    /* #8578: server_name is the registry's display name for server_id when the server is registered, else the name the caller passed. An alert
+       carries the display name or the host name and an analysis finding the storage name (host[:database][:RO]), so one server opened its requests
+       under two names. server_id 0 (an external source) has no registry row and keeps the caller's label, which is also its join key (FindJoinSql). */
     internal static readonly string OpenSql = @"
 INSERT INTO config.investigation_requests
     (request_id, route_id, server_id, server_name, family, first_metric, first_dedup_key, story_path_hash,
      first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes, autonomy_level, max_severity, trigger_kind)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9 + " + GroupingWindowSql + @", $10, $10 + make_interval(mins => $11), $12,
+VALUES ($1, $2, $3, COALESCE((SELECT COALESCE(sv.display_name, sv.server_name) FROM collect.servers AS sv WHERE sv.server_id = $3), $4), $5, $6, $7, $8, $9, $9, $9 + " + GroupingWindowSql + @", $10, $10 + make_interval(mins => $11), $12,
         " + StampLevelSql(6, 13) + ", $14, $15)";
 
     internal const string AlertRowsSql = @"

@@ -13,6 +13,8 @@ const jsDir = process.argv[2];
 
 /* The nodes the page called focus() on, so a scenario can tell whether the focus was moved into the reason box (#7987). */
 const focusCalls = [];
+/* #8578: the scrollIntoView calls the page made. */
+const scrollCalls = [];
 
 class FakeNode {
   constructor(tag, text) {
@@ -57,6 +59,26 @@ class FakeNode {
   }
   focus() {
     focusCalls.push(this);
+  }
+  /* #8578: the page scrolls a picked request's heading into view; the stand-in records the call and its options. */
+  scrollIntoView(options) {
+    scrollCalls.push({ node: this, options });
+  }
+  querySelector(selector) {
+    const cls = selector.replace(/^\./, "");
+    const find = (n) => {
+      if ((" " + n.className + " ").includes(" " + cls + " ")) return n;
+      for (const c of n.children) {
+        const hit = find(c);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    for (const c of this.children) {
+      const hit = find(c);
+      if (hit) return hit;
+    }
+    return null;
   }
   closest() {
     return null;
@@ -533,6 +555,43 @@ try {
   await settle();
   out.oneNoChange = { text: slotText(), links: all(main, "a").map((a) => a.attrs.href) };
   out.queryIds = [requestIdFromQuery("request=" + A), requestIdFromQuery("request=%20" + B + "%20&x=1"), requestIdFromQuery(""), requestIdFromQuery("request="), requestIdFromQuery("other=1")];
+
+  /* #8578: one server, two requests. The analysis finding's request was opened with the host name and the alert's with the display name;
+     every row carries the registry's display_name. Both rows draw the same Server text, the host name rides the cell's title, and a
+     pick moves the focus to the pane's heading and scrolls it into view (a poll's rebuild of the open pane does neither). */
+  const HOST = "SQLPRODOLTP01.corp.example.com:SalesDatabaseWithALongName:RO";
+  const mk = (id, name) => ({ request_id: id, route_id: 3, server_id: 7, server_name: name, display_name: "Prod OLTP", instance_name: "SQLPRODOLTP01",
+    family: "blocking", first_metric: "Blocking", alert_count: 1, state: "open", opened_at: "2026-10-14T09:00:00Z", expires_at: "2026-10-14T13:00:00Z",
+    claimed_by: null, lease_until: null, claim_count: 0, reported_at: null });
+  const FROM_FINDING = "33333333-3333-3333-3333-333333333333";
+  const FROM_ALERT = "44444444-4444-4444-4444-444444444444";
+  bodies.list_investigation_requests = { status: "ok", requests_returned: 2, truncated: false, requests: [mk(FROM_FINDING, HOST), mk(FROM_ALERT, "Prod OLTP")] };
+  bodies.get_investigation_reports = { ...reportsA, requests: [], reports: [], journal: [], brief: null };
+  renderInvestigations(main);
+  await settle();
+  const serverCell = (tr) => tr.children[2];
+  const spanOf = (td) => all(td, "span")[0];
+  focusCalls.length = 0;
+  scrollCalls.length = 0;
+  const serverRows = rowsOf(main);
+  out.sameServer = {
+    texts: serverRows.map((tr) => serverCell(tr).textContent),
+    titles: serverRows.map((tr) => (spanOf(serverCell(tr)) || { attrs: {} }).attrs.title || ""),
+    cellClass: serverCell(serverRows[0]).className,
+  };
+  serverRows[0].handlers.click({ type: "click" });
+  await settle();
+  const headingOf = (calls) => calls.map((n) => ({ cls: n.className, text: n.textContent, tabindex: n.attrs.tabindex }));
+  out.revealed = {
+    focused: headingOf(focusCalls),
+    scrolled: scrollCalls.map((s) => ({ cls: s.node.className, text: s.node.textContent, options: s.options })),
+    pane: slotText(),
+  };
+  focusCalls.length = 0;
+  scrollCalls.length = 0;
+  renderInvestigations(main);
+  await settle();
+  out.revealedByPoll = { focused: focusCalls.length, scrolled: scrollCalls.length, hasDetail: slotText().includes("Request on Prod OLTP") };
 
   out.columns = REQUEST_COLUMNS.map((c) => c.key);
   out.claimedAt = claimedAt(reportsA.journal, A);

@@ -815,7 +815,9 @@ export const READ_FIELDS = {
       columns: [
         { key: "opened_at", label: "Opened", format: "time" },
         { key: "state", label: "State" },
-        { key: "server_name", label: "Server" },
+        /* #8578: the registry's display name, which every row carries (it falls back to the name the request was opened with). server_name is the
+           label the opening alert or finding carried, so requests opened before that was one name show one server under two. */
+        { key: "display_name", label: "Server" },
         { key: "first_metric", label: "Metric" },
         { key: "family", label: "Family" },
         { key: "alert_count", label: "Alerts", format: "int" },

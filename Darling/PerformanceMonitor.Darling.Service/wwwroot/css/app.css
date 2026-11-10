@@ -1551,6 +1551,10 @@ table.data td.rec-text { min-width: 16rem; }
 .jh-detail:empty { display: none; }
 .jh-detail { background: var(--bg-dark); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; margin: 8px 0; }
 .jh-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+/* #8578: a picked request's heading is scrolled to and focused; it clears the 48px top bar of a narrow window and the status bar at the bottom. */
+.jh-detail-title { scroll-margin: 56px 0 48px; }
+.jh-detail-title:focus { outline: none; }
+.jh-detail-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .jh-detail-message { margin: 8px 0 0; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* The Investigations page (#5904) reuses the jh-detail pane, head and message above; these two only space its sections and its report blocks. */
 .inv-section { margin: 10px 0 0; }
