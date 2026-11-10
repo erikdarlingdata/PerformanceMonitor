@@ -215,6 +215,22 @@ public sealed class PgTargetZeroHistoryTests
         Assert.DoesNotContain("measured ZERO", unstampedBlock.Investigation, StringComparison.Ordinal);
     }
 
+    /// <summary>#8532: the deadlock rate the sentence gives beside its count is not written as zero when it is too
+    /// small for the sentence's one decimal place.</summary>
+    [Fact]
+    public void ComposeDeadlockRatio_ARateTooSmallForOneDecimalPlace_ReadsLessThanATenth()
+    {
+        var bucket = Trusted();
+        var perHour = bucket.Mean * (AnomalyThresholds.PgRatioAnomalyThreshold + 1);
+        var fact = DeadlockFact(Build(bucket, (long)Math.Ceiling(perHour * ObservedHours), perHour)!);
+        fact.Metadata["current_rate_per_hour"] = 0.03;
+
+        var block = Compose(fact);
+
+        Assert.Contains("The deadlock rate reached <0.1/hour", block.Headline, StringComparison.Ordinal);
+        Assert.Contains("<0.1 per observed hour", block.Investigation, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ComposeDeadlockRatio_TrustedBucket_KeepsTheRatioWording()
     {
