@@ -245,7 +245,7 @@ public partial class WebhookAlertService
                it is the live settings. */
             var delivery = _settings.SnapshotForDelivery();
             var route = NotificationRouter.Resolve(metricName, delivery.NotificationRoutes, delivery, NotificationRouter.ParseServerId(serverId),
-                AlertSeverity.RouteLevelOf(metricName, context?.SeverityOverride));
+                AlertSeverity.RouteTierOf(metricName, context));
 
             /* #5469: the PagerDuty auto-resolve behaviour reaches the cooldown only when PagerDuty will
                actually be sent this alert: the flag on AND a destination for this metric. The flag is read

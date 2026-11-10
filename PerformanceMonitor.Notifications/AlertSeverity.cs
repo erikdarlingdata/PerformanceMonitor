@@ -29,9 +29,31 @@ public enum AlertSeverityLevel
 internal static class AlertSeverity
 {
     /// <summary>The tier a notification route's severity filter sees for an alert (#6928): the tier graded at the fire site
-    /// when it carries one, else the metric's own badge (red is Critical, every other badge is Warning).</summary>
-    public static AlertSeverityLevel RouteLevelOf(string metricName, AlertSeverityLevel? overrideLevel) =>
-        overrideLevel ?? (ForMetric(metricName).HexColor == "#DC2626" ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning);
+    /// when it carries one, else the metric's own badge (red is Critical, every other badge is Warning).
+    /// <para>#8525: a recovery the product delivers as an alert of its own (<see cref="AlertFamily.RecoveryPairs"/>) has no tier
+    /// of its own, its badge is RESOLVED green, so with no tier handed in it routes exactly as a tierless firing of the name it
+    /// closes does: one badge rule for both edges, and the recovery lands where that firing did. The tier the firing was in fact
+    /// delivered at comes in through <see cref="RouteTierOf"/> when the sender has it on record.</para></summary>
+    public static AlertSeverityLevel RouteLevelOf(string metricName, AlertSeverityLevel? overrideLevel)
+    {
+        if (overrideLevel is { } fireSite)
+        {
+            return fireSite;
+        }
+
+        if (AlertFamily.RecoveryPairs.TryGetValue(metricName, out var firing))
+        {
+            return RouteLevelOf(firing, null);
+        }
+
+        return ForMetric(metricName).HexColor == "#DC2626" ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning;
+    }
+
+    /// <summary>The tier the senders hand a route's severity filter for an alert (#8525): the route-only tier the context carries
+    /// (<see cref="AlertContext.RouteSeverity"/>, the tier a recovery's firing was delivered at) when it has one, else
+    /// <see cref="RouteLevelOf"/> over the fire site's tier (<see cref="AlertContext.SeverityOverride"/>) and the badge.</summary>
+    public static AlertSeverityLevel RouteTierOf(string metricName, AlertContext? context) =>
+        context?.RouteSeverity ?? RouteLevelOf(metricName, context?.SeverityOverride);
 
     /// <param name="overrideLevel">
     /// When non-null, forces the tier regardless of <paramref name="metricName"/> — for metrics
