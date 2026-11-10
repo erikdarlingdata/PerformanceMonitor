@@ -349,6 +349,111 @@ public sealed class CaptureDownEnsureFindingsTests
         Assert.Contains("refused the permission", cleared.DetailText, StringComparison.Ordinal);
         Assert.Contains("The Deadlock capture is running again", cleared.DetailText, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task AnActiveCaptureDown_WhoseCollectorsNextRowDidNotReadTheSession_StaysOpen()
+    {
+        var h = new DarlingSelfAlertTests.Harness();
+        var e = h.Build();
+        await CaptureDownSeams.ApplyAsync(e, ServerId, Name, new[] { "Blocking" }, CaptureDownSeams.Report(), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The next run's read timed out: its row is ERROR, the read names no capture, and nothing has read the session. */
+        await CaptureDownSeams.ApplyAsync(e, ServerId, Name, Array.Empty<string>(),
+            CaptureDownFindingSeams.WithStatus(CaptureDownFindingSeams.Report(), "blocked_process_report", "ERROR"), Ct);
+
+        Assert.DoesNotContain(h.History.Records, r => AlertMetricClassifier.IsResolution(r.MetricName));
+
+        /* The run after it finds the session stopped again: the same outage, not a second page. */
+        await CaptureDownSeams.ApplyAsync(e, ServerId, Name, new[] { "Blocking" }, CaptureDownSeams.Report(), Ct);
+
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* A row that read the running session closes it. */
+        await CaptureDownSeams.ApplyAsync(e, ServerId, Name, Array.Empty<string>(),
+            CaptureDownFindingSeams.WithStatus(CaptureDownFindingSeams.Report(), "blocked_process_report", "SUCCESS"), Ct);
+
+        var restored = Assert.Single(h.History.Records, r => AlertMetricClassifier.IsResolution(r.MetricName));
+        Assert.Equal("Capture Restored", restored.MetricName);
+    }
+
+    [Fact]
+    public async Task APermissionsRow_WithNoEnsureFailureOnRecord_ClosesAsCleared()
+    {
+        var h = new DarlingSelfAlertTests.Harness();
+        var e = h.Build();
+        await CaptureDownSeams.ApplyAsync(e, ServerId, Name, new[] { "Blocking" }, CaptureDownSeams.Report(), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The read itself was denied: the row is PERMISSIONS and the ensure has no failure of its own to remember. */
+        await CaptureDownSeams.ApplyAsync(e, ServerId, Name, Array.Empty<string>(),
+            CaptureDownFindingSeams.WithStatus(CaptureDownFindingSeams.Report(), "blocked_process_report", "PERMISSIONS"), Ct);
+
+        var cleared = Assert.Single(h.History.Records, r => AlertMetricClassifier.IsResolution(r.MetricName));
+        Assert.Equal("Capture Cleared", cleared.MetricName);
+        Assert.Contains("PERMISSIONS", cleared.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("running again", cleared.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OnAzureSqlDatabase_TheQuoteIsTheServersTextAlone()
+    {
+        var h = new DarlingSelfAlertTests.Harness();
+        var e = h.Build();
+        var refused = new InvalidOperationException("Cannot start the event session.");
+        AlwaysOnXeSessions.MarkAzureCapsFailure(refused);
+        Assert.True(AlwaysOnXeSessions.CarriesAzureCaps(refused));
+        var failure = DarlingXeSessions.CaptureFaultFor(refused, "deadlock");
+
+        await CaptureDownSeams.ApplyAsync(e, ServerId, Name, new[] { "Deadlock" },
+            CaptureDownFindingSeams.Report(failures: new[] { ("deadlocks", failure) }), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("The server said: Cannot start the event session.", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("allows at most 100 started event sessions", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheQuote_DropsCharactersThatHideOrReorderText_AndNeverEndsInHalfACharacter()
+    {
+        var h = new DarlingSelfAlertTests.Harness();
+        var e = h.Build();
+
+        /* A right-to-left override inside a name, and a character outside the Basic Multilingual Plane across the cut. */
+        var said = "x‮y " + new string('a', 295) + "\U0001F600\U0001F600 and more";
+        var failure = DarlingXeSessions.CaptureFaultFor(new InvalidOperationException(said), "deadlock");
+
+        await CaptureDownSeams.ApplyAsync(e, ServerId, Name, new[] { "Deadlock" },
+            CaptureDownFindingSeams.Report(failures: new[] { ("deadlocks", failure) }), Ct);
+
+        var detail = Assert.Single(h.Deliverer.Outcomes).DetailText ?? string.Empty;
+        Assert.Contains("The server said: xy aaa", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("‮", detail, StringComparison.Ordinal);
+        for (var i = 0; i < detail.Length; i++)
+        {
+            if (char.IsHighSurrogate(detail[i]))
+            {
+                Assert.True(i + 1 < detail.Length && char.IsLowSurrogate(detail[i + 1]), "The quote is cut between characters, never inside one.");
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TheStorePass_HoldsACaptureThatIsHeldByTheTimeTheStoreIsRead()
+    {
+        var h = new DarlingSelfAlertTests.Harness();
+        var e = h.Build();
+        e.CaptureDownReadOverride = (_, _, _) => Task.FromResult<IReadOnlyList<string>>(new[] { "Client timeouts" });
+        e.CaptureDownEngineReadOverride = (_, _, _) => throw new InvalidOperationException("the servers read faulted");
+
+        /* The report taken before the pass's reads holds nothing; the run set its hold before it wrote the row the read then finds. */
+        await CaptureDownFindingSeams.EvaluateStoreAsync(
+            e, ServerId, Name, Ct,
+            before: (CaptureSessionEnsureReport)CaptureDownSeams.Report(),
+            afterRead: () => (CaptureSessionEnsureReport)CaptureDownSeams.Report(restarted: new[] { "attention" }));
+
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Capture Down");
+    }
 }
 
 /// <summary>
@@ -362,6 +467,11 @@ public sealed class CaptureDownReadEnsureLiveTests
     private const int RereadServerId = -852811;
     private const int StaysStoppedServerId = -852812;
     private const int TransientServerId = -852813;
+    private const int StopsAgainServerId = -852814;
+    private const int WindowServerId = -852815;
+    private const int SweepServerId = -852816;
+    private const int OtherRetryServerId = -852817;
+    private const int ErrorRowServerId = -852818;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -498,6 +608,207 @@ public sealed class CaptureDownReadEnsureLiveTests
         }
     }
 
+    [Fact]
+    public async Task ASessionThatStopsAgainRightAfterItWasStartedAtARead_IsNotStartedAgain_AndFires()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live capture read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, StopsAgainServerId, "findings-stops-again", ct);
+            await using var postgres = NpgsqlDataSource.Create(cs!);
+            var fixture = Fixture.Build(postgres, StopsAgainServerId, "findings-stops-again");
+            fixture.Server.XeSessionsEnsuredAtUtc = DateTime.UtcNow;
+
+            /* Something stops the session before every run. The first run starts it and reads; the second finds it stopped again. */
+            fixture.SessionStoppedUntilEnsured = true;
+            await fixture.Worker.RunOnLoadAsync(fixture.Server, fixture.Runner, "attention", StopsAgainServerId, fixture.Effective("attention"), ct);
+            fixture.SessionStoppedUntilEnsured = true;
+            await fixture.Worker.RunOnLoadAsync(fixture.Server, fixture.Runner, "attention", StopsAgainServerId, fixture.Effective("attention"), ct);
+
+            Assert.Equal(new[] { "read", "ensure", "read", "read" }, fixture.Order);
+            Assert.Equal(new[] { "SUCCESS", "SESSION_MISSING" }, await ReadRowsAsync(connection, StopsAgainServerId, "attention", ct));
+
+            var h = new DarlingSelfAlertTests.Harness();
+            await CaptureDownSeams.ApplyAsync(h.Build(), StopsAgainServerId, "findings-stops-again", new[] { "Client timeouts" }, CaptureDownSeams.ReportOf(fixture.Server), ct);
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            Assert.Contains("The service started the Client timeouts session at its last check, and its collector has found it stopped, absent or unreadable again since", fired.DetailText, StringComparison.Ordinal);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
+    [Fact]
+    public async Task ASessionStartedAtAReadTwiceInTheHour_IsNotStartedAThirdTime_EvenWithCleanReadsBetween()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live capture read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, WindowServerId, "findings-window", ct);
+            await using var postgres = NpgsqlDataSource.Create(cs!);
+            var fixture = Fixture.Build(postgres, WindowServerId, "findings-window");
+            fixture.Server.XeSessionsEnsuredAtUtc = DateTime.UtcNow;
+
+            /* Stopped, started at the read; a clean read; stopped, started again; a clean read; stopped a third time. */
+            for (var round = 0; round < 3; round++)
+            {
+                fixture.SessionStoppedUntilEnsured = true;
+                await fixture.Worker.RunOnLoadAsync(fixture.Server, fixture.Runner, "attention", WindowServerId, fixture.Effective("attention"), ct);
+                if (round < 2)
+                {
+                    await fixture.Worker.RunOnLoadAsync(fixture.Server, fixture.Runner, "attention", WindowServerId, fixture.Effective("attention"), ct);
+                }
+            }
+
+            Assert.Equal(new[] { "read", "ensure", "read", "read", "read", "ensure", "read", "read", "read" }, fixture.Order);
+            Assert.Equal(
+                new[] { "SUCCESS", "SUCCESS", "SUCCESS", "SUCCESS", "SESSION_MISSING" },
+                await ReadRowsAsync(connection, WindowServerId, "attention", ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
+    [Fact]
+    public async Task ThreeCollectorsThatFindTheirSessionsStoppedInOneSweep_EnsureOnce()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live capture read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, SweepServerId, "findings-sweep", ct);
+            await using var postgres = NpgsqlDataSource.Create(cs!);
+            var fixture = Fixture.Build(postgres, SweepServerId, "findings-sweep");
+            fixture.Server.XeSessionsEnsuredAtUtc = DateTime.UtcNow;
+            fixture.SessionStopped = true;
+
+            foreach (var collector in new[] { "deadlocks", "blocked_process_report", "attention" })
+            {
+                await fixture.Worker.RunOnLoadAsync(fixture.Server, fixture.Runner, collector, SweepServerId, fixture.Effective(collector), ct);
+            }
+
+            /* The first collector's ensure looked at all three sessions; the other two read without ensuring again. */
+            Assert.Equal(new[] { "read", "ensure", "read", "read", "read" }, fixture.Order);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
+    [Fact]
+    public async Task ACaptureWhoseOwnEnsureCompleted_EnsuresAtItsRead_WhileAnotherCapturesRetryIsPending()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live capture read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, OtherRetryServerId, "findings-other-retry", ct);
+            await using var postgres = NpgsqlDataSource.Create(cs!);
+            var fixture = Fixture.Build(postgres, OtherRetryServerId, "findings-other-retry");
+
+            /* The hourly ensure's client-timeout probe timed out; the deadlock and blocked-process ensures completed. */
+            fixture.Server.XeSessionsEnsuredAtUtc = DateTime.UtcNow;
+            fixture.Server.CaptureEnsure.AttentionTransient = true;
+            fixture.SessionStoppedUntilEnsured = true;
+
+            await fixture.Worker.RunOnLoadAsync(fixture.Server, fixture.Runner, "deadlocks", OtherRetryServerId, fixture.Effective("deadlocks"), ct);
+
+            Assert.Equal(new[] { "read", "ensure", "read" }, fixture.Order);
+            Assert.Equal(new[] { "SUCCESS" }, await ReadRowsAsync(connection, OtherRetryServerId, "deadlocks", ct));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
+    [Fact]
+    public async Task ARowThatDidNotReadTheSession_DoesNotGiveTheRetryHoldBack()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live capture read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ErrorRowServerId, "findings-error-row", ct);
+            await using var postgres = NpgsqlDataSource.Create(cs!);
+            var fixture = Fixture.Build(postgres, ErrorRowServerId, "findings-error-row", connectionString: "this is not a connection string");
+            fixture.Runner.XeEnsureOverrideForTests = null;
+            fixture.Server.XeSessionsEnsuredAtUtc = null;
+            fixture.SessionStopped = true;
+
+            /* Held once: the ensure could not open its connection. The retry fails the same way and ends the hold. */
+            await fixture.Worker.RunOnLoadAsync(fixture.Server, fixture.Runner, "deadlocks", ErrorRowServerId, fixture.Effective("deadlocks"), ct);
+            await DarlingWorker.EnsureAlwaysOnXeSessionsAsync(fixture.Server, fixture.Runner, DateTime.UtcNow.AddMinutes(6), NullLogger.Instance, ct);
+
+            /* A read that times out says nothing about the session, so it does not start a new streak. */
+            fixture.ReadFails = true;
+            await fixture.Worker.RunOnLoadAsync(fixture.Server, fixture.Runner, "deadlocks", ErrorRowServerId, fixture.Effective("deadlocks"), ct);
+            fixture.ReadFails = false;
+            await fixture.Worker.RunOnLoadAsync(fixture.Server, fixture.Runner, "deadlocks", ErrorRowServerId, fixture.Effective("deadlocks"), ct);
+
+            Assert.Equal(new[] { "SESSION_MISSING", "ERROR", "SESSION_MISSING" }, await ReadRowsAsync(connection, ErrorRowServerId, "deadlocks", ct));
+
+            var h = new DarlingSelfAlertTests.Harness();
+            await CaptureDownSeams.ApplyAsync(h.Build(), ErrorRowServerId, "findings-error-row", new[] { "Deadlock" }, CaptureDownSeams.ReportOf(fixture.Server), ct);
+            Assert.Single(h.Deliverer.Outcomes);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
     private sealed class Fixture
     {
         public required DarlingWorker Worker { get; init; }
@@ -507,6 +818,9 @@ public sealed class CaptureDownReadEnsureLiveTests
 
         /// <summary>The read finds the session stopped, whatever the ensure does.</summary>
         public bool SessionStopped { get; set; }
+
+        /// <summary>The read itself fails, as a read that times out does: the run's row is ERROR and nothing read the session.</summary>
+        public bool ReadFails { get; set; }
 
         /// <summary>The read finds the session stopped until an ensure has run, as after a failover the service has not seen.</summary>
         public bool SessionStoppedUntilEnsured { get; set; }
@@ -556,6 +870,11 @@ public sealed class CaptureDownReadEnsureLiveTests
             worker.DispatchOverrideForTests = (_, _, _) =>
             {
                 fixture.Order.Add("read");
+                if (fixture.ReadFails)
+                {
+                    throw new InvalidOperationException("The read timed out.");
+                }
+
                 if (fixture.SessionStopped || fixture.SessionStoppedUntilEnsured)
                 {
                     throw CaptureDownFindingSeams.SessionMissing("The XE session is not running.");
@@ -585,7 +904,7 @@ public sealed class CaptureDownReadEnsureLiveTests
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        foreach (var id in new[] { RereadServerId, StaysStoppedServerId, TransientServerId })
+        foreach (var id in new[] { RereadServerId, StaysStoppedServerId, TransientServerId, StopsAgainServerId, WindowServerId, SweepServerId, OtherRetryServerId, ErrorRowServerId })
         {
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", id);
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", id);
@@ -680,6 +999,40 @@ internal static class CaptureDownFindingSeams
         {
             throw ex.InnerException;
         }
+    }
+
+    /// <summary>Sets the newest run status the service wrote for a capture collector, as the loop state reports it.</summary>
+    public static object WithStatus(object report, string collector, string status)
+    {
+        var member = report.GetType().GetProperty("LastRowStatuses", Any);
+        Assert.True(member is not null, "CaptureSessionEnsureReport has no LastRowStatuses: the close cannot tell a row that read the running session from one that read nothing.");
+        member!.SetValue(report, (IReadOnlyDictionary<string, string>)new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { [collector] = status });
+        return report;
+    }
+
+    /// <summary>The store pass with the report taken before its reads and the one taken after the capture read.</summary>
+    public static Task EvaluateStoreAsync(
+        DarlingSelfAlertEvaluator evaluator, int serverId, string serverName, CancellationToken ct,
+        CaptureSessionEnsureReport before, Func<CaptureSessionEnsureReport> afterRead)
+    {
+        var method = typeof(DarlingSelfAlertEvaluator).GetMethod("EvaluateStoreAlertsAsync", Any);
+        Assert.True(method is not null, "The evaluator has no EvaluateStoreAlertsAsync.");
+        var parameters = method!.GetParameters();
+        var after = Array.FindIndex(parameters, p => p.Name == "captureSessionsAfterRead");
+        Assert.True(after >= 0, "EvaluateStoreAlertsAsync takes no captureSessionsAfterRead: a hold set while the pass was reading the store is not seen.");
+        var args = new object?[parameters.Length];
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            args[i] = parameters[i].HasDefaultValue ? parameters[i].DefaultValue : null;
+        }
+
+        args[1] = serverId;
+        args[2] = serverName;
+        args[3] = true;
+        args[4] = ct;
+        args[Array.FindIndex(parameters, p => p.Name == "captureSessions")] = before;
+        args[after] = afterRead;
+        return (Task)method.Invoke(evaluator, args)!;
     }
 
     /// <summary>The exception a capture read raises for a session that is not running, as the run's own read wraps it.</summary>
