@@ -451,7 +451,7 @@ ORDER BY event_time DESC";
     public async Task<(List<MemoryBrokerRow> Rows, SortedDictionary<string, int> NotificationCounts, int RawEventCount)> GetMemoryBrokerWithCountsAsync(
         int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
-        using var _q = TimeQuery("GetMemoryBrokerAsync", "v_system_health_events memory_broker shred");
+        using var _q = TimeQuery("GetMemoryBrokerWithCountsAsync", "v_system_health_events memory_broker shred");
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.MemoryBrokerEvent);
 
