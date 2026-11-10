@@ -82,7 +82,7 @@ public static class NotificationRouteKinds
     /// <summary><c>severities</c> value (#6928): a route that takes Critical alerts only.</summary>
     public const string SeveritiesCritical = "critical";
 
-    /// <summary><c>severities</c> value (#6928): a route that takes Warning alerts only. Every alert that is not Critical counts as Warning here.</summary>
+    /// <summary><c>severities</c> value (#6928): a route that takes Warning alerts only. Every alert that is not Critical counts as Warning here, except a recovery delivered as an alert of its own (<see cref="AlertFamily.RecoveryPairs"/>), which is routed at the tier of the firing it closes.</summary>
     public const string SeveritiesWarning = "warning";
 
     /// <summary>The stored word for a route's severity filter: <c>both</c>, <c>critical</c> or <c>warning</c>. Blank, null or
