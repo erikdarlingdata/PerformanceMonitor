@@ -264,7 +264,9 @@ internal static class DarlingMcpAgentActions
         if (parsed is null && (server_id is null || string.IsNullOrWhiteSpace(metric_name)))
             return await RefuseEarlyAsync(postgres, action!, tool, NeedsMetric, seat.Policy.AgentTokenName, seat.NamedAgentNames, ct);
 
-        var target = await ServerTargetAsync(postgres, server_id ?? -1, null);
+        var target = server_id is int named
+            ? await ServerTargetAsync(postgres, named, null)
+            : AgentActionTarget.NoServer("no server (the mute names no server_id)", null);
         return await RunAsync(seat, postgres, logger, tool, MuteRuleImage.Kind, agentAction, target,
             (_, _, _, _) => Task.FromResult(metric_name is null ? NeedsMetric : MetricRefusal(metric_name)),
             NoBefore,
@@ -289,7 +291,7 @@ internal static class DarlingMcpAgentActions
     private static Task<AgentActionTarget> MuteTargetAsync(NpgsqlDataSource postgres, MuteRule before) =>
         before.ServerId is int id
             ? ServerTargetAsync(postgres, id, before.Id)
-            : Task.FromResult(new AgentActionTarget(-1, "every server (the rule names no server_id)", before.Id, null));
+            : Task.FromResult(AgentActionTarget.NoServer("every server (the rule names no server_id)", before.Id));
 
     /// <summary>
     /// The write hook's recheck, in the gate's transaction: the stored rule is locked <c>FOR UPDATE</c> and is still the one the
@@ -349,7 +351,7 @@ internal static class DarlingMcpAgentActions
                 return DarlingMcpAlertTools.Outcome("invalid", error ?? "changes_json is invalid.");
         }
 
-        var target = before is null ? new AgentActionTarget(-1, "no such target", rule_id, null) : await MuteTargetAsync(postgres, before);
+        var target = before is null ? AgentActionTarget.NoServer("no such target", rule_id) : await MuteTargetAsync(postgres, before);
         /* #7414: a digest rule is not this path's to change (it cannot make one, and clearing the expiry of a bounded one would leave an unbounded
            digest rule that the stale check skips), and an agent-made rule's 7 days are a lifetime on this path too. */
         AgentActionRefusal? bound = null;
@@ -382,7 +384,7 @@ internal static class DarlingMcpAgentActions
         var (before, notFound) = await FindMuteAsync(postgres, rule_id);
         if (before is null && InvestigationToolCore.ParseAgentAction(agentAction, out _) is null)
             return notFound!;
-        var target = before is null ? new AgentActionTarget(-1, "no such target", rule_id, null) : await MuteTargetAsync(postgres, before);
+        var target = before is null ? AgentActionTarget.NoServer("no such target", rule_id) : await MuteTargetAsync(postgres, before);
         return await RunAsync(seat, postgres, logger, tool, MuteRuleImage.Kind, agentAction, target, null,
             (_, _, _) => Task.FromResult(Serialize(before)),
             async (connection, transaction, token) =>
@@ -401,7 +403,7 @@ internal static class DarlingMcpAgentActions
         var (before, notFound) = await FindMuteAsync(postgres, rule_id);
         if (before is null && InvestigationToolCore.ParseAgentAction(agentAction, out _) is null)
             return notFound!;
-        var target = before is null ? new AgentActionTarget(-1, "no such target", rule_id, null) : await MuteTargetAsync(postgres, before);
+        var target = before is null ? AgentActionTarget.NoServer("no such target", rule_id) : await MuteTargetAsync(postgres, before);
         return await RunAsync(seat, postgres, logger, tool, MuteRuleImage.Kind, agentAction, target,
             /* Turning a mute ON is an after image that mutes: the same rule as a create. Turning it off is always allowed. */
             (_, _, ctx, _) => Task.FromResult(enabled && before is not null ? MuteAfterImageRefusal(before, ctx.RequestServerId) : null),
@@ -431,7 +433,7 @@ internal static class DarlingMcpAgentActions
                 return new AgentActionTarget(reader.GetInt32(0), reader.GetString(1), id, null);
         }
 
-        return new AgentActionTarget(-1, "no such target", id, null);
+        return AgentActionTarget.NoServer("no such target", id);
     }
 
     /// <summary>The rule_scope rule: the definition's scope is exactly the request's one server (by its storage name), never all servers, a tag or a list.</summary>

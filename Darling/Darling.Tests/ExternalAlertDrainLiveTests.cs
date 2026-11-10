@@ -304,6 +304,26 @@ public sealed class ExternalAlertDrainLiveTests
         });
     }
 
+    /// <summary>#8550: a server id is a 32-bit hash of the server's name, negative for about half the servers. The kept server
+    /// key is the id as text, minus sign included, so a rule keyed on a negative id silences that server's external fire.</summary>
+    [Fact]
+    public async Task AMuteRuleNamingAServerWithANegativeId_SilencesAnExternalFireForThatServer()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            rig.Registry["SQLNEG"] = new ExternalAlertServer(-1563402511, "SQLNEG");
+            rig.Rules.Add(new MuteRule { ServerId = -1563402511 });
+            var id = await rig.SubmitAsync("fire", "disk", server: "SQLNEG");
+            var other = await rig.SubmitAsync("fire", "disk2", server: "SQL01");
+            var pass = await rig.Drain.RunPassAsync(rig.Ct);
+
+            Assert.Equal("muted", await rig.StatusAsync(id));
+            Assert.Equal("delivered", await rig.StatusAsync(other));
+            Assert.Equal(1, pass.Muted);
+            Assert.Equal(1, pass.Delivered);
+        });
+    }
+
     [Fact]
     public async Task AFireEveryChannelFailed_GoesBackToTheQueue_WaitsOneTwoFourMinutes_AndIsMarkedFailedOnTheFourthAttempt()
     {

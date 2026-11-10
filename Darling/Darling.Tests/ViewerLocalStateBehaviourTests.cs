@@ -219,6 +219,92 @@ public sealed class ViewerLocalStateBehaviourTests
         Assert.Equal(new[] { "A" }, Strings(r.GetProperty("heldNoStorage")));
     }
 
+    /// <summary>The ids the signedIds scenario runs: a negative id, a ten-digit positive id, and the two ends of the 32-bit
+    /// range a server id (a hash of the server's name) can take.</summary>
+    private static readonly int[] SignedIds = { -1563402511, 1730000001, int.MinValue, int.MaxValue };
+
+    private static bool[] Bools(JsonElement node) => node.EnumerateArray().Select(e => e.GetBoolean()).ToArray();
+
+    private static readonly bool[] AllFour = { true, true, true, true };
+    private static readonly bool[] NoneOfFour = { false, false, false, false };
+
+    [Fact]
+    public void AnActionableAlert_DrawsABadge_OnAServerWithANegativeId()
+    {
+        if (!TryRun("signedIds", out var r)) return;
+
+        var badges = r.GetProperty("badges").EnumerateArray().ToArray();
+        Assert.Equal(SignedIds.Length, badges.Length);
+        // The negative id has two actionable alerts, one of them critical; each other id has one.
+        Assert.Equal(new[] { 2, 1, 1, 1 }, badges.Select(b => b.GetProperty("count").GetInt32()).ToArray());
+        Assert.Equal(AllFour, badges.Select(b => b.GetProperty("show").GetBoolean()).ToArray());
+        Assert.True(badges[0].GetProperty("critical").GetBoolean());
+        // server_id 0 (the store's own alerts, an external source's alert that names no registered server) is no server and gets no badge.
+        Assert.Equal(0, r.GetProperty("zeroBadge").GetProperty("count").GetInt32());
+        Assert.False(r.GetProperty("zeroBadge").GetProperty("show").GetBoolean());
+    }
+
+    [Fact]
+    public void TheFavouriteStar_Toggles_OnAServerWithANegativeId_AndSurvivesARebuild()
+    {
+        if (!TryRun("signedIds", out var r)) return;
+
+        Assert.Equal(AllFour, Bools(r.GetProperty("starOn")));
+        Assert.Equal(SignedIds.OrderBy(i => i).ToArray(), Ints(r.GetProperty("storedFavorites")));
+        Assert.Equal(AllFour, Bools(r.GetProperty("starAfterReload")));
+        Assert.Equal(new[] { SignedIds[0], 5 }, Ints(r.GetProperty("starSortsFirst")));
+        Assert.False(r.GetProperty("starOff").GetBoolean());
+        Assert.False(r.GetProperty("starOffAfterReload").GetBoolean());
+    }
+
+    [Fact]
+    public void AnAcknowledgement_QuietsTheBadge_OnAServerWithANegativeOrTenDigitId_AndSurvivesARebuild()
+    {
+        if (!TryRun("signedIds", out var r)) return;
+
+        Assert.Equal(NoneOfFour, Bools(r.GetProperty("shownWhileAcked")));
+        Assert.Equal(
+            SignedIds.Select(i => i.ToString(System.Globalization.CultureInfo.InvariantCulture)).OrderBy(s => s, StringComparer.Ordinal).ToArray(),
+            Strings(r.GetProperty("storedAckKeys")).OrderBy(s => s, StringComparer.Ordinal).ToArray());
+        Assert.Equal(AllFour, Bools(r.GetProperty("ackedAfterReload")));
+        Assert.Equal(NoneOfFour, Bools(r.GetProperty("shownAfterReload")));
+    }
+
+    [Fact]
+    public void TheDatabaseFilter_IsKept_ForAServerWithANegativeOrTenDigitId_AndSurvivesARebuild()
+    {
+        if (!TryRun("signedIds", out var r)) return;
+
+        Assert.Equal(AllFour, Bools(r.GetProperty("filterSet")));
+        var expected = SignedIds.Select(i => "Db" + i.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+        Assert.Equal(expected, r.GetProperty("filterHeld").EnumerateArray().Select(e => Strings(e).SingleOrDefault()).ToArray());
+        Assert.Equal(
+            SignedIds.Select(i => i.ToString(System.Globalization.CultureInfo.InvariantCulture)).OrderBy(s => s, StringComparer.Ordinal).ToArray(),
+            Strings(r.GetProperty("storedFilterKeys")).OrderBy(s => s, StringComparer.Ordinal).ToArray());
+        Assert.Equal(expected, r.GetProperty("filterAfterReload").EnumerateArray().Select(e => Strings(e).SingleOrDefault()).ToArray());
+    }
+
+    [Fact]
+    public void WhatIsNotAServerId_IsRefused_ZeroAFractionTextAndANumberOutsideThirtyTwoBits()
+    {
+        if (!TryRun("signedIds", out var r)) return;
+
+        var notIds = r.GetProperty("notIds").EnumerateArray().ToArray();
+        Assert.Equal(10, notIds.Length);
+        foreach (var n in notIds)
+        {
+            Assert.False(n.GetProperty("star").GetBoolean());
+            Assert.False(n.GetProperty("filter").GetBoolean());
+            Assert.Equal(0, n.GetProperty("badge").GetInt32());
+        }
+
+        // A hand-edited stored value keeps only the one real id it holds.
+        var hand = r.GetProperty("handEdited");
+        Assert.Equal(new[] { SignedIds[0] }, Ints(hand.GetProperty("favorites")));
+        Assert.Equal(new[] { SignedIds[0] }, Ints(hand.GetProperty("acks")));
+        Assert.Equal(new[] { SignedIds[0] }, Ints(hand.GetProperty("filters")));
+    }
+
     [Fact]
     public void TheShell_WiresTheControlsInAtModuleScope_WithoutTouchingPanelsOrTheApi()
     {
