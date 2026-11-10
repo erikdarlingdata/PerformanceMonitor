@@ -32,7 +32,7 @@ public sealed class PlanRegressionCandidateReuseRuleTests
     private static readonly TimeSpan Window = PgFactCollector.PlanRegressionCandidateCache.DefaultRefreshAfter;
 
     [Fact]
-    public void TheReuseWindow_IsOneAnalysisCadence_SetByTheWorker_AndTheScheduledPassAlwaysReads()
+    public void TheReuseWindow_DefaultsToOneAnalysisCadence_IsSetByTheWorker_AndTheScheduledPassAlwaysReads()
     {
         Assert.Equal(TimeSpan.FromMinutes(30), PgFactCollector.PlanRegressionCandidateCache.DefaultRefreshAfter);
         var cache = new PgFactCollector.PlanRegressionCandidateCache();
@@ -43,10 +43,10 @@ public sealed class PlanRegressionCandidateReuseRuleTests
         cache.Store("store", 1, "s", Now.AddMinutes(-15), Array.Empty<PgFactCollector.PlanRegressionCandidate>());
         Assert.Null(cache.TryGet("store", 1, "s", Now, Now));
 
-        /* The worker sets the shared window from the clamped cadence; the scheduled pass (the one caller that persists
+        /* The worker sets the shared window from the clamped cadence and the longest a pass is deferred; the scheduled pass (the one caller that persists
            caveats) refreshes and never reuses; an on-demand current call reuses. */
         var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
-        Assert.Contains("PlanRegressionCandidateCache.Shared.RefreshAfter = TimeSpan.FromMinutes(analysisIntervalMinutes);", worker, StringComparison.Ordinal);
+        Assert.Contains("PlanRegressionCandidateCache.Shared.RefreshAfter = TimeSpan.FromMinutes(analysisIntervalMinutes) + ScheduledAnalysisAdmission.OrdinaryDeferral(s_analysisTimeout);", worker, StringComparison.Ordinal);
         var service = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "DarlingAnalysisService.cs");
         Assert.Contains("ReusePlanRegressionCandidates = asOfUtc is null && !persistCollectionCaveats,", service, StringComparison.Ordinal);
         Assert.Contains("RefreshPlanRegressionCandidates = asOfUtc is null && persistCollectionCaveats,", service, StringComparison.Ordinal);
