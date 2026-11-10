@@ -1340,8 +1340,17 @@ public sealed class ServerSummaryItem
     /// keeps, so what it collected is gone. Every other such card reads "Never", whatever its band.</para>
     /// </summary>
     public string LastCollectionDisplay => LastCollectionTime.HasValue
-        ? FormatLastCollect(LastCollectionTime.Value, ViewerTimeHelper.CurrentDisplayZone(), DateTime.UtcNow)
+        ? LastCollectLabelled(LastCollectionTime.Value, ViewerTimeHelper.CurrentDisplayMode, ViewerTimeHelper.ActiveServerClock, DateTime.UtcNow)
         : HistoryAgedOut(RegisteredAt, DateTime.UtcNow) ? "None retained" : "Never";
+
+    /// <summary>
+    /// The card's Last Collect text for <paramref name="mode"/> on <paramref name="clock"/>: the time
+    /// <see cref="FormatLastCollect"/> words in that mode's zone, and in Server Time the clock's offset after it,
+    /// "09:56:40 (UTC-04:00)" (<see cref="ViewerTimeHelper.WithServerZoneLabel"/>), so the card says whose clock it reads.
+    /// </summary>
+    internal static string LastCollectLabelled(DateTime lastCollectionUtc, TimeDisplayMode mode, PerformanceMonitor.Analysis.Baselines.ServerClock clock, DateTime nowUtc) =>
+        ViewerTimeHelper.WithServerZoneLabel(
+            FormatLastCollect(lastCollectionUtc, ViewerTimeHelper.DisplayZoneFor(mode, clock), nowUtc), mode, clock, lastCollectionUtc);
 
     /// <summary>#3967, #8464: true when <paramref name="registeredAtUtc"/> precedes the collection log's retention horizon at
     /// <paramref name="nowUtc"/>, so a server with no retained collection collected before everything the store keeps. The

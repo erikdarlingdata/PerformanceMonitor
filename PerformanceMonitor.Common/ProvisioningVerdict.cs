@@ -95,6 +95,14 @@ public static class ProvisioningVerdict
     /// <summary>The tooltip on a Status cell that reads <see cref="NotCollectedLabel"/>: what was not collected, and over what window.</summary>
     public const string NoStatusNote = "No CPU sample in the last 24 hours";
 
+    /// <summary>What a Server Inventory Status or Health cell shows for a server with no value when the read of the collected
+    /// metrics failed: the store may hold a value, and this read could not say. Never <see cref="NotCollectedLabel"/>, which is
+    /// a statement about the server.</summary>
+    public const string CouldNotReadLabel = "Could not read";
+
+    /// <summary>The tooltip on a cell that reads <see cref="CouldNotReadLabel"/>.</summary>
+    public const string CouldNotReadNote = "The collected metrics could not be read from the store. The log has the reason, and the next read tries again";
+
     /// <summary>What the verdict badge shows for <see cref="NotEnoughData"/>: "not enough data yet (6 samples)".</summary>
     public static string NotEnoughDataLabel(long samples) =>
         string.Create(System.Globalization.CultureInfo.CurrentCulture, $"{NotEnoughDataShortLabel} ({samples:N0} {(samples == 1 ? "sample" : "samples")})");

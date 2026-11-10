@@ -773,7 +773,7 @@ public partial class FinOpsTab
         try
         {
             await loader();
-            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+            StatusChanged?.Invoke($"{_server.DisplayName}: refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {

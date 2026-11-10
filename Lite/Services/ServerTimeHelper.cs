@@ -164,6 +164,19 @@ public static class ServerTimeHelper
         _ => OffsetLabel(clock.OffsetMinutesAt(naiveUtc))
     };
 
+    /// <summary>
+    /// <paramref name="text"/>, a time worded on <paramref name="clock"/>, with that clock's offset at <paramref name="naiveUtc"/>
+    /// after it in Server Time, "09:30 (UTC-08:00)": a list or a row of cards shows several servers, each on its own clock, and the
+    /// label says which. UTC and Local Time are one zone for every server and carry none. A time in the hour that repeats after a
+    /// daylight saving change already ends with its offset and is left as it is.
+    /// </summary>
+    public static string WithServerZoneLabel(string text, TimeDisplayMode mode, ServerClock clock, DateTime naiveUtc)
+    {
+        if (mode != TimeDisplayMode.ServerTime || text.Length == 0) return text;
+        var label = GetTimezoneLabel(mode, clock, naiveUtc);
+        return label.Length > 3 && text.EndsWith(label[3..], StringComparison.Ordinal) ? text : text + " (" + label + ")";
+    }
+
     private static string LocalZoneName(DateTime naiveUtc)
     {
         var zone = TimeZoneInfo.Local;

@@ -28,7 +28,9 @@ public class ProvisioningTrendRow
     public decimal? StolenMemoryPct { get; set; }
     /// <summary>Why the day read UNDER PROVISIONED, in the badge's words; null for any other verdict.</summary>
     public string? StatusReason { get; set; }
-    public string DayDisplay => Day.ToString("ddd MM/dd");
+    /// <summary>True for a day that has not ended (today): the row is judged on the hours collected so far.</summary>
+    public bool IsPartial { get; set; }
+    public string DayDisplay => ProvisioningTrendWindow.DayLabel(Day, IsPartial);
     public string StatusDisplay => ProvisioningVerdict.StatusLabel(Status);
 }
 
@@ -364,8 +366,24 @@ public class DatabaseSizeRow
         ? (VlfCount ?? 0) : -1;
 }
 
-public class ServerPropertyRow
+/// <summary>One Server Inventory row. The collected overlay's cells (average CPU, storage, idle databases, Status, Health) and the
+/// Last Updated text raise <see cref="PropertyChanged"/>, so a re-read of the overlay or a change of the time display redraws
+/// those cells in place and the grid keeps its rows, its selection and its scroll position.</summary>
+public class ServerPropertyRow : System.ComponentModel.INotifyPropertyChanged
 {
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+
+    private void Raise(params string[] names)
+    {
+        foreach (var name in names)
+        {
+            PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(name));
+        }
+    }
+
+    /// <summary>The time display changed: the Last Updated cell and the value its column filters on are read again.</summary>
+    public void NotifyTimeDisplayChanged() => Raise(nameof(LastUpdatedDisplay), nameof(LastUpdatedLocal));
+
     public string ServerName { get; set; } = "";
     public string Edition { get; set; } = "";
     public string ProductVersion { get; set; } = "";
@@ -433,11 +451,8 @@ public class ServerPropertyRow
             if (LastUpdated is not { } utc) return "";
             var mode = ServerTimeHelper.CurrentDisplayMode;
             var clock = Clock ?? ServerTimeHelper.ActiveServerClock;
-            var text = ServerTimeHelper.FormatInstant(utc, ServerTimeHelper.DisplayZoneFor(mode, clock), "yyyy-MM-dd HH:mm");
-            if (mode == TimeDisplayMode.ServerTime)
-            {
-                text += " (" + ServerTimeHelper.GetTimezoneLabel(mode, clock, utc) + ")";
-            }
+            var text = ServerTimeHelper.WithServerZoneLabel(
+                ServerTimeHelper.FormatInstant(utc, ServerTimeHelper.DisplayZoneFor(mode, clock), "yyyy-MM-dd HH:mm"), mode, clock, utc);
 
             return IsLastKnown ? "last known, " + text : text;
         }
@@ -462,10 +477,40 @@ public class ServerPropertyRow
         set => _hardwareUnavailableReason = value;
     }
 
-    public decimal? AvgCpuPct { get; set; }
-    public decimal? StorageTotalGb { get; set; }
-    public int? IdleDbCount { get; set; }
-    public string? ProvisioningStatus { get; set; }
+    private decimal? _avgCpuPct;
+    private decimal? _storageTotalGb;
+    private int? _idleDbCount;
+    private string? _provisioningStatus;
+    private int? _healthScore;
+
+    public decimal? AvgCpuPct
+    {
+        get => _avgCpuPct;
+        set { if (_avgCpuPct != value) { _avgCpuPct = value; Raise(nameof(AvgCpuPct)); } }
+    }
+
+    public decimal? StorageTotalGb
+    {
+        get => _storageTotalGb;
+        set { if (_storageTotalGb != value) { _storageTotalGb = value; Raise(nameof(StorageTotalGb)); } }
+    }
+
+    public int? IdleDbCount
+    {
+        get => _idleDbCount;
+        set { if (_idleDbCount != value) { _idleDbCount = value; Raise(nameof(IdleDbCount)); } }
+    }
+
+    public string? ProvisioningStatus
+    {
+        get => _provisioningStatus;
+        set
+        {
+            if (_provisioningStatus == value) return;
+            _provisioningStatus = value;
+            Raise(nameof(ProvisioningStatus), nameof(ProvisioningDisplay), nameof(ProvisioningNote));
+        }
+    }
 
     /// <summary>The uptime in seconds, the sort key of the Uptime column (#6086): <see cref="UptimeDisplay"/> is text, which sorts
     /// "10d" before "2d". Null when the start time is unknown.</summary>
@@ -484,12 +529,32 @@ public class ServerPropertyRow
     public string ClusteredDisplay => IsClustered.HasValue ? (IsClustered.Value ? "Yes" : "No") : "";
     public string AgReplicaRoleDisplay => string.Equals(AgReplicaRole, "Standalone", StringComparison.OrdinalIgnoreCase) ? "-" : AgReplicaRole;
 
-    /// <summary>The Status cell: the verdict's words, or <see cref="ProvisioningVerdict.NotCollectedLabel"/> for a server with no
-    /// verdict (the last 24 hours hold no CPU sample to judge it by), never an empty cell.</summary>
-    public string ProvisioningDisplay => string.IsNullOrEmpty(ProvisioningStatus) ? ProvisioningVerdict.NotCollectedLabel : ProvisioningVerdict.StatusLabel(ProvisioningStatus);
+    private bool _overlayReadFailed;
 
-    /// <summary>The tooltip on a Status cell that reads <see cref="ProvisioningVerdict.NotCollectedLabel"/>; null when there is a verdict.</summary>
-    public string? ProvisioningNote => string.IsNullOrEmpty(ProvisioningStatus) ? ProvisioningVerdict.NoStatusNote : null;
+    /// <summary>True when the last read of the collected overlay for this row failed (the fleet read threw, or this server's merge
+    /// did). A cell with no value then reads <see cref="ProvisioningVerdict.CouldNotReadLabel"/>: the store may hold one. A value
+    /// an earlier read brought stays on screen.</summary>
+    public bool OverlayReadFailed
+    {
+        get => _overlayReadFailed;
+        set
+        {
+            if (_overlayReadFailed == value) return;
+            _overlayReadFailed = value;
+            Raise(nameof(OverlayReadFailed), nameof(ProvisioningDisplay), nameof(ProvisioningNote), nameof(HealthDisplay), nameof(HealthScoreNote));
+        }
+    }
+
+    private string NoValueLabel => OverlayReadFailed ? ProvisioningVerdict.CouldNotReadLabel : ProvisioningVerdict.NotCollectedLabel;
+
+    /// <summary>The Status cell: the verdict's words, or, for a server with no verdict, <see cref="ProvisioningVerdict.NotCollectedLabel"/>
+    /// (the last 24 hours hold no CPU sample to judge it by) or <see cref="ProvisioningVerdict.CouldNotReadLabel"/> (the overlay read
+    /// failed), never an empty cell.</summary>
+    public string ProvisioningDisplay => string.IsNullOrEmpty(ProvisioningStatus) ? NoValueLabel : ProvisioningVerdict.StatusLabel(ProvisioningStatus);
+
+    /// <summary>The tooltip on a Status cell with no verdict: what was not collected, or that the read failed; null when there is a verdict.</summary>
+    public string? ProvisioningNote => !string.IsNullOrEmpty(ProvisioningStatus) ? null
+        : OverlayReadFailed ? ProvisioningVerdict.CouldNotReadNote : ProvisioningVerdict.NoStatusNote;
 
     // FinOps cost — from server config
     public decimal MonthlyCost { get; set; }
@@ -512,11 +577,26 @@ public class ServerPropertyRow
     /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server: the grid says Not collected,
     /// not a score built from memory and storage alone. It is the Utilization tab's score for the same server
     /// (<see cref="FinOpsHealthCalculator.Score"/>), read by <see cref="LocalDataService.GetServerMetricsAsync"/>.</summary>
-    public int? HealthScore { get; set; }
+    public int? HealthScore
+    {
+        get => _healthScore;
+        set
+        {
+            if (_healthScore == value) return;
+            _healthScore = value;
+            Raise(nameof(HealthScore), nameof(HealthDisplay), nameof(HealthScoreColor), nameof(HealthScoreNote));
+        }
+    }
+
     public string HealthScoreColor => HealthScore is int score ? FinOpsHealthCalculator.ScoreColor(score) : FinOpsHealthCalculator.NoScoreColor;
 
+    /// <summary>The Health cell: the score, or the words shown in place of one (<see cref="ProvisioningVerdict.NotCollectedLabel"/>,
+    /// or <see cref="ProvisioningVerdict.CouldNotReadLabel"/> when the overlay read failed). The column sorts on <see cref="HealthScore"/>.</summary>
+    public string HealthDisplay => HealthScore is int score ? score.ToString(System.Globalization.CultureInfo.CurrentCulture) : NoValueLabel;
+
     /// <summary>The tooltip on the words shown in place of a score; null when there is a score.</summary>
-    public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoInventoryScoreNote;
+    public string? HealthScoreNote => HealthScore.HasValue ? null
+        : OverlayReadFailed ? ProvisioningVerdict.CouldNotReadNote : FinOpsHealthCalculator.NoInventoryScoreNote;
 }
 
 public class StorageGrowthRow

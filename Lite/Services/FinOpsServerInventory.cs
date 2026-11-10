@@ -29,7 +29,9 @@ namespace PerformanceMonitorLite.Services;
 ///
 /// <para><b>The overlay is an optional extra and can never cost the grid a row.</b> Its read
 /// (<see cref="LocalDataService.GetServerMetricsAsync"/>) and its per-server merge are both guarded here: an
-/// exception in either leaves that overlay blank and is logged, and the rows still come back.</para>
+/// exception in either is logged and the rows still come back, marked <see cref="ServerPropertyRow.OverlayReadFailed"/>,
+/// so a Status or Health cell with no value reads "Could not read" and never "Not collected", which is a statement
+/// about the server that a failed read cannot make.</para>
 ///
 /// <para><b>Servers come from the monitor's own list, not from the collected data.</b> The collected set
 /// also holds a server removed from the list until retention purges its rows; looking each listed server up
@@ -61,7 +63,9 @@ internal static class FinOpsServerInventory
     /// <param name="Rows">One row per server that answered live or had a collected row, in list order.</param>
     /// <param name="ListedServers">The servers the monitor lists.</param>
     /// <param name="UnreadableServers">The servers left out because their collected read threw after the live read failed.</param>
-    internal sealed record InventoryBuild(List<ServerPropertyRow> Rows, int ListedServers, int UnreadableServers)
+    /// <param name="OverlayReadFailed">True when the fleet-wide read of the collected overlay threw; every row is then marked
+    /// <see cref="ServerPropertyRow.OverlayReadFailed"/>.</param>
+    internal sealed record InventoryBuild(List<ServerPropertyRow> Rows, int ListedServers, int UnreadableServers, bool OverlayReadFailed = false)
     {
         /// <summary>The sentence under the grid when it has no row, or null when it has rows.</summary>
         public string? EmptyText => Rows.Count == 0 ? FinOpsServerInventory.EmptyText(ListedServers, UnreadableServers) : null;
@@ -71,7 +75,7 @@ internal static class FinOpsServerInventory
     /// The inventory rows for <paramref name="servers"/>, in list order, with the counts behind the empty sentence. A
     /// server whose live read fails is logged and built from its collected row, marked last known; with no collected row
     /// it is left out, and so is one whose collected read throws, which the result counts. A failing overlay read or
-    /// merge is logged and leaves the overlay blank.
+    /// merge is logged and marks the rows it failed for, whose empty Status and Health cells then read "Could not read".
     /// </summary>
     /// <param name="servers">The servers the monitor lists. Only these can produce a row.</param>
     /// <param name="readLive">One server's live properties (a real network call to the monitored server).</param>
@@ -86,7 +90,7 @@ internal static class FinOpsServerInventory
         Func<Task<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>> readCollectedMetrics,
         Func<ServerConnection, Task<ServerClock>>? readClock = null)
     {
-        var fleetMetrics = await ReadCollectedMetricsAsync(readCollectedMetrics);
+        var (fleetMetrics, overlayReadFailed) = await TryReadCollectedMetricsAsync(readCollectedMetrics);
 
         var tasks = servers.Select(async server =>
         {
@@ -112,6 +116,7 @@ internal static class FinOpsServerInventory
 
             /* Step 2: lay this server's collected metrics from the fleet-wide read on top. Guarded on its
                own (see ApplyCollectedMetrics), so it cannot cost the row above its place. */
+            item.OverlayReadFailed = overlayReadFailed;
             ApplyCollectedMetrics(item, server, fleetMetrics);
 
             return (Row: item, ReadFailed: false);
@@ -121,7 +126,8 @@ internal static class FinOpsServerInventory
         return new InventoryBuild(
             results.Where(r => r.Row != null).Select(r => r.Row!).ToList(),
             ListedServers: results.Length,
-            UnreadableServers: results.Count(r => r.ReadFailed));
+            UnreadableServers: results.Count(r => r.ReadFailed),
+            OverlayReadFailed: overlayReadFailed);
     }
 
     /// <summary>
@@ -209,30 +215,41 @@ internal static class FinOpsServerInventory
     /// not-yet-populated store). The throw is logged, never swallowed silently and never propagated.
     /// </summary>
     internal static async Task<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>> ReadCollectedMetricsAsync(
+        Func<Task<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>> readCollectedMetrics) =>
+        (await TryReadCollectedMetricsAsync(readCollectedMetrics)).Overlay;
+
+    /// <summary>
+    /// The fleet-wide collected overlay and whether its read failed: an empty overlay and true when the read throws, which is
+    /// logged and never propagated. The caller marks its rows with the flag, so an empty cell says the read failed.
+    /// </summary>
+    internal static async Task<(IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow> Overlay, bool Failed)> TryReadCollectedMetricsAsync(
         Func<Task<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>> readCollectedMetrics)
     {
         try
         {
-            return await readCollectedMetrics();
+            return (await readCollectedMetrics(), false);
         }
         catch (Exception ex)
         {
             AppLogger.Error("FinOps", $"Failed to read collected server metrics; the Server Inventory overlay stays blank: {ex.Message}", ex);
-            return new Dictionary<int, LocalDataService.ServerMetricsRow>();
+            return (new Dictionary<int, LocalDataService.ServerMetricsRow>(), true);
         }
     }
 
     /// <summary>
     /// Lays a newer fleet overlay onto rows already built, each found by its <see cref="ServerPropertyRow.StorageServerId"/>. A row
     /// with no entry, or a value the overlay does not have, keeps what it shows. It reads nothing itself: the caller passes the
-    /// one store read, so the rows' live properties are not read again.
+    /// one store read, so the rows' live properties are not read again. Every row is marked with <paramref name="readFailed"/>,
+    /// so after a failed read a cell with no value reads "Could not read", and after a good one "Not collected" again.
     /// </summary>
     internal static void ReapplyCollectedMetrics(
         IEnumerable<ServerPropertyRow> rows,
-        IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow> fleetMetrics)
+        IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow> fleetMetrics,
+        bool readFailed = false)
     {
         foreach (var item in rows)
         {
+            item.OverlayReadFailed = readFailed;
             if (!fleetMetrics.TryGetValue(item.StorageServerId, out var row)) continue;
 
             if (row.AvgCpuPct.HasValue) item.AvgCpuPct = row.AvgCpuPct;
@@ -245,8 +262,8 @@ internal static class FinOpsServerInventory
 
     /// <summary>
     /// Lays one server's collected metrics onto its row. A server with no entry keeps the row as it is. Every lookup
-    /// finishes before the first assignment, so a failure leaves the overlay blank rather than half applied; it is
-    /// logged and never propagates.
+    /// finishes before the first assignment, so a failure leaves the overlay unapplied rather than half applied; it is
+    /// logged, marks the row <see cref="ServerPropertyRow.OverlayReadFailed"/> and never propagates.
     /// </summary>
     internal static void ApplyCollectedMetrics(
         ServerPropertyRow item,
@@ -267,6 +284,7 @@ internal static class FinOpsServerInventory
         catch (Exception ex)
         {
             AppLogger.Error("FinOps", $"Failed to overlay collected metrics for {server.DisplayName}: {ex.Message}", ex);
+            item.OverlayReadFailed = true;
         }
     }
 }

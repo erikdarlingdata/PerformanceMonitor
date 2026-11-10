@@ -494,7 +494,7 @@
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
                 <!-- Provisioning Trend (7-day) -->
-                <ui:ChartPanel x:Name="ProvisioningTrendCard" Title="7-Day Provisioning Trend" Subtitle="The badge above covers the last 24 hours; each row is one calendar day of the last 7 days, judged on its CPU, memory grants and stolen memory. The first and last rows are part days" Margin="10,8,10,0">
+                <ui:ChartPanel x:Name="ProvisioningTrendCard" Title="7-Day Provisioning Trend" Subtitle="The badge above covers the last 24 hours; each row is one calendar day, judged on its CPU, memory grants and stolen memory: the six whole days before today, then today so far" Margin="10,8,10,0">
                     <DataGrid x:Name="ProvisioningTrendGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                               AutoGenerateColumns="False" IsReadOnly="True"
                               CanUserSortColumns="False" HeadersVisibility="Column"
@@ -502,7 +502,7 @@
                               RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="100" SortMemberPath="Day"/>
+                            <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="130" SortMemberPath="Day"/>
                             <!-- Status takes the width the numeric columns leave, so UNDER PROVISIONED is never cut while the card has room. -->
                             <DataGridTextColumn Header="Status" Binding="{Binding StatusDisplay}" Width="*" MinWidth="160">
                                 <DataGridTextColumn.ElementStyle>
@@ -3261,7 +3261,7 @@
                             <DataGridTextColumn Header="Annual ($)" Binding="{Binding AnnualCost, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="100">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Health" Binding="{Binding HealthScore, TargetNullValue='Not collected'}" Width="Auto" MinWidth="75">
+                            <DataGridTextColumn Header="Health" Binding="{Binding HealthDisplay}" SortMemberPath="HealthScore" Width="Auto" MinWidth="75">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="ToolTip" Value="{Binding HealthScoreNote}"/>

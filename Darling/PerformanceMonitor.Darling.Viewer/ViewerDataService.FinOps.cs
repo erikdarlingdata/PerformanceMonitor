@@ -52,15 +52,18 @@ public sealed class ProvisioningTrendRow
         MemoryRatio = dto.MemoryRatio,
         Status = dto.Status,
         StolenMemoryPct = dto.StolenMemoryPct,
-        StatusReason = dto.StatusReason
+        StatusReason = dto.StatusReason,
+        IsPartial = dto.IsPartial
     };
 
     /// <summary>Stolen memory as a share of total server memory over the day; null when the day has no memory sample.</summary>
     public decimal? StolenMemoryPct { get; set; }
     /// <summary>Why the day read UNDER PROVISIONED, in the badge's words; null for any other verdict.</summary>
     public string? StatusReason { get; set; }
+    /// <summary>True for a day that has not ended (today): the row is judged on the hours collected so far.</summary>
+    public bool IsPartial { get; set; }
 
-    public string DayDisplay => Day.ToString("ddd MM/dd");
+    public string DayDisplay => ProvisioningTrendWindow.DayLabel(Day, IsPartial);
     public string StatusDisplay => ProvisioningVerdict.StatusLabel(Status);
 }
 
@@ -585,9 +588,13 @@ public sealed class ServerPropertyRow
     /// <summary>The UTC instant behind <see cref="LastCollected"/>; see <see cref="InventoryAsOfUtc"/>.</summary>
     public DateTime? LastCollectedUtc { get; set; }
 
-    /// <summary>What the Last Collected column shows (#4766); see <see cref="InventoryAsOfText"/>. The column sorts by <see cref="LastCollected"/>.</summary>
+    /// <summary>What the Last Collected column shows (#4766); see <see cref="InventoryAsOfText"/>. In Server Time each row is on its
+    /// own server's clock, so the text ends with that clock's offset, "2026-07-01 10:30 (UTC-04:00)". The column sorts by
+    /// <see cref="LastCollected"/>.</summary>
     public string LastCollectedText => LastCollectedUtc.HasValue
-        ? ViewerTimeHelper.FormatForDisplay(LastCollectedUtc.Value, ApplicationConnectionRow.DisplayZoneNow(Clock), "yyyy-MM-dd HH:mm")
+        ? ViewerTimeHelper.WithServerZoneLabel(
+            ViewerTimeHelper.FormatForDisplay(LastCollectedUtc.Value, ApplicationConnectionRow.DisplayZoneNow(Clock), "yyyy-MM-dd HH:mm"),
+            ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock, LastCollectedUtc.Value)
         : "";
     public bool? IsHadrEnabled { get; set; }
     public bool? IsClustered { get; set; }
@@ -663,6 +670,10 @@ public sealed class ServerPropertyRow
     public string ClusteredDisplay => IsClustered.HasValue ? (IsClustered.Value ? "Yes" : "No") : "";
     public string AgReplicaRoleDisplay => string.Equals(AgReplicaRole, "Standalone", StringComparison.OrdinalIgnoreCase) ? "-" : AgReplicaRole;
     public string ProvisioningDisplay => string.IsNullOrEmpty(ProvisioningStatus) ? ProvisioningVerdict.NotCollectedLabel : ProvisioningVerdict.StatusLabel(ProvisioningStatus);
+
+    /// <summary>The tooltip on a Status cell that reads <see cref="ProvisioningVerdict.NotCollectedLabel"/>: what was not collected,
+    /// and over what window; null when there is a verdict.</summary>
+    public string? ProvisioningNote => string.IsNullOrEmpty(ProvisioningStatus) ? ProvisioningVerdict.NoStatusNote : null;
 
     /// <summary>License-limit warning for Standard edition (CPU/RAM caps). Same math as Lite.</summary>
     public string? LicenseWarning => FinOpsInventoryFigures.LicenseWarning(Edition, EngineEdition, _cpuCount, _physicalMemoryMb);

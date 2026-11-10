@@ -240,9 +240,11 @@ public partial class FinOpsTab : UserControl
     }
 
     /// <summary>
-    /// Lists the server's databases in the Index Analysis picker (<see cref="LocalDataService.GetIndexAnalysisDatabasesAsync"/>: its
-    /// current ones, or the ones in its newest size snapshot when the store has no recent state snapshot), keeping whatever name
-    /// is already typed. The box stays usable as a free text field when the store knows no databases.
+    /// Lists the server's databases in the Index Analysis picker (<see cref="LocalDataService.GetIndexAnalysisDatabaseListAsync"/>: its
+    /// current ones, or the ones in its newest size snapshot of the last seven days when the store has no recent state snapshot),
+    /// keeping whatever name is already typed. A list taken from a size snapshot says when it was collected, on the box and on
+    /// each entry's tooltip, since a database dropped since may be in it. The box stays usable as a free text field when the
+    /// store knows no databases.
     /// </summary>
     private async System.Threading.Tasks.Task PopulateIndexAnalysisDatabasesAsync(int serverId)
     {
@@ -250,16 +252,39 @@ public partial class FinOpsTab : UserControl
         var gen = _loads.Claim(nameof(PopulateIndexAnalysisDatabasesAsync));
         try
         {
-            var databases = await Task.Run(() => _dataService.GetIndexAnalysisDatabasesAsync(serverId));
+            var databases = await Task.Run(() => _dataService.GetIndexAnalysisDatabaseListAsync(serverId));
             if (_loads.Superseded(nameof(PopulateIndexAnalysisDatabasesAsync), gen)) return;
             var typed = IndexAnalysisDatabaseInput.Text;
-            IndexAnalysisDatabaseInput.ItemsSource = databases;
+            IndexAnalysisDatabaseInput.ItemsSource = databases.Names;
             IndexAnalysisDatabaseInput.Text = typed;
+
+            var note = IndexAnalysisListNote(databases.AsOfUtc);
+            IndexAnalysisDatabaseInput.ToolTip = note;
+            if (note is null)
+            {
+                IndexAnalysisDatabaseInput.ClearValue(ItemsControl.ItemContainerStyleProperty);
+            }
+            else
+            {
+                var entryStyle = new Style(typeof(ComboBoxItem), TryFindResource(typeof(ComboBoxItem)) as Style);
+                entryStyle.Setters.Add(new Setter(ToolTipProperty, note));
+                IndexAnalysisDatabaseInput.ItemContainerStyle = entryStyle;
+            }
         }
         catch (Exception ex)
         {
             AppLogger.Error("FinOps", $"Failed to list databases for index analysis: {ex.Message}", ex);
         }
+    }
+
+    /// <summary>What the Index Analysis picker says about a list taken from a size snapshot: when it was collected, in the selected
+    /// time display, and that a database dropped since may be in it. Null for the current list.</summary>
+    internal static string? IndexAnalysisListNote(DateTime? asOfUtc)
+    {
+        if (asOfUtc is not { } asOf) return null;
+        var when = ServerTimeHelper.FormatInstant(
+            asOf, ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, ServerTimeHelper.ActiveServerClock), "yyyy-MM-dd HH:mm");
+        return $"Databases as of {when}, from the newest size snapshot. There is no recent database list, so a database dropped since may be listed";
     }
 
     private int GetSelectedServerId()
@@ -1022,9 +1047,10 @@ public partial class FinOpsTab : UserControl
         ServerInventoryReload = ReReadServerInventoryOverlayAsync();
     }
 
-    /// <summary>One store read (the fleet overlay), laid onto the cached rows, and the grid redrawn. A failed read is logged by
-    /// <see cref="FinOpsServerInventory.ReadCollectedMetricsAsync"/> and leaves the rows as they are. Rows a whole load replaced
-    /// while the read ran are left to that load.</summary>
+    /// <summary>One store read (the fleet overlay), laid onto the cached rows. Each row raises a change for the cells that moved,
+    /// so the grid keeps its rows, its selection and its scroll position. A failed read is logged by
+    /// <see cref="FinOpsServerInventory.TryReadCollectedMetricsAsync"/> and keeps the values the rows have; a cell with none
+    /// then reads "Could not read". Rows a whole load replaced while the read ran are left to that load.</summary>
     private async System.Threading.Tasks.Task ReReadServerInventoryOverlayAsync()
     {
         var rows = _serverInventoryCache;
@@ -1032,24 +1058,32 @@ public partial class FinOpsTab : UserControl
         if (rows == null || dataService == null) return;
 
         _inventoryOverlayReadStartedUtc = DateTime.UtcNow;
-        var overlay = await FinOpsServerInventory.ReadCollectedMetricsAsync(async () => await Task.Run(() => dataService.GetServerMetricsAsync()));
+        var (overlay, readFailed) = await FinOpsServerInventory.TryReadCollectedMetricsAsync(async () => await Task.Run(() => dataService.GetServerMetricsAsync()));
         if (!ReferenceEquals(rows, _serverInventoryCache)) return;
 
-        FinOpsServerInventory.ReapplyCollectedMetrics(rows, overlay);
-        ServerInventoryDataGrid.Items.Refresh();
+        FinOpsServerInventory.ReapplyCollectedMetrics(rows, overlay, readFailed);
     }
 
-    /// <summary>The time display changed: the Server Inventory's Last Updated cells are computed text, so the grid is redrawn
-    /// and the cells and the column's filter read the new mode together.</summary>
+    /// <summary>The time display changed: the Server Inventory's Last Updated cells are computed text, so each loaded row raises
+    /// a change for it and the cells and the column's filter read the new mode together. The grid keeps its rows and selection.</summary>
     private void OnDisplayModeChanged(object? sender, EventArgs e)
     {
         if (Dispatcher.CheckAccess())
         {
-            ServerInventoryDataGrid.Items.Refresh();
+            RedrawInventoryTimes();
         }
         else
         {
-            Dispatcher.BeginInvoke(new Action(() => ServerInventoryDataGrid.Items.Refresh()));
+            Dispatcher.BeginInvoke(new Action(RedrawInventoryTimes));
+        }
+    }
+
+    private void RedrawInventoryTimes()
+    {
+        if (_serverInventoryCache is not { } rows) return;
+        foreach (var row in rows)
+        {
+            row.NotifyTimeDisplayChanged();
         }
     }
 

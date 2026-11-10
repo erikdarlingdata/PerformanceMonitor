@@ -415,11 +415,11 @@
                         <TextBlock x:Name="FinOpsClassificationExplanation" Margin="12,8,10,4" VerticalAlignment="Top"
                                    TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
-                        <ui:ChartPanel x:Name="FinOpsProvisioningTrendCard" Title="7-Day Provisioning Trend" Subtitle="The badge above covers the last 24 hours; each row is one calendar day of the last 7 days, judged on its CPU, memory grants and stolen memory. The first and last rows are part days" Margin="10,8,10,0">
+                        <ui:ChartPanel x:Name="FinOpsProvisioningTrendCard" Title="7-Day Provisioning Trend" Subtitle="The badge above covers the last 24 hours; each row is one calendar day, judged on its CPU, memory grants and stolen memory: the six whole days before today, then today so far" Margin="10,8,10,0">
                             <DataGrid x:Name="FinOpsProvisioningTrendGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}"
                                       CanUserSortColumns="False">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="100" SortMemberPath="Day"/>
+                                    <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="130" SortMemberPath="Day"/>
                                     <!-- Status takes the width the numeric columns leave, so UNDER PROVISIONED is never cut while the card has room. -->
                                     <DataGridTextColumn Header="Status" Binding="{Binding StatusDisplay}" Width="*" MinWidth="160">
                                         <DataGridTextColumn.ElementStyle>
@@ -1089,6 +1089,7 @@
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ProvisioningDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle>
                                             <Style TargetType="TextBlock">
+                                                <Setter Property="ToolTip" Value="{Binding ProvisioningNote}"/>
                                                 <Style.Triggers>
                                                     <DataTrigger Binding="{Binding ProvisioningStatus}" Value="RIGHT_SIZED"><Setter Property="Foreground" Value="#27AE60"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger>
                                                     <DataTrigger Binding="{Binding ProvisioningStatus}" Value="OVER_PROVISIONED"><Setter Property="Foreground" Value="#F39C12"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger>
@@ -1103,7 +1104,7 @@
                                     <DataGridTextColumn Binding="{Binding UptimeDisplay}" SortMemberPath="UptimeSeconds" Width="90"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="UptimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Uptime" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding SqlServerStartTime, StringFormat=\{0:yyyy-MM-dd HH:mm\}}" Width="150"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SqlServerStartTime" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Start Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding InventoryAsOfText}" SortMemberPath="InventoryAsOfUtc" Width="170"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="InventoryAsOf" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Inventory As Of" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding LastCollectedText}" SortMemberPath="LastCollectedUtc" Width="170"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastCollected" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding LastCollectedText}" SortMemberPath="LastCollectedUtc" Width="215"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastCollected" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <!-- #2359: Server Inventory lists every REGISTERED server, so a decommissioned one keeps the
                                          Last Updated it had when monitoring stopped. Without this the date reads as a broken
                                          freshness column. No explicit Style here on purpose (#2181/#2331): DarkButton and friends
