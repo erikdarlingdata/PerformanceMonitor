@@ -761,6 +761,71 @@ check("leg extras: no self-test leg writes the script tests and no self-test fil
 cp.write_leg_extras(os.path.join(tmp, "e3"), run([SERVICE]))
 check("leg extras: an ordinary plan writes none", os.path.exists(os.path.join(tmp, "e3")), False)
 
+# --- the WPF smoke harness restore (#8529) -----------------------------------------------------------------------
+# pr.yml's plan job asks ci-select.py whether the build job restores tools/ui-smoke-wpf in locked mode. The harness is
+# outside the solution and referenced by no test project, so that restore is the one a pull request has for its lock file.
+if not hasattr(cs, "harness_restore") or not hasattr(cs, "restore_input"):
+    failures.append("harness restore: ci-select.py has no harness_restore and restore_input")
+    print("\n".join(failures))
+    sys.exit(1)
+HARNESS = "tools/ui-smoke-wpf/"
+LITE_SOURCE = "Lite/Services/LocalDataService.cs"
+SOLUTION_LOCKS = [d + "/packages.lock.json" for d in (
+    "Lite", "Lite.Tests", "Darling/Darling.Tests", "Darling/PerformanceMonitor.Darling.Viewer",
+    "Exporter/PerformanceMonitor.Exporter", "Exporter/PerformanceMonitor.Exporter.Tests")]
+
+
+def harness(files, event="pull_request", base="dev", areas="classes"):
+    return cs.harness_restore(event, base, areas, files)
+
+
+for name, files in (
+        ("the central package versions alone", ["Directory.Packages.props"]),
+        ("the central package versions with the solution's lock files", ["Directory.Packages.props"] + SOLUTION_LOCKS),
+        ("one solution lock file among sources", [LITE_SOURCE, "Lite/packages.lock.json"]),
+        ("the harness lock file alone", [HARNESS + "packages.lock.json"]),
+        ("a harness source file", [HARNESS + "LiteWalkTests.cs"]),
+        ("the harness project file", [HARNESS + "UiSmokeWpf.csproj"]),
+        ("the Lite project file", ["Lite/PerformanceMonitorLite.csproj"]),
+        ("a shared library's project file", ["PerformanceMonitor.Common/PerformanceMonitor.Common.csproj"]),
+        ("global.json", ["global.json"]),
+        ("NuGet.Config in mixed case", ["NuGet.Config"]),
+        ("Directory.Build.props", ["Directory.Build.props"]),
+        ("Directory.Build.targets", ["Directory.Build.targets"]),
+        ("a props file in a project folder", ["Lite/Version.props"]),
+        ("a targets file in a project folder", ["Darling/Build/Publish.targets"]),
+        ("the solution", ["PerformanceMonitor.sln"]),
+        ("an slnx solution", ["PerformanceMonitor.slnx"]),
+        ("an empty file list", []),
+        ("a file list that cannot be trusted", ["unknown/over-the-cap"])):
+    check(f"harness restore: {name} restores", harness(files), True)
+for name, files in (
+        ("a Lite source file", [LITE_SOURCE]),
+        ("a test class", ["Darling/Darling.Tests/OneTests.cs"]),
+        ("a docs change", ["README.md"]),
+        ("a file that only names the harness folder further down its path", ["docs/" + HARNESS + "notes.md"]),
+        ("a file whose name only starts like a lock file", ["Lite/packages.lock.json.orig"])):
+    check(f"harness restore: {name} does not restore", harness(files), False)
+check("harness restore: a plan of every area restores", harness([LITE_SOURCE], areas="all"), True)
+check("harness restore: a pull request into main restores", harness([LITE_SOURCE], base="main"), True)
+check("harness restore: a dispatch restores", harness([LITE_SOURCE], event="workflow_dispatch"), True)
+check("harness restore: a dev push with a source file does not restore", harness([LITE_SOURCE], event="push"), False)
+check("harness restore: a dev push with a restore input restores", harness(["Directory.Packages.props"], event="push"), True)
+# The file kinds, one by one: the gate reads the same names and suffixes as the slow-class skip, so dropping one there for
+# that rule's sake has to show up here.
+for name in ("Directory.Build.props", "Directory.Build.targets", "Directory.Packages.props", "global.json", "nuget.config",
+             "packages.lock.json"):
+    check(f"harness restore: {name} is a restore input at the root and in a folder",
+          (cs.restore_input(name), cs.restore_input("Some/Folder/" + name)), (True, True))
+for suffix in (".csproj", ".props", ".targets", ".sln", ".slnx"):
+    check(f"harness restore: a {suffix} file is a restore input", cs.restore_input("Some/Folder/Thing" + suffix), True)
+check("harness restore: a source file under the harness folder is not itself a restore input",
+      cs.restore_input(HARNESS + "LiteWalkTests.cs"), False)
+# The three Directory.* names end in a listed suffix too, so restore_input answers the same with one of them gone and no
+# row above can fail for it. These read the set, so each of the eleven names and suffixes has a row that fails without it.
+for name in ("directory.build.props", "directory.build.targets", "directory.packages.props"):
+    check(f"harness restore: {name} is listed by name", name in cs._BUILD_INPUT_NAMES, True)
+
 # --- the real filters, three stable paths ----------------------------------------------------------------------
 live = cs.Rules()
 check("real filters: README.md is docs-only", cp.classify(live, "pull_request", "dev", ["README.md"])["areas"], "docs-only")
