@@ -752,6 +752,146 @@ public sealed class ScopedWebTokenLiveTests
         Assert.True(problems.Count == 0, string.Join("\n", problems));
     }
 
+    /// <summary>#7988: alert history answers the caller's grant. A caller with no grant reads every server's alerts, a caller granted
+    /// one server reads that server's alerts alone, and a caller whose grant holds no server reads none; the dismissed count beside
+    /// a page counts the same servers. Each grant is asked three ways: the store read, the <c>get_alert_history</c> tool, and the web
+    /// route under a token of that kind. The hidden server's rows are the newest and the most numerous, so a page that ignored the
+    /// grant would lead with them. Every read ends its window at one fixed instant, after every seeded row.</summary>
+    [Fact]
+    public async Task AlertHistory_ReadsEveryServerWithNoGrant_OnlyTheGrantedServers_AndNoneForAnEmptyGrant()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the scoped-token test against PostgreSQL.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        var settings = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath };
+        await using var postgres = NpgsqlDataSource.Create(settings.ConnectionString);
+        await using var connection = await postgres.OpenConnectionAsync(ct);
+        await PgMigrations.MigrateAsync(connection, null, ct);
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, 41, "finance-server", ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, 42, "operations-server", ct);
+        int finance;
+        await using (var tag = connection.CreateCommand())
+        {
+            tag.CommandText = """
+                WITH tag AS (
+                    INSERT INTO server_tags (name, parent_id) VALUES ('Finance', NULL) RETURNING id
+                )
+                INSERT INTO server_tag_map (server_id, tag_id)
+                SELECT 41, id FROM tag
+                RETURNING tag_id
+                """;
+            finance = (int)(await tag.ExecuteScalarAsync(ct))!;
+        }
+
+        // A tag no server carries: the token scoped to it holds a grant with no server in it.
+        int vacant;
+        await using (var tag = connection.CreateCommand())
+        {
+            tag.CommandText = "INSERT INTO server_tags (name, parent_id) VALUES ('Vacant', NULL) RETURNING id";
+            vacant = (int)(await tag.ExecuteScalarAsync(ct))!;
+        }
+
+        // Two open alerts and one dismissed on the permitted server; three open and two dismissed, all newer, on the other.
+        var windowEnd = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+        var since = windowEnd.AddHours(-1);
+        var firedAt = windowEnd.AddMinutes(-10);
+        foreach (var (id, name, open, dismissed) in new[] { (41, "finance-server", 2, 1), (42, "operations-server", 3, 2) })
+        {
+            for (var row = 0; row < open + dismissed; row++)
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct, """
+                    INSERT INTO config_alert_log
+                    (alert_time, server_id, server_name, metric_name, current_value, threshold_value, dismissed)
+                    VALUES ($1, $2, $3, 'High CPU', 95, 10, $4)
+                    """, firedAt.AddSeconds(((id - 41) * 60) + row), id, name, row >= open);
+            }
+        }
+
+        using var server = await BuildServer(
+            SetFor(ScopedEntry("finance", ReaderToken, finance), ScopedEntry("vacant", ParentReaderToken, vacant)),
+            dataSource: postgres, readAdmission: new ReadAdmission(TimeProvider.System, TimeSpan.Zero, null));
+        var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+        var problems = new List<string>();
+
+        void Check(string what, IEnumerable<int> serverIds, int[] expected, string answer)
+        {
+            var actual = serverIds.Order().ToArray();
+            if (!actual.SequenceEqual(expected))
+            {
+                problems.Add(what + " returned alerts of servers [" + string.Join(", ", actual) + "], expected [" + string.Join(", ", expected) + "]: " + answer);
+            }
+        }
+
+        // The alert rows of a tool or route answer; the empty answer carries a status and no rows.
+        static int[] ServerIdsOf(string json)
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.TryGetProperty("alerts", out var alerts)
+                ? alerts.EnumerateArray().Select(alert => alert.GetProperty("server_id").GetInt32()).ToArray()
+                : Array.Empty<int>();
+        }
+
+        static long? DismissedExcludedOf(string json)
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.TryGetProperty("dismissed_excluded_count", out var count) ? count.GetInt64() : null;
+        }
+
+        var cases = new (string Label, string Token, int[]? Grant, int Tag, int[] Open, int[] All, long Hidden, int[] OpenOnHidden)[]
+        {
+            ("no grant", SharedToken, null, 0, [41, 41, 42, 42, 42], [41, 41, 41, 42, 42, 42, 42, 42], 3, [42, 42, 42]),
+            ("a grant of one server", ReaderToken, [41], finance, [41, 41], [41, 41, 41], 1, []),
+            ("a grant of no server", ParentReaderToken, [], vacant, [], [], 0, []),
+        };
+
+        foreach (var (label, token, grant, tag, open, all, hidden, openOnHidden) in cases)
+        {
+            // The store read: the fleet-wide page and its dismissed count, then the one-server page of the hidden server.
+            var filter = new DarlingAlertReader.AlertHistoryFilter(null, null) { AllowedServerIds = grant };
+            var openRows = await DarlingAlertReader.GetAlertHistoryPageAsync(postgres, since, windowEnd, null, 50, includeDismissed: false, filter, ct);
+            Check("the store read under " + label, openRows.Select(row => row.ServerId), open, "(rows)");
+            var allRows = await DarlingAlertReader.GetAlertHistoryPageAsync(postgres, since, windowEnd, null, 50, includeDismissed: true, filter, ct);
+            Check("the store read with dismissed rows under " + label, allRows.Select(row => row.ServerId), all, "(rows)");
+            var hiddenCount = await DarlingAlertReader.CountDismissedAlertsAsync(postgres, since, windowEnd, null, filter, ct);
+            if (hiddenCount != hidden)
+            {
+                problems.Add("the store's dismissed count under " + label + " is " + hiddenCount + ", expected " + hidden);
+            }
+            var hiddenServerRows = await DarlingAlertReader.GetAlertHistoryPageAsync(postgres, since, windowEnd, 42, 50, includeDismissed: false, filter, ct);
+            Check("the store's one-server read of the other server under " + label, hiddenServerRows.Select(row => row.ServerId), openOnHidden, "(rows)");
+
+            // The tool, called as the web route calls it for this grant and as an MCP caller (no grant) calls it.
+            Task<string> Tool(bool includeDismissed) =>
+                DarlingMcpAlertTools.GetAlertHistory(postgres, null, 1, 50, as_of: asOf, include_dismissed: includeDismissed, cancellationToken: ct);
+            var toolOpen = grant is null ? await Tool(false) : await DarlingServerResolver.ReadWebScopeAsync(grant, new[] { tag }, () => Tool(false));
+            Check("the tool under " + label, ServerIdsOf(toolOpen), open, toolOpen);
+            var toolAll = grant is null ? await Tool(true) : await DarlingServerResolver.ReadWebScopeAsync(grant, new[] { tag }, () => Tool(true));
+            Check("the tool with dismissed rows under " + label, ServerIdsOf(toolAll), all, toolAll);
+
+            // The web route, signed in with a token that holds this grant.
+            var cookie = await SignIn(server, token);
+            var path = "/api/read/get_alert_history?hours_back=1&limit=50&as_of=" + Uri.EscapeDataString(asOf);
+            var (webOpen, webOpenBody) = await Send(server, HttpMethods.Get, path, cookie);
+            Assert.True(webOpen.Response.StatusCode == StatusCodes.Status200OK, "the route under " + label + " answered " + webOpen.Response.StatusCode + ": " + webOpenBody);
+            Check("the route under " + label, ServerIdsOf(webOpenBody), open, webOpenBody);
+            if (open.Length > 0 && DismissedExcludedOf(webOpenBody) != hidden)
+            {
+                problems.Add("the route under " + label + " counts " + DismissedExcludedOf(webOpenBody) + " dismissed rows, expected " + hidden + ": " + webOpenBody);
+            }
+            var (webAll, webAllBody) = await Send(server, HttpMethods.Get, path + "&include_dismissed=true", cookie);
+            Assert.True(webAll.Response.StatusCode == StatusCodes.Status200OK, "the route with dismissed rows under " + label + " answered " + webAll.Response.StatusCode + ": " + webAllBody);
+            Check("the route with dismissed rows under " + label, ServerIdsOf(webAllBody), all, webAllBody);
+            if (!open.Contains(42) && (webOpenBody + webAllBody + toolOpen + toolAll).Contains("operations-server", StringComparison.Ordinal))
+            {
+                problems.Add("an answer under " + label + " names the server outside the grant");
+            }
+        }
+
+        Assert.True(problems.Count == 0, string.Join("\n", problems));
+    }
+
     /// <summary>Every <c>collector_interval_minutes</c> value in a catalog answer, wherever the read's parameter nodes sit.</summary>
     private static IEnumerable<int> IntervalsOf(JsonElement element)
     {
