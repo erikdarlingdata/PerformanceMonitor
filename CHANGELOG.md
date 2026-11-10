@@ -118,8 +118,6 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 - **Lite serves the two investigation reads in every configuration, as Darling does** ([#8461]) - `list_investigation_requests` and `get_investigation_reports` no longer need `mcp_allow_investigations`. The two tools that claim and report keep that setting. One shared list now decides which investigation tools only read and which change state, for both apps.
 - **Lite's default per-event alert limit is now 5, the same as Darling's** ([#8466]) - Lite's default for `alert_per_event_max_per_cycle` changes from 10 to 5. Per-event delivery now reports up to 5 incidents one by one in each check cycle, then sends one "+N more" message, in both apps. A value you saved in Lite's settings file is kept. A file that never set it gets 5 on upgrade.
 - **Window text, notes, advice and CLI output write counts as "1 thing" and "3 things" instead of "thing(s)"** ([#8468]) - Every count a person or an agent reads in both apps' windows, collection-log notes, PostgreSQL advice, plan viewer warnings, FinOps findings and CLI notes now agrees with its number. So does the verb beside it. The warning text that the Exporter stores for each plan changed, so the Exporter reads every plan once more on its next export.
-- **The drill-down top-CPU and bad-actor reads are one text shared by Lite and Darling** ([#8470]) - Both apps run the same SQL from one place in the shared library instead of two copies kept in step by hand. What either app returns is unchanged.
-- **The analysis facts' shared thresholds live in one place for Lite and Darling** ([#8471]) - The parameter sensitivity floors, the high-DOP floor and its unlimited marker, the grant divergence ratio and the offender cap are now named once in the shared library. Both apps' SQL takes them from it. What either app detects and returns is unchanged.
 
 ### Fixed
 
@@ -646,6 +644,7 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 - **FinOps Server Inventory shows Edition, Version and Host OS whole** ([#8474]) - In the Viewer and in Lite the three text columns size to their longest value. The Hardware Note column is shown only while a server carries a note, so the grid needs less horizontal scroll.
 - **The MCP server instructions match each app's investigation gate** ([#8463]) - Lite's instructions state the token rule the server enforces for the tools that claim and report, and count them from the policy. Darling's instructions name every investigation tool, including `post_investigation_message`. Both lists follow the policy's set from now on.
 - **The FinOps day tables keep a sample stamped after the read took its clock** ([#8503]) - The 7-Day Provisioning Trend and Memory Grant Efficiency tables run their days through the window's newest sample, in Lite and the Viewer. A sample that the store's host wrote after the Viewer's clock, or that the collector stamped after Lite took its clock, now lands in the row its day names instead of leaving the table. MCP day labels stay UTC.
+- **Apps & features shows the Lite and Viewer names and their publisher** ([#8414]) - The Velopack installers now list the apps as Performance Monitor Lite and Performance Monitor Darling Viewer, with Darling Data, LLC as the publisher. Before, Apps & features showed the package id for both.
 
 ## [3.12.0] - 2026-10-30
 
@@ -7437,6 +7436,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#8407]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8407
 [#8408]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8408
 [#8412]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8412
+[#8414]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8414
 [#8422]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8422
 [#8443]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8443
 [#8446]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8446
@@ -7462,8 +7462,6 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#8467]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8467
 [#8468]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8468
 [#8469]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8469
-[#8470]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8470
-[#8471]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8471
 [#8473]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8473
 [#8474]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8474
 [#8491]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8491
