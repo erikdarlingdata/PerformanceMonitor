@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Common;
 using Xunit;
 
 namespace Lite.Tests;
@@ -151,6 +152,12 @@ public sealed class QueryHighDopStaleMaxDopParityTests
         @"LEFT[ \t]+JOIN[ \t]+current_maxdop[ \t]+AS[ \t]+m[ \t]+ON[ \t]+true",
         RegexOptions.IgnoreCase);
 
+    /// <summary>
+    /// A read that takes the count from the one text (#8471). The census counts these where it counted spelled-out
+    /// copies, and the canonical check judges that text through the same discriminator.
+    /// </summary>
+    private static readonly Regex SignatureUse = new(@"QueryHighDopSignature\.HighDopQueriesCountSql");
+
     [Fact]
     public void EveryCopyOfTheCrossCheck_IsAccountedFor_InLitesAnalysisSql()
     {
@@ -158,7 +165,7 @@ public sealed class QueryHighDopStaleMaxDopParityTests
 
         foreach (var (relativePath, expected) in ExpectedCopies)
         {
-            var actual = StaleMaxDopGuard.Matches(ReadNormalized(relativePath)).Count;
+            var actual = SignatureUse.Matches(ReadNormalized(relativePath)).Count;
             total += actual;
 
             Assert.True(
@@ -193,6 +200,14 @@ public sealed class QueryHighDopStaleMaxDopParityTests
             }
         }
 
+        /* The one text the reads splice (#8471): its count carries the cross-check, or every read's does not. */
+        var sharedCounts = HighDopCount.Matches(QueryHighDopSignature.HighDopQueriesCountSql).Count;
+        var sharedGuarded = StaleMaxDopGuard.Matches(QueryHighDopSignature.HighDopQueriesCountSql).Count;
+        if (sharedCounts != 1 || sharedGuarded != 1)
+        {
+            unguarded.Add($"QueryHighDopSignature.HighDopQueriesCountSql: {sharedCounts} high-DOP count(s), {sharedGuarded} carrying the cross-check");
+        }
+
         Assert.True(
             unguarded.Count == 0,
             "a QUERY_HIGH_DOP count exists that does NOT cross-check max_dop against the server's current "
@@ -224,11 +239,6 @@ public sealed class QueryHighDopStaleMaxDopParityTests
 
         foreach (var path in files)
         {
-            if (declared.Contains(path))
-            {
-                continue;
-            }
-
             var count = HighDopCount.Matches(
                 File.ReadAllText(path).Replace("\r\n", "\n", StringComparison.Ordinal)).Count;
 
@@ -240,7 +250,7 @@ public sealed class QueryHighDopStaleMaxDopParityTests
 
         Assert.True(
             strays.Count == 0,
-            "a Lite analysis read counts high-DOP queries in a file this guard does not declare:"
+            "a Lite analysis read spells out a high-DOP count rather than splicing QueryHighDopSignature.HighDopQueriesCountSql:"
             + Environment.NewLine + string.Join(Environment.NewLine, strays) + Environment.NewLine
             + "Add it to ExpectedCopies — with the staleness cross-check, and with the mirror copy in "
             + "Darling's store — in the same commit.");
@@ -254,14 +264,18 @@ public sealed class QueryHighDopStaleMaxDopParityTests
 
         foreach (var (relativePath, _) in ExpectedCopies)
         {
-            foreach (Match m in StaleMaxDopGuard.Matches(ReadNormalized(relativePath)))
+            foreach (Match use in SignatureUse.Matches(ReadNormalized(relativePath)))
             {
                 seen++;
+
+                /* The text the read splices is what the discriminator judges. */
+                var m = StaleMaxDopGuard.Match(QueryHighDopSignature.HighDopQueriesCountSql);
+                Assert.True(m.Success, $"{relativePath} @ char {use.Index}: the shared count does not carry the cross-check's shape");
 
                 if (!string.Equals(Normalize(m.Value), CanonicalStaleMaxDopGuard, StringComparison.Ordinal))
                 {
                     skewed.Add(
-                        $"{relativePath} @ char {m.Index}: floor={m.Groups["floorOp"].Value} "
+                        $"{relativePath} @ char {use.Index}: floor={m.Groups["floorOp"].Value} "
                         + $"{m.Groups["floor"].Value}, unlimited sentinel={m.Groups["unlimited"].Value}");
                 }
             }

@@ -12,13 +12,14 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Common;
 using Xunit;
 
 namespace Darling.Tests;
 
 /// <summary>
-/// Cross-SKU parity guard for the QUERY_HIGH_DOP staleness cross-check: #2705's guard, written out twice
-/// across two stores and otherwise held equal by nothing. Built to the shape
+/// Cross-SKU parity guard for the QUERY_HIGH_DOP staleness cross-check: #2705's guard, spliced from
+/// <c>PerformanceMonitor.Common.QueryHighDopSignature</c> into both stores' reads (#8471). Built to the shape
 /// <c>ParameterSensitivityFiringSignatureParityTests</c> established in #2998, because this is the defect
 /// that guard exists to catch and did not cover.
 ///
@@ -149,6 +150,12 @@ public sealed class QueryHighDopStaleMaxDopParityTests
         @"LEFT[ \t]+JOIN[ \t]+current_maxdop[ \t]+AS[ \t]+m[ \t]+ON[ \t]+true",
         RegexOptions.IgnoreCase);
 
+    /// <summary>
+    /// A read that takes the count from the one text (#8471). The census counts these where it counted spelled-out
+    /// copies, and the canonical check judges that text through the same discriminator.
+    /// </summary>
+    private static readonly Regex SignatureUse = new(@"QueryHighDopSignature\.HighDopQueriesCountSql");
+
     [Fact]
     public void EveryCopyOfTheCrossCheck_IsAccountedFor_InBothStores()
     {
@@ -157,7 +164,7 @@ public sealed class QueryHighDopStaleMaxDopParityTests
             var path = RepoPath(relativePath);
             Assert.True(File.Exists(path), $"{relativePath} is gone — update this guard deliberately");
 
-            var actual = StaleMaxDopGuard.Matches(ReadNormalizedSource(path)).Count;
+            var actual = SignatureUse.Matches(ReadNormalizedSource(path)).Count;
 
             Assert.True(
                 actual == expected,
@@ -190,6 +197,14 @@ public sealed class QueryHighDopStaleMaxDopParityTests
             }
         }
 
+        /* The one text the reads splice (#8471): its count carries the cross-check, or every read's does not. */
+        var sharedCounts = HighDopCount.Matches(QueryHighDopSignature.HighDopQueriesCountSql).Count;
+        var sharedGuarded = StaleMaxDopGuard.Matches(QueryHighDopSignature.HighDopQueriesCountSql).Count;
+        if (sharedCounts != 1 || sharedGuarded != 1)
+        {
+            unguarded.Add($"QueryHighDopSignature.HighDopQueriesCountSql: {sharedCounts} high-DOP count(s), {sharedGuarded} carrying the cross-check");
+        }
+
         Assert.True(
             unguarded.Count == 0,
             "a QUERY_HIGH_DOP count exists that does NOT cross-check max_dop against the server's current "
@@ -211,11 +226,6 @@ public sealed class QueryHighDopStaleMaxDopParityTests
 
         foreach (var path in scanned)
         {
-            if (declared.Contains(path))
-            {
-                continue;
-            }
-
             var count = HighDopCount.Matches(ReadNormalizedSource(path)).Count;
             if (count > 0)
             {
@@ -240,7 +250,7 @@ public sealed class QueryHighDopStaleMaxDopParityTests
 
         Assert.True(
             strays.Count == 0,
-            "an analysis read counts high-DOP queries in a file this guard does not declare:"
+            "an analysis read spells out a high-DOP count rather than splicing QueryHighDopSignature.HighDopQueriesCountSql:"
             + Environment.NewLine + string.Join(Environment.NewLine, strays) + Environment.NewLine
             + "Add it to ExpectedCopies — with the staleness cross-check, and with the mirror copy in the "
             + "other store — in the same commit.");
@@ -256,14 +266,18 @@ public sealed class QueryHighDopStaleMaxDopParityTests
         {
             var store = relativePath.StartsWith("Lite/", StringComparison.Ordinal) ? "Lite" : "Darling";
 
-            foreach (Match m in StaleMaxDopGuard.Matches(ReadNormalizedSource(RepoPath(relativePath))))
+            foreach (Match use in SignatureUse.Matches(ReadNormalizedSource(RepoPath(relativePath))))
             {
                 perStore[store]++;
+
+                /* The text the read splices is what the discriminator judges. */
+                var m = StaleMaxDopGuard.Match(QueryHighDopSignature.HighDopQueriesCountSql);
+                Assert.True(m.Success, $"{relativePath} @ char {use.Index}: the shared count does not carry the cross-check's shape");
 
                 if (!string.Equals(Normalize(m.Value), CanonicalStaleMaxDopGuard, StringComparison.Ordinal))
                 {
                     skewed.Add(
-                        $"{relativePath} @ char {m.Index}: floor={m.Groups["floorOp"].Value} "
+                        $"{relativePath} @ char {use.Index}: floor={m.Groups["floorOp"].Value} "
                         + $"{m.Groups["floor"].Value}, unlimited sentinel={m.Groups["unlimited"].Value}");
                 }
             }
