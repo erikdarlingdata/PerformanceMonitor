@@ -2178,6 +2178,12 @@ public class QueryTrendPoint
     /// <summary>How many of a bucketed point's collections had no knowable rate and were left out of it (#3897).
     /// Null on an unbucketed point, which is its own single collection — unrated or not, per <see cref="HasRate"/>.</summary>
     public long? UnratedInBucket { get; set; }
+
+    /// <summary>#8575: set only on a Query Store point whose interval was still OPEN when it was last captured: the seconds its
+    /// totals cover (the newest snapshot that stored one of its rows, less the interval's start), shorter than the interval's length.
+    /// The rates are over this, not over the whole interval, and are null when it is under 60 seconds. Null on a closed interval and
+    /// on every other trend. Darling's twin is <c>QueryDurationTrendPoint.PartialCoveredSeconds</c>.</summary>
+    public double? PartialCoveredSeconds { get; set; }
 }
 
 public class QueryStatsRow
