@@ -222,16 +222,45 @@ public partial class ServerTab : UserControl
 
     /// <summary>
     /// #1980: the Query Store grid's inline "View" button — the capability its two sibling grids
-    /// always had. Lite's QS rows already carry the stored plan text, so this opens it directly in
-    /// the Plan Viewer via <see cref="OpenPlanTab"/> (the history window's own path); the button is
-    /// gated on <c>HasQueryPlan</c> in XAML, so an empty row is never clickable.
+    /// always had. Lite's QS rows carry no plan text, so the plan is fetched from the monitored server's
+    /// Query Store by the row's plan id, as the row's context menu and the history window fetch it, and
+    /// opened in the Plan Viewer via <see cref="OpenPlanTab"/>. The button is gated on
+    /// <c>HasQueryPlan</c> in XAML, so a row that names no plan is never clickable. A plan Query Store
+    /// no longer holds, or a fetch that fails, gets the history window's "Plan Not Found" message.
     /// </summary>
-    private void ViewQueryStorePlanInline_Click(object sender, RoutedEventArgs e)
+    private async void ViewQueryStorePlanInline_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.DataContext is not QueryStoreRow row) return;
-        if (string.IsNullOrEmpty(row.QueryPlanText)) return;
+        if (row.PlanId <= 0) return;
+        // A second click while the fetch is running is dropped.
+        if (btn.Content is "...") return;
 
-        _ = OpenPlanTab(row.QueryPlanText, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
+        btn.Content = "...";
+        try
+        {
+            string? plan = null;
+            try
+            {
+                var connStr = _credentialResolver.GetConnectionString(_server);
+                plan = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryStorePlanAsync(connStr, row.DatabaseName, row.PlanId));
+            }
+            catch
+            {
+                // A failed fetch reads as a plan that is not there, as it does from the row's context menu.
+            }
+
+            if (string.IsNullOrEmpty(plan))
+            {
+                MessageBox.Show("No query plan found in Query Store for this plan ID.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            _ = OpenPlanTab(plan, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
+        }
+        finally
+        {
+            btn.Content = "View";
+        }
     }
 
     // Returns a Task (not async void) so the Ctrl+V paste handler can await it inside its _pasteInProgress

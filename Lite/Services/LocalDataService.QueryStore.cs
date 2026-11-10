@@ -1379,7 +1379,11 @@ public class QueryStoreRow
     public double AvgNumPhysicalIoReads { get; set; }
     public double MinNumPhysicalIoReads { get; set; }
     public double MaxNumPhysicalIoReads { get; set; }
-    public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlanText);
+    /// <summary>
+    /// Whether the row's plan can be asked for: it names a plan. The grid's read carries no plan text, so the inline View
+    /// button fetches the plan from the monitored server's Query Store by this plan id when it is clicked.
+    /// </summary>
+    public bool HasQueryPlan => PlanId > 0;
     public string FirstExecutionTimeLocal => ServerTimeHelper.FormatServerTime(FirstExecutionTime);
     public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerTime(LastExecutionTime);
     public double TotalCpuMs => TotalExecutions * AvgCpuTimeMs;
