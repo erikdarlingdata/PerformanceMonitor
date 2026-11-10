@@ -760,12 +760,13 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             """, ct, CollectionIdGenerator.Next(), Naive(DateTime.UtcNow - age), id, name);
 
     [Fact]
-    public async Task AStaleAutomaticTuningCapture_SaysThePlanCorrectionCollectorIsDisabled_WhereItsScheduleIsOff_AndNamesTheHourlyCadenceOnlyWhereItRuns()
+    public async Task AStaleAutomaticTuningCapture_SaysThePlanCorrectionCollectorIsDisabled_WhereItsScheduleIsOff_AndPointsAtCollectionHealthWhereItRuns()
     {
         await RunAsync(async (connection, postgres, ct) =>
         {
             /* #8541: two servers whose newest automatic-tuning capture is 19 days old. The first has plan_correction disabled, so
-               the note of get_plan_corrections says no newer capture is taken. The second runs the collector and keeps the cadence. */
+               the note of get_plan_corrections says no newer capture is taken. The second runs the collector, and its note points at
+               get_collection_health for why no newer capture exists. */
             const int disabledId = 854_171;
             const string disabled = "plan-correction-disabled";
             const int enabledId = 854_172;
