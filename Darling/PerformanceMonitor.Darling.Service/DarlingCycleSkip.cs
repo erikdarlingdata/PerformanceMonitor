@@ -28,6 +28,11 @@ internal sealed record CycleSkipSnapshot(
     DateTime EarliestUtc)
 {
     internal long Total => GridSlots.Values.Sum() + HeldSlots.Values.Sum() + DailyLostSlots.Values.Sum();
+
+    /// <summary>#8539: the longest of each cause measured by the earlier bodies that reached the row's flush with these slots
+    /// pending and wrote no row (the last row was under <see cref="DarlingCycleSkip.RowMinInterval"/> old, or the write did
+    /// not land). All zero when the body that writes the row is the first to see the slots.</summary>
+    internal CycleSkipCauses EarlierCauses { get; init; }
 }
 
 /// <summary>The measured causes the late run carries in: the previous body's length and its slowest collector, the time
@@ -42,7 +47,20 @@ internal readonly record struct CycleSkipCauses(
     long PrevAnalysisMs = 0,
     int GateWaitAnalysisHolders = 0,
     int DailyRunsWaiting = 0,
-    long OldestDailyWaitMs = 0);
+    long OldestDailyWaitMs = 0)
+{
+    /// <summary>#8539: the longest of each cause across two bodies, each kept with its own detail (the slowest collector
+    /// of the longer body, the analysis holders of the longer wait). The daily-run permit backlog is not carried: a row
+    /// states it as it stands when the row is written.</summary>
+    internal static CycleSkipCauses Longest(CycleSkipCauses a, CycleSkipCauses b)
+    {
+        var body = a.PrevBodyMs >= b.PrevBodyMs ? a : b;
+        var wait = a.GateWaitMs >= b.GateWaitMs ? a : b;
+        return new CycleSkipCauses(
+            body.PrevBodyMs, body.PrevBodySlowestName, body.PrevBodySlowestMs, wait.GateWaitMs,
+            Math.Max(a.PrevAnalysisMs, b.PrevAnalysisMs), wait.GateWaitAnalysisHolders);
+    }
+}
 
 /// <summary>
 /// #5735: the slots one server has lost since its last <c>collection_cycle</c> row, summed over its collectors. The places
@@ -60,6 +78,10 @@ internal sealed class CycleSkipAccumulator
     private readonly Dictionary<string, long> _daily = new(StringComparer.OrdinalIgnoreCase);
     private DateTime? _earliest;
     private DateTime _lastRowUtc = DateTime.MinValue;
+
+    /* #8539: the longest of each cause measured by the bodies that reached the flush with slots pending and wrote no row.
+       Cleared when a row lands. */
+    private CycleSkipCauses _carried;
 
     /// <summary>Slots pending, all kinds.</summary>
     internal long Pending
@@ -101,6 +123,24 @@ internal sealed class CycleSkipAccumulator
         }
     }
 
+    /// <summary>
+    /// #8539: keeps what a body measured with the slots still pending, for the row that reports them. A body calls it when
+    /// it reaches the flush and writes no row. Nothing is kept when no slot is pending: a long wait that cost no slot is not
+    /// a cause of the ones lost after it.
+    /// </summary>
+    internal void NoteCauses(CycleSkipCauses causes)
+    {
+        lock (_lock)
+        {
+            if (_grid.Count == 0 && _held.Count == 0 && _daily.Count == 0)
+            {
+                return;
+            }
+
+            _carried = CycleSkipCauses.Longest(_carried, causes);
+        }
+    }
+
     /// <summary>The pending counts, or null when there are none or the last row was written less than
     /// <paramref name="minInterval"/> ago. Takes nothing out: <see cref="Commit"/> does that once the row has landed, so a
     /// failed write keeps its counts. A clock that stepped back (now before the last row) counts as elapsed.</summary>
@@ -123,7 +163,10 @@ internal sealed class CycleSkipAccumulator
                 new Dictionary<string, long>(_grid, StringComparer.OrdinalIgnoreCase),
                 new Dictionary<string, long>(_held, StringComparer.OrdinalIgnoreCase),
                 new Dictionary<string, long>(_daily, StringComparer.OrdinalIgnoreCase),
-                _earliest.Value);
+                _earliest.Value)
+            {
+                EarlierCauses = _carried,
+            };
         }
     }
 
@@ -141,6 +184,8 @@ internal sealed class CycleSkipAccumulator
                 _earliest = null;
             }
 
+            /* The row that landed stated the carried causes, so they go with it. */
+            _carried = default;
             _lastRowUtc = nowUtc;
         }
     }
@@ -220,35 +265,46 @@ internal static class DarlingCycleSkip
         /* Candidates: (label, length of the cause, name for slowest_item, slowest_item_ms). The largest length is the cause
            the row carries; the sentence lists every one. */
         var candidates = new List<(string Sentence, long? Length, string Name, long NameMs)>();
-        if (causes.PrevBodyMs >= CauseFloorMs)
+
+        /* #8539: the row is written at most once in RowMinInterval, so some of its slots were lost by earlier bodies, and
+           the body that writes it may have measured nothing long itself. For each cause the longer of the two is stated:
+           this body's in its own words, an earlier body's as an earlier pass's. */
+        var earlier = snapshot.EarlierCauses;
+        var bodyIsEarlier = earlier.PrevBodyMs > causes.PrevBodyMs;
+        var body = bodyIsEarlier ? earlier : causes;
+        if (body.PrevBodyMs >= CauseFloorMs)
         {
-            var slowestName = causes.PrevBodySlowestName ?? UnmeasuredName;
-            var slowestMs = causes.PrevBodySlowestMs > 0 ? causes.PrevBodySlowestMs : causes.PrevBodyMs;
+            var slowestName = body.PrevBodySlowestName ?? UnmeasuredName;
+            var slowestMs = body.PrevBodySlowestMs > 0 ? body.PrevBodySlowestMs : body.PrevBodyMs;
             candidates.Add((
                 string.Create(CultureInfo.InvariantCulture,
-                    $"the previous collection pass took {Format(causes.PrevBodyMs)} and was still running when the next one was due (slowest: {slowestName.Replace('_', ' ')} {Format(slowestMs)})"),
-                causes.PrevBodyMs, slowestName, slowestMs));
+                    $"{(bodyIsEarlier ? "an earlier" : "the previous")} collection pass took {Format(body.PrevBodyMs)} and was still running when the next one was due (slowest: {slowestName.Replace('_', ' ')} {Format(slowestMs)})"),
+                body.PrevBodyMs, slowestName, slowestMs));
         }
 
         /* #5824: the previous body's scheduled analysis pass ran after its collectors, inside the same fleet slot, so it is
            not in PrevBodyMs; until this candidate a slot it held read as "no single cause". */
-        if (causes.PrevAnalysisMs >= CauseFloorMs)
+        var analysisIsEarlier = earlier.PrevAnalysisMs > causes.PrevAnalysisMs;
+        var analysisMs = analysisIsEarlier ? earlier.PrevAnalysisMs : causes.PrevAnalysisMs;
+        if (analysisMs >= CauseFloorMs)
         {
             candidates.Add((
                 string.Create(CultureInfo.InvariantCulture,
-                    $"the previous pass's scheduled analysis held this server's fleet collection slot for {Format(causes.PrevAnalysisMs)} after its collectors"),
-                causes.PrevAnalysisMs, AnalysisPassName, causes.PrevAnalysisMs));
+                    $"{(analysisIsEarlier ? "an earlier" : "the previous")} pass's scheduled analysis held this server's fleet collection slot for {Format(analysisMs)} after its collectors"),
+                analysisMs, AnalysisPassName, analysisMs));
         }
 
-        if (causes.GateWaitMs >= CauseFloorMs)
+        var waitIsEarlier = earlier.GateWaitMs > causes.GateWaitMs;
+        var wait = waitIsEarlier ? earlier : causes;
+        if (wait.GateWaitMs >= CauseFloorMs)
         {
-            var holders = causes.GateWaitAnalysisHolders > 0
+            var holders = wait.GateWaitAnalysisHolders > 0
                 ? string.Create(CultureInfo.InvariantCulture,
-                    $" ({CountText.Plural(causes.GateWaitAnalysisHolders, "slot")} {(causes.GateWaitAnalysisHolders == 1 ? "was" : "were")} held by scheduled analysis passes when it got one)")
+                    $" ({CountText.Plural(wait.GateWaitAnalysisHolders, "slot")} {(wait.GateWaitAnalysisHolders == 1 ? "was" : "were")} held by scheduled analysis passes when it got one)")
                 : string.Empty;
             candidates.Add((
-                string.Create(CultureInfo.InvariantCulture, $"this pass waited {Format(causes.GateWaitMs)} for a fleet collection slot{holders}"),
-                causes.GateWaitMs, GateWaitName, causes.GateWaitMs));
+                string.Create(CultureInfo.InvariantCulture, $"{(waitIsEarlier ? "an earlier" : "this")} pass waited {Format(wait.GateWaitMs)} for a fleet collection slot{holders}"),
+                wait.GateWaitMs, GateWaitName, wait.GateWaitMs));
         }
 
         if (heldSlots > 0)
