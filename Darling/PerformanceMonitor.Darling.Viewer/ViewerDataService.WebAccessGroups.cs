@@ -77,19 +77,16 @@ public sealed partial class ViewerDataService
         return await WebGroups.ReadAsync(id, ct);
     }
 
-    public Task<ViewerWebToken> CreateWebAccessGroupAsync(string name, WebAccessGroupScope scope,
-        int[] tags, ViewerPasswordSealer sealer, CancellationToken ct = default) =>
-        CreateWebAccessGroupAsync(name, scope, tags, sealer, "", "", ct);
-
+    /// <summary>Creates the group with a fresh random token sealed to the service's key. The plaintext lives only in the returned
+    /// <see cref="ViewerWebToken"/> for the one-time handoff; the store keeps the sealed copy alone, so a lost token is rotated, not recovered.</summary>
     public async Task<ViewerWebToken> CreateWebAccessGroupAsync(string name, WebAccessGroupScope scope,
-        int[] tags, ViewerPasswordSealer sealer, string description, string address, CancellationToken ct = default)
+        int[] tags, ViewerPasswordSealer sealer, CancellationToken ct = default)
     {
-        ValidateWebAccessAddress(address);
         await RequireWebGroupAdminAsync(ct);
         var token = NewWebToken(Guid.NewGuid());
         var sealedToken = sealer.SealWebAccessToken(token.Plain, token.GroupId, token.Generation);
-        await WebGroupWriteAsync(() => PersistRecoverableTokenAsync(token, sealedToken, null,
-            name.Trim(), scope, tags.Distinct().ToArray(), ct, (description, address)));
+        await WebGroupWriteAsync(() => WebGroups.CreateAsync(token.GroupId, name.Trim(), scope, tags.Distinct().ToArray(),
+            token.Generation, sealedToken, true, "viewer", ct));
         return token;
     }
 
@@ -99,8 +96,7 @@ public sealed partial class ViewerDataService
         await RequireWebGroupAdminAsync(ct);
         var token = NewWebToken(group.GroupId);
         var sealedToken = sealer.SealWebAccessToken(token.Plain, token.GroupId, token.Generation);
-        await WebGroupWriteAsync(() => PersistRecoverableTokenAsync(token, sealedToken, group,
-            null, group.Scope, group.TagIds.ToArray(), ct));
+        await WebGroupWriteAsync(() => WebGroups.RotateAsync(group.GroupId, group.Revision, token.Generation, sealedToken, "viewer", ct));
         return token;
     }
 

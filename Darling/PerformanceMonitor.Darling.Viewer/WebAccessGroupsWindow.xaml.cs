@@ -26,9 +26,6 @@ public partial class WebAccessGroupsWindow : Window
     private WebAccessGroup? _selected;
     private bool _busy;
     private bool _loading;
-    private string _savedDescription = "";
-    private string _savedAddress = "";
-    private string _defaultAddress = "";
     private bool _allowClose;
     private bool _confirming;
 
@@ -48,8 +45,6 @@ public partial class WebAccessGroupsWindow : Window
     {
         if (!await _data.CanManageWebAccessGroupsAsync(_lifetime.Token))
             throw new InvalidOperationException("Web access groups can only be managed by a Viewer administrator.");
-        var service = await _data.GetServiceConfigAsync(_lifetime.Token) ?? new ServiceConfigRow();
-        _defaultAddress = $"http://localhost:{service.WebPort}/";
         var id = _selected?.GroupId;
         var tags = await _data.GetServerTagsAsync(_lifetime.Token);
         var byId = tags.ToDictionary(t => t.Id);
@@ -70,7 +65,6 @@ public partial class WebAccessGroupsWindow : Window
         }
         finally { _loading = false; }
         LoadSelection(GroupList.SelectedItem as WebAccessGroup);
-        await LoadHandoverAsync();
     }
 
     private void LoadSelection(WebAccessGroup? group)
@@ -81,8 +75,6 @@ public partial class WebAccessGroupsWindow : Window
             ClearToken();
             _selected = group;
             NameBox.Text = group?.Name ?? "";
-            DescriptionBox.Text = _savedDescription = "";
-            AddressBox.Text = _savedAddress = _defaultAddress;
             NameBox.IsReadOnly = group is not null;
             EnabledBox.IsChecked = group?.Enabled ?? true;
             EnabledBox.IsEnabled = group is not null;
@@ -197,22 +189,17 @@ public partial class WebAccessGroupsWindow : Window
         ClearToken();
         var scope = Scope;
         var tags = scope == WebAccessGroupScope.AllServers ? Array.Empty<int>() : TagIds;
-        var description = DescriptionBox.Text;
-        var address = AddressBox.Text.Trim();
-        ViewerDataService.ValidateWebAccessAddress(address);
         if (_selected is null)
         {
             if (string.IsNullOrWhiteSpace(NameBox.Text) || (scope == WebAccessGroupScope.Tags && tags.Length == 0))
                 throw new InvalidOperationException("Enter a group name and choose at least one tag or explicitly select All servers.");
             var sealer = await GetSealerAsync();
             if (sealer is null) return;
-            await RevealWhenActiveAsync(await _data.CreateWebAccessGroupAsync(NameBox.Text, scope, tags, sealer,
-                description, address, _lifetime.Token));
+            await RevealWhenActiveAsync(await _data.CreateWebAccessGroupAsync(NameBox.Text, scope, tags, sealer, _lifetime.Token));
         }
         else
         {
-            await _data.UpdateWebAccessGroupWithHandoverAsync(_selected, scope, tags, EnabledBox.IsChecked == true,
-                description, address, _lifetime.Token);
+            await _data.UpdateWebAccessGroupAsync(_selected, scope, tags, EnabledBox.IsChecked == true, _lifetime.Token);
             await RefreshAsync();
             StatusText.Text = "Saved. Changes apply to the next web request; the token is unchanged.";
         }
@@ -257,47 +244,14 @@ public partial class WebAccessGroupsWindow : Window
         TokenBox.Text = token.Plain;
         TokenPanel.Visibility = Visibility.Visible;
         TokenBox.SelectAll();
-        StatusText.Text = "Token accepted. Export token retrieves it again while active.";
+        StatusText.Text = "Token accepted. Copy it now: it is shown once, and a lost token is replaced by rotating it.";
         return true;
-    }
-
-    private async Task LoadHandoverAsync()
-    {
-        if (_selected is null) return;
-        var handover = await _data.GetWebAccessHandoverAsync(_selected, _lifetime.Token);
-        DescriptionBox.Text = _savedDescription = handover.Description;
-        AddressBox.Text = _savedAddress = string.IsNullOrWhiteSpace(handover.Address) ? _defaultAddress : handover.Address;
-    }
-
-    private async void Export_Click(object sender, RoutedEventArgs e)
-    {
-        if (!await ConfirmLeaveAsync()) return;
-        var group = _selected;
-        if (group is null) return;
-        await RunAsync(async () =>
-        {
-            var handover = await _data.GetWebAccessHandoverAsync(group, _lifetime.Token);
-            var address = string.IsNullOrWhiteSpace(handover.Address) ? _defaultAddress : handover.Address;
-            var dialog = new Microsoft.Win32.SaveFileDialog
-            {
-                Title = "Export web access token",
-                Filter = "Text file (*.txt)|*.txt",
-                FileName = $"DarlingWeb_{group.Name.Replace(':', '_')}_{DateTime.Now:yyyyMMdd}.txt"
-            };
-            if (dialog.ShowDialog(this) != true) return;
-            var token = await _data.ExportWebAccessTokenAsync(group, _lifetime.Token);
-            await System.IO.File.WriteAllTextAsync(dialog.FileName,
-                $"Group: {group.Name}\nDescription: {handover.Description}\nDashboard: {address}\nToken: {token}\n\nOpen the dashboard and enter the token on the sign-in form. Keep this file private.",
-                _lifetime.Token);
-            StatusText.Text = "Token exported. Keep the exported file private.";
-        });
     }
 
     private void ClearToken() { TokenBox.Clear(); TokenPanel.Visibility = Visibility.Collapsed; }
     private void ClearToken_Click(object sender, RoutedEventArgs e) => ClearToken();
     private bool HasUnsavedChanges()
     {
-        if (DescriptionBox.Text != _savedDescription || AddressBox.Text != _savedAddress) return true;
         if (_selected is null)
             return !string.IsNullOrWhiteSpace(NameBox.Text) || Scope == WebAccessGroupScope.AllServers || TagIds.Length > 0;
         return EnabledBox.IsChecked != _selected.Enabled
@@ -352,7 +306,6 @@ public partial class WebAccessGroupsWindow : Window
         }
         finally { _loading = false; }
         LoadSelection(GroupList.SelectedItem as WebAccessGroup);
-        await RunAsync(LoadHandoverAsync);
     }
 
     private async void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)

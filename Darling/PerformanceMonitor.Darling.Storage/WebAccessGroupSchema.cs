@@ -280,7 +280,6 @@ DO $groups$
 BEGIN
     IF pg_catalog.to_regprocedure('config.harden_web_access_groups()') IS NOT NULL THEN
         PERFORM config.harden_web_access_groups();
-        IF pg_catalog.to_regprocedure('config.harden_web_access_exports()') IS NOT NULL THEN PERFORM config.harden_web_access_exports(); END IF;
         IF pg_catalog.to_regprocedure('config.harden_web_access_advanced()') IS NOT NULL THEN PERFORM config.harden_web_access_advanced(); END IF;
     END IF;
 END $groups$;

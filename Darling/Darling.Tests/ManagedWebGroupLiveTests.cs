@@ -105,7 +105,6 @@ public sealed class ManagedWebGroupLiveTests
             Assert.Equal("active",(await store.ReadAsync(id,ct))!.ActivationState);
             var activeGroup = (await viewer.GetWebAccessGroupAsync(id, ct))!;
             Assert.Equal("UAT", activeGroup.Name);
-            Assert.Equal(token, await viewer.ExportWebAccessTokenAsync(activeGroup, ct));
 
             var builder=WebApplication.CreateBuilder();
             builder.WebHost.UseTestServer();

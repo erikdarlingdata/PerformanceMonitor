@@ -4,7 +4,7 @@ namespace PerformanceMonitor.Darling.Storage;
 
 public static class WebAccessAdvancedSchema
 {
-    public const int Version = 260;
+    public const int Version = 259;
     public const string CreateSql = """
 CREATE TABLE config.web_access_advanced (
     id integer PRIMARY KEY CHECK (id=1),

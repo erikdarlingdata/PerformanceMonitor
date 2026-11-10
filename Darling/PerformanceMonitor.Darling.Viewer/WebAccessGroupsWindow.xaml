@@ -23,8 +23,6 @@
      <TextBox x:Name="NameBox" AutomationProperties.Name="Group name" MaxLength="64" Margin="0,0,0,8"/>
      <TextBlock Text="Use letters, digits, dots, underscores, colons or hyphens. Names are fixed at creation; delete and recreate to rename."
       TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,8"/>
-     <TextBlock Text="Description" Foreground="{DynamicResource ForegroundBrush}"/>
-     <TextBox x:Name="DescriptionBox" MaxLength="2000" Margin="0,4,0,8"/>
      <CheckBox x:Name="EnabledBox" Content="_Enabled" IsChecked="True" Margin="0,0,0,12"/>
      <RadioButton x:Name="TagsRadio" Content="Selected _tags and their descendants" GroupName="Scope" IsChecked="True"
       Checked="Scope_Changed" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,6"/>
@@ -38,7 +36,6 @@
      <TextBlock x:Name="ActivationText" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,10"/>
      <WrapPanel>
       <Button x:Name="SaveButton" Content="_Save scope" Click="Save_Click" Padding="10,5" Margin="0,0,6,6"/>
-      <Button Content="_Export token..." Click="Export_Click" Padding="10,5" Margin="0,0,6,6"/>
       <Button x:Name="RotateButton" Content="Rotate _token..." Click="Rotate_Click" Padding="10,5" Margin="0,0,6,6"/>
       <Button x:Name="DeleteButton" Content="_Delete group..." Click="Delete_Click" Padding="10,5" Margin="0,0,6,6"/>
      </WrapPanel>
@@ -46,14 +43,10 @@
       <TextBlock Text="New token" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
       <TextBox x:Name="TokenBox" IsReadOnly="True" FontFamily="Consolas" TextWrapping="Wrap"
        AutomationProperties.Name="New web token" Margin="0,6,0,6"/>
-      <TextBlock Text="Export token retrieves this credential again while it remains active."
+      <TextBlock Text="Copy the token now. It is shown once and is not stored in a readable form; rotate the token if it is lost."
        TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}"/>
       <Button Content="Clear token from this window" Click="ClearToken_Click" HorizontalAlignment="Left" Margin="0,6,0,8"/>
      </StackPanel>
-     <TextBlock Text="Dashboard address" Foreground="{DynamicResource ForegroundBrush}" Margin="0,10,0,4"/>
-     <TextBox x:Name="AddressBox" AutomationProperties.Name="Dashboard address"/>
-     <TextBlock Text="Use the address your team connects to. Save changes stores it for future exports."
-      TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0"/>
     </StackPanel>
    </ScrollViewer>
   </Grid>

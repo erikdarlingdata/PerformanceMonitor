@@ -109,24 +109,6 @@ public sealed class WebAccessGroupStore
         bool enabled, string actor, CancellationToken ct = default) =>
         ManageAsync("update", id, revision, null, WireScope(scope), tagIds, null, null, enabled, actor, ct);
 
-    public async Task<long> UpdateWithHandoverAsync(WebAccessGroup group, WebAccessGroupScope scope, int[] tagIds,
-        bool enabled, string description, string address, string actor, CancellationToken ct = default)
-    {
-        await using var connection = await _postgres.OpenConnectionAsync(ct);
-        await using var transaction = await connection.BeginTransactionAsync(ct);
-        var revision = await ManageAsync("update", group.GroupId, group.Revision, null, WireScope(scope), tagIds,
-            null, null, enabled, actor, ct, transaction);
-        await using var command = new NpgsqlCommand("SELECT config.web_access_export('metadata',$1,$2,NULL,$3,$4)", connection, transaction)
-        { CommandTimeout = _timeout };
-        command.Parameters.AddWithValue(group.GroupId);
-        command.Parameters.AddWithValue(group.TokenGeneration);
-        command.Parameters.AddWithValue(description);
-        command.Parameters.AddWithValue(address);
-        await command.ExecuteNonQueryAsync(ct);
-        await transaction.CommitAsync(ct);
-        return revision;
-    }
-
     public Task<long> RotateAsync(Guid id, long revision, Guid generation, string sealedToken,
         string actor, CancellationToken ct = default) =>
         ManageAsync("rotate", id, revision, null, null, null, generation, sealedToken, null, actor, ct);

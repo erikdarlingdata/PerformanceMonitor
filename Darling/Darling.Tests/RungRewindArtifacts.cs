@@ -770,15 +770,7 @@ DROP TABLE IF EXISTS collect.schema_capture_passes;"),
             DROP FUNCTION IF EXISTS config.web_access_owner_guard();
             DROP FUNCTION IF EXISTS config.harden_web_access_groups();
             """),
-        new(259, "hasWebAccessExport", """
-            DROP TABLE IF EXISTS config.web_access_export_keys, config.web_access_exports CASCADE;
-            DROP FUNCTION IF EXISTS config.web_access_export(text,uuid,uuid,text,text,text);
-            DROP FUNCTION IF EXISTS config.manage_web_access_group_recoverable(text,uuid,bigint,text,text,integer[],uuid,text,boolean,text);
-            DROP FUNCTION IF EXISTS config.harden_web_access_exports();
-            ALTER TABLE config.web_access_group_events DROP CONSTRAINT IF EXISTS web_access_group_events_event_check;
-            ALTER TABLE config.web_access_group_events ADD CHECK(event IN ('created','updated','rotated','deleted','activated','refused','tag_deleted'));
-            """),
-        new(260, "hasAdvancedWebAccess", """
+        new(259, "hasAdvancedWebAccess", """
             DROP FUNCTION IF EXISTS config.set_web_access_advanced(boolean);
             DROP FUNCTION IF EXISTS config.harden_web_access_advanced();
             DROP TABLE IF EXISTS config.web_access_advanced;

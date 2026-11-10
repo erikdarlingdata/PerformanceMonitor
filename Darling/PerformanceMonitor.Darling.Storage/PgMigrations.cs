@@ -3388,7 +3388,6 @@ $rung$;";
         new Migration(256, "schema-tracking", V256Sql),
         new Migration(257, "collection-log-status-time", V257Sql),
         new Migration(WebAccessGroupSchema.Version, "viewer-managed-web-access-groups", WebAccessGroupSchema.CreateSql),
-        new Migration(259, "viewer-web-token-export", WebAccessExportSchema.CreateSql),
         new Migration(WebAccessAdvancedSchema.Version, "advanced-web-access-opt-in", WebAccessAdvancedSchema.CreateSql),
     };
 
