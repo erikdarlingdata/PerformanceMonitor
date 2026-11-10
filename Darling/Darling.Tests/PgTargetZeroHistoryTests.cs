@@ -226,6 +226,10 @@ public sealed class PgTargetZeroHistoryTests
 
         Assert.Contains("about 4× its baseline for this time of week", block.Headline, StringComparison.Ordinal);
         Assert.Contains("about 4× the 2/hour this server normally sees at this hour-of-week", block.Investigation, StringComparison.Ordinal);
+
+        // #8532: a baseline too small for the sentence's one decimal place is not written as zero.
+        fact.Metadata["baseline_rate"] = 0.03;
+        Assert.Contains("the <0.1/hour this server normally sees at this hour-of-week", Compose(fact).Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("measured ZERO", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("first occurrence", block.Headline, StringComparison.Ordinal);
     }

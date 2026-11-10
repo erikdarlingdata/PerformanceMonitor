@@ -24,8 +24,10 @@ namespace Darling.Tests;
 /// #8532: the month calendar keeps its day cells when a day is clicked. The day-detail panel opens under the
 /// cells, inside the room the Daily Summary tab gives the calendar. In a small window the cells and the panel
 /// cannot both fit, so the calendar scrolls: every cell keeps the height it asks for, with its day number and
-/// band label inside it. With room to spare, the cells share all the height that is left, down to the host's
-/// bottom edge. Rendered: the real control with the app's theme, laid out in a host of a stated size.
+/// band label inside it, and the calendar scrolls the panel it just opened into view. With nothing clicked, a
+/// six-week month fits that window without scrolling. With room to spare, the cells share all the height that is
+/// left, down to the host's bottom edge. Rendered: the real control with the app's theme, laid out in a host of a
+/// stated size.
 /// </summary>
 public sealed class PerformanceCalendarDayDetailLayoutTests
 {
@@ -38,6 +40,9 @@ public sealed class PerformanceCalendarDayDetailLayoutTests
 
     private const double Tolerance = 0.5;
 
+    /// <summary>The ring around today's cell makes every week row 2 px taller, 12 px over six rows.</summary>
+    private const double TodayRingOverSixRows = 12;
+
     /// <summary>About the room the Daily Summary tab has for the calendar in a 900 x 600 window, and a shorter one.</summary>
     [Theory]
     [InlineData(900, 350)]
@@ -46,11 +51,74 @@ public sealed class PerformanceCalendarDayDetailLayoutTests
     {
         var violations = StaTestThread.Run(() =>
         {
-            var (host, calendar) = BuildWithAClickedDay(width, height);
+            var (host, calendar) = Build(width, height, click: true);
             return CellViolations(calendar).Concat(ReachViolations(host, calendar)).ToList();
         });
 
         Assert.Empty(violations);
+    }
+
+    /// <summary>With no day clicked, a six-week month fits the room a 900 x 600 window gives without a scroll bar, with
+    /// the 12 px to spare that a month holding today needs. Run with the week starting on Sunday and on Monday.</summary>
+    [Theory]
+    [InlineData("en-US")]
+    [InlineData("en-GB")]
+    public void NothingClicked_InASmallRoom_ASixWeekMonthFitsWithoutScrolling(string culture)
+    {
+        var violations = StaTestThread.Run(() =>
+        {
+            var saved = CultureInfo.CurrentCulture;
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo(culture);
+            try
+            {
+                var (host, calendar) = Build(900, 350, click: false);
+                var found = CellViolations(calendar).Concat(ReachViolations(host, calendar)).ToList();
+                if (calendar.Cells.Count != 42)
+                    found.Add($"the month drew {calendar.Cells.Count} cells, not six weeks");
+
+                foreach (var scroller in Descendants<ScrollViewer>(calendar))
+                {
+                    if (scroller.ComputedVerticalScrollBarVisibility != Visibility.Collapsed)
+                        found.Add($"a scroll bar shows with nothing clicked: the calendar is {scroller.ExtentHeight:F1} px tall in a {scroller.ViewportHeight:F1} px view");
+                    else if (scroller.ExtentHeight + TodayRingOverSixRows > scroller.ViewportHeight + Tolerance)
+                        found.Add($"the calendar is {scroller.ExtentHeight:F1} px tall in a {scroller.ViewportHeight:F1} px view, too tall for a month that holds today");
+                }
+
+                return found;
+            }
+            finally
+            {
+                CultureInfo.CurrentCulture = saved;
+            }
+        });
+
+        Assert.Empty(violations);
+    }
+
+    /// <summary>The panel is brought into view when a day is clicked, and at no other time: a host that hands the
+    /// calendar a refreshed list of days leaves the scroll position where the user put it.</summary>
+    [Fact]
+    public void ARefreshedDaysList_LeavesTheScrollPositionAlone()
+    {
+        var moved = StaTestThread.Run(() =>
+        {
+            var (host, calendar) = Build(900, 350, click: true);
+            var scroller = ScrollerAround(CellPresenters(calendar)[0], calendar);
+            if (scroller is null)
+                return null;
+
+            scroller.ScrollToVerticalOffset(0);
+            Layout(host);
+            var before = scroller.VerticalOffset;
+
+            calendar.Days = new[] { DayWithOneDeadlock() };
+            Layout(host);
+            return Math.Abs(scroller.VerticalOffset - before) > Tolerance
+                ? $"the scroll position went from {before:F1} to {scroller.VerticalOffset:F1} px when the days were refreshed"
+                : null;
+        });
+
+        Assert.Null(moved);
     }
 
     [Fact]
@@ -58,7 +126,7 @@ public sealed class PerformanceCalendarDayDetailLayoutTests
     {
         var violations = StaTestThread.Run(() =>
         {
-            var (host, calendar) = BuildWithAClickedDay(1600, 900);
+            var (host, calendar) = Build(1600, 900, click: true);
             var found = CellViolations(calendar).Concat(ReachViolations(host, calendar)).ToList();
 
             var panel = DetailPanel(calendar);
@@ -79,34 +147,32 @@ public sealed class PerformanceCalendarDayDetailLayoutTests
         Assert.Empty(violations);
     }
 
-    private static (Border Host, PerformanceCalendar Calendar) BuildWithAClickedDay(double width, double height)
+    private static PerformanceCalendarDay DayWithOneDeadlock() => new()
     {
-        var calendar = new PerformanceCalendar
-        {
-            DisplayMonth = Month,
-            Days = new[]
-            {
-                new PerformanceCalendarDay
-                {
-                    Date = Clicked,
-                    Band = DailyHealthBand.Healthy,
-                    Signals = new DailyHealthSignals { HasData = true, Deadlocks = 1, Window = TimeSpan.FromHours(24) },
-                    Tooltip = "1 deadlock",
-                    TopWaitType = "LCK_M_X",
-                    TotalWaitSeconds = 12.5m,
-                    UniqueQueries = 40,
-                },
-            },
-        };
+        Date = Clicked,
+        Band = DailyHealthBand.Healthy,
+        Signals = new DailyHealthSignals { HasData = true, Deadlocks = 1, Window = TimeSpan.FromHours(24) },
+        Tooltip = "1 deadlock",
+        TopWaitType = "LCK_M_X",
+        TotalWaitSeconds = 12.5m,
+        UniqueQueries = 40,
+    };
+
+    private static (Border Host, PerformanceCalendar Calendar) Build(double width, double height, bool click)
+    {
+        var calendar = new PerformanceCalendar { DisplayMonth = Month, Days = new[] { DayWithOneDeadlock() } };
 
         var host = new Border { Width = width, Height = height, Child = calendar };
         host.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = Theme });
         Layout(host);
 
-        calendar.SelectedDate = Clicked;
-        Layout(host);
+        if (click)
+        {
+            calendar.SelectedDate = Clicked;
+            Layout(host);
+        }
 
-        Assert.Equal(Visibility.Visible, DetailPanel(calendar).Visibility);
+        Assert.Equal(click ? Visibility.Visible : Visibility.Collapsed, DetailPanel(calendar).Visibility);
         Assert.Equal(calendar.Cells.Count, CellPresenters(calendar).Count);
         Assert.True(calendar.Cells.Count >= 28, $"the month drew {calendar.Cells.Count} cells");
         return (host, calendar);
@@ -148,28 +214,46 @@ public sealed class PerformanceCalendarDayDetailLayoutTests
         }
     }
 
-    /// <summary>Everything the calendar draws can be reached: it lies inside the host, or inside a scrolling
-    /// region that offers its scroll bar.</summary>
+    /// <summary>Everything the calendar draws can be reached, and an open day-detail panel is in view. With no
+    /// scrolling region, everything lies inside the host. With one, it shows its scroll bar when its content is taller
+    /// than its view, and it is scrolled so the panel lies inside the view, or fills the view from the panel's top edge
+    /// when the panel is taller than the view.</summary>
     private static IEnumerable<string> ReachViolations(Border host, PerformanceCalendar calendar)
     {
+        var panel = DetailPanel(calendar);
         var scroller = ScrollerAround(CellPresenters(calendar)[0], calendar);
-        if (scroller is not null)
+        if (scroller is null)
         {
-            if (scroller.ExtentHeight > scroller.ViewportHeight + Tolerance
-                && scroller.ComputedVerticalScrollBarVisibility != Visibility.Visible)
+            var drawn = CellPresenters(calendar).Cast<FrameworkElement>().Append(panel);
+            foreach (var element in drawn)
             {
-                yield return $"the calendar is {scroller.ExtentHeight:F1} px tall in a {scroller.ViewportHeight:F1} px view and shows no scroll bar";
+                var bounds = BoundsIn(element, host);
+                if (bounds.Bottom > host.Height + Tolerance)
+                    yield return $"a {element.GetType().Name} ends at {bounds.Bottom:F1} px, below the {host.Height:F0} px host, and nothing scrolls";
             }
 
             yield break;
         }
 
-        var drawn = CellPresenters(calendar).Cast<FrameworkElement>().Append(DetailPanel(calendar));
-        foreach (var element in drawn)
+        if (scroller.ExtentHeight > scroller.ViewportHeight + Tolerance
+            && scroller.ComputedVerticalScrollBarVisibility != Visibility.Visible)
         {
-            var bounds = BoundsIn(element, host);
-            if (bounds.Bottom > host.Height + Tolerance)
-                yield return $"a {element.GetType().Name} ends at {bounds.Bottom:F1} px, below the {host.Height:F0} px host, and nothing scrolls";
+            yield return $"the calendar is {scroller.ExtentHeight:F1} px tall in a {scroller.ViewportHeight:F1} px view and shows no scroll bar";
+        }
+
+        if (panel.Visibility != Visibility.Visible)
+            yield break;
+
+        var view = Descendants<ScrollContentPresenter>(scroller).First();
+        var inView = BoundsIn(panel, view);
+        if (inView.Height <= view.ActualHeight + Tolerance)
+        {
+            if (inView.Top < -Tolerance || inView.Bottom > view.ActualHeight + Tolerance)
+                yield return $"the day-detail panel spans {inView.Top:F1} to {inView.Bottom:F1} px of a {view.ActualHeight:F1} px view";
+        }
+        else if (Math.Abs(inView.Top) > Tolerance)
+        {
+            yield return $"the day-detail panel is taller than the {view.ActualHeight:F1} px view and starts at {inView.Top:F1} px, not at the view's top";
         }
     }
 
