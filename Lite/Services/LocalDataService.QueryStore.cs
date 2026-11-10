@@ -1203,7 +1203,8 @@ WITH placed AS
         interval_start_time_utc AS point_time,
         interval_end_time_utc,
         execution_count,
-        avg_duration_us
+        avg_duration_us,
+        snapshot_time
     FROM
     (
         SELECT
@@ -1211,6 +1212,7 @@ WITH placed AS
             interval_end_time_utc,
             execution_count,
             avg_duration_us,
+            collection_time AS snapshot_time,
             ROW_NUMBER() OVER
             (
                 PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
@@ -1244,7 +1246,8 @@ WITH placed AS
         collection_time AS point_time,
         CAST(NULL AS TIMESTAMP) AS interval_end_time_utc,
         execution_count,
-        avg_duration_us
+        avg_duration_us,
+        CAST(NULL AS TIMESTAMP) AS snapshot_time
     FROM v_query_store_stats
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -1261,9 +1264,30 @@ raw AS
         -- interval with no executions, so the gap to the previous stored point is the interval's length PLUS
         -- every quiet interval before it. Only a point whose rows stored no end (collected before the column)
         -- keeps that gap, as sample_interval_seconds does (#3540).
-        COALESCE(extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))), extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))) AS interval_seconds
+        COALESCE(extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))), extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))) AS interval_seconds,
+        -- #8575: an interval whose end is still in the future is OPEN: it has run only until the newest snapshot that stored one of
+        -- its rows, so that is the time its totals cover. NULL for a closed interval, whose own length stays the denominator.
+        CASE WHEN date_trunc('second', MAX(interval_end_time_utc)) > date_trunc('second', timezone('UTC', now()))
+             THEN extract(epoch FROM (date_trunc('second', MAX(snapshot_time)) - date_trunc('second', point_time)))
+        END AS open_covered_seconds
     FROM placed
     GROUP BY point_time
+),
+rated AS
+(
+    -- #8575: an open interval is partial when its covered time is under its whole length. It is then rated over that covered time,
+    -- and left unrated (NULL, so no rate below) when that is under 60 seconds: a rate over a few seconds is noise. A closed
+    -- interval has no covered time and keeps its own interval_seconds.
+    SELECT
+        point_time,
+        total_duration_ms,
+        total_executions,
+        CASE WHEN open_covered_seconds < interval_seconds
+             THEN CASE WHEN open_covered_seconds >= 60 THEN open_covered_seconds END
+             ELSE interval_seconds
+        END AS interval_seconds,
+        CASE WHEN open_covered_seconds < interval_seconds THEN open_covered_seconds END AS covered_seconds
+    FROM raw
 )
 SELECT
     point_time AS collection_time,
@@ -1272,8 +1296,10 @@ SELECT
     CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
     CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second,
     /* #8073: the interval's stored executions, a count the store holds whether or not the interval's length is knowable. */
-    CAST(total_executions AS BIGINT) AS execution_count
-FROM raw
+    CAST(total_executions AS BIGINT) AS execution_count,
+    /* #8575: the seconds an OPEN interval's rates cover, null on a closed interval. */
+    covered_seconds
+FROM rated
 ORDER BY point_time";
 
         command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
@@ -1294,7 +1320,9 @@ ORDER BY point_time";
                 CollectionTime = reader.GetDateTime(0),
                 Value = reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1)),
                 ExecutionCount = reader.IsDBNull(3) ? null : ToInt64(reader.GetValue(3)),
-                ExecutionsPerSecond = reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2))
+                ExecutionsPerSecond = reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2)),
+                /* #8575: the open interval's covered seconds, the statement's last column; null on a closed one. */
+                PartialCoveredSeconds = reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4))
             });
         }
         return items;

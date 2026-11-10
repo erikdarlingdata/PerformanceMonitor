@@ -1663,7 +1663,7 @@ public sealed class McpPayloadContractCensusTests
         ("partial_count", ["DarlingMcpPgLoggingAuditTools.cs"], "the number of logging-audit facets whose verdict is `partial` (DarlingPgLoggingAudit.Partial) — a verdict tally, not a cut"),
         ("window_truncated_servers", ["DarlingMcpFleetTools.cs"], "#7010: get_fleet_overview's sorted names (at most 20) of the cards whose own window_truncated is true — a roster of which servers were cut, not a cut flag; the flag keeps its window_truncated spelling on each card and at the top level"),
         ("window_truncated_servers_more", ["DarlingMcpFleetTools.cs"], "#7010: the count of window-truncated servers beyond the 20 named in window_truncated_servers, written only when there are more — a tally of the roster's overflow, not a cut flag"),
-        ("partial", ["DarlingMcpStoreMetricsTools.cs"], "get_store_metrics' store.daily_growth point (#4734): true for the UTC day still in progress, whose delta runs from the previous day's last snapshot to the latest one so far and is not a full day's growth — whether the day is over, not a page or window cut"),
+        ("partial", ["DarlingMcpStoreMetricsTools.cs", "DarlingMcpTrendTools.cs", "McpQueryTools.cs"], "get_store_metrics' store.daily_growth point (#4734): true for the UTC day still in progress, whose delta runs from the previous day's last snapshot to the latest one so far and is not a full day's growth; and (#8575) a get_query_store_duration_trend point whose Query Store interval was still open when last captured, rated over covered_seconds and not its whole length: whether the period is over, not a page or window cut"),
     ];
 
     /// <summary>The spellings this lane retired, named so their return fails as THE regression rather than as

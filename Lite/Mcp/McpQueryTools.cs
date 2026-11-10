@@ -1364,7 +1364,7 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration and executions per second, summed across every query, each interval counted once, at the hour it ran. not_collected: engine cannot run Query Store. unavailable: never sampled here. empty: quiet on Lite always; on Darling, empty can also be a rollup coverage gap (window predates the corrected rollup, run --backfill-rollups). Only a point that stored no interval end and has no earlier point to rate against has null rates, never 0 (unrated_points, unrated_note says why). window_truncated marks the retention floor, not a page cut. <<GUIDE>> Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. Each point is a rate over its own stored interval, its end minus its start. A point with no stored end (a row collected before the end was recorded) falls back to the gap since the PREVIOUS point, so only such a point, when it is the window's first collection and has no previous one to difference against, carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + McpHelpers.UtcStampsDescription + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration and executions per second, summed across every query, each interval counted once, at the hour it ran. not_collected: engine cannot run Query Store. unavailable: never sampled here. empty: quiet on Lite always; on Darling, empty can also be a rollup coverage gap (window predates the corrected rollup, run --backfill-rollups). Only a point that stored no interval end and has no earlier point to rate against has null rates, never 0 (unrated_points, unrated_note says why). window_truncated marks the retention floor, not a page cut. <<GUIDE>> Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. Each point is a rate over its own stored interval, its end minus its start. A point with no stored end (a row collected before the end was recorded) falls back to the gap since the PREVIOUS point, so only such a point, when it is the window's first collection and has no previous one to difference against, carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why). The newest point is usually the Query Store interval still OPEN: it is rated over the time it has covered so far (the newest snapshot that stored one of its rows, less the interval's start), not over its whole length, and it carries partial: true and covered_seconds; a closed interval carries neither. An open interval that had run under 60 seconds when last captured has null rates and counts in unrated_points." + McpHelpers.UtcStampsDescription + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryStoreDurationTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -2092,6 +2092,21 @@ public sealed class McpQueryTools
     /// <c>value</c> named no unit, and a reasoning agent charted it as whatever it guessed. The named field is
     /// the one to read; <c>value</c> stays for the consumer already reading it.</para>
     /// </summary>
+    /// <summary>#8575: a Query Store interval still open is rated over the time it has covered, and left unrated (null rates, counted in
+    /// <c>unrated_points</c>) when that is under this many seconds, since a rate over a few seconds is noise. The same 60 is written into
+    /// the SQL. Darling's twin is <c>DarlingMcpTrendTools.PartialIntervalMinSeconds</c>.</summary>
+    internal const int PartialIntervalMinSeconds = 60;
+
+    /// <summary>#8575: a Query Store point whose interval was still open when last captured, with the two keys that say so after its own:
+    /// <c>partial</c> is true and <c>covered_seconds</c> is how long the interval had run. A closed interval's point never carries them.</summary>
+    private static JsonObject MarkPartial(object point, double coveredSeconds)
+    {
+        var node = JsonSerializer.SerializeToNode(point, McpHelpers.JsonOptions)!.AsObject();
+        node["partial"] = true;
+        node["covered_seconds"] = coveredSeconds;
+        return node;
+    }
+
     private static string SerializeTrend(
         string serverName, int hours_back, DateTime startUtc, DateTime windowEndUtc, List<QueryTrendPoint> points, TrendGrain grain,
         IReadOnlyList<BaselineDiscontinuity> discontinuities, string? database)
@@ -2113,22 +2128,31 @@ public sealed class McpQueryTools
            and the same sentence as Darling's twin, byte-identical — pinned by McpMissMessageParityPinTests. */
         var unrated = points.Count(p => !p.HasRate);
         var unratedCollections = points.Sum(p => p.UnratedInBucket ?? (p.HasRate ? 0 : 1));
+        /* #8575: an open Query Store interval captured for under PartialIntervalMinSeconds is one of the unrated points. */
+        var unratedOpenIntervals = points.Count(p => p.PartialCoveredSeconds.HasValue && !p.HasRate);
         envelope["unrated_points"] = unrated;
         /* #3897: a bucket leaves an unknowable collection out of its rates, so the collections are counted apart
            from the points — a restart inside a rated bucket is still reported. Darling's key, at Darling's position. */
         envelope["unrated_collections"] = unratedCollections;
         envelope["unrated_note"] = unratedCollections == 0
             ? null
-            : $"{CountText.Plural(unratedCollections, "collection")} had no knowable rate: a rate is a collection's work divided by the seconds it accrued over, and that denominator is unknowable two ways, the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the collection is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0: such a collection is left out of its point's rates rather than counted as zero, and a point that held nothing else carries null rates ({unrated} here).";
-        envelope["trend"] = points.Select(p => new
+            : $"{CountText.Plural(unratedCollections, "collection")} had no knowable rate: a rate is a collection's work divided by the seconds it accrued over, and that denominator is unknowable two ways, the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the collection is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0: such a collection is left out of its point's rates rather than counted as zero, and a point that held nothing else carries null rates ({unrated} here)."
+              + (unratedOpenIntervals == 0
+                  ? ""
+                  : $" Of those, {unratedOpenIntervals} {(unratedOpenIntervals == 1 ? "is a Query Store interval" : "are Query Store intervals")} still open that had run under {PartialIntervalMinSeconds} seconds when last captured: a rate over so few seconds is noise, so the rates are null (covered_seconds says how long each had run).");
+        envelope["trend"] = points.Select(p =>
         {
-            time = p.CollectionTime.ToString("o"),
-            value = p.Value,
-            elapsed_ms_per_second = p.Value,
-            execution_count = p.ExecutionCount,
-            executions_per_second = p.ExecutionsPerSecond,
-            /* #3897: the bucket's worst single collection; null where a point is not a bucket of collections. */
-            peak_elapsed_ms_per_second = p.PeakElapsedMsPerSecond,
+            var point = new
+            {
+                time = p.CollectionTime.ToString("o"),
+                value = p.Value,
+                elapsed_ms_per_second = p.Value,
+                execution_count = p.ExecutionCount,
+                executions_per_second = p.ExecutionsPerSecond,
+                /* #3897: the bucket's worst single collection; null where a point is not a bucket of collections. */
+                peak_elapsed_ms_per_second = p.PeakElapsedMsPerSecond,
+            };
+            return p.PartialCoveredSeconds is double covered ? MarkPartial(point, covered) : (object)point;
         });
         /* #3653 A5: trailing, after the points, on the data envelope only — the window's baseline
            discontinuities, the same key and shape Darling's SerializeTrend writes (BaselineDiscontinuities). */
