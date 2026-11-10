@@ -114,4 +114,83 @@ public sealed class ViewerCheckBoxOutlineTests
             Assert.True(bullet >= field - 0.01, $"{theme}: the unchosen radio button's outline {o.RadioOutline} is {bullet:0.00}:1 against the {name} {surface}; the text box's outline {o.TextBoxOutline} is {field:0.00}:1");
         }
     }
+
+    private readonly record struct States(
+        Color CheckMark, Color CheckedFill, Color RadioMark, Color RadioCheckedFill,
+        Color DisabledCheckOutline, Color DisabledCheckMark, Color DisabledRadioOutline, Color DisabledRadioMark,
+        Color Muted, Color Page);
+
+    /// <summary>A checked check box and radio button, and a disabled checked pair, read from the elements their templates rendered.</summary>
+    private static States RenderStates(string theme) => StaTestThread.Run(() =>
+    {
+        _ = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        var check = new CheckBox { Content = "All Databases", IsChecked = true };
+        var radio = new RadioButton { Content = "Estimated plan", IsChecked = true, GroupName = "enabled" };
+        var offCheck = new CheckBox { Content = "Auto-refresh", IsChecked = true, IsEnabled = false };
+        var offRadio = new RadioButton { Content = "Actual plan", IsChecked = true, IsEnabled = false, GroupName = "disabled" };
+        var panel = new StackPanel();
+        panel.Children.Add(check);
+        panel.Children.Add(radio);
+        panel.Children.Add(offCheck);
+        panel.Children.Add(offRadio);
+        var window = new Window { Content = panel, Width = 400, Height = 300 };
+        window.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = ThemeUri(theme) });
+        StaTestThread.ShowOffScreen(window);
+        try
+        {
+            ClippedTextProbe.Settle(window);
+            var box = (Border)check.Template.FindName("Border", check);
+            var tick = (Path)check.Template.FindName("CheckMark", check);
+            var bullet = (Ellipse)radio.Template.FindName("Border", radio);
+            var dot = (Ellipse)radio.Template.FindName("CheckMark", radio);
+            var offBox = (Border)offCheck.Template.FindName("Border", offCheck);
+            var offTick = (Path)offCheck.Template.FindName("CheckMark", offCheck);
+            var offBullet = (Ellipse)offRadio.Template.FindName("Border", offRadio);
+            var offDot = (Ellipse)offRadio.Template.FindName("CheckMark", offRadio);
+            return new States(
+                ColorOf(tick.Stroke), ColorOf(box.Background), ColorOf(dot.Fill), ColorOf(bullet.Fill),
+                ColorOf(offBox.BorderBrush), ColorOf(offTick.Stroke), ColorOf(offBullet.Stroke), ColorOf(offDot.Fill),
+                ColorOf((Brush)window.FindResource("ForegroundMutedBrush")),
+                ColorOf((Brush)window.FindResource("BackgroundBrush")));
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    /// <summary>The mark is what says a box is checked, so it is held to 3:1 on the checked fill.</summary>
+    [Theory]
+    [InlineData("Light")]
+    [InlineData("CoolBreeze")]
+    [InlineData("Dark")]
+    public void TheMarkOfACheckedBox_Is3To1OnItsFill(string theme)
+    {
+        var s = RenderStates(theme);
+
+        var tick = Contrast(s.CheckMark, s.CheckedFill);
+        var dot = Contrast(s.RadioMark, s.RadioCheckedFill);
+        Assert.True(tick >= 3.0, $"{theme}: the check mark {s.CheckMark} is {tick:0.00}:1 on the checked fill {s.CheckedFill}, under 3.0:1");
+        Assert.True(dot >= 3.0, $"{theme}: the radio button's dot {s.RadioMark} is {dot:0.00}:1 on its fill {s.RadioCheckedFill}, under 3.0:1");
+    }
+
+    /// <summary>A disabled box is outlined no more strongly than an enabled one, and its mark is the muted colour.</summary>
+    [Theory]
+    [InlineData("Light")]
+    [InlineData("CoolBreeze")]
+    [InlineData("Dark")]
+    public void ADisabledBox_IsOutlinedNoMoreStronglyThanAnEnabledOne(string theme)
+    {
+        var s = RenderStates(theme);
+        var o = Render(theme);
+
+        var enabledCheck = Contrast(o.CheckOutline, s.Page);
+        var disabledCheck = Contrast(s.DisabledCheckOutline, s.Page);
+        var enabledRadio = Contrast(o.RadioOutline, s.Page);
+        var disabledRadio = Contrast(s.DisabledRadioOutline, s.Page);
+        Assert.True(disabledCheck <= enabledCheck + 0.01, $"{theme}: a disabled check box's outline {s.DisabledCheckOutline} is {disabledCheck:0.00}:1 against the page; an enabled one's {o.CheckOutline} is {enabledCheck:0.00}:1");
+        Assert.True(disabledRadio <= enabledRadio + 0.01, $"{theme}: a disabled radio button's outline {s.DisabledRadioOutline} is {disabledRadio:0.00}:1 against the page; an enabled one's {o.RadioOutline} is {enabledRadio:0.00}:1");
+        Assert.Equal(s.Muted, s.DisabledCheckMark);
+        Assert.Equal(s.Muted, s.DisabledRadioMark);
+    }
 }
