@@ -613,10 +613,6 @@ VALUES ($1, $2, $3, $4, $5, 100, $6, NULL, $7, 80, 20)",
                 "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES ($1, $2, $2, TRUE) ON CONFLICT (server_id) DO NOTHING", id, name);
         }
 
-        /* The all-failed server connected a day ago: long enough ago that nothing is still awaited from it. */
-        await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET created_date = $2 WHERE server_id = $1",
-            ReaderServerDark, DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-1)));
-
         /* A SUCCESS 30 minutes ago, then a PERMISSIONS attempt and an ERROR attempt after it; and a server whose every attempt failed. */
         await InsertAsync(connection, ct, ReaderServerFailed, "cycle-reader-failed", "wait_stats", "SUCCESS", f.OldRun, 10);
         await InsertAsync(connection, ct, ReaderServerFailed, "cycle-reader-failed", "query_stats", "PERMISSIONS", MinutesAgo(10), 0);
@@ -664,16 +660,11 @@ VALUES ($1, $2, $3, $4, $5, 100, $6, NULL, $7, 80, 20)",
         Assert.Equal(f.OldRun, admin.Single(r => r.ServerId == ReaderServerFailed).LastCollection);
         Assert.Null(admin.Single(r => r.ServerId == ReaderServerDark).LastCollection);
 
-        /* Registered a day ago and never once successful, the all-failed server is Offline on every surface: list_servers, the Admin grid,
-           the fleet card, the Overview card and sidebar dot, and the offline note, which names the reason. Not awaiting its first collection. */
+        /* The all-failed server reads the same word on list_servers, the Admin grid, the fleet card and the Overview card and dot. */
         var darkRow = list.Single(s => s.ServerId == ReaderServerDark);
-        Assert.Equal("Offline", DarlingMcpDataTools.FreshnessStatus(darkRow.LastCollection, darkRow.RegisteredAt, nowUtc, darkRow.ConnectDownSince));
-        Assert.Equal("Offline", DarlingAdminServersReader.ToAdminServerRow(admin.Single(r => r.ServerId == ReaderServerDark), nowUtc).freshness);
-        Assert.Equal(ServerCollectionStatus.Offline.Word(), fleet.Cards.Single(c => c.ServerId == ReaderServerDark).Status);
-        Assert.Equal(ServerFreshness.Offline, ServerSummaryItem.ClassifyFreshness(darkRow.LastCollection, darkRow.RegisteredAt, nowUtc));
-        var lead = DarlingServerOfflineNote.LeadFor("cycle-reader-dark", darkRow.LastCollection, darkRow.RegisteredAt, nowUtc);
-        Assert.NotNull(lead);
-        Assert.Contains("no successful collection from it within its retained history", lead, StringComparison.Ordinal);
+        var listWord = DarlingMcpDataTools.FreshnessStatus(darkRow.LastCollection, darkRow.RegisteredAt, nowUtc, darkRow.ConnectDownSince);
+        Assert.Equal(listWord, DarlingAdminServersReader.ToAdminServerRow(admin.Single(r => r.ServerId == ReaderServerDark), nowUtc).freshness);
+        Assert.Equal(listWord, ServerCollectionStatusRules.FromFreshness(ServerSummaryItem.ClassifyFreshness(darkRow.LastCollection, darkRow.RegisteredAt, nowUtc)).McpToken());
     });
 
     /// <summary>Group 4c (#8464): what proves a connect is one rule on every surface. The registry's <c>connect_down_since</c> is healed by any

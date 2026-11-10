@@ -49,8 +49,7 @@ public sealed class DarkPastRetentionReadsOfflineTests
     private static DateTime LongAgo => Now.AddDays(-90);
 
     /// <summary>A registration inside the retained span: any collection it made would still be there.</summary>
-    /// <summary>A registration inside the offline threshold (#8464): the only registration with no collection that still reads never-collected.</summary>
-    private static DateTime Recently => Now.AddMinutes(-10);
+    private static DateTime Recently => Now.AddDays(-10);
 
     /// <summary>
     /// The rule. A newest collection bands on the ladder, whatever the registration says; with none, a
@@ -76,20 +75,15 @@ public sealed class DarkPastRetentionReadsOfflineTests
     }
 
     /// <summary>
-    /// The boundaries. A registration before the horizon is Offline on its own: a collection the read cannot see is possible. A
-    /// registration at or after it is Offline once it is older than the offline threshold (#8464): the worker collects as soon as it
-    /// connects, so a server registered that long ago with no SUCCESS the read could see is dark. Registered exactly the threshold
-    /// ago, or later, it keeps the never-collected reading, as a quiet server registered then would still read Fresh.
+    /// The boundary is the instant the read could first see. Registered AT it, any collection would be at or
+    /// after it and so still visible, which proves an empty read means never collected. One tick earlier, a
+    /// collection the read cannot see is possible.
     /// </summary>
     [Fact]
-    public void TheBoundaries_AreTheHorizonAndTheOfflineThreshold()
+    public void TheBoundary_IsTheFirstInstantTheReadCouldSee()
     {
-        var atThreshold = Now - ServerHealthThresholds.OfflineThreshold;
+        Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, Horizon, Horizon, Now));
         Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, Horizon.AddTicks(-1), Horizon, Now));
-        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, Horizon, Horizon, Now));
-        Assert.Equal(ServerFreshness.Offline, ServerHealthClassifier.ClassifyFreshness(null, atThreshold.AddTicks(-1), Horizon, Now));
-        Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, atThreshold, Horizon, Now));
-        Assert.Equal(ServerFreshness.NeverCollected, ServerHealthClassifier.ClassifyFreshness(null, Now, Horizon, Now));
     }
 
     /// <summary>The horizon an unbounded read of the collection log can see: the log's retention back, as
@@ -193,6 +187,22 @@ public sealed class DarkPastRetentionReadsOfflineTests
         var justAdded = Card(Recently, null);
         Assert.Null(justAdded.IsOnline);
         Assert.True(justAdded.AwaitingFirstCollection);
+        Assert.Equal("Never", justAdded.LastCollectionDisplay);
+
+        /* #8464: the empty Last Collect is worded from the registration against the retention horizon alone, not from the band, so a
+           card that reads Offline for another reason (a failed connect) still says "Never" when nothing was ever collected. */
+        var refused = Card(DateTime.UtcNow.AddDays(-1), null);
+        Assert.Null(refused.IsOnline);
+        Assert.Equal("Never", refused.LastCollectionDisplay);
+        refused.ConnectDownSince = DateTime.UtcNow.AddHours(-1);
+        refused.ApplyFreshness(DateTime.UtcNow);
+        Assert.False(refused.IsOnline);
+        Assert.Equal("Never", refused.LastCollectionDisplay);
+        var agedOutCard = Card(DateTime.UtcNow.AddYears(-1), null);
+        Assert.False(agedOutCard.IsOnline);
+        Assert.Equal("None retained", agedOutCard.LastCollectionDisplay);
+        Assert.False(ServerSummaryItem.HistoryAgedOut(DateTime.UtcNow.AddDays(-1), DateTime.UtcNow));
+        Assert.True(ServerSummaryItem.HistoryAgedOut(DateTime.UtcNow.AddYears(-1), DateTime.UtcNow));
         Assert.Equal("Never", justAdded.LastCollectionDisplay);
     }
 

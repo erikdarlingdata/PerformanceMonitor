@@ -639,13 +639,19 @@ public class ServerSummaryItem
     ///
     /// <para>#3967: the newest-collection read has no window, but the archive's retention bounds what it can
     /// see (<see cref="RetentionService.OldestRetainedInstant"/>), so a server whose whole history has aged out
-    /// comes back null. Added before that instant, or longer ago than the offline threshold, it bands Offline;
-    /// added inside the threshold, or with no registration, it keeps the ladder's never-collected reading. The
-    /// same rule the Darling viewer and fleet card apply.</para>
+    /// comes back null. Added before that instant, it bands Offline; added after it, or with no registration,
+    /// it keeps the ladder's never-collected reading. The same rule the Darling viewer and fleet card apply.</para>
     /// </summary>
-    public void ApplyCollectionFreshness(DateTime nowUtc, DateTime? registeredAtUtc) =>
-        CollectionFreshness = ServerHealthClassifier.ClassifyFreshness(
-            LastCollectionTime, registeredAtUtc, RetentionService.OldestRetainedInstant(nowUtc), nowUtc);
+    public void ApplyCollectionFreshness(DateTime nowUtc, DateTime? registeredAtUtc)
+    {
+        var oldestRetained = RetentionService.OldestRetainedInstant(nowUtc);
+        CollectionFreshness = ServerHealthClassifier.ClassifyFreshness(LastCollectionTime, registeredAtUtc, oldestRetained, nowUtc);
+        HistoryAgedOut = registeredAtUtc is { } registered && registered < oldestRetained;
+    }
+
+    /// <summary>#3967, #8464: the server was added before the archive's oldest retained instant, so with no collection to show it
+    /// collected before everything the archive keeps. Words the empty Last Collect; the band is a separate question.</summary>
+    public bool HistoryAgedOut { get; private set; }
 
     /// <summary>
     /// The clock of the server this card is for, stamped by the overview refresh: the server's own collected clock,
@@ -679,10 +685,10 @@ public class ServerSummaryItem
     {
         get
         {
-            /* #3967: with nothing to show, "Never" only for a server that has never collected. One banded
-               Offline with nothing to show collected once, and none of it is still archived. */
+            /* #3967, #8464: with nothing to show, "None retained" only for a server added before the archive's oldest retained
+               instant: it collected before everything the archive keeps. Every other such card reads "Never", whatever its band. */
             if (!LastCollectionTime.HasValue)
-                return CollectionFreshness == ServerFreshness.Offline ? "None retained (stopped)" : "Never";
+                return HistoryAgedOut ? "None retained (stopped)" : "Never";
 
             var stamp = FormatLastCollect(LastCollectionTime.Value, ServerTimeHelper.CurrentDisplayMode, Clock, DateTime.UtcNow);
             return CollectionFreshness switch

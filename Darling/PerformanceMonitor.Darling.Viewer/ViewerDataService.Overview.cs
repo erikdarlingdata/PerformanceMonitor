@@ -1330,13 +1330,19 @@ public sealed class ServerSummaryItem
     /// The stored collection_time is naive UTC; the viewer shows it in the viewer machine's local time
     /// (the viewer convention — Lite used its per-server offset helper instead).
     ///
-    /// <para>With no collection to show, "Never" only when the card is awaiting its first one. A card that
-    /// reads Offline with nothing to show is a server whose history retention has dropped (#3967): something
-    /// was collected, and none of it is retained, which is what the row says.</para>
+    /// <para>With no collection to show, "None retained" only for a server registered before the collection log's
+    /// retention horizon (#3967, <see cref="HistoryAgedOut"/>): it had time to collect before everything the store
+    /// keeps, so what it collected is gone. Every other such card reads "Never", whatever its band.</para>
     /// </summary>
     public string LastCollectionDisplay => LastCollectionTime.HasValue
         ? FormatLastCollect(LastCollectionTime.Value, ViewerTimeHelper.CurrentDisplayZone(), DateTime.UtcNow)
-        : IsOnline == false ? "None retained" : "Never";
+        : HistoryAgedOut(RegisteredAt, DateTime.UtcNow) ? "None retained" : "Never";
+
+    /// <summary>#3967, #8464: true when <paramref name="registeredAtUtc"/> precedes the collection log's retention horizon at
+    /// <paramref name="nowUtc"/>, so a server with no retained collection collected before everything the store keeps. The
+    /// Overview card and Manage Servers word their empty Last Collect from this alone; the band is a separate question.</summary>
+    public static bool HistoryAgedOut(DateTime? registeredAtUtc, DateTime nowUtc) =>
+        registeredAtUtc is { } registered && registered < DarlingRetentionHorizons.CollectionLogHorizon(nowUtc);
 
     /// <summary>
     /// The Last Collect time as the card words it (D4 of the final walk, the twin of Lite's
@@ -1654,10 +1660,9 @@ public sealed class ServerSummaryItem
     /// The same derivation with the registration rule (#3967), and the one the sidebar dot and the Overview
     /// card both call. Their newest-collection reads have no window, but the collection log's retention bounds
     /// what they can see (<see cref="DarlingRetentionHorizons.CollectionLogHorizon"/>), so a server whose whole
-    /// history retention has dropped comes back null. Registered before that horizon, or longer ago than the
-    /// offline threshold (#8464), it reads Offline; registered inside the threshold, or with no registration, it
-    /// keeps the ladder's never-collected reading. One horizon for both surfaces, so the dot and the card cannot
-    /// disagree about the same server.
+    /// history retention has dropped comes back null. Registered before that horizon, it reads Offline;
+    /// registered after it, or with no registration, it keeps the ladder's never-collected reading. One
+    /// horizon for both surfaces, so the dot and the card cannot disagree about the same server.
     /// </summary>
     public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc) =>
         ServerHealthClassifier.ClassifyFreshness(

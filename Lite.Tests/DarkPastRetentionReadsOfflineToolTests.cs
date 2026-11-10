@@ -124,8 +124,12 @@ public sealed class DarkPastRetentionReadsOfflineToolTests : IClassFixture<Share
         Assert.Null(agedOut.LastCollectionTime);
         Assert.Equal("None retained (stopped)", agedOut.LastCollectionDisplay);
 
-        var justAdded = await service.GetServerSummaryAsync(967002, "just-added", DateTime.UtcNow.AddMinutes(-10));
+        var justAdded = await service.GetServerSummaryAsync(967002, "just-added", DateTime.UtcNow.AddDays(-10));
         Assert.Equal(ServerFreshness.NeverCollected, justAdded!.CollectionFreshness);
+        /* #8464: the empty Last Collect is worded from the registration against the oldest retained instant alone, not from the band. */
+        Assert.Equal("Never", justAdded.LastCollectionDisplay);
+        Assert.False(justAdded.HistoryAgedOut);
+        Assert.True(agedOut.HistoryAgedOut);
         Assert.Equal("Never", justAdded.LastCollectionDisplay);
 
         var unknown = await service.GetServerSummaryAsync(967003, "unknown", registeredAtUtc: null);

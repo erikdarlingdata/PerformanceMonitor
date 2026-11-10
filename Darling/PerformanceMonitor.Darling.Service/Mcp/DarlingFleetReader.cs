@@ -692,16 +692,16 @@ AND   s.server_id <> 0";
     /// A card's collection freshness from <see cref="FleetLastCollectionSql"/>'s row (#3935): the shared
     /// registration rule (<see cref="ServerHealthClassifier"/>'s <c>ClassifyFreshness</c> overload, #3967) with
     /// this read's window as what it could see. A newest collection inside the window bands on the ladder; with
-    /// none, a server first connected BEFORE the window, or longer ago than the offline threshold, reads Offline,
-    /// and one first connected inside the threshold reads awaiting its first collection, which is exact because
-    /// the worker collects only after connecting (on DARLING01 every one of the 17 registry rows has its first
-    /// retained collection after its <c>created_date</c>).
+    /// none, a server first connected BEFORE the window reads Offline and one first connected inside it reads
+    /// awaiting its first collection, which is exact because the worker collects only after connecting (on
+    /// DARLING01 every one of the 17 registry rows has its first retained collection after its
+    /// <c>created_date</c>).
     ///
-    /// <para><b>The window is what this read could see, and the threshold is what every surface agrees on.</b> A
-    /// server with no SUCCESS run inside the window and a registration older than the threshold reads Offline here
-    /// and on the viewer, <c>list_servers</c> and the Admin grid alike (#8464), so a server whose every collector
-    /// fails is dark on every surface rather than awaiting its first collection on some. A server dark past the
-    /// retention reads Offline on every surface too.</para>
+    /// <para><b>The window, not the retention, is what this read could see.</b> So a server that connected more
+    /// than two days ago and has never written a SUCCESS row reads Offline here, while the viewer and
+    /// <c>list_servers</c>, whose reads have no window, still read it as awaiting its first collection until the
+    /// retention horizon passes its registration (#8464 names the case: a login that connects but whose every
+    /// collector fails). A server dark past the retention reads Offline on every surface.</para>
     ///
     /// <para><b>A null registration keeps the ladder's reading.</b> The service writes <c>created_date</c> on
     /// every registry insert; a row without one was inserted by hand. The same holds for a server the read did
