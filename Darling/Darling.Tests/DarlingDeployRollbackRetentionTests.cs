@@ -864,6 +864,72 @@ public sealed class DarlingDeployRollbackRetentionTests
         Assert.Contains(held.Lines, line => line.Contains("postgres (pid 4200)", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// #8546: a process started by a short (8.3) spelling of the install folder reports that spelling, and
+    /// the folders the guard looks under are in their long form. The guard spells the process's path out
+    /// before it compares, so a service registered through a short path is found and excused with its
+    /// PostgreSQL, and a Viewer started that way still refuses the upgrade. The refusal gives the path as
+    /// the process reports it.
+    /// </summary>
+    [Fact]
+    public void ThePreStopGuard_FindsProcessesStartedByAShortSpellingOfTheInstallFolder()
+    {
+        const string noShortNames = "this machine's temp folder has no short (8.3) spelling to start a process by.";
+        var setup = new GuardSetup { ShortNamedFolder = true };
+        var service = new GuardProcess("PerformanceMonitor.Darling.Service", 4100, ShortRootMarker + @"\PerformanceMonitor.Darling.Service.exe", Fate.Running);
+        var postmaster = new GuardProcess("postgres", 4200, ShortRootMarker + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.Running);
+
+        var healthy = RunPreStopGuard(setup, service, postmaster);
+        Assert.SkipWhen(healthy.NoShortNames, noShortNames);
+        Assert.False(healthy.Refused,
+            "the pre-stop guard refused a healthy install whose service was started by a short (8.3) spelling of its folder (#8546):\n  " + healthy.Text);
+
+        var held = RunPreStopGuard(setup, service, postmaster,
+            new GuardProcess("PerformanceMonitor.Darling.Viewer", 5300, ShortRootMarker + @"\viewer\PerformanceMonitor.Darling.Viewer.exe", Fate.Running));
+        Assert.SkipWhen(held.NoShortNames, noShortNames);
+        Assert.True(held.Refused, "the pre-stop guard let the upgrade through with a Viewer started by a short (8.3) spelling of the install folder (#8546):\n  " + held.Text);
+        Assert.True(
+            held.Lines.Exists(line => line.Contains("PerformanceMonitor.Darling.Viewer (pid 5300)", StringComparison.Ordinal)
+                && line.Contains(held.ShortRoot + @"\viewer\PerformanceMonitor.Darling.Viewer.exe", StringComparison.OrdinalIgnoreCase)),
+            "the refusal does not name the Viewer with the path it reports (#8546):\n  " + held.Text);
+        Assert.DoesNotContain(held.Lines, line => line.Contains("(pid 4100)", StringComparison.Ordinal));
+        Assert.DoesNotContain(held.Lines, line => line.Contains("(pid 4200)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #8546: the check after the stop finds a process started by a short (8.3) spelling of the install
+    /// folder, so a postmaster that outlived the stop on an install registered that way refuses the run.
+    /// </summary>
+    [Fact]
+    public void ThePostStopCheck_FindsAProcessStartedByAShortSpellingOfTheInstallFolder()
+    {
+        var held = RunPostStopCheck(new GuardSetup { ShortNamedFolder = true, ServiceStatus = "Stopped" },
+            new GuardProcess("postgres", 4200, ShortRootMarker + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.Running));
+
+        Assert.SkipWhen(held.NoShortNames, "this machine's temp folder has no short (8.3) spelling to start a process by.");
+        Assert.True(held.Refused, "the post-stop check let the copy go ahead with a process started by a short (8.3) spelling of the install folder still running (#8546):\n  " + held.Text);
+        Assert.Contains(held.Lines, line => line.Contains("postgres (pid 4200)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #8546: a service in any state but Stopped has a process, and the stop acts on every such state. So
+    /// the pre-stop guard asks for the service's process in each of them, not only while it is Running.
+    /// </summary>
+    [Theory]
+    [InlineData("StartPending")]
+    [InlineData("StopPending")]
+    [InlineData("Paused")]
+    public void ThePreStopGuard_AsksForTheServiceProcessInEveryStateButStopped(string status)
+    {
+        var run = RunPreStopGuard(new GuardSetup { ServiceStatus = status });
+
+        Assert.True(run.Refused, $"the pre-stop guard passed with the service {status} and no process listed under the install tree (#8546):\n  " + run.Text);
+        Assert.True(
+            run.Lines.Exists(line => line.StartsWith("REFUSED ", StringComparison.Ordinal)
+                && line.Contains("could not find its process", StringComparison.Ordinal)),
+            "the refusal does not say the service's own process was not found (#8546):\n  " + run.Text);
+    }
+
     private const string GuardRoot = @"C:\PerformanceMonitorDarling";
 
     /// <summary>What a stand-in process does once the guard has listed it.</summary>
@@ -891,9 +957,22 @@ public sealed class DarlingDeployRollbackRetentionTests
         public string ServiceStatus { get; init; } = "Running";
         public bool Is64BitOperatingSystem { get; init; } = true;
         public bool Is64BitProcess { get; init; } = true;
+
+        /// <summary>The install folder is a real folder the probe makes under the temp folder, given to the
+        /// guard in its long form, and a process path that starts with <see cref="ShortRootMarker"/> is
+        /// under that folder's short (8.3) spelling. <see cref="InstallRoot"/> and
+        /// <see cref="RegisteredRoot"/> are not read.</summary>
+        public bool ShortNamedFolder { get; init; }
     }
 
-    private sealed record GuardRun(bool Refused, List<string> Lines)
+    /// <summary>Stands at the start of a stand-in process's path for the short (8.3) spelling of the folder
+    /// a <see cref="GuardSetup.ShortNamedFolder"/> run makes.</summary>
+    private const string ShortRootMarker = "<short>";
+
+    /// <summary>What a phase printed. <see cref="NoShortNames"/> is true when a
+    /// <see cref="GuardSetup.ShortNamedFolder"/> run found no short spelling for its folder, and the phase
+    /// was not run. <see cref="ShortRoot"/> is the short spelling such a run used.</summary>
+    private sealed record GuardRun(bool Refused, List<string> Lines, bool NoShortNames = false, string? ShortRoot = null)
     {
         public string Text => Lines.Count == 0 ? "(the guard printed nothing)" : string.Join("\n  ", Lines);
     }
@@ -985,12 +1064,35 @@ public sealed class DarlingDeployRollbackRetentionTests
 
             $testProcesses = @()
             """);
+        if (setup.ShortNamedFolder)
+        {
+            /* A real folder, because only a folder that exists has a short spelling to spell out. The long
+               form is the script's own, and the short one is the file system's. */
+            probe.AppendLine("""
+                $made = Join-Path ([IO.Path]::GetTempPath()) ('PerformanceMonitorDarling-8546-' + [guid]::NewGuid().ToString('N'))
+                [void][IO.Directory]::CreateDirectory($made)
+                $longRoot = Get-DarlingCanonicalPath $made
+                $shortRoot = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($made).ShortPath
+                if ([string]::IsNullOrEmpty($longRoot) -or [string]::IsNullOrEmpty($shortRoot) -or $shortRoot.IndexOf('~') -lt 0 -or $shortRoot -ieq $longRoot) {
+                    Remove-Item -LiteralPath $made -Recurse -Force -ErrorAction SilentlyContinue
+                    'NOSHORT'
+                    'DONE'
+                    exit 0
+                }
+                "SHORTROOT $shortRoot"
+                """);
+        }
+
+        string PathExpression(string path) => setup.ShortNamedFolder && path.StartsWith(ShortRootMarker, StringComparison.Ordinal)
+            ? "($shortRoot + " + Quote(path[ShortRootMarker.Length..]) + ")"
+            : Quote(path);
+
         foreach (var process in processes)
         {
-            probe.AppendLine($"$testProcesses += New-TestProcess {Quote(process.Name)} {process.Id} {Quote(process.Path)} {Quote(process.Fate.ToString())}");
+            probe.AppendLine($"$testProcesses += New-TestProcess {Quote(process.Name)} {process.Id} {PathExpression(process.Path)} {Quote(process.Fate.ToString())}");
         }
-        probe.AppendLine($"$InstallRoot = {Quote(setup.InstallRoot)}");
-        probe.AppendLine($"$registeredRoot = {Quote(setup.RegisteredRoot ?? setup.InstallRoot)}");
+        probe.AppendLine(setup.ShortNamedFolder ? "$InstallRoot = $longRoot" : $"$InstallRoot = {Quote(setup.InstallRoot)}");
+        probe.AppendLine(setup.ShortNamedFolder ? "$registeredRoot = $longRoot" : $"$registeredRoot = {Quote(setup.RegisteredRoot ?? setup.InstallRoot)}");
         probe.AppendLine($"$testServiceStatus = {Quote(setup.ServiceStatus)}");
         probe.AppendLine($"$testBitness = New-Object psobject -Property @{{ Is64BitOperatingSystem = {Bool(setup.Is64BitOperatingSystem)}; Is64BitProcess = {Bool(setup.Is64BitProcess)} }}");
         probe.AppendLine("""
@@ -1004,6 +1106,7 @@ public sealed class DarlingDeployRollbackRetentionTests
             $SkipStopGuard = $false
             try { . ([scriptblock]::Create($guard -join "`r`n")) }
             catch { if ($_.Exception.Message -ne 'refused') { throw } }
+            finally { if ($made) { Remove-Item -LiteralPath $made -Recurse -Force -ErrorAction SilentlyContinue } }
             'DONE'
             """);
 
@@ -1012,7 +1115,16 @@ public sealed class DarlingDeployRollbackRetentionTests
             "the stop guard probe did not run to its end:\n  " + string.Join("\n  ", lines));
         lines.RemoveAt(lines.Count - 1);
 
-        return new GuardRun(lines.Exists(line => line.StartsWith("REFUSED ", StringComparison.Ordinal)), lines);
+        if (lines.Remove("NOSHORT"))
+        {
+            return new GuardRun(false, lines, NoShortNames: true);
+        }
+
+        const string shortRootPrefix = "SHORTROOT ";
+        var shortRoot = lines.Find(line => line.StartsWith(shortRootPrefix, StringComparison.Ordinal));
+        if (shortRoot is not null) { lines.Remove(shortRoot); }
+
+        return new GuardRun(lines.Exists(line => line.StartsWith("REFUSED ", StringComparison.Ordinal)), lines, ShortRoot: shortRoot?[shortRootPrefix.Length..]);
     }
 
     /// <summary>
