@@ -157,7 +157,7 @@ function loadUtilization(body, server, ctx) {
             : s);
       const trend = (data.provisioning_trend || []).map((r) => ({
         ...r,
-        day_label: trendDay(r.day) + (r.partial ? ", so far" : ""),
+        day_label: trendDay(r.day) + (r.part_day ? ", so far" : ""),
         verdict_label: verdictLabel(r.verdict),
         verdict_sev: VERDICT_SEV[r.verdict],
       }));
