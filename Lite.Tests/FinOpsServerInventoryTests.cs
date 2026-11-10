@@ -231,8 +231,15 @@ public sealed class FinOpsServerInventoryTests : IDisposable
         Assert.False(lastKnown.IsClustered);
         Assert.Equal("", lastKnown.HostOsVersion);
         Assert.Null(lastKnown.SqlServerStartTime);
-        Assert.Equal(CollectedAtUtc.ToLocalTime(), lastKnown.LastUpdated);
-        Assert.Equal($"last known, {CollectedAtUtc.ToLocalTime():yyyy-MM-dd HH:mm}", lastKnown.LastUpdatedDisplay);
+        /* The row keeps the collection instant in UTC. The collected row carries no UTC offset, so the cell reads it on the
+           selected time display with the active tab's clock. */
+        Assert.Equal(CollectedAtUtc, lastKnown.LastUpdated);
+        Assert.Equal(
+            "last known, " + ServerTimeHelper.FormatInstant(
+                CollectedAtUtc,
+                ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, ServerTimeHelper.ActiveServerClock),
+                "yyyy-MM-dd HH:mm"),
+            lastKnown.LastUpdatedDisplay);
         Assert.Equal(100m, lastKnown.MonthlyCost);
         Assert.Equal(99m, lastKnown.AvgCpuPct);
         Assert.Equal(1m, lastKnown.StorageTotalGb);
@@ -388,7 +395,7 @@ public sealed class FinOpsServerInventoryTests : IDisposable
         Assert.Equal("Enterprise Edition", only.Edition);
         Assert.Equal(16, only.CpuCount);
         Assert.Equal("16.0.4150.1 - RTM", only.ProductVersion);
-        Assert.Equal(CollectedAtUtc.ToLocalTime(), only.LastUpdated);
+        Assert.Equal(CollectedAtUtc, only.LastUpdated);
     }
 
     /// <summary>

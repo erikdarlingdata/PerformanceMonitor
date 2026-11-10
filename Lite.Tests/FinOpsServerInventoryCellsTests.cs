@@ -1,0 +1,400 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
+using PerformanceMonitorLite.Controls;
+using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Models;
+using PerformanceMonitorLite.Services;
+using Xunit;
+
+namespace PerformanceMonitorLite.Tests;
+
+/// <summary>
+/// #8531: the FinOps Server Inventory, rendered on the real tab over a seeded store. The Status and Health cells of a server
+/// with CPU and memory samples read its verdict and its score, and those of a server with no CPU sample in the last 24 hours
+/// read "Not collected", never an empty cell or a bare dash. The Last Updated cell reads the selected time display: each
+/// server's own collected clock in Server Time, UTC in UTC, and this machine's clock in Local Time. The tab's first show after
+/// start-up reads the inventory again, so cells the start-up load filled before any collection do not stay as they were.
+///
+/// <para>Each live read goes to a loopback port nothing listens on, which refuses the connection at once, so every row is built
+/// from the store. Collection <c>credential-manager</c>: the live read resolves each connection string through the process-wide
+/// credential service, the collection runs alone, and the time display statics this class sets are put back in Dispose.</para>
+/// </summary>
+[Collection("credential-manager")]
+public sealed class FinOpsServerInventoryCellsTests : IDisposable
+{
+    private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
+
+    /* The collected rows' collection time, the naive UTC instant the store holds. */
+    private static readonly DateTime CollectedAtUtc = new(2026, 11, 7, 9, 30, 0, DateTimeKind.Utc);
+
+    private readonly string _tempDir = Path.Combine(Path.GetTempPath(), "LiteFinOpsCells_" + Guid.NewGuid().ToString("N")[..8]);
+    private readonly ServerClock _savedClock = ServerTimeHelper.ActiveServerClock;
+    private readonly TimeDisplayMode _savedMode = ServerTimeHelper.CurrentDisplayMode;
+    private DuckDbInitializer? _store;
+    private long _nextId = -1;
+
+    public FinOpsServerInventoryCellsTests() => Directory.CreateDirectory(_tempDir);
+
+    public void Dispose()
+    {
+        ServerTimeHelper.ActiveServerClock = _savedClock;
+        ServerTimeHelper.CurrentDisplayMode = _savedMode;
+        _store?.Dispose();
+        try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); } catch { }
+    }
+
+    private static ServerConnection Unreachable(string displayName, int port) => new()
+    {
+        Id = Guid.NewGuid().ToString(),
+        ServerName = "127.0.0.1," + port,
+        DisplayName = displayName,
+    };
+
+    private static int IdOf(ServerConnection server) =>
+        RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+
+    [Fact]
+    public async Task StatusAndHealth_ReadTheCollectedValues_OrNotCollected_NeverBlank()
+    {
+        var sampled = Unreachable("inv-cells-sampled", 1);
+        var unsampled = Unreachable("inv-cells-unsampled", 2);
+
+        var initializer = await StoreAsync((sampled, null), (unsampled, null));
+        await SeedCpuAndMemoryAsync(sampled);
+
+        var problems = OnTheInventory(new LocalDataService(initializer), new[] { sampled, unsampled }, grid =>
+        {
+            var found = new List<string>();
+            var rows = grid.Items.OfType<ServerPropertyRow>().ToDictionary(r => r.ServerName);
+            if (!rows.TryGetValue(sampled.DisplayName, out var sampledRow) || !rows.TryGetValue(unsampled.DisplayName, out var unsampledRow))
+            {
+                found.Add($"the inventory lists {string.Join(", ", rows.Keys)}, not both servers");
+                return found;
+            }
+
+            /* The server with samples: the overlay is keyed to it, so its cells carry the verdict and the score. */
+            var status = CellText(grid, sampledRow, "Status");
+            if (string.IsNullOrEmpty(sampledRow.ProvisioningStatus) || status != ProvisioningVerdict.StatusLabel(sampledRow.ProvisioningStatus))
+            {
+                found.Add($"the sampled server's Status cell reads \"{status}\" for the verdict \"{sampledRow.ProvisioningStatus}\"");
+            }
+
+            var health = CellText(grid, sampledRow, "Health");
+            if (sampledRow.HealthScore is not int score || health != score.ToString(System.Globalization.CultureInfo.CurrentCulture))
+            {
+                found.Add($"the sampled server's Health cell reads \"{health}\" for the score {sampledRow.HealthScore?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "(none)"}");
+            }
+
+            /* The server with no CPU sample in the last 24 hours has no verdict and no score, and its cells say so. */
+            foreach (var header in new[] { "Status", "Health" })
+            {
+                var text = CellText(grid, unsampledRow, header);
+                if (text != "Not collected")
+                {
+                    found.Add($"the unsampled server's {header} cell reads \"{text}\", not \"Not collected\"");
+                }
+            }
+
+            return found;
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    [Fact]
+    public async Task LastUpdated_ReadsTheSelectedTimeDisplay_OnEachServersOwnClock()
+    {
+        var kathmandu = Unreachable("inv-cells-plus-0545", 1);
+        var pacific = Unreachable("inv-cells-minus-0800", 2);
+
+        var initializer = await StoreAsync((kathmandu, 345), (pacific, -480));
+
+        /* A third clock on the active tab: a row reads its own server's clock, never the tab that happens to be open. */
+        ServerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(60);
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+
+        var problems = OnTheInventory(new LocalDataService(initializer), new[] { kathmandu, pacific }, grid =>
+        {
+            var found = new List<string>();
+            var rows = grid.Items.OfType<ServerPropertyRow>().ToDictionary(r => r.ServerName);
+            if (!rows.TryGetValue(kathmandu.DisplayName, out var kathmanduRow) || !rows.TryGetValue(pacific.DisplayName, out var pacificRow))
+            {
+                found.Add($"the inventory lists {string.Join(", ", rows.Keys)}, not both servers");
+                return found;
+            }
+
+            void Expect(string mode, ServerPropertyRow row, string expected)
+            {
+                var text = CellText(grid, row, "Last Updated");
+                if (text != expected)
+                {
+                    found.Add($"{mode}: {row.ServerName}'s Last Updated cell reads \"{text}\", not \"{expected}\"");
+                }
+            }
+
+            Expect("Server Time", kathmanduRow, "last known, 2026-11-07 15:15");
+            Expect("Server Time", pacificRow, "last known, 2026-11-07 01:30");
+
+            ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+            grid.Items.Refresh();
+            grid.UpdateLayout();
+            Expect("UTC", kathmanduRow, "last known, 2026-11-07 09:30");
+            Expect("UTC", pacificRow, "last known, 2026-11-07 09:30");
+
+            ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+            grid.Items.Refresh();
+            grid.UpdateLayout();
+            var local = "last known, " + CollectedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+            Expect("Local Time", kathmanduRow, local);
+            Expect("Local Time", pacificRow, local);
+
+            return found;
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    [Fact]
+    public async Task TheFirstShowAfterStartUp_ReadsTheInventoryAgain()
+    {
+        var server = Unreachable("inv-cells-first-show", 1);
+        var initializer = await StoreAsync((server, null));
+
+        /* Start-up reads the inventory before the tab has ever been shown and before any collection: the store holds no CPU sample.
+           The first collection then lands, and the tab is shown for the first time. */
+        var problems = OnTheInventory(new LocalDataService(initializer), new[] { server }, (_, _, grid) =>
+        {
+            var found = new List<string>();
+            if (grid.Items.Count != 1 || grid.Items[0] is not ServerPropertyRow shown)
+            {
+                found.Add($"after the show the inventory lists {grid.Items.Count} servers, not the one");
+                return Task.FromResult(found);
+            }
+
+            var status = CellText(grid, shown, "Status");
+            if (string.IsNullOrEmpty(shown.ProvisioningStatus) || status != ProvisioningVerdict.StatusLabel(shown.ProvisioningStatus))
+            {
+                found.Add($"after the show the Status cell reads \"{status}\" for the verdict \"{shown.ProvisioningStatus}\"; the samples the collection brought were not read");
+            }
+
+            var health = CellText(grid, shown, "Health");
+            if (shown.HealthScore is not int score || health != score.ToString(System.Globalization.CultureInfo.CurrentCulture))
+            {
+                found.Add($"after the show the Health cell reads \"{health}\"; the samples the collection brought were not read");
+            }
+
+            return Task.FromResult(found);
+        }, betweenStartUpAndFirstShow: () => SeedCpuAndMemoryAsync(server));
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>A row's Last Updated is an instant in UTC. With no clock of its own (a row nothing stamped) it reads the active
+    /// tab's clock in Server Time and UTC in UTC, as the other FinOps rows that word their own times do.</summary>
+    [Fact]
+    public void LastUpdated_IsAUtcInstant_ShownOnTheSelectedTimeDisplay()
+    {
+        var row = new ServerPropertyRow { LastUpdated = CollectedAtUtc };
+
+        ServerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(345);
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.Equal("2026-11-07 15:15", row.LastUpdatedDisplay);
+
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+        Assert.Equal("2026-11-07 09:30", row.LastUpdatedDisplay);
+    }
+
+    /// <summary>A fresh store from the product's template with one collected <c>server_properties</c> row per server, each with the
+    /// UTC offset its server reported (null for a row collected without one).</summary>
+    private async Task<DuckDbInitializer> StoreAsync(params (ServerConnection Server, int? UtcOffsetMinutes)[] servers)
+    {
+        var dbPath = Path.Combine(_tempDir, "inventory.duckdb");
+        _store = new DuckDbInitializer(dbPath);
+        await _store.InitializeFromTemplateAsync();
+
+        using var conn = new DuckDBConnection($"Data Source={dbPath}");
+        await conn.OpenAsync(TestContext.Current.CancellationToken);
+        foreach (var (server, offset) in servers)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name,
+                                  edition, product_version, product_level, engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb, socket_count, cores_per_socket, utc_offset_minutes)
+                                VALUES ($1, $2, $3, $4, 'Enterprise Edition: Core-based Licensing', '16.0.4150.1', 'RTM', 3, 16, 2, 65536, 2, 8, $5)";
+            cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+            cmd.Parameters.Add(new DuckDBParameter { Value = CollectedAtUtc });
+            cmd.Parameters.Add(new DuckDBParameter { Value = IdOf(server) });
+            cmd.Parameters.Add(new DuckDBParameter { Value = server.ServerName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = offset is int minutes ? minutes : DBNull.Value });
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        return _store;
+    }
+
+    /// <summary>Twenty CPU samples over the last hours and one memory row for <paramref name="server"/>: enough for a verdict and a score.</summary>
+    private async Task SeedCpuAndMemoryAsync(ServerConnection server)
+    {
+        using var conn = new DuckDBConnection($"Data Source={Path.Combine(_tempDir, "inventory.duckdb")}");
+        await conn.OpenAsync(TestContext.Current.CancellationToken);
+        var now = DateTime.UtcNow;
+        for (var i = 0; i < 20; i++)
+        {
+            using var cpu = conn.CreateCommand();
+            cpu.CommandText = @"INSERT INTO cpu_utilization_stats
+                                  (collection_id, collection_time, server_id, server_name, sample_time, sample_time_utc, sqlserver_cpu_utilization, other_process_cpu_utilization)
+                                VALUES ($1, $2, $3, $4, $2, $2, 40, 3)";
+            cpu.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+            cpu.Parameters.Add(new DuckDBParameter { Value = now.AddMinutes(-10 * (i + 1)) });
+            cpu.Parameters.Add(new DuckDBParameter { Value = IdOf(server) });
+            cpu.Parameters.Add(new DuckDBParameter { Value = server.ServerName });
+            await cpu.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        using var memory = conn.CreateCommand();
+        memory.CommandText = @"INSERT INTO memory_stats
+                                 (collection_id, collection_time, server_id, server_name, total_physical_memory_mb, available_physical_memory_mb,
+                                  target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
+                               VALUES ($1, $2, $3, $4, 65536, 8192, 49152, 49152, 40960)";
+        memory.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+        memory.Parameters.Add(new DuckDBParameter { Value = now.AddMinutes(-5) });
+        memory.Parameters.Add(new DuckDBParameter { Value = IdOf(server) });
+        memory.Parameters.Add(new DuckDBParameter { Value = server.ServerName });
+        await memory.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>
+    /// Opens the FinOps tab over <paramref name="dataService"/> and <paramref name="servers"/> in a Dark-themed window on the STA thread,
+    /// runs the Server Inventory load once, and hands the grid to <paramref name="check"/>.
+    /// </summary>
+    private List<string> OnTheInventory(LocalDataService dataService, IReadOnlyList<ServerConnection> servers, Func<DataGrid, List<string>> check) =>
+        OnTheInventory(dataService, servers, (_, _, grid) => Task.FromResult(check(grid)));
+
+    /// <summary>The same, for a check that also takes the tab and its window. With <paramref name="betweenStartUpAndFirstShow"/> the
+    /// order is the app's at start-up instead: the inventory is read while the tab has never been shown, the callback runs, the
+    /// window is shown (the tab's first show, which runs its own show handler), and the load that show starts is awaited.</summary>
+    private List<string> OnTheInventory(
+        LocalDataService dataService, IReadOnlyList<ServerConnection> servers, Func<FinOpsTab, Window, DataGrid, Task<List<string>>> check,
+        Func<Task>? betweenStartUpAndFirstShow = null)
+    {
+        var configDir = Path.Combine(_tempDir, "config");
+        Directory.CreateDirectory(configDir);
+        var serverManager = new ServerManager(configDir);
+        foreach (var server in servers)
+        {
+            serverManager.AddServer(server);
+        }
+
+        var problems = new List<string>();
+        StaTestThread.Run(async () =>
+        {
+            var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            var saved = app.Resources.MergedDictionaries.ToList();
+            app.Resources.MergedDictionaries.Clear();
+            app.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = new Uri("pack://application:,,,/PerformanceMonitorLite;component/Themes/DarkTheme.xaml") });
+            app.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = new Uri("pack://application:,,,/PerformanceMonitor.Ui;component/Themes/SharedStyles.xaml") });
+            try
+            {
+                var tab = new FinOpsTab();
+                /* The tab's services, without the server picker's own loads: this test drives one Server Inventory load. */
+                typeof(FinOpsTab).GetField("_dataService", Instance)!.SetValue(tab, dataService);
+                typeof(FinOpsTab).GetField("_serverManager", Instance)!.SetValue(tab, serverManager);
+                typeof(FinOpsTab).GetField("_credentialResolver", Instance)!.SetValue(tab, new CredentialResolver(new CredentialService(), null));
+
+                var load = typeof(FinOpsTab).GetMethod("LoadServerInventoryAsync", Instance)!;
+                if (betweenStartUpAndFirstShow is not null)
+                {
+                    await (Task)load.Invoke(tab, new object[] { false })!;
+                    await betweenStartUpAndFirstShow();
+                }
+
+                var window = new Window { Content = tab, Width = 1000, Height = 700, Left = 0, Top = 0, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize };
+                StaTestThread.ShowOffScreen(window);
+                try
+                {
+                    var grid = tab.FindName("ServerInventoryDataGrid") as DataGrid ?? throw new Xunit.Sdk.XunitException("ServerInventoryDataGrid is not on the tab");
+                    Reveal(grid);
+                    Settle(window);
+
+                    if (betweenStartUpAndFirstShow is null)
+                    {
+                        await (Task)load.Invoke(tab, new object[] { true })!;
+                    }
+                    else if (typeof(FinOpsTab).GetProperty("ServerInventoryReload", Instance | BindingFlags.Public)?.GetValue(tab) is Task reload)
+                    {
+                        await reload;
+                    }
+
+                    Settle(window);
+
+                    problems.AddRange(await check(tab, window, grid));
+                }
+                finally
+                {
+                    window.Close();
+                }
+            }
+            finally
+            {
+                app.Resources.MergedDictionaries.Clear();
+                foreach (var dictionary in saved)
+                {
+                    app.Resources.MergedDictionaries.Add(dictionary);
+                }
+            }
+        });
+        return problems;
+    }
+
+    /// <summary>The text the grid draws in <paramref name="item"/>'s cell under the column headed <paramref name="header"/>.</summary>
+    private static string CellText(DataGrid grid, object item, string header)
+    {
+        var column = grid.Columns.FirstOrDefault(c => HeaderText(c) == header)
+            ?? throw new Xunit.Sdk.XunitException($"the grid has no {header} column");
+        grid.ScrollIntoView(item, column);
+        grid.UpdateLayout();
+        return column.GetCellContent(item) is TextBlock text ? text.Text : "(the cell is not realized)";
+    }
+
+    private static string HeaderText(DataGridColumn column) => column.Header switch
+    {
+        string text => text,
+        Panel panel => panel.Children.OfType<TextBlock>().FirstOrDefault()?.Text ?? "",
+        _ => "",
+    };
+
+    private static void Settle(Window window)
+    {
+        window.UpdateLayout();
+        ClippedTextProbe.Settle(window);
+    }
+
+    /// <summary>Selects every tab on the way up to <paramref name="element"/>, so it is laid out and drawn.</summary>
+    private static void Reveal(FrameworkElement element)
+    {
+        for (DependencyObject? at = element; at is not null; at = LogicalTreeHelper.GetParent(at))
+        {
+            if (at is TabItem item && ItemsControl.ItemsControlFromItemContainer(item) is TabControl owner)
+            {
+                owner.SelectedItem = item;
+            }
+        }
+    }
+}
