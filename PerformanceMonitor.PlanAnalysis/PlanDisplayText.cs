@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.PlanAnalysis;
 
@@ -32,7 +34,7 @@ public static class PlanDisplayText
     /// shown only when there are waits to describe.
     /// </summary>
     public static string? WaitStatsHeaderTooltip(int waitCount, long totalWaitMs) =>
-        waitCount > 0 ? $"{totalWaitMs:N0} ms of waits across {waitCount} wait types" : null;
+        waitCount > 0 ? string.Create(CultureInfo.InvariantCulture, $"{totalWaitMs:N0} ms of waits across {CountText.Plural(waitCount, "wait type")}") : null;
 
     /// <summary>
     /// The CPU:Elapsed ratio shown in the runtime summary, matching

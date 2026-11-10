@@ -90,6 +90,8 @@ public sealed record PlanMissingIndexRow(
 public static class PlanFeatureExtractor
 {
     /// <summary>
+    /// 6 since the exchange spill warning reads "1 write to TempDB" and "4 writes to TempDB", the Key Lookup grade "over 1 lookup"
+    /// and the Lazy Spool message "1 rewind (cache hit)", so the old and new warning rows stay apart.
     /// 5 since the warning messages that carry a count write it as a person says it: the Bare Scan message reads "1 column" and
     /// "3 columns" and the three spill prefixes "1 thread" and "2 threads", so the old and new warning rows stay apart.
     /// 4 since the analyzer's warning set changed in one release: Bare Scan and Scan With Predicate need 10,000 rows read
@@ -105,7 +107,7 @@ public static class PlanFeatureExtractor
     /// 2 since the pin moved to 4d730bb42: the parser reads an IF condition's query plan (#4470), and the analyzer's
     /// warning set changed.
     /// </summary>
-    public const int FeatureVersion = 5;
+    public const int FeatureVersion = 6;
 
     /// <summary>
     /// Parse cap (16 MiB). Measured real plans top out at 3.6 MB; this guards against a runaway document: it is never
