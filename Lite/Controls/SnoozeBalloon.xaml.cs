@@ -11,6 +11,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using Hardcodet.Wpf.TaskbarNotification;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
@@ -35,6 +36,8 @@ public partial class SnoozeBalloon : UserControl
         Action closePopup)
     {
         InitializeComponent();
+        /* #8475: the card sits in a popup with no window above it, so a theme change has to be brought to it. */
+        WindowlessThemeFollower.Attach(this);
 
         _muteRuleService = muteRuleService;
         _serverName = serverName;

@@ -25,12 +25,17 @@
                            VerticalAlignment="Center"/>
             </DockPanel>
 
-            <TextBlock x:Name="MessageText"
-                       Text=""
-                       TextWrapping="Wrap"
-                       FontSize="12"
-                       Foreground="{DynamicResource ForegroundBrush}"
-                       Margin="0,0,0,10"/>
+            <!-- #8475: a long message scrolls inside the card in place of growing it past a toast's height, so its end stays readable. -->
+            <ScrollViewer MaxHeight="160"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled"
+                          Margin="0,0,0,10">
+                <TextBlock x:Name="MessageText"
+                           Text=""
+                           TextWrapping="Wrap"
+                           FontSize="12"
+                           Foreground="{DynamicResource ForegroundBrush}"/>
+            </ScrollViewer>
 
             <DockPanel>
                 <Button x:Name="DismissButton"
