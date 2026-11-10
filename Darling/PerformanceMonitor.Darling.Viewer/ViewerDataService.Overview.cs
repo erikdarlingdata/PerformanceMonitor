@@ -1211,7 +1211,7 @@ public sealed class ServerSummaryItem
 
                 var of = $"of {PgBlockingCapturesTotal} sampled";
                 return BlockingRatePerHour.HasValue
-                    ? $"{BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr, {of}"
+                    ? $"{DailyHealthBandCalculator.RatePerHourText(BlockingRatePerHour.Value)}/hr, {of}"
                     : of;
             }
 
@@ -1219,7 +1219,7 @@ public sealed class ServerSummaryItem
             {
                 var max = $"max: {MaxBlockedSeconds:F0}s";
                 return BlockingRatePerHour.HasValue
-                    ? $"{BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr, {max}"
+                    ? $"{DailyHealthBandCalculator.RatePerHourText(BlockingRatePerHour.Value)}/hr, {max}"
                     : max;
             }
 
@@ -1254,7 +1254,7 @@ public sealed class ServerSummaryItem
             var parts = new List<string>(2);
             if (DeadlockRatePerHour.HasValue)
             {
-                parts.Add($"{DeadlockRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr");
+                parts.Add($"{DailyHealthBandCalculator.RatePerHourText(DeadlockRatePerHour.Value)}/hr");
             }
 
             if (LastDeadlockMinutesAgo.HasValue)
