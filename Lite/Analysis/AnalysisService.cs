@@ -1295,8 +1295,16 @@ WHERE server_id = $1";
     /// the caller can put "state unavailable: why" on every target rather than fail the read or — worse —
     /// let the verdict read as eligible by silence. An abandonment is not swallowed (#2443).
     /// </summary>
-    public async Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> TryGetForcePlanTargetStatesAsync(
-        int serverId, IEnumerable<AnalysisFinding> findings, CancellationToken cancellationToken = default)
+    public Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> TryGetForcePlanTargetStatesAsync(
+        int serverId, IEnumerable<AnalysisFinding> findings, CancellationToken cancellationToken = default) =>
+        ReadForcePlanTargetStatesAsync(_duckDb, serverId, findings, cancellationToken);
+
+    /// <summary>
+    /// The same read for a caller that holds the store and no analysis service: the Recommendations
+    /// cards, through <see cref="FindingStore.TryGetForcePlanTargetStatesAsync"/> (#8542).
+    /// </summary>
+    internal static async Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> ReadForcePlanTargetStatesAsync(
+        DuckDbInitializer duckDb, int serverId, IEnumerable<AnalysisFinding> findings, CancellationToken cancellationToken = default)
     {
         var targets = new List<ForcePlanTarget>();
         foreach (var finding in findings)
@@ -1312,10 +1320,10 @@ WHERE server_id = $1";
         {
             /* #7256: a table whose archive holds nothing in the lookback is read as its hot table. */
             var nowUtc = DateTime.UtcNow;
-            var plan = await _duckDb.PlanArchiveReadAsync(cancellationToken,
+            var plan = await duckDb.PlanArchiveReadAsync(cancellationToken,
                 [.. ForcePlanTargetStateReader.ArchivedTables.Select(t => new ArchiveWindow(t, "collection_time", nowUtc - ForcePlanTargetState.Lookback))]);
-            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-            using var connection = _duckDb.CreateConnection();
+            using var readLock = duckDb.AcquireReadLock(cancellationToken);
+            using var connection = duckDb.CreateConnection();
             await connection.OpenAsync(cancellationToken);
             using var command = connection.CreateCommand();
             return (await ForcePlanTargetStateReader.ReadAsync(command, serverId, targets, nowUtc, plan, cancellationToken), null);

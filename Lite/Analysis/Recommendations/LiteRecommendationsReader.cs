@@ -64,7 +64,11 @@ public sealed class LiteRecommendationsReader
         /* #3712: the two knobs the notification path applied when these findings fired, so the grid's
            not-paged marker and the gate's decision read the same settings. */
         var lens = new FindingRoutingLens(App.AnalysisNotifySeverity, App.AnalysisUncorroboratedRoute);
-        return MapFindings(findings, serverName, lens);
+        /* #8542: the forcing state behind the shown batch's force-plan targets, read once and now, so a
+           card gives no force statement for a plan the store blocks. A failed read withholds nothing:
+           the cards then render from the persisted action alone. */
+        var (forcePlanStates, _) = await _findingStore.TryGetForcePlanTargetStatesAsync(serverId, LatestBatchOnly(findings));
+        return MapFindings(findings, serverName, lens, forcePlanStates);
     }
 
     /// <summary>
@@ -74,7 +78,8 @@ public sealed class LiteRecommendationsReader
     /// <c>internal</c> for tests; the public entry point is <see cref="GetRecommendationsAsync"/>.
     /// </summary>
     internal static List<LiteRecommendationItem> MapFindings(
-        IReadOnlyList<AnalysisFinding> findings, string serverName, FindingRoutingLens? lens = null)
+        IReadOnlyList<AnalysisFinding> findings, string serverName, FindingRoutingLens? lens = null,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? forcePlanStates = null)
     {
         var latest = LatestBatchOnly(findings);
 
@@ -83,7 +88,7 @@ public sealed class LiteRecommendationsReader
         {
             if (finding is null)
                 continue;
-            items.Add(MapFinding(finding, serverName, lens));
+            items.Add(MapFinding(finding, serverName, lens, forcePlanStates));
         }
 
         items.Sort(CompareForDisplay);
@@ -148,7 +153,11 @@ public sealed class LiteRecommendationsReader
     /// </summary>
     /// <param name="lens">#3712: the notify floor and routing knob to judge the not-paged marker by; null
     /// (the pure-mapping tests' default) computes no marker.</param>
-    internal static LiteRecommendationItem MapFinding(AnalysisFinding finding, string serverName, FindingRoutingLens? lens = null)
+    /// <param name="forcePlanStates">#8542: the read-time forcing state of the finding's force-plan targets;
+    /// null (the pure-mapping tests' default) withholds no statement.</param>
+    internal static LiteRecommendationItem MapFinding(
+        AnalysisFinding finding, string serverName, FindingRoutingLens? lens = null,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? forcePlanStates = null)
     {
         // Value-stated advice frozen into StoryText at analysis time (current MAXDOP/CTFP/etc.),
         // with the static block as the fallback for legacy findings. StoryText now holds advice
@@ -164,8 +173,8 @@ public sealed class LiteRecommendationsReader
             AdviceText = ComposeAdvice(advice),
             // Persisted-action render is the PRIMARY source (mirrors the Darling viewer); the live
             // drill-down generator is only a fallback when no action was persisted (see class remarks).
-            CopyPasteSql = NullIfEmpty(BuildCopyPasteSql(finding.Remediation))
-                        ?? NullIfEmpty(FactRemediation.GenerateForFinding(finding)),
+            CopyPasteSql = NullIfEmpty(BuildCopyPasteSql(finding.Remediation, forcePlanStates))
+                        ?? NullIfEmpty(FactRemediation.GenerateForFinding(finding, forcePlanStates)),
             IncidentId = finding.IncidentId,
             ServerName = serverName ?? string.Empty,
             WindowStartUtc = AsUtc(finding.TimeRangeStart),
@@ -187,8 +196,10 @@ public sealed class LiteRecommendationsReader
     /// the shared renderer so the reader can be unit-tested directly and cannot drift from the viewer.
     /// Null when the action is null or carries no renderable target.
     /// </summary>
-    internal static string? BuildCopyPasteSql(RemediationAction? action) =>
-        FactRemediation.RenderCopyPasteCommand(action);
+    internal static string? BuildCopyPasteSql(
+        RemediationAction? action,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? forcePlanStates = null) =>
+        FactRemediation.RenderCopyPasteCommand(action, forcePlanStates);
 
     /// <summary>
     /// Maps an engine finding's <c>double</c> severity (0–~2.0) onto the canonical band. Cutoffs
