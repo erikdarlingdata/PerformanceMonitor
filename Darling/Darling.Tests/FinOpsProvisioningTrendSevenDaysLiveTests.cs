@@ -26,8 +26,8 @@ namespace Darling.Tests;
 /// #8548: the 7-day provisioning trend lists seven calendar days, the six whole days before today and today so far, in the
 /// store's UTC-day read and in the MCP utilization view built on it. The store holds a CPU sample on each of the last nine UTC
 /// days, the one seven days back in that day's last second: inside a window that begins at this hour a week ago, and on a day
-/// that is not one of the seven. The read returns the seven days and marks only today's row partial, and the payload's
-/// <c>trend_days</c> is the most rows <c>provisioning_trend</c> holds.
+/// that is not one of the seven. The read returns the seven days and marks only today's row partial. The payload's
+/// <c>trend_days</c> is the most rows <c>provisioning_trend</c> holds, and each row's <c>part_day</c> is true on today's only.
 /// </summary>
 /* #1776 own-store: each fact seeds its own scratch database, so nothing here shares rows with another test. */
 public sealed class FinOpsProvisioningTrendSevenDaysLiveTests
@@ -44,7 +44,7 @@ public sealed class FinOpsProvisioningTrendSevenDaysLiveTests
     });
 
     [Fact]
-    public Task TheMcpPayload_HoldsTrendDaysRows_AndMarksOnlyTodayPartial() => WithStoreAsync(async (dataSource, today, ct) =>
+    public Task TheMcpPayload_HoldsTrendDaysRows_AndMarksOnlyTodayAPartDay() => WithStoreAsync(async (dataSource, today, ct) =>
     {
         using var doc = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(dataSource, "utilization", ServerName, 24, 10, cancellationToken: ct));
         var root = doc.RootElement;
@@ -62,7 +62,7 @@ public sealed class FinOpsProvisioningTrendSevenDaysLiveTests
         /* Today's row is the day still running; the six before it are whole. */
         Assert.Equal(
             new[] { false, false, false, false, false, false, true },
-            trend.Select(r => r.TryGetProperty("partial", out var partial) && partial.ValueKind == JsonValueKind.True).ToArray());
+            trend.Select(r => r.TryGetProperty("part_day", out var partDay) && partDay.ValueKind == JsonValueKind.True).ToArray());
     });
 
     private static DateTime[] SevenDays(DateTime today) => Enumerable.Range(0, 7).Select(i => today.AddDays(i - 6)).ToArray();
