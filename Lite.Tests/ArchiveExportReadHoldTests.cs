@@ -143,15 +143,15 @@ SELECT i, TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'W' ||
         }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
     }
 
-    /* Signalled, not slept: the hold stays open until the store counts the queued writer, so the writer is known to be
-       parked on the lock before the export releases it. Counted from before the writer was queued: the lock is the whole
-       process's, and another class's writer may be waiting too. A fixed delay let a slow runner start the writer after the hold
-       ended, and it then queued behind the next one. */
-    private static void WaitUntilWriterQueued(int waitingBefore)
+    /* Signalled, not slept: the hold stays open until the initializer counts its own queued writer as parked, so the writer is
+       known to be parked on the lock before the export releases it. The count is this initializer's, not the process's: the lock
+       is the whole process's, and another class's writer parked on it must not stand in for this one (#8490). A fixed delay let a
+       slow runner start the writer after the hold ended, and it then queued behind the next one. */
+    private static void WaitUntilWriterQueued(DuckDbInitializer initializer)
     {
         /* Up to 30 s, a hang guard only. */
         TestWait.WaitUntil(
-            () => DuckDbInitializer.WaitingWriteCountForTests > waitingBefore,
+            () => initializer.ParkedWriterCountForTests > 0,
             TimeSpan.FromSeconds(30),
             TimeSpan.FromMilliseconds(5),
             "the writer reached the lock wait");
@@ -210,9 +210,8 @@ SELECT i, TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'W' ||
             if (writer is null && e.Table == first && e.Entered)
             {
                 /* Queue the writer while this table's export holds the read lock, and wait until it is parked on the lock. */
-                var waitingBefore = DuckDbInitializer.WaitingWriteCountForTests;
                 writer = QueueWriter(initializer, events);
-                WaitUntilWriterQueued(waitingBefore);
+                WaitUntilWriterQueued(initializer);
             }
         });
 
@@ -256,9 +255,8 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         {
             if (writer is null && e.Table == "collection_log" && e.Slice == 1 && e.Entered)
             {
-                var waitingBefore = DuckDbInitializer.WaitingWriteCountForTests;
                 writer = QueueWriter(initializer, events);
-                WaitUntilWriterQueued(waitingBefore);
+                WaitUntilWriterQueued(initializer);
             }
         });
 
@@ -303,7 +301,6 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         {
             if (writer is null && e.Table == order[0] && e.Entered)
             {
-                var waitingBefore = DuckDbInitializer.WaitingWriteCountForTests;
                 writer = QueueWriter(initializer, events, async () =>
                 {
                     await ExecAsync(@"
@@ -316,7 +313,7 @@ VALUES (TIMESTAMP '2026-08-15 00:00:00', 1, 'S1', 'Blocking Detected', 51, 10)")
 INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type)
 VALUES (51, TIMESTAMP '2026-08-15 00:00:00', 1, 'S1', 'W51')");
                 });
-                WaitUntilWriterQueued(waitingBefore);
+                WaitUntilWriterQueued(initializer);
             }
         });
 
@@ -364,11 +361,10 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         {
             if (writer is null && e.Table == "collection_log" && e.Slice == 1 && e.Entered)
             {
-                var waitingBefore = DuckDbInitializer.WaitingWriteCountForTests;
                 writer = QueueWriter(initializer, events, () => ExecAsync(@"
 INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status)
 VALUES (2001, 1, 'S1', 'wait_stats', TIMESTAMP '2026-08-01 00:00:00', 'SUCCESS')"));
-                WaitUntilWriterQueued(waitingBefore);
+                WaitUntilWriterQueued(initializer);
             }
         });
 

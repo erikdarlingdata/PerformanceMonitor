@@ -73,15 +73,15 @@ public class PlanFeatureExtractorTests
     }
 
     [Fact]
-    public void FeatureVersion_is_5_and_every_row_carries_it()
+    public void FeatureVersion_is_6_and_every_row_carries_it()
     {
-        Assert.Equal(5, PlanFeatureExtractor.FeatureVersion);
+        Assert.Equal(6, PlanFeatureExtractor.FeatureVersion);
 
         var result = PlanFeatureExtractor.Extract("digest-version", ReadFixture("missing_index.sqlplan"));
 
-        Assert.All(result.Features, f => Assert.Equal(5, f.FeatureVersion));
-        Assert.All(result.Warnings, w => Assert.Equal(5, w.FeatureVersion));
-        Assert.All(result.MissingIndexes, i => Assert.Equal(5, i.FeatureVersion));
+        Assert.All(result.Features, f => Assert.Equal(6, f.FeatureVersion));
+        Assert.All(result.Warnings, w => Assert.Equal(6, w.FeatureVersion));
+        Assert.All(result.MissingIndexes, i => Assert.Equal(6, i.FeatureVersion));
     }
 
     [Fact]

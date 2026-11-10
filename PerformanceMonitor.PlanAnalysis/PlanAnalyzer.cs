@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -249,7 +250,7 @@ public static partial class PlanAnalyzer
             var severity = pct >= 0.5 ? PlanWarningSeverity.Critical
                 : pct >= 0.1 ? PlanWarningSeverity.Warning
                 : PlanWarningSeverity.Info;
-            return (severity, $"Operator time: {ownMs:N0}ms ({pct * 100:N0}% of statement) over {node.ActualExecutions:N0} lookups.");
+            return (severity, string.Create(CultureInfo.InvariantCulture, $"Operator time: {ownMs:N0}ms ({pct * 100:N0}% of statement) over {CountText.Plural(node.ActualExecutions, "lookup")}."));
         }
 
         return (node.ActualExecutions >= KeyLookupWarningExecutions ? PlanWarningSeverity.Warning : PlanWarningSeverity.Info,
@@ -1421,14 +1422,19 @@ public static partial class PlanAnalyzer
                     : PlanWarningSeverity.Warning;
 
                 var ratio = rewinds > 0
-                    ? $"{rewinds / rebinds:F1}x rewinds (cache hits) per rebind (cache miss)"
+                    ? string.Create(CultureInfo.InvariantCulture, $"{rewinds / rebinds:F1}x rewinds (cache hits) per rebind (cache miss)")
                     : "no rewinds (cache hits) at all";
 
+                // An estimated plan carries fractional rewinds. The count is shown rounded the way N0 rounds (a midpoint to
+                // the even neighbour), and the noun follows the number shown, so 1.3 reads "1 rewind" and 1.5 "2 rewinds".
+                // Every number in the sentence is written in the invariant culture, as CountText writes its count, so the
+                // text reads the same on every desktop, in MCP output and in the Exporter's stored rows.
+                var rewindsShown = (long)Math.Round(rewinds, MidpointRounding.ToEven);
                 node.Warnings.Add(new PlanWarning
                 {
                     RuleNumber = 14,
                     WarningType = "Lazy Spool Ineffective",
-                    Message = $"Lazy spool has low cache hit ratio ({source}): {rebinds:N0} rebinds (cache misses), {rewinds:N0} rewinds (cache hits), {ratio}. The spool is caching results but rarely reusing them, adding overhead for no benefit.",
+                    Message = string.Create(CultureInfo.InvariantCulture, $"Lazy spool has low cache hit ratio ({source}): {rebinds:N0} rebinds (cache misses), {CountText.Plural(rewindsShown, "rewind (cache hit)", "rewinds (cache hits)")}, {ratio}. The spool is caching results but rarely reusing them, adding overhead for no benefit."),
                     Severity = severity
                 });
             }

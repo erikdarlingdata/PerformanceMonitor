@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
 using System.Xml.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.PlanAnalysis;
 
@@ -1884,15 +1885,16 @@ public static class ShowPlanParser
         // Exchange spill details
         foreach (var exchSpillEl in warningsEl.Elements(Ns + "ExchangeSpillDetails"))
         {
+            var writes = ParseLong(exchSpillEl.Attribute("WritesToTempDb")?.Value);
             result.Add(new PlanWarning
             {
                 WarningType = "Exchange Spill",
-                Message = $"Exchange spill: {ParseLong(exchSpillEl.Attribute("WritesToTempDb")?.Value):N0} writes to TempDB. The parallel exchange operator ran out of memory buffers and spilled rows to disk. This typically means the memory grant was too small for the data volume flowing through this exchange.",
+                Message = $"Exchange spill: {CountText.Plural(writes, "write")} to TempDB. The parallel exchange operator ran out of memory buffers and spilled rows to disk. This typically means the memory grant was too small for the data volume flowing through this exchange.",
                 Severity = PlanWarningSeverity.Warning,
                 SpillDetails = new SpillDetail
                 {
                     SpillType = "Exchange",
-                    WritesToTempDb = ParseLong(exchSpillEl.Attribute("WritesToTempDb")?.Value)
+                    WritesToTempDb = writes
                 }
             });
         }

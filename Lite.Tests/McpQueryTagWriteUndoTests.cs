@@ -10,7 +10,9 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
+using Darling.Tests;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
@@ -32,6 +34,11 @@ public sealed class McpQueryTagWriteUndoTests : IDisposable
     private readonly DuckDbInitializer _duckDb;
     private readonly LocalDataService _data;
     private readonly int[] _known = { Server };
+
+    /// <summary>How long a budgeted writer from this fixture may take to show up as a waiting writer once it asks for the held
+    /// lock. A writer that parks is one on its first step, with no sleep between asking and parking; one that polls stays out of
+    /// the waiting count for all but the last second of its budget. Ten seconds decides which, with no timing margin.</summary>
+    private static readonly TimeSpan ParkBackstop = TimeSpan.FromSeconds(10);
 
     public McpQueryTagWriteUndoTests()
     {
@@ -237,5 +244,62 @@ public sealed class McpQueryTagWriteUndoTests : IDisposable
 
         await ReplayAsync(deleted["undo"]);
         Assert.Equal(before, await RulesAsync());
+    }
+
+    /// <summary>
+    /// #8490: the write lock is process-wide, and the classes running alongside take it while they build their own databases. A
+    /// budgeted writer polls for it with no queue position for all but the last second of its budget (#7256), and the writers those
+    /// classes park on the lock win every handoff, so a create from this fixture could spend its whole budget polling, time out, and
+    /// answer with an error that has no tag, which NewTagAsync then dereferences. This host starts every initializer parked for its
+    /// whole budget instead: while another writer holds the lock, a create is a waiting writer the moment it asks, and once the holder
+    /// releases it answers with the tag. The holder here is its own initializer's budgeted writer on its own thread, released in
+    /// finally on every path, and the create's mode is read from the fixture initializer's own writer counts, so neither the holder nor
+    /// the measurement depends on what the other classes' writers are doing.
+    /// </summary>
+    [Fact]
+    public async Task CreateQueryTag_ParksOnTheWriteLock_WhileAnotherWriterHoldsIt_AndAnswersWithTheTagOnceItIsFree()
+    {
+        var budget = LocalDataService.UserWriteLockBudget;
+        using var holderDb = new DuckDbInitializer(Path.Combine(_tempDir, "holder.duckdb")) { WriteLockParkTail = budget };
+        var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim(false);
+        var holder = Task.Factory.StartNew(() =>
+        {
+            using var writeLock = holderDb.AcquireWriteLock(budget);
+            held.SetResult();
+            release.Wait(budget);
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        Task<string>? create = null;
+        try
+        {
+            await Task.WhenAny(held.Task, holder);
+            if (holder.IsFaulted)
+            {
+                await holder;
+            }
+
+            create = Task.Run(() => McpQueryTagTools.CreateQueryTagCore(_data, "parked", null, null), CancellationToken.None);
+            TestWait.WaitUntil(() => _duckDb.PollingWriterCountForTests + _duckDb.ParkedWriterCountForTests > 0, ParkBackstop, TimeSpan.FromMilliseconds(5), "create_query_tag reached the write-lock wait");
+
+            Assert.True(
+                TestWait.TryWaitUntil(() => _duckDb.ParkedWriterCountForTests > 0, ParkBackstop, TimeSpan.FromMilliseconds(5)),
+                "create_query_tag polls for the write lock with no queue position instead of parking as a waiting writer, so the parked writers of the classes running alongside win every handoff, its budget runs out, and the tool answers with an error that has no tag");
+
+            release.Set();
+            await holder;
+            var answer = Parse(await create.WaitAsync(budget));
+            Assert.Equal("created", (string?)answer["status"]);
+            Assert.NotNull(answer["tag"]);
+        }
+        finally
+        {
+            release.Set();
+            await holder;
+            if (create is not null)
+            {
+                await create;
+            }
+        }
     }
 }
