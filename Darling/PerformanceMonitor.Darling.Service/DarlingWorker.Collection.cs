@@ -1018,11 +1018,13 @@ public sealed partial class DarlingWorker
                retention, so a restart long after the path shortened still finds it. */
             getStoredStoryPaths: muteReadStore.GetStoryPathsAsync,
             /* #8542: the store's forcing state for a finding's force-plan targets, read when its notification is
-               built, so the advice T-SQL gives no force statement for a plan the store blocks. */
+               built, so the advice T-SQL gives no force statement for a plan the store blocks. The read is
+               awaited inside the pass, so it runs under the pass's deadline; one that times out comes back as
+               a reason, and the message opens by saying the store was not checked. */
             readForcePlanTargetStates: (serverId, targets) => PerformanceMonitor.Darling.Analysis.DarlingForcePlanTargetStateReader.TryReadAsync(
                 postgres, serverId,
                 [new PerformanceMonitor.Analysis.AnalysisFinding { Remediation = new PerformanceMonitor.Analysis.RemediationAction("PLAN_REGRESSION", "force", targets) }],
-                McpCommandDeadlines.ReadSeconds, logger: _logger, cancellationToken: stoppingToken));
+                ServiceCommandDeadlines.NotificationForcePlanStateSeconds, logger: _logger, cancellationToken: stoppingToken));
 
         /* #2138 phase 1: the auto force-plan bot, hooked onto the SCHEDULED analysis pass only (the
            interactive analyze_now command deliberately does not trigger it — an operator poking a

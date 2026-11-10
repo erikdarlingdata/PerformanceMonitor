@@ -1334,7 +1334,11 @@ WHERE server_id = $1";
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
         {
-            return (null, $"the forcing and automatic-plan-correction state read failed ({ex.GetType().Name}: {ex.Message}); eligible reflects only the finding's own evidence. Check get_plan_corrections and sys.query_store_plan before forcing.");
+            /* The fault's message goes to the log. The reason carries the exception's type only, as Darling's
+               reader does (#4316): it is written into the command text a card shows and a notification
+               sends, and a DuckDB message can name the store's path. */
+            AppLogger.Warn("AnalysisService", $"The forcing and automatic-plan-correction state read failed for server {serverId}: {ex.Message}");
+            return (null, $"the forcing and automatic-plan-correction state read failed ({ex.GetType().Name}). Check get_plan_corrections and sys.query_store_plan before forcing.");
         }
     }
 }

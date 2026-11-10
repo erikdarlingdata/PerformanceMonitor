@@ -38,9 +38,12 @@ public static class FactRemediation
     /// <see cref="GenerateForFinding(AnalysisFinding)"/> with the read-time forcing and
     /// automatic-plan-correction state of the finding's force-plan targets (#8542). A target that state
     /// blocks (<see cref="BlockersFor"/>) is named in comments with its blockers and gets no runnable
-    /// statement. A null <paramref name="states"/> withholds nothing; when the read failed, pass why in
-    /// <paramref name="stateUnavailableReason"/> and the force-plan text opens by saying no target was
-    /// checked (<see cref="StateNotReadPrefix"/>).
+    /// statement. A target the read holds no row for keeps its statement under a line saying its state
+    /// is unknown (<see cref="StateUnknownLine"/>). A null <paramref name="states"/> withholds nothing;
+    /// when the read failed, pass why in <paramref name="stateUnavailableReason"/> and the force-plan text
+    /// opens by saying no target was checked (<see cref="StateNotReadPrefix"/>). With a null
+    /// <paramref name="states"/> and no reason the text carries no such line: the caller made no read,
+    /// and says nothing about the store.
     /// </summary>
     public static string? GenerateForFinding(
         AnalysisFinding finding,
@@ -631,6 +634,8 @@ public static class FactRemediation
             eligible++;
             AppendSecondaryReplicaDisclosure(sb, target);
             AppendParameterSensitivityCaution(sb, target);
+            if (StateUnknownLine(target, states) is { } stateUnknown)
+                sb.AppendLine(stateUnknown);
             sb.AppendLine($"USE {QuoteName(target.Database)};");
             sb.AppendLine($"EXEC sys.sp_query_store_force_plan @query_id = {target.QueryId}, @plan_id = {target.PlanId};");
             sb.AppendLine();
@@ -651,10 +656,41 @@ public static class FactRemediation
     public const string NoEligibleForceTarget =
         "-- No force statement is offered: the store's forcing state blocks every target below.";
 
-    /// <summary>How a force-plan remediation opens when the store's forcing state could not be read
-    /// (#8542): one comment line, so a statement in the text is not taken for one the store was asked
-    /// about.</summary>
+    /// <summary>How a force-plan remediation says the store's forcing state does not stand behind a
+    /// statement (#8542): one comment line that starts with this. It opens the text when the state could
+    /// not be read at all, and sits above one target's statement when the read holds no row for that
+    /// target, so neither statement is taken for one the store was asked about and cleared.</summary>
     public const string StateNotReadPrefix = "-- NOT CHECKED:";
+
+    /// <summary>What a state read that holds no row for a target observed, in the words
+    /// <c>structured_remediation</c>'s <c>state_note</c> and the copy-paste text share.</summary>
+    private static string NoStateRowInLookback =>
+        $"no query_store_stats or plan_correction row for this target within the last {ForcePlanTargetState.Lookback.TotalHours:0} hours";
+
+    /// <summary>The instruction every unknown-state note and line ends with.</summary>
+    private const string CheckBeforeForcing = "Check get_plan_corrections and sys.query_store_plan before forcing.";
+
+    /// <summary>
+    /// The comment line a target's force statement sits under when the state read ran and holds no row
+    /// for the target (#8542): the dictionary has no key for it, or its state
+    /// <see cref="ForcePlanTargetState.IsEmpty"/>. The line starts with <see cref="StateNotReadPrefix"/>
+    /// and says what <c>structured_remediation</c>'s <c>state_note</c> says of the same target: its state
+    /// is unknown, check before forcing. The statement stays, because nothing observed is not a blocker.
+    /// Null for a target with a state row, and for a null <paramref name="states"/>, where the whole
+    /// read is spoken for once by <see cref="WithStateNotRead"/>.
+    /// </summary>
+    private static string? StateUnknownLine(
+        ForcePlanTarget target,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states)
+    {
+        if (states is null)
+            return null;
+
+        if (states.TryGetValue(ForcePlanTargetKey.Of(target), out var found) && found is not null && !found.IsEmpty)
+            return null;
+
+        return $"{StateNotReadPrefix} unknown: {NoStateRowInLookback}. {CheckBeforeForcing}";
+    }
 
     /// <summary>The comment line that names a target the store's state blocks (#8542) starts with this.</summary>
     public const string NotEligiblePrefix = "-- NOT ELIGIBLE:";
@@ -1156,7 +1192,7 @@ public static class FactRemediation
             else if (!states.TryGetValue(ForcePlanTargetKey.Of(t), out state) || state is null || state.IsEmpty)
             {
                 state = null;
-                note = $"unknown: no query_store_stats or plan_correction row for this target within the last {ForcePlanTargetState.Lookback.TotalHours:0} hours; eligible reflects only the finding's own evidence. Check get_plan_corrections and sys.query_store_plan before forcing.";
+                note = $"unknown: {NoStateRowInLookback}; eligible reflects only the finding's own evidence. {CheckBeforeForcing}";
             }
             else
             {
@@ -1664,9 +1700,12 @@ public static class FactRemediation
     /// automatic-plan-correction state of the action's force-plan targets (#8542). A force-plan target
     /// that state blocks (<see cref="BlockersFor"/>) is named in comments with its blockers and gets no
     /// runnable statement; when it blocks every target the text says so and carries no force statement.
-    /// A null <paramref name="states"/> withholds nothing; when the read failed, pass why in
-    /// <paramref name="stateUnavailableReason"/> and the force-plan text opens by saying no target was
-    /// checked (<see cref="StateNotReadPrefix"/>). The other remediation shapes ignore both.
+    /// A target the read holds no row for keeps its statement under a line saying its state is unknown
+    /// (<see cref="StateUnknownLine"/>). A null <paramref name="states"/> withholds nothing; when the
+    /// read failed, pass why in <paramref name="stateUnavailableReason"/> and the force-plan text opens by
+    /// saying no target was checked (<see cref="StateNotReadPrefix"/>). With a null
+    /// <paramref name="states"/> and no reason the text carries no such line: the caller made no read,
+    /// and says nothing about the store. The other remediation shapes ignore both.
     /// </summary>
     public static string? RenderCopyPasteCommand(
         RemediationAction? action,
@@ -1746,6 +1785,7 @@ public static class FactRemediation
                 blocks.Add(
                     disclosure +
                     pspCaution +
+                    (StateUnknownLine(t, states) is { } stateUnknown ? stateUnknown + nl : string.Empty) +
                     $"USE {QuoteName(t.Database)};" + nl +
                     $"EXEC sys.sp_query_store_force_plan @query_id = {t.QueryId}, @plan_id = {t.PlanId};");
             }

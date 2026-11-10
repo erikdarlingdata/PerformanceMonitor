@@ -251,7 +251,9 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
     /// <c>ServiceCommandDeadlines.PostAnalysisForcePlanSeconds</c>, because the same statement issued from a
     /// post-analysis hook holding a sweep permit is bounded by the pass it rides on, not by an agent's
     /// patience. A timeout there is not a fault the bot recovers from — it journals
-    /// <c>state_unavailable</c> and forces nothing.</param>
+    /// <c>state_unavailable</c> and forces nothing. The worker's notification read (#8542) is awaited
+    /// inside the same passes and passes <c>ServiceCommandDeadlines.NotificationForcePlanStateSeconds</c>;
+    /// a timeout there sends the message with its not-checked line.</param>
     public static async Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(
         NpgsqlDataSource postgres, int serverId, IReadOnlyList<ForcePlanTarget> targets, DateTime nowUtc,
         int commandTimeoutSeconds, CancellationToken cancellationToken = default)

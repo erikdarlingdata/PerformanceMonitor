@@ -203,36 +203,13 @@ public sealed class AnalysisNotificationService : IDisposable
     /// under its own hash, to find a WIDER path of the same root that was already paged. Read at most once per
     /// server and root per <see cref="NotifyAsync"/> call. Null means no such lookup (a shorter path pages as new).
     /// </param>
-    /// <summary>
-    /// #8542: the store's forcing state for the force-plan targets the finding's advice T-SQL renders
-    /// (the same extraction the renderer uses), through the host's read. No read on a host without one
-    /// or for a finding with no such target. A read that throws is logged and comes back as a reason,
-    /// so the notification still goes out and its T-SQL says the store was not checked.
-    /// </summary>
-    private async Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> ReadForcePlanTargetStatesAsync(AnalysisFinding finding)
-    {
-        if (_readForcePlanTargetStates is null)
-            return (null, null);
-
-        var targets = FactRemediation.ExtractPlanRegressionTargets(finding);
-        if (targets.Count == 0)
-            return (null, null);
-
-        try
-        {
-            return await _readForcePlanTargetStates(finding.ServerId, targets).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "The forcing and automatic-plan-correction state read failed for server {ServerId}.", finding.ServerId);
-            return (null, $"the forcing and automatic-plan-correction state read failed ({ex.GetType().Name}). Check get_plan_corrections and sys.query_store_plan before forcing.");
-        }
-    }
-
+    /// <param name="readForcePlanTargetStates">
+    /// Optional <c>(serverId, targets)</c> read of the store's forcing and automatic-plan-correction state for a
+    /// finding's force-plan targets (#8542), made when the finding's notification is built: the states and a null
+    /// reason, or null and why the read failed. The advice T-SQL gives no force statement for a target that state
+    /// blocks. Null means no read, and the T-SQL says nothing about the store. A read that throws is logged and
+    /// the notification still goes out, its T-SQL opening with the line that says the store was not checked.
+    /// </param>
     public AnalysisNotificationService(
         IFindingAlertSender sender,
         IAlertSettings settings,
@@ -276,6 +253,36 @@ public sealed class AnalysisNotificationService : IDisposable
         _isStoryMuted = isStoryMuted;
         _findOpenEngineAlert = findOpenEngineAlert;
         _getStoredStoryPaths = getStoredStoryPaths;
+    }
+
+    /// <summary>
+    /// #8542: the store's forcing state for the force-plan targets the finding's advice T-SQL renders
+    /// (the same extraction the renderer uses), through the host's read. No read on a host without one
+    /// or for a finding with no such target. A read that throws is logged and comes back as a reason,
+    /// so the notification still goes out and its T-SQL says the store was not checked.
+    /// </summary>
+    private async Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> ReadForcePlanTargetStatesAsync(AnalysisFinding finding)
+    {
+        if (_readForcePlanTargetStates is null)
+            return (null, null);
+
+        var targets = FactRemediation.ExtractPlanRegressionTargets(finding);
+        if (targets.Count == 0)
+            return (null, null);
+
+        try
+        {
+            return await _readForcePlanTargetStates(finding.ServerId, targets).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "The forcing and automatic-plan-correction state read failed for server {ServerId}.", finding.ServerId);
+            return (null, $"the forcing and automatic-plan-correction state read failed ({ex.GetType().Name}). Check get_plan_corrections and sys.query_store_plan before forcing.");
+        }
     }
 
     /// <summary>

@@ -64,10 +64,26 @@ public sealed class LiteRecommendationsReader
         /* #3712: the two knobs the notification path applied when these findings fired, so the grid's
            not-paged marker and the gate's decision read the same settings. */
         var lens = new FindingRoutingLens(App.AnalysisNotifySeverity, App.AnalysisUncorroboratedRoute);
-        /* #8542: the forcing state behind the shown batch's force-plan targets, read once and now, so a
-           card gives no force statement for a plan the store blocks. A failed read withholds nothing,
-           and its reason rides to the card, whose command then opens by saying no target was checked. */
-        var (forcePlanStates, forcePlanStateNote) = await _findingStore.TryGetForcePlanTargetStatesAsync(serverId, LatestBatchOnly(findings));
+        return await MapWithForcePlanStateAsync(
+            findings, serverName, lens, batch => _findingStore.TryGetForcePlanTargetStatesAsync(serverId, batch));
+    }
+
+    /// <summary>
+    /// Reads the forcing state behind the shown batch's force-plan targets, once and now, and maps the
+    /// findings to cards over it (#8542), so a card gives no force statement for a plan the store blocks.
+    /// A failed read withholds nothing, and its reason rides to the card, whose command then opens by
+    /// saying no target was checked. Both ways the tab builds cards go through here: the stored load
+    /// (<see cref="GetRecommendationsAsync"/>) and Generate now, which maps the findings its own analysis
+    /// returned.
+    /// </summary>
+    /// <param name="readForcePlanStates">The state read for a set of findings: the dictionary and a null
+    /// reason, or null and why the read failed.</param>
+    internal static async Task<List<LiteRecommendationItem>> MapWithForcePlanStateAsync(
+        IReadOnlyList<AnalysisFinding> findings, string serverName, FindingRoutingLens? lens,
+        Func<IReadOnlyList<AnalysisFinding>, Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)>> readForcePlanStates)
+    {
+        ArgumentNullException.ThrowIfNull(readForcePlanStates);
+        var (forcePlanStates, forcePlanStateNote) = await readForcePlanStates(LatestBatchOnly(findings));
         return MapFindings(findings, serverName, lens, forcePlanStates, forcePlanStateNote);
     }
 
@@ -76,11 +92,13 @@ public sealed class LiteRecommendationsReader
     /// to the sorted advise-only card list. Pure over the inputs — no DB, no UI — so the banding,
     /// advice composition, latest-batch trim, and sort are unit-testable directly. Exposed
     /// <c>internal</c> for tests; the public entry point is <see cref="GetRecommendationsAsync"/>.
+    /// The forcing state and the reason it could not be read are required, so a caller that builds cards
+    /// says what it read (#8542); <see cref="MapWithForcePlanStateAsync"/> reads and passes them.
     /// </summary>
     internal static List<LiteRecommendationItem> MapFindings(
-        IReadOnlyList<AnalysisFinding> findings, string serverName, FindingRoutingLens? lens = null,
-        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? forcePlanStates = null,
-        string? forcePlanStateUnavailableReason = null)
+        IReadOnlyList<AnalysisFinding> findings, string serverName, FindingRoutingLens? lens,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? forcePlanStates,
+        string? forcePlanStateUnavailableReason)
     {
         var latest = LatestBatchOnly(findings);
 
