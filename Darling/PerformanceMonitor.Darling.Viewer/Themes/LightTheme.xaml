@@ -77,7 +77,7 @@
     <SolidColorBrush x:Key="BackgroundBrush" Color="{StaticResource BackgroundColor}"/>
     <SolidColorBrush x:Key="BackgroundLightBrush" Color="{StaticResource BackgroundLightColor}"/>
     <SolidColorBrush x:Key="BackgroundLighterBrush" Color="{StaticResource BackgroundLighterColor}"/>
-    <!-- #8221: the outline of a button, a text box and a combo box, and the track a bar sits on. Same values as the Lite themes. -->
+    <!-- #8221: the outline of a button, a text box, a combo box, a check box and a radio button, and the track a bar sits on. Same values as the Lite themes. -->
     <SolidColorBrush x:Key="ControlBorderBrush" Color="#7C8794"/>
     <SolidColorBrush x:Key="BarTrackBrush" Color="#DDE2E8"/>
 
@@ -1579,10 +1579,11 @@
     <!-- ============================================ -->
     <!-- CheckBox Style                               -->
     <!-- ============================================ -->
+    <!-- #8540: the box is outlined like a text box (ControlBorderBrush), so an unchecked box shows against the page and the card. -->
     <Style TargetType="CheckBox">
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="CheckBox">
@@ -1590,7 +1591,7 @@
                         <BulletDecorator.Bullet>
                             <Border x:Name="Border" Width="16" Height="16"
                                     Background="{StaticResource BackgroundDarkBrush}"
-                                    BorderBrush="{StaticResource BorderBrush}"
+                                    BorderBrush="{StaticResource ControlBorderBrush}"
                                     BorderThickness="1" CornerRadius="2">
                                 <Path x:Name="CheckMark" Width="10" Height="10" Stretch="Fill"
                                       Stroke="{StaticResource AccentBrush}" StrokeThickness="2"
@@ -1629,7 +1630,7 @@
     <Style TargetType="RadioButton">
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="RadioButton">
@@ -1638,7 +1639,7 @@
                             <Grid Width="16" Height="16">
                                 <Ellipse x:Name="Border"
                                          Fill="{StaticResource BackgroundDarkBrush}"
-                                         Stroke="{StaticResource BorderBrush}"
+                                         Stroke="{StaticResource ControlBorderBrush}"
                                          StrokeThickness="1"/>
                                 <Ellipse x:Name="CheckMark" Width="8" Height="8"
                                          Fill="{StaticResource AccentBrush}" Visibility="Collapsed"
