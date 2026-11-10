@@ -14,7 +14,7 @@
  */
 
 import { holdsPage, keepScroll, noteRefreshError, replaceNodes, showPage, showRefreshError } from "../refresh-in-place.js";
-import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, windowPhrase, bandClass, rollupTextId, tagPill, frontDoor, currentStore } from "../util.js";
+import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPerHour, fmtPct, fmtMb, fmtMs, windowPhrase, bandClass, rollupTextId, tagPill, frontDoor, currentStore } from "../util.js";
 import { frontDoorStores, healthBandClass, healthLabel, currentFirst, currentMark } from "../store-picker.js";
 import { VIZ, navigateServer, navigateServerPanel } from "../panels.js";
 import { favoritesFirst, onChange as onLocalChange } from "../viewer-local.js";
@@ -948,7 +948,7 @@ export function metricBands(c, store) {
      rate — a chip that bands on a figure it does not show leaves "Deadlocks 3" against an amber border with
      no way to see which tier was crossed, and "3" is the same string over an hour and over a day. Null when
      the window was too short to normalise, which is the reading the band itself had to go on. */
-  const deadlockRate = c.deadlock_rate_per_hour != null ? fmtNum(c.deadlock_rate_per_hour) + "/hr" : null;
+  const deadlockRate = c.deadlock_rate_per_hour != null ? fmtPerHour(c.deadlock_rate_per_hour) + "/hr" : null;
   const deadlockLast = c.deadlock_count > 0 && c.deadlock_last_seen ? "last " + relTime(c.deadlock_last_seen) : null;
   const deadlockDetail = [windowWords, deadlockRate, deadlockLast].filter(Boolean).join(" · ") || null;
 
