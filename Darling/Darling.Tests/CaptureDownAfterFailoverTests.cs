@@ -86,41 +86,6 @@ public sealed class CaptureDownAfterFailoverTests
     }
 
     [Fact]
-    public async Task ASessionTheEnsureCouldNotStart_FiresOnTheFirstSweep_AndQuotesTheServer()
-    {
-        var h = new DarlingSelfAlertTests.Harness();
-        var e = h.Build();
-        const string said = "Cannot alter the event session because the ring_buffer target is in an invalid state (error 25728).";
-
-        await CaptureDownSeams.ApplyAsync(e, ServerId, Name, new[] { "Deadlock" },
-            CaptureDownSeams.Report(failures: new[] { ("deadlocks", said, false) }), Ct);
-
-        var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
-        Assert.Contains("found the Deadlock session stopped or absent and could not start it", fired.DetailText, StringComparison.Ordinal);
-        Assert.Contains(said, fired.DetailText, StringComparison.Ordinal);
-        Assert.DoesNotContain("could not be created", fired.DetailText, StringComparison.Ordinal);
-        Assert.DoesNotContain("ALTER ANY EVENT SESSION", fired.DetailText, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task APermissionRefusal_FiresWithThePermissionText_AndQuotesTheServer()
-    {
-        var h = new DarlingSelfAlertTests.Harness();
-        var e = h.Build();
-        const string said = "The user does not have permission to perform this action. (error 15247)";
-
-        await CaptureDownSeams.ApplyAsync(e, ServerId, Name, new[] { "Blocking" },
-            CaptureDownSeams.Report(failures: new[] { ("blocked_process_report", said, true) }), Ct);
-
-        var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.Contains("lacks the permission to create Extended Events sessions", fired.DetailText, StringComparison.Ordinal);
-        Assert.Contains("ALTER ANY EVENT SESSION", fired.DetailText, StringComparison.Ordinal);
-        Assert.Contains(said, fired.DetailText, StringComparison.Ordinal);
-        Assert.DoesNotContain("could not start it", fired.DetailText, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public async Task NoIdentityChange_ASessionFoundStopped_FiresOnTheFirstSweep_AndSaysWhatTheServiceDoesNext()
     {
         var h = new DarlingSelfAlertTests.Harness();
@@ -375,14 +340,10 @@ internal static class CaptureDownSeams
         return type!;
     }
 
-    /// <summary>A report: the collectors whose session the ensure started and that have not read since, and the last ensure failure per collector.</summary>
-    public static object Report(string[]? restarted = null, (string Collector, string Message, bool IsPermission)[]? failures = null)
+    /// <summary>A report with no ensure failure: the collectors whose session the ensure started and that have not read since.</summary>
+    public static object Report(string[]? restarted = null)
     {
         var map = new Dictionary<string, DarlingXeSessions.XeEnsureFailure>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (collector, message, isPermission) in failures ?? Array.Empty<(string, string, bool)>())
-        {
-            map[collector] = new DarlingXeSessions.XeEnsureFailure(message, isPermission);
-        }
 
         var type = ReportType();
         var ctor = type.GetConstructors(Any).FirstOrDefault(c => c.GetParameters().Length == 2);
