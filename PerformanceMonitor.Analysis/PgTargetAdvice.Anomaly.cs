@@ -293,7 +293,7 @@ public static partial class PgTargetAdvice
 
         var countText = count.ToString("N0", CultureInfo.InvariantCulture);
         var plural = Math.Abs(count - 1) < 0.5 ? string.Empty : "s";
-        var rateText = rate.ToString("0.#", CultureInfo.InvariantCulture);
+        var rateText = PerformanceMonitor.Common.DailyHealthBandCalculator.RatePerHourText(rate, "0.#");
         var hours = fact.Metadata.GetValueOrDefault("observed_hours");
         var over = hours > 0 ? $" over {hours.ToString("0.#", CultureInfo.InvariantCulture)} observed hours" : string.Empty;
         var topDb = string.IsNullOrEmpty(fact.DatabaseName) ? string.Empty : $" {fact.DatabaseName} had the most.";
