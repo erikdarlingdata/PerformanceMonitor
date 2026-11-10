@@ -221,17 +221,74 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// #1980: the Query Store grid's inline "View" button — the capability its two sibling grids
-    /// always had. Lite's QS rows already carry the stored plan text, so this opens it directly in
-    /// the Plan Viewer via <see cref="OpenPlanTab"/> (the history window's own path); the button is
-    /// gated on <c>HasQueryPlan</c> in XAML, so an empty row is never clickable.
+    /// The fetch behind the Query Store grid's inline View button, where something other than the monitored server answers
+    /// it. Null is the fetch from the monitored server's Query Store by the row's plan id.
     /// </summary>
-    private void ViewQueryStorePlanInline_Click(object sender, RoutedEventArgs e)
+    internal Func<QueryStoreRow, Task<string?>>? QueryStorePlanFetch { get; set; }
+
+    /// <summary>Shows the inline View button's message (text, title, icon): a message box, unless something else is set to take it.</summary>
+    internal Action<string, string, MessageBoxImage> PlanMessage { get; set; } =
+        (text, title, image) => MessageBox.Show(text, title, MessageBoxButton.OK, image);
+
+    /// <summary>The inline View click that ran last: complete once its plan is on screen or its message has been shown.</summary>
+    internal Task InlineQueryStorePlanView { get; private set; } = Task.CompletedTask;
+
+    private async Task<string?> FetchQueryStorePlanFromServerAsync(QueryStoreRow row)
+    {
+        var connStr = _credentialResolver.GetConnectionString(_server);
+        return await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryStorePlanAsync(connStr, row.DatabaseName, row.PlanId));
+    }
+
+    /// <summary>
+    /// #1980: the Query Store grid's inline "View" button — the capability its two sibling grids
+    /// always had. Lite's QS rows carry no plan text, so the plan is fetched from the monitored server's
+    /// Query Store by the row's plan id, as the row's context menu and the history window fetch it,
+    /// opened in the Plan Viewer via <see cref="OpenPlanTab"/>, and the Plan Viewer tab is shown. The
+    /// button is gated on <c>HasQueryPlan</c> in XAML, so a row that names no plan is never clickable.
+    /// A plan Query Store no longer holds gets the history window's "Plan Not Found" message. A fetch
+    /// that fails says why it failed, as the history window's download does, and leaves the grid showing.
+    /// </summary>
+    private async void ViewQueryStorePlanInline_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.DataContext is not QueryStoreRow row) return;
-        if (string.IsNullOrEmpty(row.QueryPlanText)) return;
+        if (row.PlanId <= 0) return;
+        // A second click while the fetch is running is dropped.
+        if (btn.Content is "...") return;
 
-        _ = OpenPlanTab(row.QueryPlanText, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
+        InlineQueryStorePlanView = ViewQueryStorePlanInlineAsync(btn, row);
+        await InlineQueryStorePlanView;
+    }
+
+    private async Task ViewQueryStorePlanInlineAsync(Button btn, QueryStoreRow row)
+    {
+        btn.Content = "...";
+        try
+        {
+            string? plan;
+            try
+            {
+                plan = await (QueryStorePlanFetch ?? FetchQueryStorePlanFromServerAsync)(row);
+            }
+            catch (Exception ex)
+            {
+                PlanMessage($"Could not get the plan for server {_server.DisplayName} from Query Store: {DuckDbMemoryLimitSetting.Describe(ex)}.", "Error", MessageBoxImage.Error);
+                return;
+            }
+
+            if (string.IsNullOrEmpty(plan))
+            {
+                PlanMessage("No query plan found in Query Store for this plan ID.", "Plan Not Found", MessageBoxImage.Information);
+                return;
+            }
+
+            var opened = OpenPlanTab(plan, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
+            PlanViewerTabItem.IsSelected = true;
+            await opened;
+        }
+        finally
+        {
+            btn.Content = "View";
+        }
     }
 
     // Returns a Task (not async void) so the Ctrl+V paste handler can await it inside its _pasteInProgress

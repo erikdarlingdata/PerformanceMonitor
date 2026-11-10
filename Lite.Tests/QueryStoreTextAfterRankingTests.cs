@@ -250,7 +250,8 @@ WHERE {presence}";
             var actual = await new LocalDataService(duckDb).GetQueryStoreTopQueriesAsync(ServerId, hoursBack, top, asOfUtc: _anchor);
 
             Assert.Equal(top, actual.Count);
-            AssertSameRows(oracle, actual, ignoredColumns: ["page_ord", "candidate_count"]);
+            /* query_plan_text: the old read's NULL placeholder. The row carries no plan text; a plan is fetched by plan id when it is asked for. */
+            AssertSameRows(oracle, actual, ignoredColumns: ["page_ord", "candidate_count", "query_plan_text"]);
             /* The shapes the text lookup could get wrong, in the page: */
             Assert.DoesNotContain(actual, r => r.QueryId == 11);                              // WAITFOR, ranked first, filtered
             Assert.Equal("", Assert.Single(actual, r => r.QueryId == 13).QueryText);           // no text anywhere

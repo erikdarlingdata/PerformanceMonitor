@@ -1104,10 +1104,10 @@
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
-                                    <!-- #1980: the inline plan affordance the sibling grids always had — opens the
-                                         STORED Query Store plan (already on the row) in the Plan Viewer, the same
-                                         path the history window's View Plan uses. Gated on HasQueryPlan. Lives in
-                                         the payload region right of the #1949 anchor, next to the text it belongs to. -->
+                                    <!-- #1980: the inline plan affordance the sibling grids always had. The row carries no plan:
+                                         the button fetches the plan from the monitored server's Query Store by the row's plan id
+                                         and opens it in the Plan Viewer, as the row's context menu does. Gated on HasQueryPlan.
+                                         Lives in the payload region right of the #1949 anchor, next to the text it belongs to. -->
                                     <DataGridTemplateColumn Header="Query Plan" Width="Auto" MinWidth="70">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
