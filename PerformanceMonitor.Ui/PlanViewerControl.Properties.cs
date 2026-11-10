@@ -810,7 +810,7 @@ public partial class PlanViewerControl
                 AddPropertySection("Plan Warnings");
                 foreach (var w in PlanWarningDisplay.OrderByBenefit(s.PlanWarnings))
                 {
-                    var warnColor = PlanWarningDisplay.WarningSeverityColorHex(w.Severity);
+                    var warnBrush = WarningSeverityBrush(w.Severity);
                     var warnPanel = new StackPanel { Margin = new Thickness(10, 2, 10, 2) };
                     var planWarnHeaderText = PlanWarningDisplay.PlanWarningHeader(w);
                     var planWarnHeaderBlock = new TextBlock
@@ -818,7 +818,7 @@ public partial class PlanViewerControl
                         Text = planWarnHeaderText,
                         FontWeight = FontWeights.SemiBold,
                         FontSize = 11,
-                        Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor))
+                        Foreground = warnBrush
                     };
                     AttachOriginNavigation(planWarnHeaderBlock, planWarnHeaderText, w.OriginNodeIds);
                     warnPanel.Children.Add(planWarnHeaderBlock);
@@ -866,7 +866,7 @@ public partial class PlanViewerControl
             AddPropertySection("Warnings");
             foreach (var w in PlanWarningDisplay.OrderByBenefit(node.Warnings))
             {
-                var warnColor = PlanWarningDisplay.WarningSeverityColorHex(w.Severity);
+                var warnBrush = WarningSeverityBrush(w.Severity);
                 var warnPanel = new StackPanel { Margin = new Thickness(10, 2, 10, 2) };
                 var opWarnHeaderText = PlanWarningDisplay.PlanWarningHeader(w);
                 var opWarnHeaderBlock = new TextBlock
@@ -874,7 +874,7 @@ public partial class PlanViewerControl
                     Text = opWarnHeaderText,
                     FontWeight = FontWeights.SemiBold,
                     FontSize = 11,
-                    Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor))
+                    Foreground = warnBrush
                 };
                 AttachOriginNavigation(opWarnHeaderBlock, opWarnHeaderText, w.OriginNodeIds);
                 warnPanel.Children.Add(opWarnHeaderBlock);

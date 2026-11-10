@@ -103,7 +103,7 @@ public partial class ProcedureHistoryWindow : Window
                 var zone = _displayZone();
                 var first = ServerTimeHelper.FormatInstant(_historyData.First().CollectionTime, zone, "MM/dd HH:mm");
                 var last = ServerTimeHelper.FormatInstant(_historyData.Last().CollectionTime, zone, "MM/dd HH:mm");
-                SummaryText.Text = $"{_historyData.Count} samples from {first} to {last} | " +
+                SummaryText.Text = $"{PerformanceMonitor.Ui.HistorySampleSummary.Span(_historyData.Count, first, last)} | " +
                                    $"Total Executions: {totalExec:N0} | Total CPU: {totalCpu:N1} ms";
             }
             else

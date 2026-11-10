@@ -79,6 +79,11 @@
     <SolidColorBrush x:Key="BackgroundLighterBrush" Color="{StaticResource BackgroundLighterColor}"/>
     <!-- #8221: the outline of a button, a text box and a combo box, and the track a bar sits on. Same values as the Lite themes. -->
     <SolidColorBrush x:Key="ControlBorderBrush" Color="#7C8794"/>
+    <!-- #8540: the outline of a check box and a radio button. The colour of ControlBorderBrush on this theme, so a box is outlined like the text box beside it. -->
+    <SolidColorBrush x:Key="BoxBorderBrush" Color="#7C8794"/>
+    <!-- #8540: the outline of a disabled check box and radio button. 3:1 against the page and the card, so an unchecked box that cannot be changed
+         still shows as a box, and weaker than the outline of an enabled one. -->
+    <SolidColorBrush x:Key="DisabledBoxBorderBrush" Color="#858F9C"/>
     <SolidColorBrush x:Key="BarTrackBrush" Color="#DDE2E8"/>
 
     <SolidColorBrush x:Key="ForegroundBrush" Color="{StaticResource ForegroundColor}"/>
@@ -1579,10 +1584,13 @@
     <!-- ============================================ -->
     <!-- CheckBox Style                               -->
     <!-- ============================================ -->
+    <!-- #8540: the box takes BoxBorderBrush, the colour of a text box's outline on this theme, so an unchecked box shows against the page and the card. -->
+    <!-- A disabled box takes DisabledBoxBorderBrush and a muted mark: weaker than an enabled one, and still 3:1 against the page and the card. The mark and the hover outline take InfoTextBrush:
+         the accent is 2.5:1 on the checked fill and weaker than the resting outline. -->
     <Style TargetType="CheckBox">
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource BoxBorderBrush}"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="CheckBox">
@@ -1590,10 +1598,10 @@
                         <BulletDecorator.Bullet>
                             <Border x:Name="Border" Width="16" Height="16"
                                     Background="{StaticResource BackgroundDarkBrush}"
-                                    BorderBrush="{StaticResource BorderBrush}"
+                                    BorderBrush="{StaticResource BoxBorderBrush}"
                                     BorderThickness="1" CornerRadius="2">
                                 <Path x:Name="CheckMark" Width="10" Height="10" Stretch="Fill"
-                                      Stroke="{StaticResource AccentBrush}" StrokeThickness="2"
+                                      Stroke="{StaticResource InfoTextBrush}" StrokeThickness="2"
                                       Data="M 0,5 L 4,9 L 10,0" Visibility="Collapsed"
                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
                             </Border>
@@ -1609,11 +1617,12 @@
                             <Setter TargetName="Border" Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
                         </Trigger>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource InfoTextBrush}"/>
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="Border" Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
-                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource ForegroundMutedBrush}"/>
+                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource DisabledBoxBorderBrush}"/>
+                            <Setter TargetName="CheckMark" Property="Stroke" Value="{StaticResource ForegroundMutedBrush}"/>
                             <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
@@ -1629,7 +1638,7 @@
     <Style TargetType="RadioButton">
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource BoxBorderBrush}"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="RadioButton">
@@ -1638,10 +1647,10 @@
                             <Grid Width="16" Height="16">
                                 <Ellipse x:Name="Border"
                                          Fill="{StaticResource BackgroundDarkBrush}"
-                                         Stroke="{StaticResource BorderBrush}"
+                                         Stroke="{StaticResource BoxBorderBrush}"
                                          StrokeThickness="1"/>
                                 <Ellipse x:Name="CheckMark" Width="8" Height="8"
-                                         Fill="{StaticResource AccentBrush}" Visibility="Collapsed"
+                                         Fill="{StaticResource InfoTextBrush}" Visibility="Collapsed"
                                          HorizontalAlignment="Center" VerticalAlignment="Center"/>
                             </Grid>
                         </BulletDecorator.Bullet>
@@ -1656,11 +1665,11 @@
                             <Setter TargetName="Border" Property="Fill" Value="{StaticResource BackgroundLightBrush}"/>
                         </Trigger>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Border" Property="Stroke" Value="{StaticResource AccentBrush}"/>
+                            <Setter TargetName="Border" Property="Stroke" Value="{StaticResource InfoTextBrush}"/>
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="Border" Property="Fill" Value="{StaticResource BackgroundDarkBrush}"/>
-                            <Setter TargetName="Border" Property="Stroke" Value="{StaticResource ForegroundMutedBrush}"/>
+                            <Setter TargetName="Border" Property="Stroke" Value="{StaticResource DisabledBoxBorderBrush}"/>
                             <Setter TargetName="CheckMark" Property="Fill" Value="{StaticResource ForegroundMutedBrush}"/>
                             <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
                         </Trigger>
@@ -1784,6 +1793,11 @@
     <!-- Plan Viewer Resources                        -->
     <!-- ============================================ -->
     <SolidColorBrush x:Key="PlanTooltipBgBrush" Color="#FFFFFF"/>
+    <!-- #8540: the text colour of a plan warning by severity, in an operator's tooltip and in the Properties panel's warning headers.
+         4.5:1 or better on PlanTooltipBgBrush and on BackgroundLighterBrush, which a Properties section fills its body with. -->
+    <SolidColorBrush x:Key="PlanWarningCriticalTextBrush" Color="#C62828"/>
+    <SolidColorBrush x:Key="PlanWarningTextBrush" Color="#92400E"/>
+    <SolidColorBrush x:Key="PlanWarningInfoTextBrush" Color="#0369A1"/>
     <SolidColorBrush x:Key="PlanTooltipBorderBrush" Color="{StaticResource BorderColor}"/>
     <SolidColorBrush x:Key="PlanPanelTextBrush" Color="{StaticResource ForegroundColor}"/>
     <SolidColorBrush x:Key="PlanPanelMutedBrush" Color="{StaticResource ForegroundMutedColor}"/>
