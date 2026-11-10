@@ -11,7 +11,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using PerformanceMonitor.Common;
-using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -131,14 +130,15 @@ public sealed class CollectionConnectionFailureLineTests
     /// <summary>
     /// #8533. The rows are the grid's, which holds each collector's runs for the trailing seven days, and the sentence shares a card
     /// with the skipped-slots line, which is read over 24 hours. A drop 43 hours before the read is in the rows and outside those
-    /// 24 hours, so the sentence says which days it speaks for.
+    /// 24 hours, so the sentence says which days it speaks for. The drop's age is illustrative: the sentence takes no clock and words
+    /// rows of any age the same way. That the rows stop at seven days is pinned through each app's own read, in
+    /// <c>CollectionHealthErrorWindowTests</c> (Lite) and <c>ViewerCollectionHealthErrorWindowLiveTests</c>.
     /// </summary>
     [Fact]
     public void ADropFortyThreeHoursBeforeTheRead_IsSaidToBeInTheLastSevenDays()
     {
         var readAt = new DateTime(2026, 11, 9, 5, 32, 5, DateTimeKind.Utc);
         var dropped = readAt.AddHours(-43);
-        Assert.True(readAt - dropped > SkippedCycleReader.Window, "the drop has to sit outside the skipped-slots read's window for this to be the card the reader saw");
         var rows = Enumerable.Range(0, 12)
             .Select(i => ($"collector_{i:00}", (DateTime?)dropped.AddSeconds(i * 3), (string?)PreLoginHandshake, 1L))
             .ToList();
