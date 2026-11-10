@@ -645,6 +645,11 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 - **The MCP server instructions match each app's investigation gate** ([#8463]) - Lite's instructions state the token rule the server enforces for the tools that claim and report, and count them from the policy. Darling's instructions name every investigation tool, including `post_investigation_message`. Both lists follow the policy's set from now on.
 - **The FinOps day tables keep a sample stamped after the read took its clock** ([#8503]) - The 7-Day Provisioning Trend and Memory Grant Efficiency tables run their days through the window's newest sample, in Lite and the Viewer. A sample that the store's host wrote after the Viewer's clock, or that the collector stamped after Lite took its clock, now lands in the row its day names instead of leaving the table. MCP day labels stay UTC.
 - **Apps & features shows the Lite and Viewer names and their publisher** ([#8414]) - The Velopack installers now list the apps as Performance Monitor Lite and Performance Monitor Darling Viewer, with Darling Data, LLC as the publisher. Before, Apps & features showed the package id for both.
+- **Plan analysis words say "1 write", "1 lookup" and "1 wait type"** ([#8517]) - The exchange spill warning reads "1 write to TempDB". The Key Lookup grade reads "over 1 lookup". The Lazy Spool message reads "1 rewind (cache hit)". The wait stats header reads "across 1 wait type".
+- **Every MCP time-series tool says which clock its stamps are on** ([#8502], [#8524]) - Both apps' trend, snapshot and daily-summary reads now say their stamps are UTC, not the monitored server's clock. They point at get_server_properties for the server's offset. Only get_cpu_utilization said so before, so an agent reading a Lite answer beside a Darling one had to guess.
+- **Alert toasts stay readable and follow the theme** ([#8475]) - A long alert message now scrolls inside the toast instead of growing it past the screen. A toast on screen takes the new colors when the theme changes. A theme change no longer leaves a toast that cannot close while the next toast opens over it. This covers both the Viewer and Lite.
+- **Counts and the figures beside them read in one convention** ([#8522]) - These now write every number the same way on every desktop: the purge summary, the wait sampling summary, the dormant-database finding, the predicate statistics and index bloat notes, and the store repair's failure line. A count no longer reads as a decimal next to a figure in the local convention.
+- **Darling's Last Collect stamp and sidebar freshness dot count only successful collections** ([#8464]) - A failed collection attempt no longer moves the Overview card's Last Collect, the sidebar dot, list_servers or get_server_summary forward. A server Darling cannot read from no longer reads fresh. A server whose collectors run and all fail reads Offline on every surface in both apps, and its offline note points at the failing collectors. A server that is not collected yet still reads as awaiting its first collection. Every surface agrees with get_collection_health on whether the service can connect. A new index keeps the newest-success read cheap for a server whose every collector fails. Both apps now share one definition of what counts as a collection.
 
 ## [3.12.0] - 2026-10-30
 
@@ -7457,6 +7462,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#8461]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8461
 [#8462]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8462
 [#8463]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8463
+[#8464]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8464
 [#8465]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8465
 [#8466]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8466
 [#8467]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8467
@@ -7464,6 +7470,11 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#8469]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8469
 [#8473]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8473
 [#8474]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8474
+[#8475]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8475
 [#8491]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8491
 [#8492]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8492
+[#8502]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8502
 [#8503]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8503
+[#8517]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8517
+[#8522]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8522
+[#8524]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8524
