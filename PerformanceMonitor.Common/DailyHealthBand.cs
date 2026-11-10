@@ -683,10 +683,11 @@ namespace PerformanceMonitor.Common
             lines.Add(line);
         }
 
-        /// <summary>A per-hour rate to one decimal place, in the invariant convention of the "N0" count it is
-        /// printed beside. A positive rate too small for one decimal place to show prints "&lt;0.1" (#8532):
-        /// the count beside it says something happened, and "0.0" would say nothing did. A sentence that drops a
-        /// whole rate's ".0" passes its own <paramref name="format"/> ("0.#") and gets the same rule.</summary>
+        /// <summary>A per-hour rate to one decimal place, in the invariant convention. The count each caller prints
+        /// beside it reads the same on every desktop: an invariant "N0", or a whole number with no grouping. A positive
+        /// rate too small for one decimal place to show prints "&lt;0.1" (#8532): the count beside it says something
+        /// happened, and "0.0" would say nothing did. A sentence that drops a whole rate's ".0" passes its own
+        /// <paramref name="format"/> ("0.#") and gets the same rule.</summary>
         public static string RatePerHourText(double ratePerHour, string format = "0.0")
         {
             var text = ratePerHour.ToString(format, CultureInfo.InvariantCulture);
