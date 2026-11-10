@@ -221,11 +221,11 @@ public sealed class LockedModeRestoreCoverageTests
     /// workflow runs, directly or through a <c>ProjectReference</c> — bar the ones whose contents follow the
     /// SDK rather than this repository's own choices.
     ///
-    /// <para>Scoped to <c>build.yml</c> deliberately: that is the release workflow, and its one restore step
-    /// is the only place every project is restored (pr.yml restores the two test projects, the Exporter pair,
-    /// and the WPF smoke harness when a restore input changed).
-    /// <c>nightly.yml</c> restores what it publishes and is a backstop, so requiring whole-tree coverage
-    /// there would assert something that workflow is not for.</para>
+    /// <para>Held on two workflows, because they run at different times. <c>build.yml</c> is the release
+    /// workflow, and its one restore step names every project. <c>pr.yml</c> is what a pull request runs, and
+    /// <see cref="EveryCommittedLockFile_IsReachedByALockedModeRestoreInThePullRequestWorkflow"/> holds the
+    /// same requirement there. <c>nightly.yml</c> restores what it publishes and is a backstop, so requiring
+    /// whole-tree coverage there would assert something that workflow is not for.</para>
     /// </summary>
     [Fact]
     public void EveryCommittedLockFile_IsReachedByALockedModeRestoreInTheBuildWorkflow()
@@ -247,6 +247,43 @@ public sealed class LockedModeRestoreCoverageTests
             + "reaches, so a lock file left inconsistent with Directory.Packages.props under one of them "
             + "merges green — add a `dotnet restore <project> --locked-mode` for each, or reference it from "
             + "a project already restored:\n  "
+            + string.Join("\n  ", uncovered));
+    }
+
+    /// <summary>
+    /// Every committed <c>packages.lock.json</c> is reached by a locked-mode restore the pull request
+    /// workflow runs, directly or through a <c>ProjectReference</c>, under the same SDK exemption.
+    ///
+    /// <para>The release workflow's coverage says nothing about a pull request. <c>build.yml</c> runs when a
+    /// release is published, so a lock file that only it restores is first checked after the package bump
+    /// that left it stale has merged. A lock file outside the solution and referenced by no test project is
+    /// in that position unless <c>pr.yml</c> restores its project by name (#8529).</para>
+    ///
+    /// <para>What this reads is that the restore line is there, not when its step runs. A step in
+    /// <c>pr.yml</c> may carry an <c>if:</c>, and whether that condition holds for a given change is the
+    /// plan job's rule, which the CI script checks hold row by row.</para>
+    /// </summary>
+    [Fact]
+    public void EveryCommittedLockFile_IsReachedByALockedModeRestoreInThePullRequestWorkflow()
+    {
+        var pullRequestYaml = ReadRepoFileLf(s_pullRequestSegments);
+        var globalJson = ReadRepoFileLf("global.json");
+
+        /* Non-vacuity, as for the build workflow: an empty lock-file set or an empty restore set both report
+           perfect coverage. */
+        var lockFiles = LockFileDirectories();
+        Assert.Contains("Darling/Darling.Tests", lockFiles);
+        Assert.NotEmpty(RestoredProjects(pullRequestYaml));
+
+        var uncovered = UncoveredLockFiles(pullRequestYaml, globalJson);
+
+        Assert.True(
+            uncovered.Count == 0,
+            "Committed packages.lock.json files that no locked-mode restore in .github/workflows/pr.yml "
+            + "reaches, so a pull request that leaves one of them inconsistent with Directory.Packages.props "
+            + "merges green and the first run to report NU1004 comes after the merge — add a "
+            + "`dotnet restore <project> --locked-mode` to pr.yml for each, or reference it from a project "
+            + "pr.yml already restores:\n  "
             + string.Join("\n  ", uncovered));
     }
 
