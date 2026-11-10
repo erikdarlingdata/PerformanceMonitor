@@ -106,6 +106,7 @@ public static partial class DarlingWebEndpoints
         "get_alert_details",
         "get_overview_baselines",
         "get_block_chain",
+        "get_alert_badge_summary",
     };
 
     /// <summary>The tool names deliberately absent from the <c>/api/read/*</c> 1:1 read surface. <c>analyze_server</c>

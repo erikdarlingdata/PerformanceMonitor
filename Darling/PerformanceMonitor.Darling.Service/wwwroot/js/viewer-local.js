@@ -325,26 +325,24 @@ export function alertMs(value) {
 }
 
 /**
- * Per-server attention from a get_alert_history page: the actionable rows only. A muted row (a mute rule suppressed
- * it) and a resolution row (good news) never count, the desktop badge's own rule.
+ * Per-server attention from a get_alert_badge_summary answer (#8551): one entry per server with at least one actionable
+ * alert in the last 24 hours, { server_id, count, critical, latest_alert_time }. The store has already left out muted
+ * rows (a mute rule suppressed them), dismissed rows and resolution rows (good news), the desktop badge's own rule, so
+ * nothing is filtered or counted here and no row cap can cut a count short.
  */
-export function summarizeAlerts(rows) {
+export function summarizeBadges(servers) {
   const out = new Map();
-  for (const r of Array.isArray(rows) ? rows : []) {
-    if (!r || !isServerId(r.server_id) || r.muted === true || r.severity === "resolution" || r.dismissed === true) continue;
-    const t = alertMs(r.alert_time);
-    const s = out.get(r.server_id) || { count: 0, critical: false, latestMs: 0 };
-    s.count++;
-    if (r.severity === "critical") s.critical = true;
-    if (Number.isFinite(t) && t > s.latestMs) s.latestMs = t;
-    out.set(r.server_id, s);
+  for (const r of Array.isArray(servers) ? servers : []) {
+    if (!r || !isServerId(r.server_id) || !Number.isSafeInteger(r.count) || r.count < 1) continue;
+    const t = alertMs(r.latest_alert_time);
+    out.set(r.server_id, { count: r.count, critical: r.critical === true, latestMs: Number.isFinite(t) ? t : 0 });
   }
   return out;
 }
 
-/** Applies a fresh alert read: an acknowledgement is cleared by an alert newer than it (ack-until-worse). */
-export function updateAttention(rows) {
-  attention = summarizeAlerts(rows);
+/** Applies a fresh summary: an acknowledgement is cleared by an alert newer than it (ack-until-worse). */
+export function updateAttention(servers) {
+  attention = summarizeBadges(servers);
   let cleared = false;
   for (const [id, ackMs] of [...acks]) {
     const s = attention.get(id);
@@ -386,16 +384,17 @@ let attentionRead = null;
 let attentionReadAt = 0;
 
 /**
- * Refreshes the badge counts with ONE get_alert_history read for the whole fleet. Callers within the TTL share the
- * one request, so the sidebar poll and the fleet page cost the store one read per tick, not one each. A failed read
- * leaves the last counts in place.
+ * Refreshes the badge counts with ONE get_alert_badge_summary read for the whole fleet (#8551: a few bytes per server,
+ * where the page used to download the newest 1,000 alert rows and count them). Callers within the TTL share the one
+ * request, so the sidebar poll and the fleet page cost the store one read per tick, not one each. A failed read leaves
+ * the last counts in place.
  */
 export function refreshAttention(readTool, now = Date.now()) {
   if (attentionRead && now - attentionReadAt < ATTENTION_TTL_MS) return attentionRead;
   attentionReadAt = now;
-  attentionRead = Promise.resolve(readTool("get_alert_history", { hours_back: 24, limit: 1000 }))
+  attentionRead = Promise.resolve(readTool("get_alert_badge_summary", {}))
     .then((res) => {
-      if (res && res.kind === "data" && res.data && Array.isArray(res.data.alerts)) updateAttention(res.data.alerts);
+      if (res && res.kind === "data" && res.data && Array.isArray(res.data.servers)) updateAttention(res.data.servers);
     })
     .catch(() => {
       attentionReadAt = 0;

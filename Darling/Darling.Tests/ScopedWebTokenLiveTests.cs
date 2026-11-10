@@ -475,6 +475,16 @@ public sealed class ScopedWebTokenLiveTests
         }
         Assert.DoesNotContain("operations-server", historyBody, StringComparison.Ordinal);
 
+        /* #8551: the sidebar badge's summary reads the same grant: one actionable alert on the finance server, none for the other. */
+        var (badgeResponse, badgeBody) = await Send(server, HttpMethods.Get, "/api/read/get_alert_badge_summary", financeCookie);
+        Assert.Equal(StatusCodes.Status200OK, badgeResponse.Response.StatusCode);
+        using (var badge = JsonDocument.Parse(badgeBody))
+        {
+            var entry = Assert.Single(badge.RootElement.GetProperty("servers").EnumerateArray());
+            Assert.Equal(41, entry.GetProperty("server_id").GetInt32());
+            Assert.Equal(1, entry.GetProperty("count").GetInt32());
+        }
+
         var alertTime = Uri.EscapeDataString(DateTime.SpecifyKind(sampledAt.AddSeconds(41), DateTimeKind.Utc).ToString("o"));
         var alertPath = "/api/read/get_alert_details?server_id=41&metric_name=High%20CPU&alert_time=" + alertTime;
         var (ownAlert, _) = await Send(server, HttpMethods.Get, alertPath, financeCookie);

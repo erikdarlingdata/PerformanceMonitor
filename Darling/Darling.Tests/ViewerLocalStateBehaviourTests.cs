@@ -81,8 +81,8 @@ public sealed class ViewerLocalStateBehaviourTests
         Assert.Equal(2, before.GetProperty("count").GetInt32());
         Assert.True(before.GetProperty("critical").GetBoolean());
         Assert.True(before.GetProperty("show").GetBoolean());
-        Assert.Equal(0, r.GetProperty("mutedAndResolved").GetProperty("count").GetInt32());
-        Assert.Equal(0, r.GetProperty("dismissed").GetProperty("count").GetInt32());
+        Assert.False(r.GetProperty("noActionable").GetProperty("show").GetBoolean());
+        Assert.Equal(0, r.GetProperty("absent").GetProperty("count").GetInt32());
 
         Assert.False(r.GetProperty("acked").GetProperty("show").GetBoolean());
         Assert.False(r.GetProperty("afterReloadSameRows").GetProperty("show").GetBoolean());
@@ -160,9 +160,13 @@ public sealed class ViewerLocalStateBehaviourTests
     }
 
     [Fact]
-    public void TheBadgeCounts_ShareOneFleetWideAlertRead_AndKeepTheLastCountsWhenARefreshFails()
+    public void TheBadgeCounts_ShareOneFleetWideSummaryRead_AndKeepTheLastCountsWhenARefreshFails()
     {
         if (!TryRun("oneRead", out var r)) return;
+
+        /* #8551: the small per-server summary, not a page of alert rows: the read takes no limit and no window to cut. */
+        Assert.Equal("get_alert_badge_summary", r.GetProperty("asked").GetProperty("tool").GetString());
+        Assert.Empty(r.GetProperty("asked").GetProperty("params").EnumerateObject());
 
         Assert.Equal(1, r.GetProperty("readsWithinTtl").GetInt32());
         Assert.Equal(1, r.GetProperty("count").GetInt32());
