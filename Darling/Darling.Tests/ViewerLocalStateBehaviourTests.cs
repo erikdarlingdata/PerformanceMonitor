@@ -239,7 +239,7 @@ public sealed class ViewerLocalStateBehaviourTests
         Assert.Equal(new[] { 2, 1, 1, 1 }, badges.Select(b => b.GetProperty("count").GetInt32()).ToArray());
         Assert.Equal(AllFour, badges.Select(b => b.GetProperty("show").GetBoolean()).ToArray());
         Assert.True(badges[0].GetProperty("critical").GetBoolean());
-        // server_id 0 (the store's own alerts, an external source) is no server and gets no badge.
+        // server_id 0 (the store's own alerts, an external source's alert that names no registered server) is no server and gets no badge.
         Assert.Equal(0, r.GetProperty("zeroBadge").GetProperty("count").GetInt32());
         Assert.False(r.GetProperty("zeroBadge").GetProperty("show").GetBoolean());
     }

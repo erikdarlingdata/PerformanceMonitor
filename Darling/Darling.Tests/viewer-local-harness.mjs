@@ -187,7 +187,8 @@ if (scenario === "favorites") {
   const rows = () => [...ids.map((id) => row(id, t0)), row(NEG, "2026-01-01T10:05:00", { severity: "critical" }), row(0, t0)];
   const st = makeStorage();
   const a = load(st);
-  // The badge: an actionable alert counts on every id. server_id 0 (the store's own alerts, an external source) gets none.
+  // The badge: an actionable alert counts on every id. server_id 0 (the store's own alerts, an external source's alert that
+  // names no registered server) gets none.
   a.updateAttention(rows());
   out.badges = ids.map((id) => a.attentionFor(id));
   out.zeroBadge = a.attentionFor(0);

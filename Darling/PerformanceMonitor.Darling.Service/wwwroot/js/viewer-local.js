@@ -103,7 +103,7 @@ function writeJson(key, value, store = storage) {
 
 /** A server id is a 32-bit hash of the server's name (ServerIdHelper.GetDeterministicHashCode): any whole number from
  *  -2,147,483,648 to 2,147,483,647 except 0, negative for about half the servers. 0 is no server: the store's own alerts and
- *  an external source's alerts carry server_id 0, and they get no badge, star or filter. */
+ *  an external source's alert that names no registered server carry server_id 0, and they get no badge, star or filter. */
 const MIN_SERVER_ID = -2147483648;
 const MAX_SERVER_ID = 2147483647;
 

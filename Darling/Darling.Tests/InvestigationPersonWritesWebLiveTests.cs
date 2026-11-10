@@ -293,12 +293,14 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
     [Fact]
     public async Task NoteRoute_WritesANoteForARegisteredServerWithANegativeId_RefusesZero_AndAnswers404ForAnUnregisteredOne()
     {
+        const int negativeId = -1563402511;
         const string negativeText = "-1563402511";
         await WithWebRoutesAsync("admin", () => Lee, async (owner, store, Send, ct) =>
         {
-            await ExecAsync(owner, $@"
-INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
-VALUES ({negativeText}, 'SQLNEG', 'SQLNEG', TRUE, 15, now() AT TIME ZONE 'utc', now() AT TIME ZONE 'utc')", ct);
+            await using (var registry = await owner.OpenConnectionAsync(ct))
+            {
+                await DarlingMcpTestData.RegisterServerAsync(registry, negativeId, "SQLNEG", ct);
+            }
 
             var written = await Send("PUT", "/api/investigation-notes", Json,
                 "{\"note_text\":\"the reporting replica lags on Mondays\",\"server_id\":" + negativeText + "}");
