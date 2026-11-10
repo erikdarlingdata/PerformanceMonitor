@@ -248,10 +248,10 @@ public sealed class CollectionCycleRowLiveTests
     private const int ReaderServerOnly = -573505;  // skip rows only
     private const int ReaderServerFailed = -573506;  // a collector SUCCESS, then NEWER failed attempts (#8464)
     private const int ReaderServerDark = -573507;  // failed attempts only (#8464)
-    private const int ReaderServerUntried = -573508;  // registered, no collector row at all (#8464)
+    private const int ReaderServerUntried = -573510;  // registered, no collector row at all (#8464)
     private const int ReaderServerHealed = -573508;  // a failed connect, then a failed collector attempt after it (#8464)
     private const int ReaderServerDown = -573509;  // a failed connect and nothing after it (#8464)
-    private static readonly int[] AllIds = [WriterServerId, ServerA, ServerB, ReaderServerOld, ReaderServerOnly, ReaderServerFailed, ReaderServerDark, ReaderServerHealed, ReaderServerDown];
+    private static readonly int[] AllIds = [WriterServerId, ServerA, ServerB, ReaderServerOld, ReaderServerOnly, ReaderServerFailed, ReaderServerDark, ReaderServerUntried, ReaderServerHealed, ReaderServerDown];
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 

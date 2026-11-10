@@ -205,7 +205,7 @@ AND   {CollectionRunSql.SuccessfulCollectorRun}";
 
         /* #8464: the second fact the band needs when there is no successful collection: whether any collector has run against the
            server at all. One with failed rows and no SUCCESS row is Offline; one with no row is awaiting its first collection. */
-        var attempted = lastCollection.HasValue || await HasAnyCollectorRowAsync(serverId);
+        var attempted = lastCollection.HasValue || await HasAnyCollectorRowAsync(connection, serverId);
 
         var summary = new ServerSummaryItem
         {
@@ -322,6 +322,13 @@ AND   {CollectionRunSql.SuccessfulCollectorRun}";
     public async Task<bool> HasAnyCollectorRowAsync(int serverId)
     {
         using var connection = await OpenConnectionAsync();
+        return await HasAnyCollectorRowAsync(connection, serverId);
+    }
+
+    /// <summary>The probe over a connection the caller already holds, so a reader that has the store's read lock in hand (the Overview
+    /// card's summary) never asks for a second one.</summary>
+    private static async Task<bool> HasAnyCollectorRowAsync(LockedConnection connection, int serverId)
+    {
         foreach (var relation in NewestFirstRelations("collection_log"))
         {
             using var cmd = connection.CreateCommand();
