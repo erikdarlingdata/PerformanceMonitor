@@ -54,14 +54,16 @@ public sealed partial class ViewerDataService
     /// <summary>The first store version whose requests table has <c>practice_of</c> (V191, #5918).</summary>
     public const int PracticeStoreSchemaVersion = 191;
 
-    /// <summary>The requests, newest first, with the state computed as the store's list computes it. $1 is the state
+    /// <summary>The requests, newest first, with the state computed as the store's list computes it. #8578: <c>server_name</c> here is the registry's
+    /// display name (the name the web list shows), falling back to the name the request was opened with for a server the registry no longer holds. $1 is the state
     /// filter (NULL for every state). <paramref name="withPractice"/> adds the <c>practice_of</c> column, which only a store at
     /// <see cref="PracticeStoreSchemaVersion"/> or later has: the Requests tab keeps its V184 floor and asks for it only then.</summary>
     public static string InvestigationRequestsSelectSql(bool withPractice) => @"
-SELECT request_id, server_id, server_name, family, first_metric, opened_at, alert_count, effective_state,
-       claimed_by, lease_until, claim_count, expires_at, reported_at, closed_at, closed_by, closed_reason,
+SELECT s.request_id, s.server_id, COALESCE(sv.display_name, sv.server_name, s.server_name) AS server_name, s.family, s.first_metric,
+       s.opened_at, s.alert_count, s.effective_state,
+       s.claimed_by, s.lease_until, s.claim_count, s.expires_at, s.reported_at, s.closed_at, s.closed_by, s.closed_reason,
        (SELECT p.verdict FROM config.investigation_reports AS p WHERE p.request_id = s.request_id) AS verdict" +
-        (withPractice ? ", practice_of" : "") + @"
+        (withPractice ? ", s.practice_of" : "") + @"
 FROM (
     SELECT r.*,
            CASE
@@ -73,6 +75,7 @@ FROM (
            END AS effective_state
     FROM config.investigation_requests AS r
 ) AS s
+LEFT JOIN servers AS sv ON sv.server_id = s.server_id
 WHERE ($1::text IS NULL OR s.effective_state = $1)
 ORDER BY s.opened_at DESC, s.request_id
 LIMIT 500";

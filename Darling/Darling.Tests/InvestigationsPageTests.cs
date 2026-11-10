@@ -326,6 +326,44 @@ public sealed class InvestigationsPageTests
         Assert.Contains("#/admin/agent-changes", Strings(none.GetProperty("links")));
     }
 
+    /// <summary>#8578: one server's two requests, one opened by an analysis finding (the host name) and one by an alert (the display name), draw
+    /// the same Server text, which is the registry's display name; the host name rides the cell's title and the pane.</summary>
+    [Fact]
+    public void TwoRequestsForOneServer_DrawTheSameServerText_WhateverNameTheyWereOpenedWith()
+    {
+        var same = Run().GetProperty("sameServer");
+        var texts = Strings(same.GetProperty("texts"));
+        Assert.Equal(new[] { "Prod OLTP", "Prod OLTP" }, texts);
+        var titles = Strings(same.GetProperty("titles"));
+        Assert.Contains("SQLPRODOLTP01.corp.example.com:SalesDatabaseWithALongName:RO", titles[0]);
+        Assert.Equal("Prod OLTP", titles[1]);
+        Assert.Contains("name-cell", same.GetProperty("cellClass").GetString());
+        var pane = Run().GetProperty("revealed").GetProperty("pane").GetString()!;
+        Assert.Contains("Request on Prod OLTP (blocking)", pane);
+        Assert.Contains("Opened as SQLPRODOLTP01.corp.example.com:SalesDatabaseWithALongName:RO", pane);
+    }
+
+    /// <summary>#8578: a pick draws a pane under a list that can fill the window, so the pane's heading is scrolled to and takes the focus;
+    /// the poll's rebuild of the open pane does not move the focus or the scroll. A fake DOM has no layout: the heading being inside a 1280x720
+    /// viewport is the scroll call's job, which the browser walk of the page checks.</summary>
+    [Fact]
+    public void PickingARequest_ScrollsItsHeadingIntoView_AndMovesTheFocusThere_ButAPollRebuildDoesNot()
+    {
+        var run = Run();
+        var revealed = run.GetProperty("revealed");
+        var focus = Assert.Single(revealed.GetProperty("focused").EnumerateArray());
+        Assert.Equal("jh-detail-title", focus.GetProperty("cls").GetString());
+        Assert.StartsWith("Request on Prod OLTP", focus.GetProperty("text").GetString());
+        Assert.Equal("-1", focus.GetProperty("tabindex").GetString());
+        var scroll = Assert.Single(revealed.GetProperty("scrolled").EnumerateArray());
+        Assert.Equal("jh-detail-title", scroll.GetProperty("cls").GetString());
+        Assert.Equal("start", scroll.GetProperty("options").GetProperty("block").GetString());
+        var poll = run.GetProperty("revealedByPoll");
+        Assert.True(poll.GetProperty("hasDetail").GetBoolean());
+        Assert.Equal(0, poll.GetProperty("focused").GetInt32());
+        Assert.Equal(0, poll.GetProperty("scrolled").GetInt32());
+    }
+
     [Fact]
     public void TheRequestId_IsReadFromTheHashQuery_AndBlankWhenThereIsNone()
     {

@@ -23,7 +23,7 @@ function load(storage) {
   const ctx = vm.createContext({ console, Date, localStorage: storage });
   vm.runInContext(source + "\n;globalThis.api = { " +
     "KEY_FAVORITES, KEY_ACKS, KEY_SEVERITY_COLORS, KEY_SIDEBAR, isFavorite, toggleFavorite, favoritesFirst, updateAttention, attentionFor, " +
-    "acknowledge, isAcknowledged, severityColor, setSeverityColor, applySeverityColors, isSidebarCollapsed, setSidebarCollapsed, " +
+    "acknowledge, isAcknowledged, severityColor, setSeverityColor, applySeverityColors, isSidebarCollapsed, setSidebarCollapsed, isNavCollapsed, setNavCollapsed, " +
     "refreshAttention, summarizeBadges, KEY_DB_FILTER, getDatabaseFilter, setDatabaseFilter, MAX_DB_NAMES, MAX_DB_QUERY_BYTES, databaseQueryBytes };", ctx);
   return ctx.api;
 }
@@ -116,6 +116,27 @@ if (scenario === "favorites") {
   out.afterReload = load(st).isSidebarCollapsed();
   a.setSidebarCollapsed(false);
   out.afterExpand = load(st).isSidebarCollapsed();
+} else if (scenario === "navCollapsed") {
+  // #8578: the sidebar's page links fold away; the choice is per browser, default expanded, and independent of the icon rail.
+  const st = makeStorage();
+  const a = load(st);
+  out.initial = a.isNavCollapsed();
+  a.setNavCollapsed(true);
+  const b = load(st);
+  out.afterReload = b.isNavCollapsed();
+  out.railUntouched = b.isSidebarCollapsed();
+  b.setSidebarCollapsed(true);
+  out.navKeptWhenRailChanges = load(st).isNavCollapsed();
+  b.setNavCollapsed(false);
+  const c = load(st);
+  out.afterExpand = c.isNavCollapsed();
+  out.railKeptWhenNavChanges = c.isSidebarCollapsed();
+  out.unreadable = load(makeStorage({}, { throwOnRead: true })).isNavCollapsed();
+  const w = load(makeStorage({}, { throwOnWrite: true }));
+  w.setNavCollapsed(true);
+  out.unwritableStillWorksInSession = w.isNavCollapsed();
+  st.data[a.KEY_SIDEBAR] = JSON.stringify({ v: 1, navCollapsed: "yes" });
+  out.handEdited = load(st).isNavCollapsed();
 } else if (scenario === "oneRead") {
   const st = makeStorage();
   const a = load(st);
@@ -187,10 +208,10 @@ if (scenario === "favorites") {
   const NEG = -1563402511, POS = 1730000001, MIN = -2147483648, MAX = 2147483647;
   const ids = [NEG, POS, MIN, MAX];
   const t0 = "2026-01-01T10:00:00";
-  const rows = () => [...ids.map((id) => row(id, t0)), row(NEG, "2026-01-01T10:05:00", { severity: "critical" }), row(0, t0)];
+  const rows = () => [...ids.map((id) => (id === NEG ? entry(id, 2, "2026-01-01T10:05:00", true) : entry(id, 1, t0))), entry(0, 1, t0)];
   const st = makeStorage();
   const a = load(st);
-  // The badge: an actionable alert counts on every id. server_id 0 (the store's own alerts, an external source's alert that
+  // The badge: a summary entry counts on every id. server_id 0 (the store's own alerts, an external source's alert that
   // names no registered server) gets none.
   a.updateAttention(rows());
   out.badges = ids.map((id) => a.attentionFor(id));
@@ -221,7 +242,7 @@ if (scenario === "favorites") {
   // What is not a server id is refused: zero, a fraction, text, nothing, and a whole number outside 32 bits.
   const notIds = [0, -0, 1.5, -1.5, 2147483648, -2147483649, "5", "-5", null, NaN];
   const n = load(makeStorage());
-  n.updateAttention(notIds.map((id) => row(id, t0)));
+  n.updateAttention(notIds.map((id) => entry(id, 1, t0)));
   out.notIds = notIds.map((id) => ({ star: n.toggleFavorite(id), filter: n.setDatabaseFilter(id, ["A"]), badge: n.attentionFor(id).count }));
   // A hand-edited stored value keeps only its server ids.
   const keys = ["0", "-0", "2147483648", "-2147483649", "--5", "-", "1e3", "-5.0", " -5", "+5", String(NEG)];
