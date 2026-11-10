@@ -1132,8 +1132,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 
     /// <summary>
     /// #8542: a failed state read withholds nothing and says so. Every statement stays, and the text opens
-    /// with the renderer's not-checked line, in the command, the preview and the Lite card. With no reason
-    /// the text is the one a caller with no state gets.
+    /// with the renderer's not-checked line, in the command, the preview and the Lite card. With no state
+    /// and no reason the text carries no such line.
     /// </summary>
     [Fact]
     public void AFailedStateRead_KeepsEveryStatement_AndTheTextOpensBySayingNothingWasChecked()
@@ -1145,13 +1145,13 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.StartsWith(FactRemediation.StateNotReadPrefix, command, StringComparison.Ordinal);
         Assert.True(Forces(RunnableLines(command), 201, 11));
         Assert.True(Forces(RunnableLines(command), 202, 12));
-        Assert.Equal(FactRemediation.RenderCopyPasteCommand(action), FactRemediation.RenderCopyPasteCommand(action, states: null, stateUnavailableReason: null));
+        Assert.DoesNotContain(FactRemediation.StateNotReadPrefix, FactRemediation.RenderCopyPasteCommand(action, states: null, stateUnavailableReason: null), StringComparison.Ordinal);
 
         var finding = DrillDownFinding((201, 11), (202, 12));
         var preview = FactRemediation.GenerateForFinding(finding, states: null, stateUnavailableReason: reason);
         Assert.StartsWith(FactRemediation.StateNotReadPrefix, preview, StringComparison.Ordinal);
         Assert.True(Forces(RunnableLines(preview), 201, 11));
-        Assert.Equal(FactRemediation.GenerateForFinding(finding), FactRemediation.GenerateForFinding(finding, states: null, stateUnavailableReason: null));
+        Assert.DoesNotContain(FactRemediation.StateNotReadPrefix, FactRemediation.GenerateForFinding(finding, states: null, stateUnavailableReason: null), StringComparison.Ordinal);
 
         var card = PerformanceMonitorLite.Analysis.Recommendations.LiteRecommendationsReader.MapFinding(
             new AnalysisFinding { RootFactKey = "PLAN_REGRESSION", Remediation = action }, "TestServer",
@@ -1159,9 +1159,77 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.StartsWith(FactRemediation.StateNotReadPrefix, card.CopyPasteSql, StringComparison.Ordinal);
         Assert.True(Forces(RunnableLines(card.CopyPasteSql), 202, 12));
 
-        /* A state that was read never carries the line, whatever it holds. */
-        var read = FactRemediation.RenderCopyPasteCommand(action, For(Target(202, 12), State(failures: 2, failureReason: "GENERAL_FAILURE")));
+        /* A text whose every target has a state row never opens with the line, whatever the rows hold. */
+        var readStates = For(Target(202, 12), State(failures: 2, failureReason: "GENERAL_FAILURE"));
+        readStates[ForcePlanTargetKey.Of(Target(201, 11))] = State(planForced: false, forcingType: "NONE", failures: 0);
+        var read = FactRemediation.RenderCopyPasteCommand(action, readStates);
         Assert.False(read!.StartsWith(FactRemediation.StateNotReadPrefix, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #8542: a target the state read found no row for keeps its statement, and the line above that
+    /// statement says its state is unknown and to check before forcing, as structured_remediation's
+    /// state_note does. The reader's all-null row and a missing key read the same. A target whose state
+    /// was read and holds nothing against it carries no such line.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ATargetTheStateReadFoundNoRowFor_KeepsItsStatement_UnderALineSayingItsStateIsUnknown(bool allNullRow)
+    {
+        var unknown = Target(201, 11);
+        var quiet = Target(202, 12);
+        var states = For(quiet, State(planForced: false, forcingType: "NONE", failures: 0));
+        if (allNullRow)
+            states[ForcePlanTargetKey.Of(unknown)] = Empty();
+
+        var note = FactRemediation.BuildStructuredRemediation(Action(unknown, quiet), states)!.ForcePlanTargets[0].StateNote;
+        Assert.StartsWith("unknown:", note, StringComparison.Ordinal);
+
+        var texts = new[]
+        {
+            FactRemediation.RenderCopyPasteCommand(Action(unknown, quiet), states),
+            FactRemediation.GenerateForFinding(DrillDownFinding((201, 11), (202, 12)), states),
+        };
+        foreach (var text in texts)
+        {
+            var lines = (text ?? string.Empty).Split('\n').Select(line => line.Trim()).ToList();
+            Assert.True(Forces(RunnableLines(text), 201, 11), "the target with no state row keeps its statement");
+            Assert.True(Forces(RunnableLines(text), 202, 12), "the target with a quiet state keeps its statement");
+
+            var notChecked = lines.Where(line => line.StartsWith(FactRemediation.StateNotReadPrefix, StringComparison.Ordinal)).ToList();
+            Assert.True(notChecked.Count == 1, $"one target has no state row, and {notChecked.Count} lines say a state is unknown in:{Environment.NewLine}{text}");
+            Assert.Contains("unknown", notChecked[0], StringComparison.Ordinal);
+            Assert.Contains("before forcing", notChecked[0], StringComparison.Ordinal);
+
+            /* The line is the unknown target's: above its statement, which is the first of the two. */
+            var at = lines.IndexOf(notChecked[0]);
+            var unknownStatement = lines.FindIndex(line => Forces([line], 201, 11));
+            var quietStatement = lines.FindIndex(line => Forces([line], 202, 12));
+            Assert.True(at < unknownStatement && unknownStatement < quietStatement,
+                $"the unknown-state line sits above the statement of the target it is about in:{Environment.NewLine}{text}");
+        }
+    }
+
+    /// <summary>
+    /// #8542: a state read that faults gives back the exception's type and never its message, because the
+    /// reason goes into the command text a card shows and a notification sends. The store here is a file
+    /// in a folder that does not exist, so the fault's message names that path.
+    /// </summary>
+    [Fact]
+    public async Task AFailedStateRead_NamesTheExceptionsType_AndNeverItsMessage()
+    {
+        const string marker = "marker8542inthepath";
+        var missing = System.IO.Path.Combine(System.IO.Path.GetTempPath(), marker + Guid.NewGuid().ToString("N")[..8], "nowhere", "store.duckdb");
+        var store = new DuckDbInitializer(missing);
+
+        var (states, reason) = await PerformanceMonitorLite.Analysis.AnalysisService.ReadForcePlanTargetStatesAsync(
+            store, ServerId, [new AnalysisFinding { RootFactKey = "PLAN_REGRESSION", Remediation = Action(Target(201, 11)) }]);
+
+        Assert.Null(states);
+        Assert.False(string.IsNullOrWhiteSpace(reason), "a read over a store that cannot be opened fails, and says so");
+        Assert.DoesNotContain(marker, reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Exception", reason, StringComparison.Ordinal);
     }
 
     /// <summary>

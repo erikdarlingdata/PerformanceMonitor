@@ -342,8 +342,17 @@ public sealed class ViewerRecommendationCardTests
             .Where(line => line.Length > 0 && !line.StartsWith("--", StringComparison.Ordinal))
             .ToList();
 
-    private static string ForceStatement(ForcePlanTarget target) =>
-        $"EXEC sys.sp_query_store_force_plan @query_id = {target.QueryId}, @plan_id = {target.PlanId};";
+    /// <summary>Whether the card's text holds a runnable force statement for the target: a line that is not a
+    /// comment, names the procedure and carries the target's query id and plan id.</summary>
+    private static bool Forces(string? sql, ForcePlanTarget target) =>
+        RunnableLines(sql).Any(line =>
+            line.Contains("sp_query_store_force_plan", StringComparison.Ordinal) &&
+            line.Contains($"@query_id = {target.QueryId},", StringComparison.Ordinal) &&
+            line.Contains($"@plan_id = {target.PlanId};", StringComparison.Ordinal));
+
+    /// <summary>How many runnable lines of the card's text name the force procedure.</summary>
+    private static int ForceStatementCount(string? sql) =>
+        RunnableLines(sql).Count(line => line.Contains("sp_query_store_force_plan", StringComparison.Ordinal));
 
     [Fact]
     public void MapItem_WithholdsTheForceStatement_ForATargetTheStoreBlocks()
@@ -357,10 +366,10 @@ public sealed class ViewerRecommendationCardTests
         var item = RecommendationsViewModel.MapItem(
             Row(ThreeTargetForceFinding()), "SQL2022", forcePlanStates: states);
 
-        var forces = RunnableLines(item.CopyPasteSql)
-            .Where(line => line.Contains("sp_query_store_force_plan", StringComparison.Ordinal))
-            .ToList();
-        Assert.Equal(new[] { ForceStatement(OpenTarget) }, forces);
+        Assert.True(Forces(item.CopyPasteSql, OpenTarget), "the target the store holds nothing against keeps its statement");
+        Assert.False(Forces(item.CopyPasteSql, WithdrawnTarget), "plan 12 is apc_withdrew_it in the store, and the card must not give a runnable force statement for it");
+        Assert.False(Forces(item.CopyPasteSql, FailedTarget), "plan 13 is forcing_failed_on_this_plan in the store, and the card must not give a runnable force statement for it");
+        Assert.Equal(1, ForceStatementCount(item.CopyPasteSql));
         Assert.Contains(ForcePlanBlockerNames.ApcWithdrewIt, item.CopyPasteSql, StringComparison.Ordinal);
         Assert.Contains(ForcePlanBlockerNames.ForcingFailedOnThisPlan, item.CopyPasteSql, StringComparison.Ordinal);
     }
@@ -377,12 +386,10 @@ public sealed class ViewerRecommendationCardTests
         Assert.StartsWith(FactRemediation.StateNotReadPrefix, item.CopyPasteSql, StringComparison.Ordinal);
         Assert.Contains(reason, item.CopyPasteSql, StringComparison.Ordinal);
 
-        var forces = RunnableLines(item.CopyPasteSql)
-            .Where(line => line.Contains("sp_query_store_force_plan", StringComparison.Ordinal))
-            .ToList();
-        Assert.Equal(
-            new[] { ForceStatement(OpenTarget), ForceStatement(WithdrawnTarget), ForceStatement(FailedTarget) },
-            forces);
+        Assert.True(Forces(item.CopyPasteSql, OpenTarget));
+        Assert.True(Forces(item.CopyPasteSql, WithdrawnTarget));
+        Assert.True(Forces(item.CopyPasteSql, FailedTarget));
+        Assert.Equal(3, ForceStatementCount(item.CopyPasteSql));
     }
 
     [Fact]
@@ -396,15 +403,51 @@ public sealed class ViewerRecommendationCardTests
 
         var blocked = RecommendationsViewModel.FromFindings(rows, "SQL2022", forcePlanStates: states)
             .Sections[0].Cards[0];
-        Assert.DoesNotContain(ForceStatement(FailedTarget), RunnableLines(blocked.CopyPasteSql));
-        Assert.Contains(ForceStatement(OpenTarget), RunnableLines(blocked.CopyPasteSql));
+        Assert.False(Forces(blocked.CopyPasteSql, FailedTarget), "plan 13 is forcing_failed_on_this_plan in the store, and the card must not give a runnable force statement for it");
+        Assert.True(Forces(blocked.CopyPasteSql, OpenTarget));
+        Assert.True(Forces(blocked.CopyPasteSql, WithdrawnTarget));
         Assert.Contains(ForcePlanBlockerNames.ForcingFailedOnThisPlan, blocked.CopyPasteSql, StringComparison.Ordinal);
 
         var unread = RecommendationsViewModel.FromFindings(
                 rows, "SQL2022", forcePlanStates: null, forcePlanStateUnavailableReason: "the state read timed out")
             .Sections[0].Cards[0];
         Assert.StartsWith(FactRemediation.StateNotReadPrefix, unread.CopyPasteSql, StringComparison.Ordinal);
-        Assert.Contains(ForceStatement(FailedTarget), RunnableLines(unread.CopyPasteSql));
+        Assert.True(Forces(unread.CopyPasteSql, FailedTarget));
+    }
+
+    /// <summary>The state the reader returns for a plan it found a row for, with nothing against it.</summary>
+    private static ForcePlanTargetState Quiet() =>
+        NothingObserved() with { PlanIsForced = false, PlanForcingType = "NONE", ForceFailureCount = 0, PlanObservedAtUtc = Snapshot };
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void MapItem_KeepsTheForceStatement_AndSaysTheStateIsUnknown_ForATargetTheReadFoundNoRowFor(bool allNullRow)
+    {
+        var states = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer)
+        {
+            [ForcePlanTargetKey.Of(WithdrawnTarget)] = Quiet(),
+            [ForcePlanTargetKey.Of(FailedTarget)] = Quiet(),
+        };
+        if (allNullRow)
+        {
+            states[ForcePlanTargetKey.Of(OpenTarget)] = NothingObserved();
+        }
+
+        var item = RecommendationsViewModel.MapItem(
+            Row(ThreeTargetForceFinding()), "SQL2022", forcePlanStates: states);
+
+        Assert.True(Forces(item.CopyPasteSql, OpenTarget), "the target with no state row keeps its statement");
+        Assert.Equal(3, ForceStatementCount(item.CopyPasteSql));
+
+        var lines = (item.CopyPasteSql ?? string.Empty).Split('\n').Select(line => line.Trim()).ToList();
+        var notChecked = lines.Where(line => line.StartsWith(FactRemediation.StateNotReadPrefix, StringComparison.Ordinal)).ToList();
+        Assert.True(notChecked.Count == 1, $"one target has no state row, and {notChecked.Count} lines say a state is unknown in:{Environment.NewLine}{item.CopyPasteSql}");
+        Assert.Contains("unknown", notChecked[0], StringComparison.Ordinal);
+        Assert.Contains("before forcing", notChecked[0], StringComparison.Ordinal);
+        Assert.True(
+            lines.IndexOf(notChecked[0]) < lines.FindIndex(line => line.Contains("sp_query_store_force_plan", StringComparison.Ordinal)),
+            "the unknown-state line sits above the first statement, which is the target's it is about");
     }
 
     [Fact]
