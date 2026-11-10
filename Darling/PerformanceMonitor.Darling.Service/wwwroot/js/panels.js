@@ -548,7 +548,9 @@ function gridTools(desc, cols, tbody) {
       .map((c, i) => {
         if (c.csv === false) return null;
         const hasCopy = typeof c.copyValue === "function";
-        const raw = objs.map((r) => (r ? (hasCopy ? c.copyValue(r) : getPath(r, c.key)) : undefined));
+        /* A state-only row's stored zero in a stateZeroDash column exports as the dash its cell shows (util.js's isStateZero), as Alert
+           History's own export does; every other value is the stored one. */
+        const raw = objs.map((r) => (r ? (hasCopy ? c.copyValue(r) : c.stateZeroDash === true && isStateZero(r, c.key) ? "—" : getPath(r, c.key)) : undefined));
         if (raw.some(isListValue)) return null;
         const textOnly = (typeof c.render === "function" || typeof c.display === "function") && raw.every((v) => v === undefined);
         return { i, c, raw, textOnly };

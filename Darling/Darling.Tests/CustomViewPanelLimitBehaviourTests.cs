@@ -175,4 +175,26 @@ public sealed class CustomViewPanelLimitBehaviourTests
         Assert.Equal(0, run.GetProperty("noSlotRetryButtons").GetInt32());
         Assert.Equal(new[] { "s1", "s2", "s3" }, Strings(run.GetProperty("noSlotStartedAfterOne")));
     }
+
+    /// <summary>A saved view whose table reads get_alert_history with its own columns (a view built from a sample read keeps each column's key,
+    /// label and format) shows a resolution row's stored zeros as the dash Alert History shows for them, and a measured row's numbers as numbers.</summary>
+    [Fact]
+    public void ASavedViewsAlertHistoryTable_ShowsTheDashForAResolutionRowsStoredZeros_AndTheNumbersOfAMeasuredRow()
+    {
+        var run = Result.Value;
+        Assert.Empty(run.GetProperty("alertHistoryViewErrors").EnumerateArray());
+        var rows = run.GetProperty("alertHistoryViewRows").EnumerateArray().Select(Strings).ToArray();
+        Assert.Equal(2, rows.Length);
+        Assert.Equal(new[] { "Client Timeouts Cleared", "\u2014", "\u2014" }, rows[0]);
+        Assert.Equal(new[] { "High CPU", "90.00", "80.00" }, rows[1]);
+    }
+
+    /// <summary>Export CSV on the saved view's alert-history table writes the dash a state-only row's stored zero shows in its cell, as Alert
+    /// History's own export does, and a measured row's stored numbers.</summary>
+    [Fact]
+    public void ExportCsv_OnTheSavedViewsAlertHistoryTable_WritesTheDashForAStateOnlyRowsStoredZeros_AndTheNumbersOfAMeasuredRow()
+    {
+        var lines = Strings(Result.Value.GetProperty("alertHistoryViewCsv"));
+        Assert.Equal(new[] { "Metric,Value,Threshold", "Client Timeouts Cleared,\u2014,\u2014", "High CPU,90,80" }, lines);
+    }
 }

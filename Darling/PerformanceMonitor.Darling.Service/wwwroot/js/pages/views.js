@@ -35,7 +35,7 @@ import { keepLonePanelsWide } from "../panel-layout.js";
 import { renderMarkdown } from "../markdown.js";
 import { NOTEBOOK_TEMPLATES, isNotebookDefinition } from "../notebook.js";
 import { DASHBOARD_TEMPLATES } from "../view-templates.js";
-import { resolveReadTable } from "../read-fields.js";
+import { resolveReadTable, withCatalogWords } from "../read-fields.js";
 import * as api from "../views-api.js";
 import { refreshChoiceOf } from "../refresh-policy.js";
 import { buildRefreshControl } from "../refresh-control.js";
@@ -1318,7 +1318,10 @@ function panelOrError(p, readSet, sourceSet, scope, onSettled, slot = null, gate
   if (p.source != null) {
     return renderComposedPanelCard(p, scope, onSettled, slot, gate);
   }
-  return renderPanel(p, onSettled, gate);
+  /* #8492: a read table that carries its own columns takes the catalog's words and rules for the same keys (withCatalogWords), so a saved
+     view's alert-history table shows a state-only row's stored zeros as the dash Alert History shows. A panel with no columns of its own
+     is unchanged. */
+  return renderPanel(withCatalogWords(p), onSettled, gate);
 }
 
 /* Why a panel cannot start a read (the catalog check), as {title, message}, or null when it can. A panel with a problem

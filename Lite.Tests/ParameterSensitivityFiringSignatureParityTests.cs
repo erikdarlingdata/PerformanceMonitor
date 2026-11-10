@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Common;
 using Xunit;
 
 namespace Lite.Tests;
@@ -112,6 +113,14 @@ public sealed class ParameterSensitivityFiringSignatureParityTests
         + @"NULLIF\(min_worker_time,[ \t]*0\)[ \t]*>=[ \t]*(?<ratio>\d+)",
         RegexOptions.IgnoreCase);
 
+    /// <summary>
+    /// A site that takes the signature from the one builder (#8471): the call, with the store's compiled-before-the-window
+    /// test and, inside a subquery, its indent. The census counts these where it counted spelled-out copies, and the
+    /// canonical check runs each call and holds its output to the canonical signature through the same discriminator.
+    /// </summary>
+    private static readonly Regex SignatureUse = new(
+        @"ParameterSensitivitySignature\.PredicateSql\(""(?<line>[^""]*)""(?:,[ \t]*""(?<indent>[^""]*)"")?\)");
+
     [Fact]
     public void EveryCopyOfTheFiringSignature_IsAccountedFor_InLitesAnalysisSql()
     {
@@ -119,7 +128,7 @@ public sealed class ParameterSensitivityFiringSignatureParityTests
 
         foreach (var (relativePath, expected) in ExpectedCopies)
         {
-            var actual = FiringSignature.Matches(ReadNormalized(relativePath)).Count;
+            var actual = SignatureUse.Matches(ReadNormalized(relativePath)).Count;
             total += actual;
 
             Assert.True(
@@ -155,11 +164,6 @@ public sealed class ParameterSensitivityFiringSignatureParityTests
 
         foreach (var path in files)
         {
-            if (declared.Contains(path))
-            {
-                continue;
-            }
-
             var count = FiringSignature.Matches(
                 File.ReadAllText(path).Replace("\r\n", "\n", StringComparison.Ordinal)).Count;
 
@@ -171,7 +175,7 @@ public sealed class ParameterSensitivityFiringSignatureParityTests
 
         Assert.True(
             strays.Count == 0,
-            "the firing signature appears in Lite analysis files this guard does not declare:"
+            "the firing signature is spelled out in a Lite analysis file rather than taken from ParameterSensitivitySignature.PredicateSql:"
             + Environment.NewLine + string.Join(Environment.NewLine, strays) + Environment.NewLine
             + "Add them to ExpectedCopies — and add the mirror copy to Darling's store — in the same commit.");
     }
@@ -184,14 +188,18 @@ public sealed class ParameterSensitivityFiringSignatureParityTests
 
         foreach (var (relativePath, _) in ExpectedCopies)
         {
-            foreach (Match m in FiringSignature.Matches(ReadNormalized(relativePath)))
+            foreach (Match use in SignatureUse.Matches(ReadNormalized(relativePath)))
             {
                 seen++;
+
+                /* The site's own call, run: the block the read splices is what the discriminator judges. */
+                var m = FiringSignature.Match(ParameterSensitivitySignature.PredicateSql(use.Groups["line"].Value, use.Groups["indent"].Value));
+                Assert.True(m.Success, $"{relativePath} @ char {use.Index}: the builder's block does not carry the firing signature's shape");
 
                 if (!string.Equals(Normalize(m.Value), CanonicalFiringSignature, StringComparison.Ordinal))
                 {
                     skewed.Add(
-                        $"{relativePath} @ char {m.Index}: min_worker_time={m.Groups["minWorker"].Value}, "
+                        $"{relativePath} @ char {use.Index}: min_worker_time={m.Groups["minWorker"].Value}, "
                         + $"max_worker_time={m.Groups["maxWorker"].Value}, "
                         + $"execution_count={m.Groups["executions"].Value}, "
                         + $"ratio={m.Groups["ratio"].Value}");
