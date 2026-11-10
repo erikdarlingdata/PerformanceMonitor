@@ -1221,7 +1221,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     {
         const string marker = "marker8542inthepath";
         var missing = System.IO.Path.Combine(System.IO.Path.GetTempPath(), marker + Guid.NewGuid().ToString("N")[..8], "nowhere", "store.duckdb");
-        var store = new DuckDbInitializer(missing);
+        using var store = new DuckDbInitializer(missing);
 
         var (states, reason) = await PerformanceMonitorLite.Analysis.AnalysisService.ReadForcePlanTargetStatesAsync(
             store, ServerId, [new AnalysisFinding { RootFactKey = "PLAN_REGRESSION", Remediation = Action(Target(201, 11)) }]);

@@ -74,26 +74,26 @@ public sealed class RecommendationsGenerateNowForcePlanStateTests : IClassFixtur
         var now = DateTime.UtcNow;
         var windowEnd = new DateTime(now.Ticks - (now.Ticks % TimeSpan.TicksPerMinute), DateTimeKind.Utc).AddMinutes(-1);
 
-        /* More than a day of wait history, so the analysis runs. */
+        /* More than a day of wait history, so the analysis runs, and waits too light to raise a finding of their own. */
         await PlantWaitAsync(windowEnd.AddHours(-30), 0L);
         for (var i = 0; i <= 16; i++)
-            await PlantWaitAsync(windowEnd.AddHours(-4).AddMinutes(15 * i), i == 0 ? 0L : 900_000L);
+            await PlantWaitAsync(windowEnd.AddHours(-4).AddMinutes(15 * i), i == 0 ? 0L : 10L);
 
-        /* Two queries whose plan regressed inside the window: 201 from plan 11, 202 from plan 12. */
-        foreach (var (queryId, bestPlanId, latestPlanId) in new[] { (201L, 11L, 19L), (202L, 12L, 29L) })
-        {
-            await PlantQueryStorePlanAsync(windowEnd, queryId, bestPlanId, "0xCHEAP" + queryId, cpuUs: 100_000,
-                firstExec: windowEnd.AddDays(-6), lastExec: windowEnd.AddDays(-5));
-            await PlantQueryStorePlanAsync(windowEnd, queryId, latestPlanId, "0xCOSTLY" + queryId, cpuUs: 500_000,
-                firstExec: windowEnd.AddDays(-1), lastExec: windowEnd);
-        }
+        /* Two queries whose plan regressed inside the window: 201 from plan 11 (74 ms to 1.2 s over 30 runs) and
+           202 from plan 12 (21 us to 455 us over 30,000 runs). Each best plan last ran five days ago. */
+        var earlier = now.AddDays(-5);
+        await PlantQueryStorePlanAsync(201, 11, "A201", execs: 30, cpuUs: 74_000, lastExec: earlier);
+        await PlantQueryStorePlanAsync(201, 19, "B201", execs: 30, cpuUs: 1_200_000, lastExec: now.AddMinutes(-30));
+        await PlantQueryStorePlanAsync(202, 12, "A202", execs: 30_000, cpuUs: 21, lastExec: earlier);
+        await PlantQueryStorePlanAsync(202, 29, "B202", execs: 30_000, cpuUs: 455, lastExec: now.AddMinutes(-20));
 
         /* The engine recommended plan 12 for query 202 and withdrew it: apc_withdrew_it. */
         await PlantWithdrawnRecommendationAsync(now.AddMinutes(-20), queryId: 202, lastGoodPlanId: 12);
 
-        var commands = StaTestThread.Run(() => WithTheme(() =>
+        var (commands, shown) = StaTestThread.Run(() => WithTheme(() =>
         {
             var found = new List<string>();
+            var state = string.Empty;
             var tab = new RecommendationsTab();
             var window = new Window { Content = tab, Width = 1000, Height = 700, Left = 0, Top = 0, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize };
             StaTestThread.ShowOffScreen(window);
@@ -112,16 +112,21 @@ public sealed class RecommendationsGenerateNowForcePlanStateTests : IClassFixtur
                     StaTestThread.WaitForIdle(tab.Dispatcher, StaTestThread.IdleLimit);
                     Assert.Equal(string.Empty, tab.StatusText.Text);
 
-                    /* The cards the list realized. */
-                    found.AddRange(ClippedTextProbe.Descendants(tab)
+                    /* The cards the list realized, and what the tab showed, for a failure to say. */
+                    var cards = ClippedTextProbe.Descendants(tab)
                         .OfType<FrameworkElement>()
                         .Select(element => element.DataContext)
                         .OfType<LiteRecommendationCardViewModel>()
                         .Distinct()
-                        .Select(card => card.CopyPasteSql ?? string.Empty));
+                        .ToList();
+                    found.AddRange(cards.Select(card => card.CopyPasteSql ?? string.Empty));
+                    state = $"{cards.Count} cards [{string.Join("; ", cards.Select(card => card.Title))}]"
+                        + $", list {tab.SectionsScroll.Visibility}, all-clear {tab.EmptyMessage.Visibility}"
+                        + $", insufficient data {tab.InsufficientDataMessage.Visibility} \"{tab.InsufficientDataMessage.Text}\""
+                        + $", window empty {tab.WindowEmptyMessage.Visibility} \"{tab.WindowEmptyMessage.Text}\"";
                 });
 
-                return found;
+                return (found, state);
             }
             finally
             {
@@ -136,7 +141,7 @@ public sealed class RecommendationsGenerateNowForcePlanStateTests : IClassFixtur
             .Where(line => line.Length > 0 && !line.StartsWith("--", StringComparison.Ordinal))
             .ToList();
 
-        Assert.True(Forces(runnable, 201, 11), "the target the store holds nothing against keeps its statement on the Generate now card");
+        Assert.True(Forces(runnable, 201, 11), $"the target the store holds nothing against keeps its statement on the Generate now card; the tab showed {shown}");
         Assert.False(Forces(runnable, 202, 12), "plan 12 is apc_withdrew_it in the store, and the Generate now card must not give a runnable force statement for it");
     }
 
@@ -147,45 +152,45 @@ public sealed class RecommendationsGenerateNowForcePlanStateTests : IClassFixtur
             line.Contains($"@plan_id = {planId};", StringComparison.Ordinal));
 
     /// <summary>
-    /// Runs a dispatcher frame until the tab's loading overlay goes off, which every state the tab ends a load or a
-    /// generate in does. The frame ends on the overlay's own change; the timer only ends a wait that would never finish.
+    /// Pumps the dispatcher until the tab has no load or generate in flight. A pass turns the loading overlay on before its
+    /// first await and off in its last step, and a pass that follows another (a reload asked for while the tab was busy)
+    /// starts inside that same step. So each frame ends on the overlay's own change, and the overlay still being off once
+    /// that step has run means the tab is idle. The timer only ends a wait that would never finish.
     /// </summary>
     private static void PumpUntilLoaded(RecommendationsTab tab, string what)
     {
-        if (!tab.LoadingOverlay.IsLoading)
-        {
-            return;
-        }
-
-        var frame = new DispatcherFrame();
-        var finished = false;
         var isLoading = DependencyPropertyDescriptor.FromProperty(LoadingOverlay.IsLoadingProperty, typeof(LoadingOverlay));
-        EventHandler changed = (_, _) =>
+        while (tab.LoadingOverlay.IsLoading)
         {
-            if (!tab.LoadingOverlay.IsLoading)
+            var frame = new DispatcherFrame();
+            var turnedOff = false;
+            EventHandler changed = (_, _) =>
             {
-                finished = true;
-                frame.Continue = false;
+                if (!tab.LoadingOverlay.IsLoading)
+                {
+                    turnedOff = true;
+                    frame.Continue = false;
+                }
+            };
+            var expiry = new DispatcherTimer(DispatcherPriority.Send, tab.Dispatcher)
+            {
+                Interval = StaHost.WithinGuard(TimeSpan.FromSeconds(120), out _),
+            };
+            expiry.Tick += (_, _) => frame.Continue = false;
+            isLoading.AddValueChanged(tab.LoadingOverlay, changed);
+            try
+            {
+                expiry.Start();
+                Dispatcher.PushFrame(frame);
             }
-        };
-        var expiry = new DispatcherTimer(DispatcherPriority.Send, tab.Dispatcher)
-        {
-            Interval = StaHost.WithinGuard(TimeSpan.FromSeconds(120), out _),
-        };
-        expiry.Tick += (_, _) => frame.Continue = false;
-        isLoading.AddValueChanged(tab.LoadingOverlay, changed);
-        try
-        {
-            expiry.Start();
-            Dispatcher.PushFrame(frame);
-        }
-        finally
-        {
-            expiry.Stop();
-            isLoading.RemoveValueChanged(tab.LoadingOverlay, changed);
-        }
+            finally
+            {
+                expiry.Stop();
+                isLoading.RemoveValueChanged(tab.LoadingOverlay, changed);
+            }
 
-        Assert.True(finished, $"{what} did not finish");
+            Assert.True(turnedOff, $"{what} did not finish");
+        }
     }
 
     private static T WithTheme<T>(Func<T> body)
@@ -240,32 +245,31 @@ VALUES ($1, $2, $3, 'TestServer', 'SOS_SCHEDULER_YIELD', $4, $5, 0, $4, $5, 0)";
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task PlantQueryStorePlanAsync(DateTime collectedAt, long queryId, long planId, string planHash, long cpuUs, DateTime firstExec, DateTime lastExec)
+    private async Task PlantQueryStorePlanAsync(long queryId, long planId, string planHash, long execs, double cpuUs, DateTime lastExec)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
 INSERT INTO query_store_stats
-    (collection_id, collection_time, server_id, server_name, database_name,
-     query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
-     query_text, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
-     query_plan_hash, is_forced_plan, force_failure_count)
-VALUES ($1, $2, $3, 'TestServer', $4, $5, $6, 'Regular', $7, $8, $9, $10, 100, $11, $12, $13, false, 0)";
+    (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
+     execution_type_desc, first_execution_time, last_execution_time, query_text, query_hash, query_plan_hash, execution_count,
+     avg_cpu_time_us, avg_duration_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
+     runtime_stats_interval_id, interval_start_time_utc, is_forced_plan, force_failure_count)
+VALUES ($1, $2, $3, 'TestServer', $4, $5, $6, 'Regular', $7, $7, $8, $9, $10, $11, $12, $12, 1, 1, 1, $6, $7, false, 0)";
         void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
         P(_nextId--);
-        P(collectedAt);
+        P(lastExec);
         P(_serverId);
         P(Db);
         P(queryId);
         P(planId);
-        P(firstExec);
-        P(lastExec);
-        P("SELECT * FROM dbo.Orders WHERE CustomerId = @id" + queryId);
-        P("0xQH" + queryId);
-        P(cpuUs);
-        P(cpuUs + 20_000);
+        P(lastExec.AddMinutes(-10));
+        P("SELECT " + queryId);
+        P("0xQ" + queryId);
         P(planHash);
+        P(execs);
+        P(cpuUs);
         await cmd.ExecuteNonQueryAsync();
     }
 
