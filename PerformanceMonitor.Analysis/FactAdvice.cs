@@ -178,7 +178,18 @@ public static class FactAdvice
     /// it with any generated remediation T-SQL. Returns null if no advice
     /// matches the root fact key.
     /// </summary>
-    public static AdviceBlock? GetForFinding(AnalysisFinding finding)
+    public static AdviceBlock? GetForFinding(AnalysisFinding finding) =>
+        GetForFinding(finding, forcePlanStates: null);
+
+    /// <summary>
+    /// <see cref="GetForFinding(AnalysisFinding)"/> with the read-time forcing and automatic-plan-correction
+    /// state of the finding's force-plan targets (#8542), so the generated T-SQL gives a statement only
+    /// for an eligible target. A null <paramref name="forcePlanStates"/> judges each target on the
+    /// evidence it carries alone.
+    /// </summary>
+    public static AdviceBlock? GetForFinding(
+        AnalysisFinding finding,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? forcePlanStates)
     {
         if (finding is null)
             return null;
@@ -189,7 +200,7 @@ public static class FactAdvice
         if (advice is null)
             return null;
 
-        var tsql = FactRemediation.GenerateForFinding(finding);
+        var tsql = FactRemediation.GenerateForFinding(finding, forcePlanStates);
         if (tsql is not null)
             advice = advice with { RemediationTsql = tsql };
 

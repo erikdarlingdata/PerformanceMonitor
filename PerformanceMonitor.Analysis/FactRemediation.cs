@@ -31,14 +31,26 @@ public static class FactRemediation
     /// markup — renderers wrap it as needed (Slack mrkdwn code block, HTML
     /// &lt;pre&gt;, etc.).
     /// </summary>
-    public static string? GenerateForFinding(AnalysisFinding finding)
+    public static string? GenerateForFinding(AnalysisFinding finding) =>
+        GenerateForFinding(finding, states: null);
+
+    /// <summary>
+    /// <see cref="GenerateForFinding(AnalysisFinding)"/> with the read-time forcing and
+    /// automatic-plan-correction state of the finding's force-plan targets (#8542). A target with any
+    /// blocker (<see cref="ForcePlanBlockers(ForcePlanTarget, ForcePlanTargetState?)"/>) is named in
+    /// comments with its blockers and gets no runnable statement. A null <paramref name="states"/>
+    /// judges each target on the evidence it carries alone.
+    /// </summary>
+    public static string? GenerateForFinding(
+        AnalysisFinding finding,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states)
     {
         if (finding is null || string.IsNullOrEmpty(finding.RootFactKey))
             return null;
 
         return finding.RootFactKey switch
         {
-            "PLAN_REGRESSION" => GenerateForPlanRegression(finding),
+            "PLAN_REGRESSION" => GenerateForPlanRegression(finding, states),
             "DB_CONFIG" => GenerateForDbConfig(finding),
             "FILE_AUTOGROWTH_PERCENT" => GenerateForFileAutogrowth(finding),
             _ => null
@@ -573,7 +585,9 @@ public static class FactRemediation
     /// all. That is what keeps the byte-for-byte golden meaningful rather than merely re-baselined:
     /// the no-replica rendering is still the one it pins.</para>
     /// </summary>
-    private static string? GenerateForPlanRegression(AnalysisFinding finding)
+    private static string? GenerateForPlanRegression(
+        AnalysisFinding finding,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states)
     {
         var targets = ExtractPlanRegressionTargets(finding);
         if (targets.Count == 0)
@@ -581,14 +595,20 @@ public static class FactRemediation
 
         var sb = new StringBuilder();
         var emitted = 0;
+        var eligible = 0;
 
         foreach (var target in targets)
         {
             if (emitted > 0)
                 sb.AppendLine();
 
+            /* #8542: a target with a blocker is described and named, never handed over as a statement. */
+            var blockers = BlockersFor(target, states);
+
             sb.AppendLine($"-- Database: {target.Database}");
-            sb.AppendLine($"-- query_id = {target.QueryId}, forcing plan_id = {target.PlanId}");
+            sb.AppendLine(blockers.Count == 0
+                ? $"-- query_id = {target.QueryId}, forcing plan_id = {target.PlanId}"
+                : $"-- query_id = {target.QueryId}, best plan_id = {target.PlanId} (not offered as a force)");
             if (!string.IsNullOrEmpty(target.LatestPlanHash))
                 sb.AppendLine($"--   latest plan hash: {target.LatestPlanHash} (cpu/exec {target.LatestCpuPerExecUs:F0} us)");
             if (!string.IsNullOrEmpty(target.BestPlanHash))
@@ -599,18 +619,71 @@ public static class FactRemediation
                 sb.AppendLine($"--   measured on replica: {target.ReplicaRole}");
             AppendSecondaryReplicaDisclosure(sb, target);
             AppendParameterSensitivityCaution(sb, target);
+            emitted++;
+
+            if (blockers.Count > 0)
+            {
+                AppendNotEligible(sb, target, blockers);
+                continue;
+            }
+
+            eligible++;
             sb.AppendLine($"USE {QuoteName(target.Database)};");
             sb.AppendLine($"EXEC sys.sp_query_store_force_plan @query_id = {target.QueryId}, @plan_id = {target.PlanId};");
             sb.AppendLine();
             sb.AppendLine($"-- To back out:");
             sb.AppendLine($"-- EXEC sys.sp_query_store_unforce_plan @query_id = {target.QueryId}, @plan_id = {target.PlanId};");
             AppendUnforceScopeNote(sb, target);
-
-            emitted++;
         }
 
-        return sb.ToString().TrimEnd();
+        var body = sb.ToString().TrimEnd();
+        return eligible == 0
+            ? NoEligibleForceTarget + Environment.NewLine + Environment.NewLine + body
+            : body;
     }
+
+    /// <summary>The line a force-plan remediation opens with when no target is eligible (#8542): the
+    /// text then carries no force statement at all.</summary>
+    private const string NoEligibleForceTarget =
+        "-- No force statement is offered: every target below has a blocker.";
+
+    /// <summary>
+    /// The blockers of one target for the copy-paste renderers (#8542): the whole gate
+    /// (<see cref="ForcePlanBlockers(ForcePlanTarget, ForcePlanTargetState?)"/>) over the target's
+    /// read-time state when <paramref name="states"/> holds one, and over the evidence the target
+    /// carries when it does not. The verdict is the one <see cref="BuildStructuredRemediation(RemediationAction?, IReadOnlyDictionary{ForcePlanTargetKey, ForcePlanTargetState}?, string?)"/>
+    /// reports as <c>eligible</c>, so the text and the structured projection agree target by target.
+    /// </summary>
+    private static IReadOnlyList<ForcePlanBlocker> BlockersFor(
+        ForcePlanTarget target,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states)
+    {
+        ForcePlanTargetState? state = null;
+        if (states is not null &&
+            states.TryGetValue(ForcePlanTargetKey.Of(target), out var found) &&
+            found is not null && !found.IsEmpty)
+        {
+            state = found;
+        }
+
+        return ForcePlanBlockers(target, state);
+    }
+
+    /// <summary>
+    /// Names an ineligible target and each of its blockers as comment lines (#8542). The evidence is
+    /// flattened to one line so collected text in it stays inside the comment.
+    /// </summary>
+    private static void AppendNotEligible(StringBuilder sb, ForcePlanTarget target, IReadOnlyList<ForcePlanBlocker> blockers)
+    {
+        sb.AppendLine($"-- NOT ELIGIBLE: no force statement is given for {OneLine(QuoteName(target.Database))} query_id = {target.QueryId}, plan_id = {target.PlanId}.");
+        foreach (var blocker in blockers)
+            sb.AppendLine($"--   {blocker.Name}: {OneLine(blocker.Evidence)}");
+    }
+
+    private static string OneLine(string? text) =>
+        string.IsNullOrEmpty(text)
+            ? string.Empty
+            : text.Replace('\r', ' ').Replace('\n', ' ').Replace('\u2028', ' ').Replace('\u2029', ' ').Replace('\u0085', ' ');
 
     /// <summary>
     /// #4736: one comment line saying when the target's best plan last ran and how long before the analysis
@@ -690,9 +763,9 @@ public static class FactRemediation
 
         sb.AppendLine("--");
         sb.AppendLine($"-- HEADS UP: this regression was measured on the {target.ReplicaRole} replica's workload,");
-        sb.AppendLine("-- but the statement below forces on the PRIMARY. sp_query_store_force_plan is executed on");
+        sb.AppendLine("-- but a force without @replica_group_id forces on the PRIMARY. sp_query_store_force_plan is executed on");
         sb.AppendLine("-- the primary in every case, and its @replica_group_id argument defaults to the primary");
-        sb.AppendLine("-- when omitted -- so running this as written changes the plan the primary's WRITE workload");
+        sb.AppendLine("-- when omitted -- so an unscoped force changes the plan the primary's WRITE workload");
         sb.AppendLine("-- gets, on the strength of what a read-only replica did. Decide that on purpose.");
         sb.AppendLine("-- To scope the force to that replica instead, read the CURRENT group ids off this server");
         sb.AppendLine("-- and add @replica_group_id as a THIRD named argument:");
@@ -1538,7 +1611,20 @@ public static class FactRemediation
     /// destructive shape (RCSI) prepends the two-sided <see cref="FactRiskDisclosure"/> text
     /// as a <c>/* ... */</c> comment header. Nothing here executes — it is advisory text the operator runs.
     /// </summary>
-    public static string? RenderCopyPasteCommand(RemediationAction? action)
+    public static string? RenderCopyPasteCommand(RemediationAction? action) =>
+        RenderCopyPasteCommand(action, states: null);
+
+    /// <summary>
+    /// <see cref="RenderCopyPasteCommand(RemediationAction?)"/> with the read-time forcing and
+    /// automatic-plan-correction state of the action's force-plan targets (#8542). A force-plan target
+    /// with any blocker is named in comments with its blockers and gets no runnable statement; when no
+    /// target is eligible the text says so and carries no force statement. A null
+    /// <paramref name="states"/> judges each target on the evidence it carries alone. The other
+    /// remediation shapes ignore <paramref name="states"/>.
+    /// </summary>
+    public static string? RenderCopyPasteCommand(
+        RemediationAction? action,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states)
     {
         if (action is null)
             return null;
@@ -1583,10 +1669,11 @@ public static class FactRemediation
         if (action.Targets is { Count: > 0 } forceTargets)
         {
             var blocks = new List<string>(forceTargets.Count);
+            var eligible = 0;
             foreach (var t in forceTargets)
             {
                 var disclosure = IsNonPrimaryReplicaRow(t.ReplicaRole)
-                    ? $"-- Measured on the {t.ReplicaRole} replica; this forces on the PRIMARY (@replica_group_id" + nl +
+                    ? $"-- Measured on the {t.ReplicaRole} replica; sp_query_store_force_plan forces on the PRIMARY (@replica_group_id" + nl +
                       "-- defaults there when omitted). Scope it with @replica_group_id to target that replica." + nl
                     : string.Empty;
 
@@ -1598,6 +1685,18 @@ public static class FactRemediation
                       "-- Forcing pins ONE shape for every value; consider stats updates first (see the preview)." + nl
                     : string.Empty;
 
+                /* #8542: a target with a blocker keeps its disclosure and is named with its blockers, in
+                   comments only. */
+                var blockers = BlockersFor(t, states);
+                if (blockers.Count > 0)
+                {
+                    var blocked = new StringBuilder(disclosure).Append(pspCaution);
+                    AppendNotEligible(blocked, t, blockers);
+                    blocks.Add(blocked.ToString().TrimEnd());
+                    continue;
+                }
+
+                eligible++;
                 blocks.Add(
                     disclosure +
                     pspCaution +
@@ -1605,7 +1704,11 @@ public static class FactRemediation
                     $"EXEC sys.sp_query_store_force_plan @query_id = {t.QueryId}, @plan_id = {t.PlanId};");
             }
 
-            return blocks.Count == 0 ? null : string.Join(nl + nl, blocks);
+            if (blocks.Count == 0)
+                return null;
+
+            var forceText = string.Join(nl + nl, blocks);
+            return eligible == 0 ? NoEligibleForceTarget + nl + nl + forceText : forceText;
         }
 
         // RCSI reconstructed action (FactKey "RCSI") — DESTRUCTIVE. Carries a ReadCommittedSnapshotOn

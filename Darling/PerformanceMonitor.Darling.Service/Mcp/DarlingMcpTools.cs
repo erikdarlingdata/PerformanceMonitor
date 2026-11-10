@@ -229,7 +229,8 @@ public sealed class DarlingMcpTools
                 },
                 findings = findings.Take(returned).Select(f =>
                 {
-                    var advice = FactAdvice.GetForFinding(f);
+                    /* #8542: the advice T-SQL is built over the same read-time state as structured_remediation. */
+                    var advice = FactAdvice.GetForFinding(f, forcePlanStates);
                     /* #3691: the config levers hanging off this chain that the greedy single-path walk could not
                        reach get a card each, appended as side_leaves. They used to root their own one-node cards
                        beside this one (CONFIG_PG_MAINT_WORK_MEM at 0.6 next to a backlog → wraparound → hold
@@ -291,7 +292,7 @@ public sealed class DarlingMcpTools
                         // renders on get_analysis_findings, where the drill-down is gone. Null when the
                         // finding has no remediable action. PRODUCE ONLY — advisory text; the read-only
                         // MCP never executes it.
-                        remediation_command = FactRemediation.RenderCopyPasteCommand(f.Remediation),
+                        remediation_command = FactRemediation.RenderCopyPasteCommand(f.Remediation, forcePlanStates),
                         // #2138: the machine-first projection — verdict (eligible/blockers, the future
                         // bot's policy gate), evidence, and split force/unforce/verify artifacts as
                         // named fields, so an agent never regexes the comment prose above. Null for
@@ -1306,7 +1307,7 @@ public sealed class DarlingMcpTools
                     // pushed a 20+-finding default call over budget; previewed like the other free-text
                     // fields below, full_text opts back in.
                     var confidenceBasis = StoryConfidence.DescribeBasis(f.RootFactKey, f.Confidence, f.FactCount);
-                    var remediationCommand = FactRemediation.RenderCopyPasteCommand(f.Remediation);
+                    var remediationCommand = FactRemediation.RenderCopyPasteCommand(f.Remediation, forcePlanStates);
                     return new
                     {
                         finding_id = f.FindingId,
