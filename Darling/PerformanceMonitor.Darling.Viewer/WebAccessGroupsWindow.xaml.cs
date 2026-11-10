@@ -313,11 +313,14 @@ public partial class WebAccessGroupsWindow : Window
 
     private async void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
-        if (_allowClose) return;
+        // A window with nothing unsaved closes on this very event; Closed then clears the one-time token. Only unsaved edits hold
+        // the close for the confirmation, and the close is then re-issued from a later dispatcher frame, because WPF refuses
+        // Close() while the Closing event that asked is still running.
+        if (_allowClose || !HasUnsavedChanges()) return;
         e.Cancel = true;
         if (!await ConfirmLeaveAsync()) return;
         _allowClose = true;
-        Close();
+        await Dispatcher.InvokeAsync(Close);
     }
     private void Scope_Changed(object sender, RoutedEventArgs e) { if (!_loading) UpdateScopeNote(); }
     private void TagList_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (!_loading) UpdateScopeNote(); }
