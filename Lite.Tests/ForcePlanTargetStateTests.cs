@@ -47,6 +47,8 @@ public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixtur
     private readonly DuckDbInitializer _duckDb;
     private DuckDBConnection? _seedConn;
     private long _nextId = 1;
+    /* The server the seeders write rows for; a test that reads through the tool sets it to the tool's own id. */
+    private int _seedServerId = ServerId;
 
     public ForcePlanTargetStateTests(SharedDuckDbFixture fixture)
     {
@@ -556,7 +558,7 @@ INSERT INTO query_store_stats
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)";
             cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
             cmd.Parameters.Add(new DuckDBParameter { Value = Naive(at) });
-            cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = _seedServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = "Srv" });
             cmd.Parameters.Add(new DuckDBParameter { Value = Db });
             cmd.Parameters.Add(new DuckDBParameter { Value = queryId });
@@ -598,7 +600,7 @@ INSERT INTO plan_correction
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = Naive(at) });
-        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = _seedServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = "Srv" });
         cmd.Parameters.Add(new DuckDBParameter { Value = database });
         cmd.Parameters.Add(new DuckDBParameter { Value = flgp });
@@ -764,5 +766,170 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var projected = Assert.Single(FactRemediation.BuildStructuredRemediation(Action(t), states)!.ForcePlanTargets);
         Assert.True(projected.Eligible);
         Assert.Contains("within the last 24 hours", projected.StateNote, StringComparison.Ordinal);
+    }
+
+    /* ------------------------------------------------------------------ 7. the copy-paste text follows the verdict (#8542) */
+
+    /// <summary>The lines of a remediation text that SQL Server would run: everything that is not a comment.</summary>
+    private static List<string> RunnableLines(string? sql) =>
+        (sql ?? string.Empty).Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0 && !line.StartsWith("--", StringComparison.Ordinal))
+            .ToList();
+
+    private static bool Forces(IEnumerable<string> runnableLines, long queryId, long planId) =>
+        runnableLines.Any(line =>
+            line.Contains("sp_query_store_force_plan", StringComparison.Ordinal) &&
+            line.Contains($"@query_id = {queryId},", StringComparison.Ordinal) &&
+            line.Contains($"@plan_id = {planId};", StringComparison.Ordinal));
+
+    /// <summary>
+    /// #8542, through the tool and the store: one persisted PLAN_REGRESSION finding with three targets.
+    /// The store says automatic plan correction withdrew its recommendation for the second target's plan
+    /// and that forcing the third target's plan is failing. The reply's own structured_remediation marks
+    /// those two ineligible, so its remediation_command gives a runnable force statement for the first
+    /// target only and names the other two with their blockers in comments.
+    /// </summary>
+    [Fact]
+    public async Task GetAnalysisFindings_RemediationCommand_ForcesOnlyTheTargetsItsOwnReplyMarksEligible()
+    {
+        var tempDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ForcePlanEligibility_" + Guid.NewGuid().ToString("N")[..8]);
+        System.IO.Directory.CreateDirectory(tempDir);
+        try
+        {
+            var serverManager = new ServerManager(tempDir);
+            var server = new PerformanceMonitorLite.Models.ServerConnection { ServerName = "TestServer", DisplayName = "TestServer" };
+            serverManager.AddServer(server);
+            _seedServerId = RemoteCollectorService.GetDeterministicHashCode(
+                RemoteCollectorService.GetServerNameForStorage(server));
+
+            var now = DateTime.UtcNow;
+            var seen = now.AddMinutes(-20);
+
+            /* Query 201 / plan 11: collected, not forced, never failed. Eligible. */
+            await SeedQueryStoreAsync(seen, 201, 11, forced: false, "NONE", 0, "NONE");
+            /* Query 202 / plan 12: the engine recommended this plan and withdrew the recommendation. */
+            await SeedPlanCorrectionAsync(seen, Db, "OFF", 202, "Expired", "TempTableChanged", 12, null, false, null);
+            /* Query 203 / plan 13: forcing this plan is already failing. */
+            await SeedQueryStoreAsync(seen, 203, 13, forced: false, "NONE", 2, "GENERAL_FAILURE");
+
+            var finding = new AnalysisFinding
+            {
+                FindingId = 854201,
+                AnalysisTime = now,
+                ServerId = _seedServerId,
+                ServerName = "TestServer",
+                TimeRangeStart = now.AddHours(-4),
+                TimeRangeEnd = now,
+                Severity = 1.6,
+                Confidence = 0.9,
+                Category = "queries",
+                StoryPath = "PLAN_REGRESSION",
+                StoryPathHash = "force_eligibility_hash",
+                StoryText = "planted finding",
+                RootFactKey = "PLAN_REGRESSION",
+                RootFactValue = 1.0,
+                FactCount = 1,
+                IncidentId = "force-eligibility-test",
+                Remediation = Action(Target(201, 11), Target(202, 12), Target(203, 13))
+            };
+            var context = new AnalysisContext
+            {
+                ServerId = _seedServerId,
+                ServerName = "TestServer",
+                TimeRangeStart = now.AddHours(-4),
+                TimeRangeEnd = now
+            };
+            await new PerformanceMonitorLite.Analysis.FindingStore(_duckDb)
+                .InsertFindingsAsync(new List<AnalysisFinding> { finding }, context);
+
+            var json = await PerformanceMonitorLite.Mcp.McpAnalysisTools.GetAnalysisFindings(
+                new PerformanceMonitorLite.Analysis.AnalysisService(_duckDb), serverManager, "TestServer", 24);
+
+            using var doc = JsonDocument.Parse(json);
+            var reply = Assert.Single(doc.RootElement.GetProperty("findings").EnumerateArray());
+            var targets = reply.GetProperty("structured_remediation").GetProperty("force_plan_targets").EnumerateArray().ToList();
+            Assert.Equal(3, targets.Count);
+
+            /* The fixture produced the verdicts the issue names, each from the store's own rows. */
+            var verdicts = targets.ToDictionary(
+                t => t.GetProperty("query_id").GetInt64(),
+                t => (Eligible: t.GetProperty("eligible").GetBoolean(),
+                      PlanId: t.GetProperty("plan_id").GetInt64(),
+                      Blockers: t.GetProperty("blockers").EnumerateArray().Select(b => b.GetString()!).ToArray()));
+            Assert.True(verdicts[201].Eligible);
+            Assert.Equal(new[] { ForcePlanBlockerNames.ApcWithdrewIt }, verdicts[202].Blockers);
+            Assert.Equal(new[] { ForcePlanBlockerNames.ForcingFailedOnThisPlan }, verdicts[203].Blockers);
+
+            var command = reply.GetProperty("remediation_command").GetString();
+            var runnable = RunnableLines(command);
+
+            /* The text agrees with the verdict beside it, target by target. */
+            foreach (var (queryId, verdict) in verdicts)
+            {
+                Assert.True(
+                    verdict.Eligible == Forces(runnable, queryId, verdict.PlanId),
+                    $"query {queryId} / plan {verdict.PlanId} is eligible: {verdict.Eligible}, but remediation_command " +
+                    $"{(Forces(runnable, queryId, verdict.PlanId) ? "gives" : "does not give")} a runnable force statement for it");
+            }
+
+            /* The ineligible targets are named with their blockers, in comments. */
+            var comments = (command ?? string.Empty).Split('\n')
+                .Select(line => line.Trim())
+                .Where(line => line.StartsWith("--", StringComparison.Ordinal))
+                .ToList();
+            Assert.Contains(comments, line => line.Contains("query_id = 202", StringComparison.Ordinal) && line.Contains("plan_id = 12", StringComparison.Ordinal));
+            Assert.Contains(comments, line => line.Contains(ForcePlanBlockerNames.ApcWithdrewIt, StringComparison.Ordinal) && line.Contains("TempTableChanged", StringComparison.Ordinal));
+            Assert.Contains(comments, line => line.Contains("query_id = 203", StringComparison.Ordinal) && line.Contains("plan_id = 13", StringComparison.Ordinal));
+            Assert.Contains(comments, line => line.Contains(ForcePlanBlockerNames.ForcingFailedOnThisPlan, StringComparison.Ordinal));
+        }
+        finally
+        {
+            _seedServerId = ServerId;
+            try { System.IO.Directory.Delete(tempDir, recursive: true); }
+            catch { /* best-effort cleanup */ }
+        }
+    }
+
+    /// <summary>
+    /// #8542: the shared renderer over a mixed action with no store state judges each target on the
+    /// evidence it carries. The clean target gets its statement; the parameter-sensitive one and the one
+    /// measured on a secondary are named with their blockers and get none.
+    /// </summary>
+    [Fact]
+    public void CopyPasteCommand_OverAMixedAction_GivesAStatementOnlyForTheTargetWithNoBlocker()
+    {
+        var action = Action(Target(201, 11), Target(202, 12, psp: true), Target(203, 13, replica: "Secondary"));
+        var structured = FactRemediation.BuildStructuredRemediation(action)!.ForcePlanTargets;
+
+        var sql = FactRemediation.RenderCopyPasteCommand(action);
+        var runnable = RunnableLines(sql);
+
+        foreach (var target in structured)
+        {
+            Assert.True(
+                target.Eligible == Forces(runnable, target.QueryId, target.PlanId),
+                $"query {target.QueryId} / plan {target.PlanId} is eligible: {target.Eligible}, and the command must agree");
+        }
+
+        Assert.True(Forces(runnable, 201, 11));
+        Assert.Contains(ForcePlanBlockerNames.ParameterSensitivityCoFired, sql, StringComparison.Ordinal);
+        Assert.Contains(ForcePlanBlockerNames.SecondaryReplicaEvidence, sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #8542: when every target has a blocker the command is still text (the targets and their blockers,
+    /// in comments), it says no statement is offered, and it holds nothing SQL Server would run.
+    /// </summary>
+    [Fact]
+    public void CopyPasteCommand_WhenNoTargetIsEligible_SaysSo_AndHoldsNoStatement()
+    {
+        var sql = FactRemediation.RenderCopyPasteCommand(Action(Target(202, 12, psp: true), Target(203, 13, replica: "Secondary")));
+
+        Assert.False(string.IsNullOrWhiteSpace(sql));
+        Assert.Empty(RunnableLines(sql));
+        Assert.Contains("No force statement is offered", sql, StringComparison.Ordinal);
+        Assert.Contains("query_id = 202", sql, StringComparison.Ordinal);
+        Assert.Contains("query_id = 203", sql, StringComparison.Ordinal);
     }
 }
