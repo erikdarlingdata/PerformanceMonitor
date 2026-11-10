@@ -48,6 +48,27 @@ public sealed class McpToolGuideHeadsClocksTests
         "get_query_store_duration_trend",
         "get_query_heatmap",
         "get_blocking_stats",
+        /* Bucketed series and ordered event lists a client reads as a timeline: collection_time, the UTC Extended
+           Events event_time and deadlock_time, the memory-pressure ring buffer's UTC sample_time. */
+        "get_memory_grants",
+        "get_memory_pressure_events",
+        "get_collection_log",
+        "get_long_query_completions",
+        "get_deadlocks",
+        "get_deadlock_detail",
+        "get_active_queries",
+        "get_waiting_tasks",
+        "get_load_by_caller",
+        "get_query_pileups",
+        "get_health_parser_system_health",
+        "get_health_parser_severe_errors",
+        "get_health_parser_io_issues",
+        "get_health_parser_scheduler_issues",
+        "get_health_parser_memory_conditions",
+        "get_health_parser_cpu_tasks",
+        "get_health_parser_memory_broker",
+        "get_health_parser_memory_node_oom",
+        "get_health_parser_significant_waits",
     ];
 
     /// <summary>The text that explains a tool's fields: the guide tail when the description is split, else the
