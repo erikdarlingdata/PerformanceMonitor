@@ -754,7 +754,8 @@ GROUP BY collector_name";
         command.CommandText = CollectionHealthSqlOverride ?? CollectionHealthSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
+        /* #8533: the rows' window start comes from the constant the connection-failure sentence words, so the two cannot disagree. */
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-CollectionConnectionFailures.RowWindowDays) });
 
         var items = new List<CollectorHealthRow>();
         System.Data.Common.DbDataReader reader;

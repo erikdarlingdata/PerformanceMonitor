@@ -62,7 +62,8 @@ public static class CollectionConnectionFailures
     public static readonly TimeSpan SameEventSpan = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// The trailing days of collector runs the Collection Health rows hold in both apps, whatever range the tab's picker shows.
+    /// The trailing days of collector runs the Collection Health rows hold in both apps, whatever range the tab's picker shows:
+    /// each app's rows read takes its window start from this.
     /// The sentence gives it wherever it speaks of a window (#8533): the card it sits on also carries the skipped-slots line,
     /// which is read over 24 hours, so a sentence that named no window would be read against that one.
     /// </summary>

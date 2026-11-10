@@ -488,7 +488,8 @@ public sealed partial class ViewerDataService
 
         /* #4999: read before the health statement's reader opens, so one call never holds two. */
         var scheduleOverrides = await ReadScheduleOverridesForHealthAsync(cancellationToken);
-        var windowStart = DateTime.UtcNow.AddDays(-7);
+        /* #8533: the rows' window start comes from the constant the connection-failure sentence words, so the two cannot disagree. */
+        var windowStart = DateTime.UtcNow.AddDays(-CollectionConnectionFailures.RowWindowDays);
         await using (var command = _dataSource.CreateCommand(CollectionHealthSql))
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
