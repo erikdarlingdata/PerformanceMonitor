@@ -10,7 +10,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
@@ -32,9 +31,9 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Store-free pins for the managed web group guards. The group metadata and credential reads go through a seam, so the per-request
-/// checks (enabled, active, generation, switch, snapshot) and the host's store trips are observed here without a PostgreSQL store, and the
-/// SQL the migrations run is pinned for the guards it carries. The live classes prove the same against a real store.
+/// Store-free tests of the managed web group guards. The group metadata and credential reads go through a seam, so the per-request
+/// checks (enabled, active, generation, switch, snapshot) and the host's store trips are observed here without a PostgreSQL store.
+/// The live classes prove the same against a real store, along with the owner-guard triggers, the grants and the journal.
 /// </summary>
 public sealed class ManagedWebGroupGuardTests
 {
@@ -274,35 +273,5 @@ public sealed class ManagedWebGroupGuardTests
     {
         using var reader = new StreamReader(response.Response.Body);
         return await reader.ReadToEndAsync();
-    }
-
-    [Fact]
-    public void TheMigrationText_KeepsItsOwnerGuards_DefinerRights_AndSearchPathPins()
-    {
-        var groups = WebAccessGroupSchema.CreateSql;
-        Assert.Equal(4, Regex.Matches(groups, @"ENABLE ALWAYS TRIGGER").Count);
-        foreach (var table in new[] { "web_access_groups", "web_access_group_tags", "web_access_group_events" })
-            Assert.Contains($"ALTER TABLE config.{table} ENABLE ALWAYS TRIGGER web_access_owner_guard;", groups, StringComparison.Ordinal);
-        Assert.Contains("ALTER TABLE config.server_tags ENABLE ALWAYS TRIGGER web_access_tag_deleted;", groups, StringComparison.Ordinal);
-        var functions = Regex.Matches(groups, @"CREATE OR REPLACE FUNCTION").Count;
-        Assert.Equal(6, functions);
-        Assert.Equal(functions, Regex.Matches(groups, @"SET search_path = pg_catalog, pg_temp").Count);
-        Assert.Matches(@"config\.manage_web_access_group\([\s\S]*?LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp", groups);
-        Assert.Matches(@"config\.web_access_tag_deleted\(\) RETURNS trigger\s+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp", groups);
-
-        var advanced = WebAccessAdvancedSchema.CreateSql;
-        Assert.Contains("ALTER TABLE config.web_access_advanced ENABLE ALWAYS TRIGGER web_access_owner_guard;", advanced, StringComparison.Ordinal);
-        Assert.Equal(Regex.Matches(advanced, @"CREATE OR REPLACE FUNCTION").Count, Regex.Matches(advanced, @"SET search_path=pg_catalog,pg_temp").Count);
-        Assert.Matches(@"config\.set_web_access_advanced\(p_enabled boolean\) RETURNS void\s+LANGUAGE \w+ SECURITY DEFINER SET search_path=pg_catalog,pg_temp", advanced);
-
-        // The per-request read joins the switch, so a group is read as enabled only while advanced access is on.
-        Assert.Contains("JOIN config.web_access_advanced a ON a.id=1 AND a.enabled", WebAccessGroupStore.EnabledGroupSql, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void TheSwitchFlip_WritesAJournalRow_WithItsOwnEventWords()
-    {
-        Assert.Matches(@"event IN \([^)]*'advanced_enabled'[^)]*'advanced_disabled'[^)]*\)", WebAccessGroupSchema.CreateSql);
-        Assert.Matches(@"config\.set_web_access_advanced\(p_enabled boolean\)[\s\S]*?INSERT INTO config\.web_access_group_events[\s\S]*?'advanced_enabled'[\s\S]*?'advanced_disabled'", WebAccessAdvancedSchema.CreateSql);
     }
 }
