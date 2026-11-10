@@ -892,6 +892,70 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     }
 
     /// <summary>
+    /// #8542, through the Recommendations cards' own read: the same three targets and the same store rows
+    /// as the tool test above. The card's copy-paste command gives the statement for the target the
+    /// store holds nothing against, and names the two the store blocks with their blockers.
+    /// </summary>
+    [Fact]
+    public async Task RecommendationCard_WithholdsTheStatement_ForATargetTheStoreBlocks()
+    {
+        _seedServerId = 854203;
+        try
+        {
+            var now = DateTime.UtcNow;
+            var seen = now.AddMinutes(-20);
+            await SeedQueryStoreAsync(seen, 201, 11, forced: false, "NONE", 0, "NONE");
+            await SeedPlanCorrectionAsync(seen, Db, "OFF", 202, "Expired", "TempTableChanged", 12, null, false, null);
+            await SeedQueryStoreAsync(seen, 203, 13, forced: false, "NONE", 2, "GENERAL_FAILURE");
+
+            var finding = new AnalysisFinding
+            {
+                FindingId = 854203,
+                AnalysisTime = now,
+                ServerId = _seedServerId,
+                ServerName = "TestServer",
+                TimeRangeStart = now.AddHours(-4),
+                TimeRangeEnd = now,
+                Severity = 1.6,
+                Confidence = 0.9,
+                Category = "queries",
+                StoryPath = "PLAN_REGRESSION",
+                StoryPathHash = "force_card_hash",
+                StoryText = "planted finding",
+                RootFactKey = "PLAN_REGRESSION",
+                RootFactValue = 1.0,
+                FactCount = 1,
+                IncidentId = "force-card-test",
+                Remediation = Action(Target(201, 11), Target(202, 12), Target(203, 13))
+            };
+            var context = new AnalysisContext
+            {
+                ServerId = _seedServerId,
+                ServerName = "TestServer",
+                TimeRangeStart = now.AddHours(-4),
+                TimeRangeEnd = now
+            };
+            var findingStore = new PerformanceMonitorLite.Analysis.FindingStore(_duckDb);
+            await findingStore.InsertFindingsAsync(new List<AnalysisFinding> { finding }, context);
+
+            var cards = await new PerformanceMonitorLite.Analysis.Recommendations.LiteRecommendationsReader(findingStore)
+                .GetRecommendationsAsync(_seedServerId, "TestServer");
+
+            var card = Assert.Single(cards);
+            var runnable = RunnableLines(card.CopyPasteSql);
+            Assert.True(Forces(runnable, 201, 11), "the target the store holds nothing against keeps its statement");
+            Assert.False(Forces(runnable, 202, 12), "plan 12 is apc_withdrew_it in the store, and the card must not give a runnable force statement for it");
+            Assert.False(Forces(runnable, 203, 13), "plan 13 is forcing_failed_on_this_plan in the store, and the card must not give a runnable force statement for it");
+            Assert.Contains(ForcePlanBlockerNames.ApcWithdrewIt, card.CopyPasteSql, StringComparison.Ordinal);
+            Assert.Contains(ForcePlanBlockerNames.ForcingFailedOnThisPlan, card.CopyPasteSql, StringComparison.Ordinal);
+        }
+        finally
+        {
+            _seedServerId = ServerId;
+        }
+    }
+
+    /// <summary>
     /// #8542: only the store's forcing state withholds a statement. A parameter-sensitive target and a
     /// target measured on a secondary carry their caution and disclosure WITH the statement (#1882,
     /// #2138), with no state and with a state that holds nothing against them.
