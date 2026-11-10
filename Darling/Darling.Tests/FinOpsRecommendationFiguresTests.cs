@@ -26,18 +26,31 @@ public sealed class FinOpsRecommendationFiguresTests
     private static UtilizationEfficiencyDto Util(int physicalMemoryMb) =>
         new(5m, 10, 10m, 100L, 1000, 1000, physicalMemoryMb, 500, 0.5m, 0L, 0L, 0L, 0m, 100, null, 8, 3, "OK");
 
-    private static void InEnUs(Action body)
+    private static void InEnUs(Action body) => InCulture("en-US", body);
+
+    private static void InCulture(string name, Action body)
     {
         var previous = CultureInfo.CurrentCulture;
         try
         {
-            CultureInfo.CurrentCulture = new CultureInfo("en-US");
+            CultureInfo.CurrentCulture = new CultureInfo(name);
             body();
         }
         finally
         {
             CultureInfo.CurrentCulture = previous;
         }
+    }
+
+    [Fact]
+    public void Dormant_OnAGermanDesktop_WritesTheCountAndTheGbTotalInOneConvention()
+    {
+        // #8522: CountText writes "2" and "1,500" the same on every desktop, so the GB figure beside it does too.
+        InCulture("de-DE", () =>
+        {
+            var two = FinOpsRecommendationFigures.Dormant(Idle(2, 1536m), 0m, 0m)!;
+            Assert.Equal("2 idle databases consuming 3.0GB", two.Finding);
+        });
     }
 
     // ── Memory right-sizing (original :269 sampleCount >= 16, :272-276 ratio, target and GB compare, :282 severity, :288 savings) ──
