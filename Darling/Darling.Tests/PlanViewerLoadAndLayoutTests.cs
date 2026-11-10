@@ -444,8 +444,185 @@ public sealed class PlanViewerLoadAndLayoutTests
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
-    /// <summary>A plan over the parser's size limit and a plan with no statement to draw are plans all the same: the viewer
-    /// cannot draw them, and Save .sqlplan is what takes them to a tool that can.</summary>
+    /// <summary>The arrow keys on a focused splitter write the column's width and raise no drag event. The width they leave
+    /// is the one the panel asks for from then on, as a dragged width is.</summary>
+    [Fact]
+    public void AStatementsWidthSetByItsSplitter_IsKeptThroughTheNextFit()
+    {
+        var problems = new List<string>();
+        StaTestThread.Run(async () =>
+        {
+            var control = NewControl();
+            try
+            {
+                var host = Host(control, 1600, 600);
+                await control.LoadPlan(Plan(Statement(1, Scan(0)), Statement(2, Scan(0))), "Stored Plan");
+                LayOut(host);
+                var statements = (FrameworkElement)control.FindName("StatementsPanel");
+                var column = (ColumnDefinition)control.FindName("StatementsColumn");
+                Assert.True(Math.Abs(statements.ActualWidth - 450) < 0.5, $"the Statements panel is {statements.ActualWidth:F0} px wide in a 1600 px viewer; this test starts from its 450 px");
+
+                StaTestThread.Step("the splitter's arrow keys: the column is 550 px wide, with no drag event");
+                column.Width = new GridLength(550);
+                LayOut(host);
+                ClickFirstOperator(control);
+                LayOut(host);
+                if (Math.Abs(statements.ActualWidth - 550) > 0.5)
+                    problems.Add($"the Statements panel is {statements.ActualWidth:F0} px wide after its splitter was moved to 550 px from the keyboard and an operator was selected: the fit that opens the Properties panel threw the width away");
+                host.Width = 1500;
+                LayOut(host);
+                host.Width = 1600;
+                LayOut(host);
+                if (Math.Abs(statements.ActualWidth - 550) > 0.5)
+                    problems.Add($"the Statements panel is {statements.ActualWidth:F0} px wide after its splitter was moved to 550 px from the keyboard and the viewer's width changed: the fit threw the width away");
+
+                StaTestThread.Step("a drag of the splitter: the column is 300 px wide, then the drag ends");
+                column.Width = new GridLength(300);
+                LayOut(host);
+                ((GridSplitter)control.FindName("StatementsSplitter")).RaiseEvent(new DragCompletedEventArgs(-250, 0, false));
+                LayOut(host);
+                host.Width = 1500;
+                LayOut(host);
+                host.Width = 1600;
+                LayOut(host);
+                if (Math.Abs(statements.ActualWidth - 300) > 0.5)
+                    problems.Add($"the Statements panel is {statements.ActualWidth:F0} px wide after its splitter was dragged to 300 px and the viewer's width changed: a dragged width is kept");
+            }
+            finally
+            {
+                control.Cleanup();
+            }
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>In a 900 px viewer the canvas is at its minimum, so a drag of the Statements splitter to the right moves the
+    /// mouse and not the splitter. The panel's width did not change, so the width it asks for does not either.</summary>
+    [Fact]
+    public void ADragOfTheStatementsSplitterThatMovesNothing_IsNotADraggedWidth()
+    {
+        var problems = new List<string>();
+        StaTestThread.Run(async () =>
+        {
+            var control = NewControl();
+            try
+            {
+                var host = Host(control, 900, 600);
+                await control.LoadPlan(Plan(Statement(1, Scan(0)), Statement(2, Scan(0))), "Stored Plan");
+                LayOut(host);
+                ClickFirstOperator(control);
+                LayOut(host);
+                var statements = (FrameworkElement)control.FindName("StatementsPanel");
+                Assert.True(statements.ActualWidth < 450 - 0.5, $"the Statements panel is {statements.ActualWidth:F0} px wide beside the Properties panel in a 900 px viewer; this test starts from a narrowed panel");
+
+                StaTestThread.Step("a drag of the Statements splitter that moves the mouse 30 px and leaves the column as it was");
+                ((GridSplitter)control.FindName("StatementsSplitter")).RaiseEvent(new DragCompletedEventArgs(30, 0, false));
+                host.Width = 1600;
+                LayOut(host);
+
+                if (Math.Abs(statements.ActualWidth - 450) > 0.5)
+                    problems.Add($"the Statements panel is {statements.ActualWidth:F0} px wide in a 1600 px viewer after a drag at 900 px that moved the mouse and not the splitter: the panel's width did not change, so it takes its 450 px");
+            }
+            finally
+            {
+                control.Cleanup();
+            }
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>A viewer that narrows until it cannot hold both panels closes one of them: the one opened earlier, so the one
+    /// opened last shows. The panel the narrowing closed comes back when the viewer is wide enough for both again. A panel the
+    /// person closed stays closed.</summary>
+    [Fact]
+    public void NarrowingAViewerPastBothPanels_ShowsTheOneOpenedLast_AndWideningBringsTheOtherBack()
+    {
+        var problems = new List<string>();
+        StaTestThread.Run(async () =>
+        {
+            var control = NewControl();
+            try
+            {
+                var host = Host(control, 1600, 600);
+                await control.LoadPlan(Plan(Statement(1, Scan(0)), Statement(2, Scan(0))), "Stored Plan");
+                LayOut(host);
+                ClickFirstOperator(control);
+                LayOut(host);
+                var statements = (FrameworkElement)control.FindName("StatementsPanel");
+                var properties = (FrameworkElement)control.FindName("PropertiesPanel");
+                var scroller = (ScrollViewer)control.FindName("PlanScrollViewer");
+                var statementsButton = (Button)control.FindName("StatementsButton");
+                Assert.Equal(Visibility.Visible, statements.Visibility);
+                Assert.Equal(Visibility.Visible, properties.Visibility);
+
+                StaTestThread.Step("narrowing the viewer from 1600 px to 600 px, the Properties panel opened last");
+                host.Width = 600;
+                LayOut(host);
+                if (properties.Visibility != Visibility.Visible || statements.Visibility == Visibility.Visible)
+                    problems.Add($"narrowed to 600 px with the Properties panel opened last, the Statements panel is {statements.Visibility} and the Properties panel is {properties.Visibility}: the one opened last shows, alone");
+                if (scroller.ActualWidth < CanvasMinimum - 0.5)
+                    problems.Add($"the plan canvas is {scroller.ActualWidth:F0} px wide in a viewer narrowed from 1600 px to 600 px: it keeps {CanvasMinimum} px");
+
+                StaTestThread.Step("widening the viewer back to 1600 px");
+                host.Width = 1600;
+                LayOut(host);
+                if (statements.Visibility != Visibility.Visible)
+                    problems.Add("the Statements panel stays closed in a viewer widened back to 1600 px: the narrowing closed it, not the person, so the widening brings it back");
+                else if (Math.Abs(statements.ActualWidth - 450) > 0.5)
+                    problems.Add($"the Statements panel comes back {statements.ActualWidth:F0} px wide in a viewer widened back to 1600 px: it asks for its 450 px");
+                if (properties.Visibility != Visibility.Visible)
+                    problems.Add("the Properties panel closed when the viewer widened back to 1600 px");
+
+                StaTestThread.Step("the Statements button twice, so the Statements panel is the one opened last, then narrowing to 600 px");
+                if (statements.Visibility == Visibility.Visible)
+                    Click(statementsButton);
+                Click(statementsButton);
+                LayOut(host);
+                Assert.Equal(Visibility.Visible, statements.Visibility);
+                Assert.Equal(Visibility.Visible, properties.Visibility);
+                host.Width = 600;
+                LayOut(host);
+                if (statements.Visibility != Visibility.Visible || properties.Visibility == Visibility.Visible)
+                    problems.Add($"narrowed to 600 px with the Statements panel opened last, the Statements panel is {statements.Visibility} and the Properties panel is {properties.Visibility}: the one opened last shows, alone");
+                if (scroller.ActualWidth < CanvasMinimum - 0.5)
+                    problems.Add($"the plan canvas is {scroller.ActualWidth:F0} px wide in a viewer narrowed to 600 px with the statement list showing: it keeps {CanvasMinimum} px");
+
+                StaTestThread.Step("widening the viewer back to 1600 px");
+                host.Width = 1600;
+                LayOut(host);
+                if (properties.Visibility != Visibility.Visible)
+                    problems.Add("the Properties panel stays closed in a viewer widened back to 1600 px: the narrowing closed it, not the person, so the widening brings it back");
+                else if (((TextBlock)control.FindName("PropertiesHeader")).Text != "Table Scan")
+                    problems.Add($"the Properties panel comes back headed \"{((TextBlock)control.FindName("PropertiesHeader")).Text}\", not with the operator that was selected");
+                if (statements.Visibility != Visibility.Visible)
+                    problems.Add("the Statements panel closed when the viewer widened back to 1600 px");
+
+                StaTestThread.Step("the Statements button, which closes the list, then narrowing to 600 px and widening again");
+                if (statements.Visibility == Visibility.Visible)
+                    Click(statementsButton);
+                LayOut(host);
+                Assert.Equal(Visibility.Collapsed, statements.Visibility);
+                host.Width = 600;
+                LayOut(host);
+                host.Width = 1600;
+                LayOut(host);
+                if (statements.Visibility == Visibility.Visible)
+                    problems.Add("the Statements panel the person closed came back when the viewer widened");
+            }
+            finally
+            {
+                control.Cleanup();
+            }
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>A plan over the parser's size limit, a plan nested past its depth limit and a plan with no statement to draw
+    /// are plans all the same: the viewer cannot draw them, and Save .sqlplan is what takes them to a tool that can. Text that
+    /// is not XML, and XML that is not a plan, are not saved as one.</summary>
     [Fact]
     public void SaveStaysEnabled_ForAPlanTheViewerDoesNotDraw()
     {
@@ -458,10 +635,21 @@ public sealed class PlanViewerLoadAndLayoutTests
                 var host = Host(control, 1000, 700);
 
                 StaTestThread.Step("LoadPlan: a plan over the parser's size limit");
-                await control.LoadPlan(Plan(Statement(1, Scan(0))) + new string(' ', 16_777_217), "Stored Plan");
+                var oversized = Plan(Statement(1, Scan(0))) + new string(' ', ShowPlanParser.MaxParseCharacters + 1);
+                Assert.True(ShowPlanParser.Parse(oversized).ExceedsParseLimit, "the fixture is not over the parser's size limit");
+                await control.LoadPlan(oversized, "Stored Plan");
                 LayOut(host);
-                Assert.Contains("size limit", ((TextBlock)control.FindName("EmptyStateTitle")).Text, StringComparison.Ordinal);
+                Assert.Empty(OperatorBorders(control));
                 problems.AddRange(SaveAloneIsEnabled(control, "for a plan over the parser's size limit"));
+
+                StaTestThread.Step("LoadPlan: a plan nested past the parser's depth limit");
+                var nested = Plan(Statement(1, Chain(ShowPlanParser.MaxParseDepth + 1)));
+                var refused = ShowPlanParser.Parse(nested);
+                Assert.True(refused.ParseError is not null && !refused.ExceedsParseLimit, "the fixture is not a plan the parser refuses for its depth");
+                await control.LoadPlan(nested, "Stored Plan");
+                LayOut(host);
+                Assert.Empty(OperatorBorders(control));
+                problems.AddRange(SaveAloneIsEnabled(control, "for a plan nested past the parser's depth limit"));
 
                 StaTestThread.Step("LoadPlan: a plan with no statement");
                 await control.LoadPlan(Plan(), "Stored Plan");
@@ -474,6 +662,16 @@ public sealed class PlanViewerLoadAndLayoutTests
                 LayOut(host);
                 if (ToolbarButton(control, "Save .sqlplan").IsEnabled)
                     problems.Add("after text that does not parse, the \"Save .sqlplan\" button is enabled");
+
+                foreach (var notAPlan in new[] { "<x/>", "<deadlock><victim-list><victimProcess id=\"process1\"/></victim-list></deadlock>", $"<x xmlns=\"{Ns}\"/>" })
+                {
+                    StaTestThread.Step("LoadPlan: well-formed XML that is not a plan");
+                    await control.LoadPlan(notAPlan, "Pasted Plan");
+                    LayOut(host);
+                    Assert.Empty(OperatorBorders(control));
+                    if (ToolbarButton(control, "Save .sqlplan").IsEnabled)
+                        problems.Add($"after XML that is not a plan ({notAPlan}), the \"Save .sqlplan\" button is enabled: it would write that XML into a .sqlplan file");
+                }
             }
             finally
             {

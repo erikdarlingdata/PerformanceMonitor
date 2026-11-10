@@ -221,6 +221,25 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
+    /// The fetch behind the Query Store grid's inline View button, where something other than the monitored server answers
+    /// it. Null is the fetch from the monitored server's Query Store by the row's plan id.
+    /// </summary>
+    internal Func<QueryStoreRow, Task<string?>>? QueryStorePlanFetch { get; set; }
+
+    /// <summary>Shows the inline View button's message (text, title, icon): a message box, unless something else is set to take it.</summary>
+    internal Action<string, string, MessageBoxImage> PlanMessage { get; set; } =
+        (text, title, image) => MessageBox.Show(text, title, MessageBoxButton.OK, image);
+
+    /// <summary>The inline View click that ran last: complete once its plan is on screen or its message has been shown.</summary>
+    internal Task InlineQueryStorePlanView { get; private set; } = Task.CompletedTask;
+
+    private async Task<string?> FetchQueryStorePlanFromServerAsync(QueryStoreRow row)
+    {
+        var connStr = _credentialResolver.GetConnectionString(_server);
+        return await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryStorePlanAsync(connStr, row.DatabaseName, row.PlanId));
+    }
+
+    /// <summary>
     /// #1980: the Query Store grid's inline "View" button — the capability its two sibling grids
     /// always had. Lite's QS rows carry no plan text, so the plan is fetched from the monitored server's
     /// Query Store by the row's plan id, as the row's context menu and the history window fetch it, and
@@ -235,14 +254,19 @@ public partial class ServerTab : UserControl
         // A second click while the fetch is running is dropped.
         if (btn.Content is "...") return;
 
+        InlineQueryStorePlanView = ViewQueryStorePlanInlineAsync(btn, row);
+        await InlineQueryStorePlanView;
+    }
+
+    private async Task ViewQueryStorePlanInlineAsync(Button btn, QueryStoreRow row)
+    {
         btn.Content = "...";
         try
         {
             string? plan = null;
             try
             {
-                var connStr = _credentialResolver.GetConnectionString(_server);
-                plan = await LivePlanDisplay.FilterAsync(await LocalDataService.FetchQueryStorePlanAsync(connStr, row.DatabaseName, row.PlanId));
+                plan = await (QueryStorePlanFetch ?? FetchQueryStorePlanFromServerAsync)(row);
             }
             catch
             {
@@ -251,11 +275,11 @@ public partial class ServerTab : UserControl
 
             if (string.IsNullOrEmpty(plan))
             {
-                MessageBox.Show("No query plan found in Query Store for this plan ID.", "Plan Not Found", MessageBoxButton.OK, MessageBoxImage.Information);
+                PlanMessage("No query plan found in Query Store for this plan ID.", "Plan Not Found", MessageBoxImage.Information);
                 return;
             }
 
-            _ = OpenPlanTab(plan, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
+            await OpenPlanTab(plan, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
         }
         finally
         {
