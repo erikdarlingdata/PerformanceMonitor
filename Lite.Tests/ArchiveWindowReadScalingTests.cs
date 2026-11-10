@@ -430,13 +430,12 @@ VALUES ({_nextId++}, {Ts(Whole(NowUtc.AddDays(-10)))}, {ServerId}, 'TestSrv', 'D
         {
             using (_duckDb.AcquireWriteLock(waitBudget))
             {
-                var waitingBefore = DuckDbInitializer.WaitingReadCountForTests;
                 writeLockTaken.Set();
                 if (!startReader.Wait(waitBudget))
                 {
                     return "the test never started the reader";
                 }
-                if (!TestWait.TryWaitUntil(() => DuckDbInitializer.WaitingReadCountForTests > waitingBefore, waitBudget, TimeSpan.FromMilliseconds(1)))
+                if (!TestWait.TryWaitUntil(() => _duckDb.WaitingReaderCountForTests > 0, waitBudget, TimeSpan.FromMilliseconds(1)))
                 {
                     return "the read never reached the lock wait";
                 }
