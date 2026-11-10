@@ -853,7 +853,7 @@ public sealed partial class DarlingWorker
     /// then one run goes through and reads each database's <c>readonly_reason</c> again. The read runs in the
     /// sweep body and carries the sweep deadline like every other store command there. False when the store cannot answer, so the collector runs.
     /// </summary>
-    internal async Task<bool> IsQueryStoreReadableSecondaryAsync(ServerLoopState server, ServerRuntime runtime, CancellationToken cancellationToken)
+    internal async Task<bool> QueryStoreHintsStandsDownAsync(ServerLoopState server, ServerRuntime runtime, CancellationToken cancellationToken)
     {
         if (QueryStoreReadableSecondaryOverride is { } answer)
         {
@@ -1103,17 +1103,19 @@ public sealed partial class DarlingWorker
                        statement skips such a database (readonly_reason & 8), so a run there reads the database list, collects
                        nothing and logs a success with zero rows every slot, which get_collection_health reads as a run that needs
                        a look. The slot is served like the backoff's above (counted, the stamp moved on) and the run is skipped, so
-                       no collection_log row is written. The role is the server's last known one in the store, the facts the Query
-                       Store reads' not_collected answer is built from: the newest query_store_health capture, and ag_replica_role
-                       when that capture has no database Query Store is read for. It is asked again at every slot, so a server that
-                       becomes the primary runs the collector at its next slot and one that becomes a secondary stops at its next.
+                       no collection_log row is written. The answer comes from three facts in the store: the
+                       newest query_store_health capture, ag_replica_role when that capture has no database Query Store is read
+                       for, and the collector's own newest run, which is the only one left once the capture has aged out of
+                       retention. It is asked again at every slot. A server that becomes a secondary stops at its next slot; one
+                       stood down on its own run that stored no row runs again once that run is an hour old, so a promoted
+                       forwarder is found within the hour.
                        A store that cannot answer runs the collector. get_collection_health lists the collector as not_collected
                        with the same sentence. */
                     if (string.Equals(name, QueryStoreHintsCollector.Instance.Name, StringComparison.Ordinal)
-                        && await IsQueryStoreReadableSecondaryAsync(server, runtime, cancellationToken))
+                        && await QueryStoreHintsStandsDownAsync(server, runtime, cancellationToken))
                     {
                         _logger.LogDebug(
-                            "  [{Server}] {Collector} not run this slot: every Query Store database on the server is a readable secondary, so there is nothing for it to read (#8361)",
+                            "  [{Server}] {Collector} not run this slot: its last run found no database to capture, or every Query Store database on the server is a readable secondary, so there is nothing for it to read (#8361, #8541)",
                             server.Config.DisplayName, name);
                         continue;
                     }

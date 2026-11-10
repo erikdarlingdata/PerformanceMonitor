@@ -189,7 +189,8 @@ public sealed class McpConfigTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Filter to a specific database. Omit for all databases.")] string? database_name = null)
+        [Description("Filter to a specific database. Omit for all databases.")] string? database_name = null,
+        McpCollectorRunTimes? runTimes = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -244,7 +245,9 @@ public sealed class McpConfigTools
             /* A snapshot that predates a role change passes the tempdb-only check above, so a readable secondary's reason rides on
                every data answer, with the capture's age when it is older than a few hourly cycles. */
             var secondaryNote = await McpRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(dataService, resolved.ServerId, resolved.DisplayName);
-            var staleNote = QueryStoreSnapshotStaleness.Note(DateTime.SpecifyKind(capturedAt, DateTimeKind.Utc), DateTime.UtcNow, "query_store_health");
+            var staleNote = QueryStoreSnapshotStaleness.Note(
+                DateTime.SpecifyKind(capturedAt, DateTimeKind.Utc), DateTime.UtcNow, "query_store_health",
+                runTimes?.IsCollectorEnabled(resolved.ServerId, "query_store_health") ?? true);
             return JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,

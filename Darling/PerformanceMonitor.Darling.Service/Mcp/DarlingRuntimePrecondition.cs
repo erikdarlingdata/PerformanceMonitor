@@ -290,7 +290,7 @@ ORDER BY lower(database_name), database_name";
         }
 
         var message = CollectorRuntimePrecondition.QueryStoreDisabledMessage(serverName, states, observedUtc);
-        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
+        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.QueryStoreDisabledStatusWord(states), message);
     }
 
     /// <summary>

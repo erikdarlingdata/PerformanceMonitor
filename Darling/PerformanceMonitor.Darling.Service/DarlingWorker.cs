@@ -634,7 +634,7 @@ public sealed partial class DarlingWorker : BackgroundService
     /// <summary>
     /// Test seam (#8361): the answer to whether the server with this id is a readable secondary for every Query Store database,
     /// which decides whether a <c>query_store_hints</c> slot runs. Null in production, which asks the store
-    /// (<see cref="IsQueryStoreReadableSecondaryAsync"/>).
+    /// (<see cref="QueryStoreHintsStandsDownAsync"/>).
     /// </summary>
     internal Func<int, bool>? QueryStoreReadableSecondaryOverride { get; set; }
 

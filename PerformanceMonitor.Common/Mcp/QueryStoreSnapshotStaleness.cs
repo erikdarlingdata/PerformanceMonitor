@@ -31,7 +31,7 @@ public static class QueryStoreSnapshotStaleness
     /// <paramref name="collectorName"/> names the hourly collector that writes it. <paramref name="collectorEnabled"/> is whether that
     /// collector's schedule runs it on this server: a disabled collector takes no newer capture, and the note says that instead of
     /// naming a cadence and sending the reader to look for a failed run.</summary>
-    public static string? Note(DateTime capturedUtc, DateTime nowUtc, string collectorName, bool collectorEnabled = true)
+    public static string? Note(DateTime capturedUtc, DateTime nowUtc, string collectorName, bool collectorEnabled)
     {
         var age = nowUtc - capturedUtc;
         if (age < Threshold) return null;

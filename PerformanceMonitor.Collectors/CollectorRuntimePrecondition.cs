@@ -928,14 +928,16 @@ public static class CollectorRuntimePrecondition
             if (secondary.Count > 0)
             {
                 var capped = readOnly.Where(s => ((s.ReadonlyReason ?? 0) & ReadableSecondaryReadonlyBit) == 0).ToList();
-                return $"Query Store is READ_ONLY and recording nothing new on {Describe(capped)} of " +
-                       $"{serverName}{observed}, and no database this read covers is in READ_WRITE. A READ_ONLY " +
-                       "Query Store still answers queries about what it already holds, which is why this looks " +
-                       "like a quiet server rather than a stopped one. It is almost always the storage cap: " +
-                       "check readonly_reason with get_query_store_health, raise MAX_STORAGE_SIZE_MB or clear " +
-                       "space, then ALTER DATABASE [name] SET QUERY_STORE (OPERATION_MODE = READ_WRITE). " +
-                       $"{Describe(secondary)} is READ_ONLY for another reason: a secondary replica " +
-                       "(readonly_reason 8), which is its normal state and needs no change. " +
+                return $"Query Store is READ_ONLY and recording nothing new on {Names(capped)} of {serverName}{observed}, " +
+                       $"{capped.Count.ToString(CultureInfo.InvariantCulture)} of the {states.Count.ToString(CultureInfo.InvariantCulture)} " +
+                       "databases this read covers, and none of them is in READ_WRITE. A READ_ONLY Query Store still answers " +
+                       "queries about what it already holds, which is why this looks like a quiet server rather than a " +
+                       $"stopped one. For {Names(capped)} it is almost always the storage cap: check readonly_reason with " +
+                       "get_query_store_health, raise MAX_STORAGE_SIZE_MB or clear space, then ALTER DATABASE [name] SET " +
+                       "QUERY_STORE (OPERATION_MODE = READ_WRITE). " +
+                       (secondary.Count == 1
+                           ? $"{Names(secondary)} is READ_ONLY for another reason: it is a secondary replica (readonly_reason 8), its normal state, and needs no change. "
+                           : $"{Names(secondary)} are READ_ONLY for another reason: each is a secondary replica (readonly_reason 8), its normal state, and needs no change. ") +
                        PreconditionEpilogue;
             }
 
@@ -957,6 +959,46 @@ public static class CollectorRuntimePrecondition
 
     /// <summary>The engine's readable-secondary bit in <c>readonly_reason</c> (the same bit the collectors gate on, #1558).</summary>
     public const int ReadableSecondaryReadonlyBit = 8;
+
+    /// <summary>
+    /// #8541: the collection_log note of a <c>query_store_hints</c> run that captured no database because every database whose
+    /// Query Store is on is a readable secondary. The run read each database's own <c>readonly_reason</c>, so the note is the
+    /// standing record of that once the <c>query_store_health</c> capture has aged out of retention.
+    /// </summary>
+    public const string QueryStoreAllSecondaryRunNote =
+        "No database captured: every database whose Query Store is on is a read-only secondary replica (readonly_reason 8).";
+
+    /// <summary>
+    /// The <c>status</c> word that goes with <see cref="QueryStoreDisabledMessage"/> for the same states:
+    /// <see cref="NotCollectedStatusWord"/> when the message is the secondary-replica one (no database in ERROR, and every
+    /// READ_ONLY database carries the bit), because nothing on the server is in the way and there is no step to take;
+    /// <see cref="StatusWord"/> otherwise.
+    /// </summary>
+    public static string QueryStoreDisabledStatusWord(IReadOnlyList<QueryStoreDatabaseState> states)
+    {
+        if (states is null || states.Any(s => IsErrored(s.ActualState)))
+        {
+            return StatusWord;
+        }
+
+        var readOnly = states.Where(s => IsReadOnly(s.ActualState)).ToList();
+        return readOnly.Count > 0 && readOnly.All(s => ((s.ReadonlyReason ?? 0) & ReadableSecondaryReadonlyBit) != 0)
+            ? NotCollectedStatusWord
+            : StatusWord;
+    }
+
+    /// <summary>Database names alone, for a sentence about some of the databases a read covers: "A", "A and B", "A, B and C", or the first three and how many more.</summary>
+    private static string Names(IReadOnlyList<QueryStoreDatabaseState> states)
+    {
+        var names = states.Select(s => s.DatabaseName).ToList();
+        return names.Count switch
+        {
+            1 => names[0],
+            2 => $"{names[0]} and {names[1]}",
+            3 => $"{names[0]}, {names[1]} and {names[2]}",
+            _ => $"{names[0]}, {names[1]}, {names[2]} and {(names.Count - 3).ToString(CultureInfo.InvariantCulture)} more",
+        };
+    }
 
     /// <summary>The <c>status</c> word of <see cref="QueryStoreReadableSecondaryMessage"/>: the data is not collected here, and the reason is not a fault to repair.</summary>
     public const string NotCollectedStatusWord = "not_collected";

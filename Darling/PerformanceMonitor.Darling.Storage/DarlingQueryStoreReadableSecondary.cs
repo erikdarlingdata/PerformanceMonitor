@@ -45,7 +45,8 @@ SELECT
     run.fanout_item_count::bigint,
     run.log_id IS NOT NULL,
     hints.rows_collected::bigint,
-    hints.age_seconds
+    hints.age_seconds,
+    hints.note
 FROM (SELECT 1) AS one
 LEFT JOIN LATERAL (
     SELECT cl.log_id, cl.fanout_item_count
@@ -55,7 +56,7 @@ LEFT JOIN LATERAL (
     ORDER BY cl.collection_time DESC
     LIMIT 1) AS run ON TRUE
 LEFT JOIN LATERAL (
-    SELECT cl.rows_collected, EXTRACT(EPOCH FROM ((now() AT TIME ZONE 'UTC') - cl.collection_time))::double precision AS age_seconds
+    SELECT cl.rows_collected, EXTRACT(EPOCH FROM ((now() AT TIME ZONE 'UTC') - cl.collection_time))::double precision AS age_seconds, cl.error_message AS note
     FROM collection_log AS cl
     WHERE cl.server_id = $1 AND cl.collector_name = 'query_store_hints' AND cl.status = 'SUCCESS'
       AND cl.collection_time > COALESCE((SELECT MAX(h2.capture_time) FROM v_query_store_health AS h2 WHERE h2.server_id = $1), '-infinity'::timestamp)
@@ -122,10 +123,12 @@ LEFT JOIN LATERAL (
                 return (null, false);
             }
 
+            var ownRunNote = reader.IsDBNull(8) ? null : reader.GetString(8);
             var ownRun = OwnRunCapturedNothing(
                 reader.IsDBNull(6) ? null : reader.GetInt64(6),
                 reader.IsDBNull(7) ? null : reader.GetDouble(7),
-                ownRunMaxAge);
+                ownRunMaxAge,
+                ownRunNote);
             return (Message(
                 serverName,
                 reader.IsDBNull(0) ? null : reader.GetString(0),
@@ -135,7 +138,8 @@ LEFT JOIN LATERAL (
                 healthCaptureRefreshes,
                 reader.IsDBNull(4) ? null : reader.GetInt64(4),
                 reader.GetBoolean(5),
-                ownRun), ownRun);
+                ownRun,
+                ownRun && OwnRunSaysSecondary(ownRunNote)), ownRun);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -184,10 +188,17 @@ LEFT JOIN LATERAL (
     /// </summary>
     public static string? Message(
         string serverName, string? agReplicaRole, int healthDatabases, int healthSecondaryDatabases, bool replicaConfigured, bool healthCaptureRefreshes,
-        long? newerRunFanout, bool newerRunExists, bool ownRunCapturedNothing)
+        long? newerRunFanout, bool newerRunExists, bool ownRunCapturedNothing, bool ownRunSaysSecondary = false)
     {
         /* A live primary's run stores zero rows most slots (closed intervals only), so its rows say nothing; the enumeration does. */
         var queryStoreRunFoundDatabases = newerRunExists && (newerRunFanout ?? 0) > 0;
+        if (ownRunSaysSecondary && !queryStoreRunFoundDatabases)
+        {
+            /* #8541: the collector's own run read each database's readonly_reason and logged that every one was a secondary
+               (ownRunSaysSecondary). That needs no capture, so it answers once the capture has aged out of retention. */
+            return CollectorRuntimePrecondition.QueryStoreReadableSecondaryMessage(serverName, agReplicaRole, 1, 1, replicaConfigured, SettingClause);
+        }
+
         var captureCounts = healthCaptureRefreshes
             || (ownRunCapturedNothing && !queryStoreRunFoundDatabases)
             || (!RoleAnswers(agReplicaRole) && newerRunExists && (newerRunFanout ?? 0) == 0);
@@ -206,8 +217,17 @@ LEFT JOIN LATERAL (
     /// null; null here when there is no such run), and is no older than
     /// <paramref name="maxAge"/> when one is given (<paramref name="ageSeconds"/> on the store's clock).
     /// </summary>
-    public static bool OwnRunCapturedNothing(long? rowsCollected, double? ageSeconds, TimeSpan? maxAge) =>
-        rowsCollected == 0 && (maxAge is null || (ageSeconds ?? double.MaxValue) <= maxAge.Value.TotalSeconds);
+    /// <paramref name="note"/> is the run's <c>error_message</c>: a run that carries a note other than
+    /// <see cref="CollectorRuntimePrecondition.QueryStoreAllSecondaryRunNote"/> (a database's read failed, or the pass budget ended
+    /// the loop) did not read every database, and is no answer.
+    public static bool OwnRunCapturedNothing(long? rowsCollected, double? ageSeconds, TimeSpan? maxAge, string? note) =>
+        rowsCollected == 0
+        && (string.IsNullOrWhiteSpace(note) || OwnRunSaysSecondary(note))
+        && (maxAge is null || (ageSeconds ?? double.MaxValue) <= maxAge.Value.TotalSeconds);
+
+    /// <summary>Whether a run's note is the one a <c>query_store_hints</c> run logs when every database it read was a readable secondary.</summary>
+    public static bool OwnRunSaysSecondary(string? note) =>
+        note is not null && note.Contains(CollectorRuntimePrecondition.QueryStoreAllSecondaryRunNote, StringComparison.Ordinal);
 
     /// <summary>
     /// Whether a collected <c>ag_replica_role</c> names an Availability Group role, PRIMARY or SECONDARY. Standalone (a server
@@ -255,7 +275,8 @@ SELECT ids.server_id,
        run.fanout_item_count::bigint,
        run.log_id IS NOT NULL,
        hints.rows_collected::bigint,
-       hints.age_seconds
+       hints.age_seconds,
+       hints.note
 FROM ids
 LEFT JOIN role ON role.server_id = ids.server_id
 LEFT JOIN newest AS n ON n.server_id = ids.server_id
@@ -268,7 +289,7 @@ LEFT JOIN LATERAL (
     ORDER BY cl.collection_time DESC
     LIMIT 1) AS run ON TRUE
 LEFT JOIN LATERAL (
-    SELECT cl.rows_collected, EXTRACT(EPOCH FROM ((now() AT TIME ZONE 'UTC') - cl.collection_time))::double precision AS age_seconds
+    SELECT cl.rows_collected, EXTRACT(EPOCH FROM ((now() AT TIME ZONE 'UTC') - cl.collection_time))::double precision AS age_seconds, cl.error_message AS note
     FROM collection_log AS cl
     WHERE cl.server_id = ids.server_id AND cl.collector_name = 'query_store_hints' AND cl.status = 'SUCCESS'
       AND cl.collection_time > COALESCE(n.capture_time, '-infinity'::timestamp)
@@ -306,6 +327,12 @@ LEFT JOIN LATERAL (
                     continue;
                 }
 
+                var fleetNote = reader.IsDBNull(9) ? null : reader.GetString(9);
+                var fleetOwnRun = OwnRunCapturedNothing(
+                    reader.IsDBNull(7) ? null : reader.GetInt64(7),
+                    reader.IsDBNull(8) ? null : reader.GetDouble(8),
+                    maxAge: null,
+                    fleetNote);
                 var message = Message(
                     server.ServerName,
                     reader.IsDBNull(1) ? null : reader.GetString(1),
@@ -315,10 +342,8 @@ LEFT JOIN LATERAL (
                     server.HealthCaptureRefreshes,
                     reader.IsDBNull(5) ? null : reader.GetInt64(5),
                     reader.GetBoolean(6),
-                    OwnRunCapturedNothing(
-                        reader.IsDBNull(7) ? null : reader.GetInt64(7),
-                        reader.IsDBNull(8) ? null : reader.GetDouble(8),
-                        maxAge: null));
+                    fleetOwnRun,
+                    fleetOwnRun && OwnRunSaysSecondary(fleetNote));
                 if (message is not null)
                 {
                     messages[server.ServerId] = message;

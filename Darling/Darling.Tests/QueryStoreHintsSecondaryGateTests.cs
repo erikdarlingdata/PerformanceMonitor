@@ -210,19 +210,19 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             var runtime = server.Runtime!;
 
             /* With query_store_health on its default schedule the capture can refresh, so it decides: still gated. */
-            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(server, runtime, ct));
+            Assert.True(await worker.QueryStoreHintsStandsDownAsync(server, runtime, ct));
 
             /* Disabled for this server: the frozen capture no longer counts, and the role says the server is now the primary. */
             worker.ScheduleOverridesForTest = new[] { new ScheduleOverride(id, QueryStoreHealthCollector.Instance.Name, null, null, false) };
-            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(server, runtime, ct));
+            Assert.False(await worker.QueryStoreHintsStandsDownAsync(server, runtime, ct));
 
             /* The reverse: the server becomes a secondary again, and the role alone gates it. */
             await RoleAsync(connection, id, name, "SECONDARY", TimeSpan.FromMinutes(1), ct);
-            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(server, runtime, ct));
+            Assert.True(await worker.QueryStoreHintsStandsDownAsync(server, runtime, ct));
 
             /* A primary with no capture at all is not gated. */
             await RoleAsync(connection, id, name, "PRIMARY", TimeSpan.Zero, ct);
-            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(server, runtime, ct));
+            Assert.False(await worker.QueryStoreHintsStandsDownAsync(server, runtime, ct));
         });
     }
 
@@ -290,7 +290,7 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             foreach (var (id, name) in new[] { (quietId, quiet), (oldRunId, oldRun), (offId, off) })
             {
                 var server = DailyRunKit.MakeServer(id, Hints);
-                Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(server, server.Runtime!, ct));
+                Assert.False(await worker.QueryStoreHintsStandsDownAsync(server, server.Runtime!, ct));
                 Assert.Null(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, id, name, ct));
             }
         });
@@ -330,8 +330,8 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             var standbyServer = DailyRunKit.MakeServer(standbyId, Hints);
             var promotedServer = DailyRunKit.MakeServer(promotedId, Hints);
 
-            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(standbyServer, standbyServer.Runtime!, ct));
-            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(promotedServer, promotedServer.Runtime!, ct));
+            Assert.True(await worker.QueryStoreHintsStandsDownAsync(standbyServer, standbyServer.Runtime!, ct));
+            Assert.False(await worker.QueryStoreHintsStandsDownAsync(promotedServer, promotedServer.Runtime!, ct));
             Assert.NotNull(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, standbyId, standby, ct));
             Assert.Null(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, promotedId, promoted, ct));
 
@@ -342,7 +342,7 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             await CaptureAsync(connection, quietId, quiet, "db1", 8, TimeSpan.FromDays(19), ct);
             worker.ScheduleOverridesForTest = new[] { new ScheduleOverride(quietId, QueryStoreHealthCollector.Instance.Name, null, null, false) };
             var quietServer = DailyRunKit.MakeServer(quietId, Hints);
-            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(quietServer, quietServer.Runtime!, ct));
+            Assert.False(await worker.QueryStoreHintsStandsDownAsync(quietServer, quietServer.Runtime!, ct));
         });
     }
 
@@ -369,15 +369,15 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             var runtime = server.Runtime!;
 
             /* No role row at all: the capture decides, and the slot is gated. */
-            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(server, runtime, ct));
+            Assert.True(await worker.QueryStoreHintsStandsDownAsync(server, runtime, ct));
 
             /* Standalone carries no answer against the capture either. */
             await RoleAsync(connection, id, name, "Standalone", TimeSpan.FromMinutes(5), ct);
-            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(server, runtime, ct));
+            Assert.True(await worker.QueryStoreHintsStandsDownAsync(server, runtime, ct));
 
             /* PRIMARY contradicts the frozen capture: a failover, and the collector runs. */
             await RoleAsync(connection, id, name, "PRIMARY", TimeSpan.FromMinutes(1), ct);
-            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(server, runtime, ct));
+            Assert.False(await worker.QueryStoreHintsStandsDownAsync(server, runtime, ct));
         });
     }
 
@@ -413,8 +413,8 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             var standbyServer = DailyRunKit.MakeServer(standbyId, Hints);
             var primaryServer = DailyRunKit.MakeServer(primaryId, Hints);
 
-            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(standbyServer, standbyServer.Runtime!, ct));
-            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(primaryServer, primaryServer.Runtime!, ct));
+            Assert.True(await worker.QueryStoreHintsStandsDownAsync(standbyServer, standbyServer.Runtime!, ct));
+            Assert.False(await worker.QueryStoreHintsStandsDownAsync(primaryServer, primaryServer.Runtime!, ct));
 
             var standbyRead = await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, standbyId, standby, ct);
             Assert.NotNull(standbyRead);
@@ -472,21 +472,21 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             };
 
             var forwarderServer = DailyRunKit.MakeServer(forwarderId, Hints);
-            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(forwarderServer, forwarderServer.Runtime!, ct));
+            Assert.True(await worker.QueryStoreHintsStandsDownAsync(forwarderServer, forwarderServer.Runtime!, ct));
             Assert.NotNull(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, forwarderId, forwarder, ct));
 
             var promotedServer = DailyRunKit.MakeServer(promotedId, Hints);
-            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(promotedServer, promotedServer.Runtime!, ct));
+            Assert.False(await worker.QueryStoreHintsStandsDownAsync(promotedServer, promotedServer.Runtime!, ct));
             Assert.Null(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, promotedId, promoted, ct));
 
             var probeServer = DailyRunKit.MakeServer(probeId, Hints);
-            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(probeServer, probeServer.Runtime!, ct));
+            Assert.False(await worker.QueryStoreHintsStandsDownAsync(probeServer, probeServer.Runtime!, ct));
             Assert.NotNull(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, probeId, probe, ct));
         });
     }
 
     /// <summary>The note a <c>query_store_hints</c> run logs when it captured no database because every one it read is a readable secondary.</summary>
-    private const string SecondaryRunNote = "No database captured: every database whose Query Store is on is a read-only secondary replica (readonly_reason 8).";
+    private const string SecondaryRunNote = CollectorRuntimePrecondition.QueryStoreAllSecondaryRunNote;
 
     /// <summary>A successful <c>query_store_hints</c> run that carries a note in <c>error_message</c>, as the runner logs one.</summary>
     private static Task NotedHintsRunAsync(NpgsqlConnection c, int id, string name, int rows, TimeSpan age, string note, CancellationToken ct) =>
@@ -536,11 +536,11 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
 
             Assert.NotNull(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, recordedId, recorded, ct));
             var recordedServer = DailyRunKit.MakeServer(recordedId, Hints);
-            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(recordedServer, recordedServer.Runtime!, ct));
+            Assert.True(await worker.QueryStoreHintsStandsDownAsync(recordedServer, recordedServer.Runtime!, ct));
 
             Assert.NotNull(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, probeId, probe, ct));
             var probeServer = DailyRunKit.MakeServer(probeId, Hints);
-            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(probeServer, probeServer.Runtime!, ct));
+            Assert.False(await worker.QueryStoreHintsStandsDownAsync(probeServer, probeServer.Runtime!, ct));
 
             var fleet = await DarlingQueryStoreReadableSecondary.MessagesAsync(postgres, new[]
             {
@@ -585,10 +585,10 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             };
 
             var bareServer = DailyRunKit.MakeServer(bareId, Hints);
-            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(bareServer, bareServer.Runtime!, ct));
+            Assert.False(await worker.QueryStoreHintsStandsDownAsync(bareServer, bareServer.Runtime!, ct));
 
             var frozenServer = DailyRunKit.MakeServer(frozenId, Hints);
-            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(frozenServer, frozenServer.Runtime!, ct));
+            Assert.False(await worker.QueryStoreHintsStandsDownAsync(frozenServer, frozenServer.Runtime!, ct));
             Assert.Null(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, frozenId, frozen, ct));
             var fleet = await DarlingQueryStoreReadableSecondary.MessagesAsync(
                 postgres, new[] { new DarlingQueryStoreReadableSecondary.FleetServer(frozenId, frozen, false) }, 30, ct);
@@ -616,7 +616,7 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             worker.ScheduleOverridesForTest = new[] { new ScheduleOverride(id, QueryStoreHealthCollector.Instance.Name, null, null, false) };
 
             var server = DailyRunKit.MakeServer(id, Hints);
-            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(server, server.Runtime!, ct));
+            Assert.True(await worker.QueryStoreHintsStandsDownAsync(server, server.Runtime!, ct));
             Assert.Null(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, id, name, ct));
         });
     }
@@ -684,14 +684,14 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             };
 
             var agedOutServer = DailyRunKit.MakeServer(agedOutId, Hints);
-            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(agedOutServer, agedOutServer.Runtime!, ct));
+            Assert.True(await worker.QueryStoreHintsStandsDownAsync(agedOutServer, agedOutServer.Runtime!, ct));
             Assert.Null(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, agedOutId, agedOut, ct));
 
             var probeServer = DailyRunKit.MakeServer(probeId, Hints);
-            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(probeServer, probeServer.Runtime!, ct));
+            Assert.False(await worker.QueryStoreHintsStandsDownAsync(probeServer, probeServer.Runtime!, ct));
 
             var capturingServer = DailyRunKit.MakeServer(capturingId, Hints);
-            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(capturingServer, capturingServer.Runtime!, ct));
+            Assert.False(await worker.QueryStoreHintsStandsDownAsync(capturingServer, capturingServer.Runtime!, ct));
         });
     }
 
