@@ -261,14 +261,15 @@ public sealed class OfflineServerEmptyAnswerToolTests : IClassFixture<SharedDuck
     }
 
     /// <summary>
-    /// A server added before the log's retention horizon that has only ever logged failed runs has no SUCCESS row to find. Darling reads it
-    /// Offline through its registration, so Lite answers the same: <c>unavailable</c>, not a false "nothing to find". One added minutes ago is
-    /// still waiting for its first collection and keeps the tools' own answer.
+    /// A server that has only ever logged failed runs has no SUCCESS row to find, and its failed rows say the collectors have reached it
+    /// and been refused (#8464): Darling reads it Offline whatever its registration's age, and Lite answers the same, <c>unavailable</c> with
+    /// the lead that sends the reader to the collectors' errors, for a server added before the retention horizon and for one added minutes
+    /// ago alike. A server with no row at all keeps the tools' own answer.
     /// </summary>
     [Theory]
     [InlineData(-400, "unavailable")]
-    [InlineData(-0.01, "empty")]
-    public async Task ServerNeverSucceeded_IsOfflineOnlyWhenAddedBeforeTheRetentionHorizon(double addedDaysAgo, string expected)
+    [InlineData(-0.01, "unavailable")]
+    public async Task ServerNeverSucceeded_IsOffline_WhateverItsAge(double addedDaysAgo, string expected)
     {
         var name = "OfflineNeverSucceeded" + Guid.NewGuid().ToString("N")[..6];
         var server = new ServerConnection
@@ -286,19 +287,19 @@ public sealed class OfflineServerEmptyAnswerToolTests : IClassFixture<SharedDuck
         Assert.Equal(expected, root.GetProperty("status").GetString());
         if (expected == "unavailable")
         {
-            Assert.StartsWith(name + " is offline: the store holds no successful collection from it", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.StartsWith(name + " is offline: its collectors run and every collection fails", root.GetProperty("message").GetString(), StringComparison.Ordinal);
         }
     }
 
     /// <summary>
-    /// The analysis reads run their window probe on a <see cref="LocalDataService"/> of their own, not the host's. The same 400-day-old server
-    /// with only failed runs must answer <c>unavailable</c> there too, as Darling's <c>get_analysis_findings</c> does, and one added minutes ago
-    /// keeps <c>empty</c>.
+    /// The analysis reads run their window probe on a <see cref="LocalDataService"/> of their own, not the host's. A server with only failed
+    /// runs must answer <c>unavailable</c> there too, as Darling's <c>get_analysis_findings</c> does, whether it was added 400 days ago or
+    /// minutes ago (#8464).
     /// </summary>
     [Theory]
     [InlineData(-400, "unavailable")]
-    [InlineData(-0.01, "empty")]
-    public async Task AnalysisFindings_ForAServerThatNeverSucceeded_AreOfflineOnlyWhenAddedBeforeTheRetentionHorizon(double addedDaysAgo, string expected)
+    [InlineData(-0.01, "unavailable")]
+    public async Task AnalysisFindings_ForAServerThatNeverSucceeded_AreOffline_WhateverItsAge(double addedDaysAgo, string expected)
     {
         var name = "OfflineAnalysis" + Guid.NewGuid().ToString("N")[..6];
         var server = new ServerConnection
@@ -315,7 +316,7 @@ public sealed class OfflineServerEmptyAnswerToolTests : IClassFixture<SharedDuck
         Assert.Equal(expected, root.GetProperty("status").GetString());
         if (expected == "unavailable")
         {
-            Assert.StartsWith(name + " is offline: the store holds no successful collection from it", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.StartsWith(name + " is offline: its collectors run and every collection fails", root.GetProperty("message").GetString(), StringComparison.Ordinal);
         }
     }
 

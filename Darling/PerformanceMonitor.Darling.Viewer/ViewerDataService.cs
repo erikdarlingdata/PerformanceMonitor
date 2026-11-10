@@ -190,6 +190,11 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// </summary>
     public DateTime? RegisteredAt { get; }
 
+    /// <summary>#8464: whether any collector has run against this server, a failed attempt included, from the registry read and refreshed
+    /// by the status poll before <see cref="ApplyFreshness"/>. With no successful collection it tells a server the collectors reach and are
+    /// refused by (Offline) from one no collector has reached yet (awaiting its first collection).</summary>
+    public bool Attempted { get; set; }
+
     /// <summary>When the service's connect to this server first failed in the current outage (UTC), from <c>servers.connect_down_since</c>
     /// (#7590), or null while the last connect succeeded. Set by the status poll before <see cref="ApplyFreshness"/>; set, the server reads
     /// Offline at once with the reason "Server unreachable since ...".</summary>
@@ -386,7 +391,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
            have lost) stops counting here, before the dot, the tooltip, the tab header and Run all collectors now read it. */
         ConnectDownSince = ServerHealthClassifier.EffectiveConnectDownSince(lastCollectionUtc, ConnectDownSince);
         var flags = ServerCollectionStatusRules.FlagsFor(
-            ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, RegisteredAt, nowUtc, ConnectDownSince));
+            ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, RegisteredAt, nowUtc, ConnectDownSince, Attempted));
         IsOnline = flags.IsOnline;
         RaiseDotChanged();
         CollectionStale = flags.CollectionStale;

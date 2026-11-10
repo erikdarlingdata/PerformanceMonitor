@@ -248,6 +248,7 @@ public sealed class CollectionCycleRowLiveTests
     private const int ReaderServerOnly = -573505;  // skip rows only
     private const int ReaderServerFailed = -573506;  // a collector SUCCESS, then NEWER failed attempts (#8464)
     private const int ReaderServerDark = -573507;  // failed attempts only (#8464)
+    private const int ReaderServerUntried = -573508;  // registered, no collector row at all (#8464)
     private const int ReaderServerHealed = -573508;  // a failed connect, then a failed collector attempt after it (#8464)
     private const int ReaderServerDown = -573509;  // a failed connect and nothing after it (#8464)
     private static readonly int[] AllIds = [WriterServerId, ServerA, ServerB, ReaderServerOld, ReaderServerOnly, ReaderServerFailed, ReaderServerDark, ReaderServerHealed, ReaderServerDown];
@@ -606,7 +607,7 @@ VALUES ($1, $2, $3, $4, $5, 100, $6, NULL, $7, 80, 20)",
     [Fact]
     public Task Group4b_NewestRowReads_AnswerWithTheNewestSuccess_NotALaterFailedAttempt() => RunReaderAsync(async (f, connection, ct) =>
     {
-        foreach (var (id, name) in new[] { (ReaderServerFailed, "cycle-reader-failed"), (ReaderServerDark, "cycle-reader-dark") })
+        foreach (var (id, name) in new[] { (ReaderServerFailed, "cycle-reader-failed"), (ReaderServerDark, "cycle-reader-dark"), (ReaderServerUntried, "cycle-reader-untried") })
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, id, name, ct);
             await DarlingMcpTestData.ExecAsync(connection, ct,
@@ -635,19 +636,20 @@ VALUES ($1, $2, $3, $4, $5, 100, $6, NULL, $7, 80, 20)",
         Assert.Equal(f.OldRun, await ScalarAsync(f.Postgres, ViewerDataService.ServerSummaryLastCollectionSql, ct, ReaderServerFailed));
         Assert.Null(await ScalarAsync(f.Postgres, ViewerDataService.ServerSummaryLastCollectionSql, ct, ReaderServerDark));
 
-        /* the sidebar dot */
-        var freshness = new Dictionary<int, DateTime>();
+        /* the sidebar dot: the newest success beside whether any collector has run at all */
+        var freshness = new Dictionary<int, (DateTime? Last, bool Attempted)>();
         await using var command = f.Postgres.CreateCommand(ViewerDataService.ServerFreshnessSql);
         await using (var reader = await command.ExecuteReaderAsync(ct))
         {
             while (await reader.ReadAsync(ct))
             {
-                freshness[reader.GetInt32(0)] = reader.GetDateTime(1);
+                freshness[reader.GetInt32(0)] = (reader.IsDBNull(1) ? null : reader.GetDateTime(1), reader.GetBoolean(2));
             }
         }
 
-        Assert.Equal(f.OldRun, freshness[ReaderServerFailed]);
-        Assert.False(freshness.ContainsKey(ReaderServerDark), "a server whose every attempt failed has no freshness row");
+        Assert.Equal((f.OldRun, true), freshness[ReaderServerFailed]);
+        Assert.Equal((null, true), freshness[ReaderServerDark]);
+        Assert.Equal((null, false), freshness[ReaderServerUntried]);
 
         /* get_fleet_overview and the web fleet card: the card's last_collection, which its freshness band is derived from. */
         var nowUtc = DateTime.UtcNow;
@@ -660,11 +662,40 @@ VALUES ($1, $2, $3, $4, $5, 100, $6, NULL, $7, 80, 20)",
         Assert.Equal(f.OldRun, admin.Single(r => r.ServerId == ReaderServerFailed).LastCollection);
         Assert.Null(admin.Single(r => r.ServerId == ReaderServerDark).LastCollection);
 
-        /* The all-failed server reads the same word on list_servers, the Admin grid, the fleet card and the Overview card and dot. */
-        var darkRow = list.Single(s => s.ServerId == ReaderServerDark);
-        var listWord = DarlingMcpDataTools.FreshnessStatus(darkRow.LastCollection, darkRow.RegisteredAt, nowUtc, darkRow.ConnectDownSince);
-        Assert.Equal(listWord, DarlingAdminServersReader.ToAdminServerRow(admin.Single(r => r.ServerId == ReaderServerDark), nowUtc).freshness);
-        Assert.Equal(listWord, ServerCollectionStatusRules.FromFreshness(ServerSummaryItem.ClassifyFreshness(darkRow.LastCollection, darkRow.RegisteredAt, nowUtc)).McpToken());
+        /* The all-failed server is Offline on list_servers, the Admin grid, the fleet card, the Overview card, the dot and the offline note:
+           its collectors have run (every surface reads that beside the newest success) and none has collected. The server with no
+           collector row at all is awaiting its first collection on each of them, and gets no offline note. */
+        var offline = ServerCollectionStatusRules.FromFreshness(ServerFreshness.Offline).McpToken();
+        var awaiting = ServerCollectionStatusRules.FromFreshness(ServerFreshness.NeverCollected).McpToken();
+        foreach (var (id, attempted, word) in new[] { (ReaderServerDark, true, offline), (ReaderServerUntried, false, awaiting) })
+        {
+            var row = list.Single(s => s.ServerId == id);
+            Assert.Null(row.LastCollection);
+            Assert.Equal(attempted, row.Attempted);
+            Assert.Equal(word, DarlingMcpDataTools.FreshnessStatus(row.LastCollection, row.RegisteredAt, nowUtc, row.ConnectDownSince, row.Attempted));
+            var adminRow = admin.Single(r => r.ServerId == id);
+            Assert.Equal(attempted, adminRow.Attempted);
+            Assert.Equal(word, DarlingAdminServersReader.ToAdminServerRow(adminRow, nowUtc).freshness);
+            var card = fleet.Cards.Single(c => c.ServerId == id);
+            Assert.Null(card.LastCollectionTime);
+            Assert.Equal(word, ServerCollectionStatusRules.Classify(card.IsOnline, card.CollectionStale, card.AwaitingFirstCollection).McpToken());
+            var (dotLast, dotAttempted) = freshness[id];
+            Assert.Equal(word, ServerCollectionStatusRules.FromFreshness(ServerSummaryItem.ClassifyFreshness(dotLast, row.RegisteredAt, nowUtc, null, dotAttempted)).McpToken());
+            var note = await DarlingServerOfflineNote.ReadFreshnessAsync(f.Postgres, id, ct);
+            Assert.NotNull(note);
+            Assert.Null(note.Value.Last);
+            Assert.Equal(attempted, note.Value.Attempted);
+            var lead = await DarlingServerOfflineNote.LeadAsync(f.Postgres, id, "cycle-reader", nowUtc, ct);
+            if (attempted)
+            {
+                Assert.NotNull(lead);
+                Assert.Contains("every collection fails", lead);
+            }
+            else
+            {
+                Assert.Null(lead);
+            }
+        }
     });
 
     /// <summary>Group 4c (#8464): what proves a connect is one rule on every surface. The registry's <c>connect_down_since</c> is healed by any

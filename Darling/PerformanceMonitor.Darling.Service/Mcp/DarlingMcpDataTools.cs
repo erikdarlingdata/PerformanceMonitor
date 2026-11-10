@@ -1972,7 +1972,7 @@ public sealed class DarlingMcpDataTools
                    sql_version: "PostgreSQL 18" — so it is documented as deprecated everywhere the payload
                    is described, and retiring it belongs to a later major of the MCP contract, not here. */
                 sql_version = engineVersion,
-                status = FreshnessStatus(s.LastCollection, s.RegisteredAt, nowUtc, s.ConnectDownSince),
+                status = FreshnessStatus(s.LastCollection, s.RegisteredAt, nowUtc, s.ConnectDownSince, s.Attempted),
                 /* #7590: a server the service cannot connect to reads Offline at once, and says why here; all three are null otherwise. */
                 reason = connectDownSince.HasValue
                     ? ServerHealthClassifier.UnreachableReason(connectDownSince.Value, s.LastConnectError)
@@ -3104,10 +3104,10 @@ ORDER BY server_name";
     /// card applies to its 48-hour window.</para>
     /// </summary>
     internal static string FreshnessStatus(
-        DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, DateTime? connectDownSinceUtc = null) =>
+        DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, DateTime? connectDownSinceUtc = null, bool attempted = false) =>
         ServerCollectionStatusRules
             .FromFreshness(ServerHealthClassifier.ClassifyFreshness(
-                lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc, connectDownSinceUtc))
+                lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc, connectDownSinceUtc, attempted))
             .McpToken();
 
     /// <summary>

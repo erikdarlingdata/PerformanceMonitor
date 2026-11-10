@@ -415,10 +415,12 @@ public partial class ViewerServerTab : UserControl
     {
         try
         {
-            var freshness = await _dataService.GetServerFreshnessAsync();
+            var freshness = await _dataService.GetServerCollectionStateAsync();
+            var found = freshness.TryGetValue(_server.ServerId, out var state);
             ServerFreshnessText.Text = FreshnessLabel(
-                freshness.TryGetValue(_server.ServerId, out var lastUtc) ? lastUtc : null,
-                _server.RegisteredAt, DateTime.UtcNow, TabDisplayZone, _server.ConnectDownSince, _server.LastConnectError);
+                found ? state.LastCollectionUtc : null,
+                _server.RegisteredAt, DateTime.UtcNow, TabDisplayZone, _server.ConnectDownSince, _server.LastConnectError,
+                attempted: found ? state.Attempted : _server.Attempted);
         }
         catch
         {
@@ -435,10 +437,10 @@ public partial class ViewerServerTab : UserControl
     /// </summary>
     internal static string FreshnessLabel(
         DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, TimeZoneInfo? zone = null,
-        DateTime? connectDownSinceUtc = null, string? lastConnectError = null)
+        DateTime? connectDownSinceUtc = null, string? lastConnectError = null, bool attempted = false)
     {
         connectDownSinceUtc = ServerHealthClassifier.EffectiveConnectDownSince(lastCollectionUtc, connectDownSinceUtc);
-        var offline = ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, registeredAtUtc, nowUtc, connectDownSinceUtc) == ServerFreshness.Offline;
+        var offline = ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, registeredAtUtc, nowUtc, connectDownSinceUtc, attempted) == ServerFreshness.Offline;
         /* #7590: the service's connect failed. The header says so, with the last values' age and the error, in place of the age-based note. */
         if (connectDownSinceUtc.HasValue)
         {
@@ -448,7 +450,12 @@ public partial class ViewerServerTab : UserControl
 
         if (lastCollectionUtc is null)
         {
-            return offline ? "no collection retained" : "no data collected yet";
+            /* #8464: a server the collectors reach and are refused by on every attempt is offline with nothing collected, so the header
+               says the collectors fail rather than pointing at retention; "no collection retained" is the server whose history retention
+               dropped, and "no data collected yet" the one no collector has reached. */
+            return offline
+                ? attempted ? "offline: collecting, but every collection fails" : "no collection retained"
+                : "no data collected yet";
         }
 
         var collected = $"collected {ViewerTimeHelper.FormatForDisplay(lastCollectionUtc.Value, zone ?? ViewerTimeHelper.CurrentDisplayZone(), "yyyy-MM-dd HH:mm")}";

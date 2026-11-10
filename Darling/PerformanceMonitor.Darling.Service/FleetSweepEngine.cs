@@ -1106,7 +1106,7 @@ public static class FleetSweepEngine
                list_servers share, so the sweep can tell a server that went quiet after the restart from one that was already offline before it. */
             DateTime? lastCollection = null;
             DateTime? registered = null;
-            if (!signals.HasData && await DarlingServerOfflineNote.ReadFreshnessAsync(postgres, serverId, cancellationToken).ConfigureAwait(false) is var (reg, last))
+            if (!signals.HasData && await DarlingServerOfflineNote.ReadFreshnessAsync(postgres, serverId, cancellationToken).ConfigureAwait(false) is var (reg, last, _))
             {
                 registered = reg;
                 lastCollection = last;

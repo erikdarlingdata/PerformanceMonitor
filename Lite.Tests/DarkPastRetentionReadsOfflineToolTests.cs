@@ -138,6 +138,34 @@ public sealed class DarkPastRetentionReadsOfflineToolTests : IClassFixture<Share
 
     /// <summary>A reading with a newest collection is untouched: an old registration does not move a fresh,
     /// stale or offline card.</summary>
+    /// <summary>#8464: a card whose collectors have run and all failed is Offline, not awaiting its first collection, and its Last Collect
+    /// reads "Never" (nothing was collected, so nothing was retained); a card with no collector row at all and a registration inside the
+    /// horizon stays awaiting. The flag changes nothing for a card that has a collection.</summary>
+    [Fact]
+    public void ACardWhoseCollectorsAllFail_IsOffline_AndSaysNever_WhileOneNeverTried_StaysAwaiting()
+    {
+        var now = DateTime.UtcNow;
+        var refused = new ServerSummaryItem();
+        refused.ApplyCollectionFreshness(now, now.AddMinutes(-31), attempted: true);
+        Assert.Equal(ServerFreshness.Offline, refused.CollectionFreshness);
+        Assert.False(refused.HistoryAgedOut);
+        Assert.Equal("Never", refused.LastCollectionDisplay);
+
+        var untried = new ServerSummaryItem();
+        untried.ApplyCollectionFreshness(now, now.AddMinutes(-31), attempted: false);
+        Assert.Equal(ServerFreshness.NeverCollected, untried.CollectionFreshness);
+        Assert.Equal("Never", untried.LastCollectionDisplay);
+
+        var agedOut = new ServerSummaryItem();
+        agedOut.ApplyCollectionFreshness(now, now.AddMonths(-6), attempted: false);
+        Assert.Equal(ServerFreshness.Offline, agedOut.CollectionFreshness);
+        Assert.Equal("None retained (stopped)", agedOut.LastCollectionDisplay);
+
+        var collecting = new ServerSummaryItem { LastCollectionTime = now.AddSeconds(-30) };
+        collecting.ApplyCollectionFreshness(now, now.AddMinutes(-31), attempted: true);
+        Assert.Equal(ServerFreshness.Fresh, collecting.CollectionFreshness);
+    }
+
     [Fact]
     public void AReadingWithANewestCollection_BandsOnTheLadder_WhateverTheRegistration()
     {

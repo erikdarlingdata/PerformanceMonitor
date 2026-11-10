@@ -49,9 +49,10 @@ public sealed partial class ViewerDataService
     public const string ServerFreshnessSql = $@"
 SELECT
     s.server_id,
-    latest.collection_time
+    latest.collection_time,
+    {CollectionAttemptSql.Attempted} AS attempted
 FROM servers AS s
-CROSS JOIN LATERAL
+LEFT JOIN LATERAL
 (
     SELECT collection_time
     FROM v_collection_log
@@ -59,7 +60,7 @@ CROSS JOIN LATERAL
     AND   {CollectionRunSql.SuccessfulCollectorRun}
     ORDER BY collection_time DESC
     LIMIT 1
-) AS latest
+) AS latest ON TRUE
 WHERE s.server_id <> 0";
 
     /// <summary>The servers whose last connect failed (#7590): <c>connect_down_since</c>, the last connect error and the next retry time, from the registry the
@@ -153,16 +154,31 @@ WHERE s.server_id <> 0";
     public async Task<Dictionary<int, DateTime>> GetServerFreshnessAsync(CancellationToken cancellationToken = default)
     {
         var result = new Dictionary<int, DateTime>();
+        foreach (var (serverId, state) in await GetServerCollectionStateAsync(cancellationToken))
+        {
+            if (state.LastCollectionUtc is { } last)
+            {
+                result[serverId] = last;
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>#8464: <see cref="GetServerFreshnessAsync"/>'s read with its second fact: every registered server's newest successful
+    /// collection (null when the retained log holds none) and whether any collector has run against it, a failed attempt included.
+    /// The sidebar dot and the server tab's header band from the pair, so a server tried and refused on every attempt reads Offline
+    /// and one no collector has reached reads as awaiting its first collection.</summary>
+    public async Task<Dictionary<int, (DateTime? LastCollectionUtc, bool Attempted)>> GetServerCollectionStateAsync(CancellationToken cancellationToken = default)
+    {
+        var result = new Dictionary<int, (DateTime? LastCollectionUtc, bool Attempted)>();
 
         await using var command = _dataSource.CreateCommand(ServerFreshnessSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            if (!reader.IsDBNull(1))
-            {
-                result[reader.GetInt32(0)] = reader.GetDateTime(1);
-            }
+            result[reader.GetInt32(0)] = (reader.IsDBNull(1) ? null : reader.GetDateTime(1), reader.GetBoolean(2));
         }
 
         return result;

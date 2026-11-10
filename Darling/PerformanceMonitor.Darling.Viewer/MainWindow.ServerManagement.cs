@@ -239,10 +239,10 @@ public partial class MainWindow
             return;
         }
 
-        Dictionary<int, DateTime> freshness;
+        Dictionary<int, (DateTime? LastCollectionUtc, bool Attempted)> freshness;
         try
         {
-            freshness = await _dataService.GetServerFreshnessAsync();
+            freshness = await _dataService.GetServerCollectionStateAsync();
         }
         catch (Exception ex)
         {
@@ -277,7 +277,10 @@ public partial class MainWindow
 
         foreach (var s in servers)
         {
-            DateTime? last = freshness.TryGetValue(s.ServerId, out var t) ? t : null;
+            DateTime? last = freshness.TryGetValue(s.ServerId, out var t) ? t.LastCollectionUtc : null;
+            /* #8464: whether any collector has run against the server, refreshed with its newest success so a server the collectors
+               start failing against after the registry read bands Offline on this tick, not as awaiting its first collection. */
+            s.Attempted = t.Attempted || s.Attempted;
             s.ConnectDownSince = connectDown.TryGetValue(s.ServerId, out var down) ? down.SinceUtc : null;
             s.LastConnectError = connectDown.TryGetValue(s.ServerId, out var down2) ? down2.Error : null;
             s.NextConnectAttemptUtc = connectDown.TryGetValue(s.ServerId, out var down3) ? down3.NextAttemptUtc : null;

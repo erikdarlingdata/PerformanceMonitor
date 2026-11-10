@@ -203,6 +203,10 @@ AND   {CollectionRunSql.SuccessfulCollectorRun}";
             }
         }
 
+        /* #8464: the second fact the band needs when there is no successful collection: whether any collector has run against the
+           server at all. One with failed rows and no SUCCESS row is Offline; one with no row is awaiting its first collection. */
+        var attempted = lastCollection.HasValue || await HasAnyCollectorRowAsync(serverId);
+
         var summary = new ServerSummaryItem
         {
             DisplayName = displayName,
@@ -226,7 +230,7 @@ AND   {CollectionRunSql.SuccessfulCollectorRun}";
            rather than read inside the band, so the classification stays a pure function of
            (last collection, now) — the shape the viewer's ApplyFreshness already has. The registration rides
            in with the caller for #3967, so every caller's card bands a dark-past-retention server alike. */
-        summary.ApplyCollectionFreshness(DateTime.UtcNow, registeredAtUtc);
+        summary.ApplyCollectionFreshness(DateTime.UtcNow, registeredAtUtc, attempted);
         return summary;
     }
 
@@ -307,6 +311,35 @@ AND   {CollectionRunSql.SuccessfulCollectorRun}";
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// #8464: whether any collector has run against the server, a failed attempt included: the fact that, beside a null
+    /// <see cref="GetLastSuccessfulCollectionAsync"/>, tells a server the collectors reach and are refused by (Offline) from one no
+    /// collector has reached yet (awaiting its first collection). The loop's skipped-slots row is not a collector run and does not count.
+    /// Reads the live table first and then the archive, and stops at the first row found.
+    /// </summary>
+    public async Task<bool> HasAnyCollectorRowAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        foreach (var relation in NewestFirstRelations("collection_log"))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+SELECT 1
+FROM " + relation + $@"
+WHERE server_id = $1
+AND   collector_name <> '{CollectionCycleSkip.CollectorName}'
+LIMIT 1";
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+            var result = await cmd.ExecuteScalarAsync();
+            if (result != null && result != DBNull.Value)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
 
@@ -642,10 +675,10 @@ public class ServerSummaryItem
     /// comes back null. Added before that instant, it bands Offline; added after it, or with no registration,
     /// it keeps the ladder's never-collected reading. The same rule the Darling viewer and fleet card apply.</para>
     /// </summary>
-    public void ApplyCollectionFreshness(DateTime nowUtc, DateTime? registeredAtUtc)
+    public void ApplyCollectionFreshness(DateTime nowUtc, DateTime? registeredAtUtc, bool attempted = false)
     {
         var oldestRetained = RetentionService.OldestRetainedInstant(nowUtc);
-        CollectionFreshness = ServerHealthClassifier.ClassifyFreshness(LastCollectionTime, registeredAtUtc, oldestRetained, nowUtc);
+        CollectionFreshness = ServerHealthClassifier.ClassifyFreshness(LastCollectionTime, registeredAtUtc, oldestRetained, nowUtc, attempted);
         HistoryAgedOut = registeredAtUtc is { } registered && registered < oldestRetained;
     }
 

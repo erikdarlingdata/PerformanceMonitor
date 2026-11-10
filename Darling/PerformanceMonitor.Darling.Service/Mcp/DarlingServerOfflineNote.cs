@@ -41,7 +41,8 @@ internal static class DarlingServerOfflineNote
     internal const string FreshnessSql = $"""
         SELECT
             s.created_date,
-            latest.collection_time AS last_collection
+            latest.collection_time AS last_collection,
+            {CollectionAttemptSql.Attempted} AS attempted
         FROM servers s
         LEFT JOIN LATERAL
         (
@@ -70,7 +71,7 @@ internal static class DarlingServerOfflineNote
         NpgsqlDataSource postgres, int serverId, string displayName, DateTime nowUtc, DateTime? windowEndUtc,
         CancellationToken cancellationToken)
     {
-        if (await ReadFreshnessAsync(postgres, serverId, cancellationToken) is not var (registered, last))
+        if (await ReadFreshnessAsync(postgres, serverId, cancellationToken) is not var (registered, last, attempted))
         {
             return (null, null);
         }
@@ -84,7 +85,7 @@ internal static class DarlingServerOfflineNote
 
         /* #7590: a stored failed connect is Offline whatever the collection age, and the note says so instead of the age. */
         var (connectDownSince, lastConnectError) = await ReadConnectDownAsync(postgres, serverId, cancellationToken);
-        return (LeadFor(displayName, last, registered, nowUtc, connectDownSince, lastConnectError), last);
+        return (LeadFor(displayName, last, registered, nowUtc, connectDownSince, lastConnectError, attempted), last);
     }
 
     /// <summary>The registry's failed-connect state for one server (#7590): since when and the last error, or nulls while the last connect succeeded,
@@ -113,7 +114,7 @@ internal static class DarlingServerOfflineNote
     /// The <see cref="FreshnessSql"/> probe for one server: its registration instant and its newest SUCCESS collector run. Null when the
     /// server is not registered or the read fails, so a caller's diagnostic never turns a finding into an error.
     /// </summary>
-    internal static async Task<(DateTime? Registered, DateTime? Last)?> ReadFreshnessAsync(
+    internal static async Task<(DateTime? Registered, DateTime? Last, bool Attempted)?> ReadFreshnessAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
         try
@@ -127,7 +128,7 @@ internal static class DarlingServerOfflineNote
                 return null;
             }
 
-            return (reader.IsDBNull(0) ? null : reader.GetDateTime(0), reader.IsDBNull(1) ? null : reader.GetDateTime(1));
+            return (reader.IsDBNull(0) ? null : reader.GetDateTime(0), reader.IsDBNull(1) ? null : reader.GetDateTime(1), reader.GetBoolean(2));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -138,10 +139,10 @@ internal static class DarlingServerOfflineNote
     /// <summary>The pure half of <see cref="LeadAsync"/>, over an already-read freshness probe.</summary>
     internal static string? LeadFor(
         string displayName, DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc,
-        DateTime? connectDownSinceUtc = null, string? lastConnectError = null)
+        DateTime? connectDownSinceUtc = null, string? lastConnectError = null, bool attempted = false)
     {
         connectDownSinceUtc = ServerHealthClassifier.EffectiveConnectDownSince(lastCollectionUtc, connectDownSinceUtc);
-        if (DarlingMcpDataTools.FreshnessStatus(lastCollectionUtc, registeredAtUtc, nowUtc, connectDownSinceUtc) != "Offline")
+        if (DarlingMcpDataTools.FreshnessStatus(lastCollectionUtc, registeredAtUtc, nowUtc, connectDownSinceUtc, attempted) != "Offline")
         {
             return null;
         }
@@ -153,10 +154,18 @@ internal static class DarlingServerOfflineNote
                 + ". Nothing is arriving to read, whatever the collectors would otherwise report.";
         }
 
-        return lastCollectionUtc is { } last
-            ? $"{displayName} is offline: the store has had no successful collection from it since "
+        if (lastCollectionUtc is { } last)
+        {
+            return $"{displayName} is offline: the store has had no successful collection from it since "
                 + $"{last.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)} UTC, "
-                + "so nothing is arriving to read, whatever the collectors would otherwise report."
+                + "so nothing is arriving to read, whatever the collectors would otherwise report.";
+        }
+
+        /* #8464: a server the collectors have reached and been refused by on every attempt is told from one whose history retention
+           dropped, so the sentence sends the reader to the collectors' errors (get_collection_health) and not to retention. */
+        return attempted
+            ? $"{displayName} is offline: its collectors run and every collection fails, so the store holds no successful collection "
+                + "from it and nothing is arriving to read; get_collection_health names the failing collectors and their errors."
             : $"{displayName} is offline: the store holds no successful collection from it within its retained history, "
                 + "so nothing is arriving to read, whatever the collectors would otherwise report.";
     }

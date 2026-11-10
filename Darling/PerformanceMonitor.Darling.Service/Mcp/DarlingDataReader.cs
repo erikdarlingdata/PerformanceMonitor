@@ -299,7 +299,8 @@ internal static class DarlingDataReader
         IReadOnlyList<string>? SameMachineAs = null,
         decimal MonthlyCostUsd = 0m,
         DateTime? ConnectDownSince = null,
-        string? LastConnectError = null);
+        string? LastConnectError = null,
+        bool Attempted = false);
 
     /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).
     /// <paramref name="UtcOffsetMinutes"/> is the offset IN FORCE at that collection (V16; null on a pre-V16 row)
@@ -3511,7 +3512,8 @@ internal static class DarlingDataReader
             {SameMachineAsColumnSql},
             COALESCE(c.monthly_cost_usd, 0) AS monthly_cost_usd,
             {ConnectDownSinceSql.Healed} AS connect_down_since,
-            s.last_connect_error
+            s.last_connect_error,
+            {CollectionAttemptSql.Attempted} AS attempted
         FROM servers s
         JOIN config.config_monitored_servers c ON c.server_id = s.server_id
         LEFT JOIN LATERAL
@@ -3549,7 +3551,8 @@ internal static class DarlingDataReader
                 reader.IsDBNull(9) ? null : reader.GetFieldValue<string[]>(9),
                 reader.GetDecimal(10),
                 reader.IsDBNull(11) ? null : reader.GetDateTime(11),
-                reader.IsDBNull(12) ? null : reader.GetString(12)));
+                reader.IsDBNull(12) ? null : reader.GetString(12),
+                reader.GetBoolean(13)));
         }
 
         return rows;

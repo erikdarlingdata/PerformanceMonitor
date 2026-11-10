@@ -345,13 +345,13 @@ public class ServerCollectionFreshnessTests
         Assert.Equal(1, CountOccurrences(source, "new ServerSummaryItem"));
         /* #3967: the stamp carries the caller's registration, so every caller's card bands a server whose
            history has aged out of the archive alike. */
-        Assert.Equal(1, CountOccurrences(source, "ApplyCollectionFreshness(DateTime.UtcNow, registeredAtUtc)"));
+        Assert.Equal(1, CountOccurrences(source, "ApplyCollectionFreshness(DateTime.UtcNow, registeredAtUtc, attempted)"));
 
         /* And the stamp is after the object is built: banding an object that has already been handed back
            would band nothing, and the ordering is the half a count cannot see. */
         Assert.True(
             source.IndexOf("new ServerSummaryItem", StringComparison.Ordinal)
-                < source.IndexOf("ApplyCollectionFreshness(DateTime.UtcNow, registeredAtUtc)", StringComparison.Ordinal),
+                < source.IndexOf("ApplyCollectionFreshness(DateTime.UtcNow, registeredAtUtc, attempted)", StringComparison.Ordinal),
             "The freshness stamp no longer follows the summary it is meant to band.");
     }
 
