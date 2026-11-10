@@ -145,9 +145,12 @@ public sealed class DarlingMcpFleetTools
 
             if (result.TotalServers == 0)
             {
-                return McpHelpers.Status(
-                    "empty",
-                    "No servers are registered yet. The service registers each monitored server on its first successful connection.");
+                /* A scoped web reader whose tags map to no server is told so; the registry may well hold servers it cannot see. */
+                return DarlingServerResolver.WebAllowedServerIds is not null
+                    ? McpHelpers.Status("empty", "No servers are in this token's scope.")
+                    : McpHelpers.Status(
+                        "empty",
+                        "No servers are registered yet. The service registers each monitored server on its first successful connection.");
             }
 
             /* Both branches serialize the SAME result (so a rollup field added later reaches both shapes

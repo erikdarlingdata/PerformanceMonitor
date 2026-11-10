@@ -190,6 +190,43 @@ public sealed class ScopedWebTokenLiveTests
                 """, requestId, Guid.NewGuid(), name + " report", id);
         }
 
+        // Collector overrides that bracket the permitted server's: a fleet catalog that folds the hidden servers' overrides in for a
+        // scoped caller cannot answer 13, whichever way it folds them.
+        foreach (var (id, minutes) in new[] { (41, 13), (42, 9), (43, 17) })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct, """
+                INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, enabled)
+                VALUES ($1, 'wait_stats', $2, TRUE)
+                """, id, minutes);
+        }
+        // The fleet-wide cadence every server shares: the one override the fleet form of the catalog shows.
+        await DarlingMcpTestData.ExecAsync(connection, ct, """
+            INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, enabled)
+            VALUES (NULL, 'wait_stats', 11, TRUE)
+            """);
+        // One job run per server, and one query tag assigned to a query on each server, so the fleet reads have a hidden row to leave out.
+        foreach (var (id, name) in new[] { (41, "finance-server"), (42, "operations-server") })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct, """
+                INSERT INTO job_history
+                (job_history_id, collection_time, server_id, server_name, job_name, category_name, run_status, run_status_desc, run_datetime, run_duration_seconds)
+                VALUES ($1, $2, $3, $4, $5, 'Uncategorized', 1, 'Succeeded', $2, 5)
+                """, CollectionIdGenerator.Next(), sampledAt, id, name, name + "_JOB");
+        }
+        int scopeTag;
+        await using (var tagCommand = connection.CreateCommand())
+        {
+            tagCommand.CommandText = "INSERT INTO config.query_tags (name, parent_id) VALUES ('ScopeTag', NULL) RETURNING id";
+            scopeTag = (int)(await tagCommand.ExecuteScalarAsync(ct))!;
+        }
+        foreach (var id in new[] { 41, 42 })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct, """
+                INSERT INTO config.query_tag_assignments (tag_id, kind, server_id, query_hash, created_by)
+                VALUES ($1, 'hash', $2, '0xABCDEF0123456789', 'scope-test')
+                """, scopeTag, id);
+        }
+
         var prod = await AddTag("PROD", null, 43);
         var finance = await AddTag("Finance", prod, 41);
         await AddTag("Operations", prod, 42);
@@ -198,6 +235,7 @@ public sealed class ScopedWebTokenLiveTests
         using var server = await BuildServer(
             SetFor(ScopedEntry("finance", ReaderToken, finance), ScopedEntry("prod", ParentReaderToken, prod)),
             dataSource: postgres, readAdmission: admission);
+        var problems = new List<string>();
 
         async Task AssertFleetAsync(string token, params int[] expectedIds)
         {
@@ -227,6 +265,30 @@ public sealed class ScopedWebTokenLiveTests
             {
                 Assert.Contains("finance-server_db", body, StringComparison.Ordinal);
             }
+        }
+
+        var (scopedCatalog, scopedCatalogBody) = await Send(server, HttpMethods.Get, "/api/catalog", financeCookie);
+        Assert.Equal(StatusCodes.Status200OK, scopedCatalog.Response.StatusCode);
+        var (sharedCatalog, sharedCatalogBody) = await Send(server, HttpMethods.Get, "/api/catalog", await SignIn(server, SharedToken));
+        Assert.Equal(StatusCodes.Status200OK, sharedCatalog.Response.StatusCode);
+        using (var sharedCatalogJson = JsonDocument.Parse(sharedCatalogBody))
+        using (var scopedCatalogJson = JsonDocument.Parse(scopedCatalogBody))
+        {
+            var sharedIntervals = IntervalsOf(sharedCatalogJson.RootElement).ToList();
+            Assert.Contains(11, sharedIntervals);
+            var scopedIntervals = IntervalsOf(scopedCatalogJson.RootElement).ToList();
+            if (!scopedIntervals.Contains(11) || scopedIntervals.Contains(9) || scopedIntervals.Contains(17))
+            {
+                problems.Add("/api/catalog with no server answered the scoped reader intervals other than the fleet-wide cadence and its own: " + string.Join(",", scopedIntervals.Distinct()));
+            }
+        }
+
+        var (partial, partialBody) = await Send(server, HttpMethods.Get, "/api/read/get_wait_stats?server=finance", financeCookie);
+        Assert.Equal(StatusCodes.Status200OK, partial.Response.StatusCode);
+        Assert.Contains("FINANCE_WAIT", partialBody, StringComparison.Ordinal);
+        if (partial.Request.Query["server"].ToString() != "finance-server")
+        {
+            problems.Add("after authorization the request still carries server=" + partial.Request.Query["server"] + " instead of the canonical finance-server");
         }
 
         var (unscopedRoute, _) = await Send(server, HttpMethods.Get, "/api/ag", financeCookie);
@@ -418,6 +480,15 @@ public sealed class ScopedWebTokenLiveTests
             Assert.True(response.Response.StatusCode == StatusCodes.Status200OK,
                 path + " answered " + response.Response.StatusCode + ": " + body);
             Assert.DoesNotContain("operations-server", body, StringComparison.Ordinal);
+            if (path.StartsWith("/api/read/get_job_history", StringComparison.Ordinal) && !body.Contains("finance-server_JOB", StringComparison.Ordinal))
+            {
+                problems.Add(path + " shows no run for the permitted server, so its hidden-row check proves nothing: " + body);
+            }
+            if ((path.StartsWith("/api/read/list_query_tags", StringComparison.Ordinal) || path.StartsWith("/api/read/get_query_fleet_summary", StringComparison.Ordinal))
+                && !body.Contains("finance-server", StringComparison.Ordinal))
+            {
+                problems.Add(path + " shows nothing for the permitted server, so its hidden-row check proves nothing: " + body);
+            }
             if (path == "/api/read/get_investigation_reports")
             {
                 using var reports = JsonDocument.Parse(body);
@@ -479,6 +550,14 @@ public sealed class ScopedWebTokenLiveTests
             Assert.Equal(StatusCodes.Status200OK, response.Response.StatusCode);
             Assert.Contains("FINANCE_WAIT", body, StringComparison.Ordinal);
             Assert.DoesNotContain("OPERATIONS_WAIT", body, StringComparison.Ordinal);
+
+            var (clash, clashBody) = await PostJson(server, "/api/compose/run",
+                """{"hours":4,"server":"finance-server","panel":""" + panel + "}", financeCookie);
+            if (clash.Response.StatusCode != StatusCodes.Status200OK)
+            {
+                problems.Add("a compose body naming the duplicated exact name answered " + clash.Response.StatusCode + " instead of 200: " + clashBody);
+            }
+            Assert.DoesNotContain("OPERATIONS_WAIT", clashBody, StringComparison.Ordinal);
         }
         finally
         {
@@ -545,5 +624,40 @@ public sealed class ScopedWebTokenLiveTests
         var (revoked, _) = await Send(server, HttpMethods.Get,
             "/api/read/get_cpu_utilization?server=finance-server", financeCookie);
         Assert.Equal(StatusCodes.Status403Forbidden, revoked.Response.StatusCode);
+        var (emptyGrant, emptyGrantBody) = await Send(server, HttpMethods.Get, "/api/read/get_fleet_overview", financeCookie);
+        Assert.Equal(StatusCodes.Status200OK, emptyGrant.Response.StatusCode);
+        Assert.DoesNotContain("operations-server", emptyGrantBody, StringComparison.Ordinal);
+        using var emptyGrantJson = JsonDocument.Parse(emptyGrantBody);
+        if (emptyGrantJson.RootElement.GetProperty("message").GetString() != "No servers are in this token's scope." || emptyGrantBody.Contains("registered", StringComparison.Ordinal))
+        {
+            problems.Add("an emptied grant's get_fleet_overview wording: " + emptyGrantBody);
+        }
+
+        Assert.True(problems.Count == 0, string.Join("\n", problems));
+    }
+
+    /// <summary>Every <c>collector_interval_minutes</c> value in a catalog answer, wherever the read's parameter nodes sit.</summary>
+    private static IEnumerable<int> IntervalsOf(JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (var property in element.EnumerateObject())
+                {
+                    if (property.Name == "collector_interval_minutes" && property.Value.ValueKind == JsonValueKind.Number)
+                    {
+                        yield return property.Value.GetInt32();
+                    }
+
+                    foreach (var inner in IntervalsOf(property.Value)) yield return inner;
+                }
+                break;
+            case JsonValueKind.Array:
+                foreach (var item in element.EnumerateArray())
+                {
+                    foreach (var inner in IntervalsOf(item)) yield return inner;
+                }
+                break;
+        }
     }
 }

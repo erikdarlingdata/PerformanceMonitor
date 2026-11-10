@@ -89,9 +89,20 @@ public static partial class DarlingWebEndpoints
 
             using var run = new WebRouteRun(readLatencyRecorder, CatalogRoute, ReadWindowBand.None, context, readScope.Scope);
             var serverName = context.Request.Query["server"].ToString();
-            if (DarlingWebSeat.FromContext(context).AllowedTagIds is { } catalogTags &&
-                !string.IsNullOrWhiteSpace(serverName))
+            if (DarlingWebSeat.FromContext(context).AllowedTagIds is { } catalogTags)
             {
+                if (string.IsNullOrWhiteSpace(serverName))
+                {
+                    /* The fleet form for a scoped reader keeps the fleet-wide overrides (the cadence every server shares) and the grant's
+                       own servers' overrides, and drops every other server's row before the node is built, so nothing in the answer is
+                       derived from a server the reader may not see. */
+                    var permitted = await AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
+                    var fleetSchedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, null, context.RequestAborted);
+                    var grantSchedules = fleetSchedules.Where(schedule => schedule.ServerId is null || Array.IndexOf(permitted, schedule.ServerId.Value) >= 0).ToList();
+                    run.Complete(ReadOutcome.Ok);
+                    return JsonNodeResult(BuildCatalogNode(null, grantSchedules));
+                }
+
                 var authorizedId = await AuthorizedWebServerAsync(postgres, context, catalogTags);
                 if (authorizedId is null)
                 {

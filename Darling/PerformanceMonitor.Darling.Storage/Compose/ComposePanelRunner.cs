@@ -322,6 +322,11 @@ internal static class ComposePanelRunner
     /// unchanged from before #4442 scope 2 added the wrapper. <paramref name="logger"/> is the one the host's
     /// read-latency recorder carries (<see cref="ReadLatencyRecorder.Logger"/>), where the data-start probe reports
     /// a failure it swallows.</summary>
+    /// <summary>The one answer a scoped caller gets for a scope that names no server it may see: an unknown name, a name outside the
+    /// grant and a name the registry cannot resolve all look the same.</summary>
+    private static ComposeRunOutcome EmptyScopedAnswer() =>
+        ComposeRunOutcome.Ok(new JsonObject { ["sql"] = "", ["rows"] = new JsonArray(), ["annotations"] = new JsonArray() });
+
     internal static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(
         ComposeRunHost host, NpgsqlDataSource postgres, JsonObject body, int clientDeadlineHeadroomSeconds, bool remapClientTimeout, bool includeDataStartFields, System.Threading.CancellationToken cancellationToken,
         ILogger? logger = null, Action<Exception>? onRunException = null, IReadOnlyList<int>? authorizedServerIds = null, DateTime? nowUtc = null)
@@ -369,7 +374,9 @@ internal static class ComposePanelRunner
         var (resolvedScope, scopeRefusal) = await host.ResolveServerNames(postgres, serverScope, cancellationToken, logger);
         if (scopeRefusal is not null)
         {
-            return ComposeRunOutcome.BadRequest(authorizedServerIds is null ? McpHelpers.ErrorMessageOf(scopeRefusal) : "The requested server scope is unavailable.");
+            /* A scoped caller gets the empty answer an unknown or out-of-scope name gets: a refusal would say that two registrations
+               share the name it sent. */
+            return authorizedServerIds is null ? ComposeRunOutcome.BadRequest(McpHelpers.ErrorMessageOf(scopeRefusal)) : EmptyScopedAnswer();
         }
 
         serverScope = resolvedScope;
@@ -391,10 +398,7 @@ internal static class ComposePanelRunner
                 : names;
             if (serverScope.Count == 0)
             {
-                return ComposeRunOutcome.Ok(new JsonObject
-                {
-                    ["sql"] = "", ["rows"] = new JsonArray(), ["annotations"] = new JsonArray()
-                });
+                return EmptyScopedAnswer();
             }
         }
 

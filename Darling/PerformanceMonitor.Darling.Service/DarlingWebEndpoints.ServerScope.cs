@@ -249,6 +249,29 @@ public static partial class DarlingWebEndpoints
         var serverIds = allowedServerIds ?? await AllowedWebServerIdsAsync(postgres, allowedTagIds, context.RequestAborted);
         var (resolved, error) = await DarlingServerResolver.ReadWebScopeAsync(serverIds, allowedTagIds,
             () => DarlingServerResolver.ResolveOrErrorAsync(postgres, Server(context), context.RequestAborted));
-        return error is null ? resolved.ServerId : null;
+        if (error is not null)
+        {
+            return null;
+        }
+
+        /* From here the request names the server by its canonical server_name, so a read's own resolution is an exact match inside
+           the grant and the resolver's pinned id is a second check rather than the only one. */
+        var canonical = new List<KeyValuePair<string, string?>>();
+        foreach (var pair in query)
+        {
+            if (string.Equals(pair.Key, "server", StringComparison.OrdinalIgnoreCase) || string.Equals(pair.Key, "server_name", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            foreach (var value in pair.Value)
+            {
+                canonical.Add(new KeyValuePair<string, string?>(pair.Key, value));
+            }
+        }
+
+        canonical.Add(new KeyValuePair<string, string?>("server", resolved.ServerName));
+        context.Request.QueryString = QueryString.Create(canonical);
+        return resolved.ServerId;
     }
 }
