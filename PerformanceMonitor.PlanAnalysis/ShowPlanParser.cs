@@ -42,6 +42,7 @@ public static class ShowPlanParser
         if (xml.Length > MaxParseCharacters)
         {
             plan.ParseError = string.Create(CultureInfo.InvariantCulture, $"Plan XML exceeds the supported size limit of {MaxParseCharacters:N0} characters.");
+            plan.ExceedsParseLimit = true;
             return plan;
         }
 

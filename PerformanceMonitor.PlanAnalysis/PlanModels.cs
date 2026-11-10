@@ -20,6 +20,12 @@ public class ParsedPlan
     public string? ParseError { get; set; }
 
     /// <summary>
+    /// True when <see cref="ParseError"/> is the size refusal: the XML was not read because it is over the parser's
+    /// character limit, and <see cref="RawXml"/> holds it whole. A viewer can still save such a plan.
+    /// </summary>
+    public bool ExceedsParseLimit { get; set; }
+
+    /// <summary>
     /// #4514: descends into stored procedure and UDF bodies via the shared
     /// <see cref="PlanStatements.EnumerateAll(ParsedPlan)"/> walk, so an EXEC &lt;procedure&gt;
     /// plan whose only missing-index suggestions live in the body is no longer reported as

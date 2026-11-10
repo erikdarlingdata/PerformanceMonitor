@@ -192,6 +192,11 @@ public partial class PlanViewerControl : UserControl
         {
             if (_insightsFitPending && e.NewSize.Height > 0)
                 ApplyInsightsFit(e.NewSize.Height);
+            /* The two side panels share the viewer's width with the canvas, so they are fitted again whenever that width
+               changes, wider or narrower. The width is the control's own: the body grid's is held up by its columns, since a
+               grid wider than its slot is arranged at the width its columns ask for. */
+            if (e.WidthChanged)
+                FitSidePanels();
         };
         InsightsExpander.Expanded += (_, _) => { if (!_applyingInsightsFit) _insightsSetByUser = true; };
         InsightsExpander.Collapsed += (_, _) => { if (!_applyingInsightsFit) _insightsSetByUser = true; };
@@ -216,14 +221,15 @@ public partial class PlanViewerControl : UserControl
                 _propertiesPanelWidth = width.Value;
         });
 
-        /* The two side panels share the viewer's width with the canvas, so their widths are fitted again whenever that width
-           changes; a drag of the Statements splitter is the width that panel asks for from then on. */
-        PlanBody.SizeChanged += (_, e) => { if (e.WidthChanged) FitSidePanels(); };
-        StatementsSplitter.DragCompleted += (_, _) =>
+        /* A drag of the Statements splitter is the width that panel asks for from then on. The splitter reports the end of a
+           drag on every mouse-up, so a click that moves nothing is not one. A drag of the Properties splitter is followed by
+           a fit, so the Statements panel takes at once what the Properties panel gave up. */
+        StatementsSplitter.DragCompleted += (_, e) =>
         {
-            if (StatementsPanel.Visibility == Visibility.Visible && StatementsColumn.ActualWidth > 0)
+            if (e.HorizontalChange != 0 && StatementsPanel.Visibility == Visibility.Visible && StatementsColumn.ActualWidth > 0)
                 _statementsWidth = StatementsColumn.ActualWidth;
         };
+        PropertiesSplitter.DragCompleted += (_, _) => FitSidePanels();
 
         UpdateToolbarState();
     }
@@ -231,7 +237,9 @@ public partial class PlanViewerControl : UserControl
     /// <summary>
     /// The zoom, Fit and Minimap buttons act on the operators on the canvas, and Save writes the plan behind them, so they are
     /// enabled only while a statement is drawn: not before a plan loads, and not after text that does not parse or a plan with no
-    /// statement to draw. Save is also enabled for a withheld plan, where its click is what says why that plan is not saved.
+    /// statement to draw. Save is also enabled for a withheld plan, where its click is what says why that plan is not saved, and
+    /// for a plan the viewer holds but does not draw: one over the parser's size limit, or one with no statement to draw. Saving
+    /// is what takes such a plan to a tool that can open it.
     /// </summary>
     private void UpdateToolbarState()
     {
@@ -250,22 +258,38 @@ public partial class PlanViewerControl : UserControl
         ZoomOutButton.IsEnabled = drawn;
         ZoomFitButton.IsEnabled = drawn;
         MinimapToggleButton.IsEnabled = drawn;
-        SavePlanButton.IsEnabled = drawn || _planWithheld;
+        var heldUndrawn = _currentPlan is { } plan && !string.IsNullOrEmpty(plan.RawXml)
+            && (plan.ParseError == null || plan.ExceedsParseLimit);
+        SavePlanButton.IsEnabled = drawn || _planWithheld || heldUndrawn;
     }
 
     /// <summary>
     /// Gives the open side panels the widths <see cref="PlanPanelLayout.Fit"/> works out for the viewer's width, and the canvas
     /// column the minimum that goes with them, so neither a panel opening nor a splitter drag leaves the canvas less than that.
-    /// Before the first layout pass there is no width to fit to; the pass that gives one fits the panels.
+    /// A viewer too narrow for both panels at their minimums shows one: the Properties panel, since it shows the operator just
+    /// selected and the Statements button brings the list back, or the Statements panel when that is the one being opened
+    /// (<paramref name="keepStatements"/>). Before the first layout pass there is no width to fit to; the pass that gives one
+    /// fits the panels.
     /// </summary>
-    private void FitSidePanels()
+    private void FitSidePanels(bool keepStatements = false)
     {
-        var viewerWidth = PlanBody.ActualWidth;
+        var viewerWidth = ActualWidth;
         if (viewerWidth <= 0)
             return;
 
         var statementsOpen = StatementsPanel.Visibility == Visibility.Visible;
         var propertiesOpen = PropertiesPanel.Visibility == Visibility.Visible;
+        if (statementsOpen && propertiesOpen && !PlanPanelLayout.HoldsBoth(
+            viewerWidth, _statementsWidth, PerformanceMonitor.PlanAnalysis.PropertyRows.ClampWidth(_propertiesPanelWidth)))
+        {
+            // Closing either panel fits the one that stays.
+            if (keepStatements)
+                ClosePropertiesPanel();
+            else
+                CloseStatementsPanel();
+            return;
+        }
+
         var fit = PlanPanelLayout.Fit(
             viewerWidth,
             statementsOpen ? _statementsWidth : null,
@@ -415,6 +439,7 @@ public partial class PlanViewerControl : UserControl
         Clear();
         CapturedQueryText = queryText;
         _currentPlan = parsedPlan;
+        UpdateToolbarState();
 
         // #4551: a refused or exception-terminated parse still returns whatever parsed before the
         // failure. Surface the reason in the empty-state slot instead of showing the plain "No
@@ -685,7 +710,7 @@ public partial class PlanViewerControl : UserControl
         StatementsPanel.Visibility = Visibility.Visible;
         StatementsButton.Visibility = Visibility.Visible;
         StatementsButtonSeparator.Visibility = Visibility.Visible;
-        FitSidePanels();
+        FitSidePanels(keepStatements: true);
     }
 
     private void CloseStatementsPanel()
