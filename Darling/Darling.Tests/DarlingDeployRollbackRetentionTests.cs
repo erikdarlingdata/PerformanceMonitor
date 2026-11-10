@@ -727,6 +727,7 @@ public sealed class DarlingDeployRollbackRetentionTests
         const string viewerPath = GuardRoot + @"\viewer\PerformanceMonitor.Darling.Viewer.exe";
 
         var run = RunPreStopGuard(
+            new GuardProcess("PerformanceMonitor.Darling.Service", 4100, GuardRoot + @"\PerformanceMonitor.Darling.Service.exe", Fate.Running),
             new GuardProcess("postgres", 10048, GuardRoot + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.ExitsOnceListed),
             new GuardProcess("PerformanceMonitor.Darling.Viewer", 5300, viewerPath, Fate.Running));
 
@@ -758,6 +759,111 @@ public sealed class DarlingDeployRollbackRetentionTests
         Assert.Contains(held.Lines, line => line.Contains("postgres (pid 4200)", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// #8546: a 32-bit PowerShell on 64-bit Windows reads no path for a 64-bit process, so every listing
+    /// the guard makes would come back empty and both phases would pass with nothing checked. The guard
+    /// refuses to run from one and names the 64-bit shell. A 64-bit shell, and a 32-bit shell on 32-bit
+    /// Windows, go on to the listing.
+    /// </summary>
+    [Fact]
+    public void TheStopGuard_RefusesToRunFromA32BitShellOn64BitWindows()
+    {
+        var service = new GuardProcess("PerformanceMonitor.Darling.Service", 4100, GuardRoot + @"\PerformanceMonitor.Darling.Service.exe", Fate.Running);
+
+        var blind = RunPreStopGuard(new GuardSetup { Is64BitProcess = false }, service);
+
+        Assert.True(blind.Refused, "the stop guard ran from a 32-bit PowerShell on 64-bit Windows, where it can read no 64-bit process's path (#8546):\n  " + blind.Text);
+        Assert.True(
+            blind.Lines.Exists(line => line.StartsWith("REFUSED ", StringComparison.Ordinal)
+                && line.Contains("32-bit PowerShell on 64-bit Windows", StringComparison.Ordinal)
+                && line.Contains(@"\sysnative\WindowsPowerShell\v1.0\powershell.exe", StringComparison.Ordinal)),
+            "the refusal does not say the shell is 32-bit and name the 64-bit one to run from (#8546):\n  " + blind.Text);
+
+        var sixtyFour = RunPreStopGuard(new GuardSetup(), service);
+        Assert.False(sixtyFour.Refused, "the stop guard refused a 64-bit shell with only the service running:\n  " + sixtyFour.Text);
+
+        var thirtyTwoBitWindows = RunPreStopGuard(new GuardSetup { Is64BitOperatingSystem = false, Is64BitProcess = false }, service);
+        Assert.False(thirtyTwoBitWindows.Refused, "the stop guard refused a 32-bit shell on 32-bit Windows, which reads every path:\n  " + thirtyTwoBitWindows.Text);
+    }
+
+    /// <summary>
+    /// #8546: a listing that cannot see is not an install tree with nothing running out of it. While the
+    /// service is running, its own process is the one thing the listing has to contain, and a listing
+    /// without it refuses the upgrade whatever kept it out. With the service stopped there is no such
+    /// process to ask for, and the same listing passes.
+    /// </summary>
+    [Fact]
+    public void ThePreStopGuard_RefusesWhenTheServiceIsRunningAndTheListingDoesNotContainIt()
+    {
+        var postmaster = new GuardProcess("postgres", 4200, GuardRoot + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.Running);
+
+        var nothingListed = RunPreStopGuard(new GuardSetup { ServiceStatus = "Running" });
+        Assert.True(nothingListed.Refused, "the pre-stop guard passed with the service running and no process listed under the install tree (#8546):\n  " + nothingListed.Text);
+        Assert.True(
+            nothingListed.Lines.Exists(line => line.StartsWith("REFUSED ", StringComparison.Ordinal)
+                && line.Contains("could not find its process", StringComparison.Ordinal)),
+            "the refusal does not say the service's own process was not found (#8546):\n  " + nothingListed.Text);
+
+        var serviceMissing = RunPreStopGuard(new GuardSetup { ServiceStatus = "Running" }, postmaster);
+        Assert.True(serviceMissing.Refused, "the pre-stop guard passed with the service running and its process missing from the listing (#8546):\n  " + serviceMissing.Text);
+
+        var stopped = RunPreStopGuard(new GuardSetup { ServiceStatus = "Stopped" });
+        Assert.False(stopped.Refused, "the pre-stop guard refused a stopped service with nothing running out of the install tree:\n  " + stopped.Text);
+    }
+
+    /// <summary>
+    /// #8546: <c>-InstallRoot</c> may reach the service's folder by another spelling (a junction, a
+    /// <c>subst</c> drive, a short name), and a process reports the path it was started from. The guard
+    /// lists under the registered folder as well, judges each process against the spelling it was found
+    /// under, and lists each one once.
+    /// </summary>
+    [Fact]
+    public void ThePreStopGuard_SeesAProcessUnderTheRegisteredFolder_WhenInstallRootIsAnotherSpellingOfIt()
+    {
+        const string registered = @"C:\PerformanceMonitorDarling";
+        const string typed = @"D:\Darling";
+        var setup = new GuardSetup { InstallRoot = typed, RegisteredRoot = registered };
+        var service = new GuardProcess("PerformanceMonitor.Darling.Service", 4100, registered + @"\PerformanceMonitor.Darling.Service.exe", Fate.Running);
+        var postmaster = new GuardProcess("postgres", 4200, registered + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.Running);
+        var viewer = new GuardProcess("PerformanceMonitor.Darling.Viewer", 5300, registered + @"\viewer\PerformanceMonitor.Darling.Viewer.exe", Fate.Running);
+
+        var held = RunPreStopGuard(setup, service, postmaster, viewer);
+
+        Assert.True(held.Refused, "the pre-stop guard let the upgrade through with a Viewer running from the folder the service is registered at (#8546):\n  " + held.Text);
+        Assert.Contains(held.Lines, line => line.Contains("PerformanceMonitor.Darling.Viewer (pid 5300)", StringComparison.Ordinal)
+            && line.Contains(registered + @"\viewer\PerformanceMonitor.Darling.Viewer.exe", StringComparison.Ordinal));
+        Assert.DoesNotContain(held.Lines, line => line.Contains("(pid 4100)", StringComparison.Ordinal));
+        Assert.DoesNotContain(held.Lines, line => line.Contains("(pid 4200)", StringComparison.Ordinal));
+
+        /* The service and its PostgreSQL under the registered spelling are excused, as they are under the typed one. */
+        var clear = RunPreStopGuard(setup, service, postmaster);
+        Assert.False(clear.Refused, "the pre-stop guard refused the service and its PostgreSQL under the registered folder:\n  " + clear.Text);
+
+        /* A process under the typed spelling is still seen, and each process is listed once. */
+        var both = RunPreStopGuard(setup, service, viewer,
+            new GuardProcess("psql", 5400, typed + @"\psql.exe", Fate.Running));
+        Assert.True(both.Refused, "the pre-stop guard let the upgrade through with processes under both spellings of the install folder (#8546):\n  " + both.Text);
+        Assert.Single(both.Lines, line => line.Contains("(pid 5300)", StringComparison.Ordinal));
+        Assert.Single(both.Lines, line => line.Contains("psql (pid 5400)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #8546: the check after the stop lists under the registered folder too, so a process left running
+    /// from it refuses the run when <c>-InstallRoot</c> spells that folder another way.
+    /// </summary>
+    [Fact]
+    public void ThePostStopCheck_SeesAProcessUnderTheRegisteredFolder_WhenInstallRootIsAnotherSpellingOfIt()
+    {
+        const string registered = @"C:\PerformanceMonitorDarling";
+        var setup = new GuardSetup { InstallRoot = @"D:\Darling", RegisteredRoot = registered, ServiceStatus = "Stopped" };
+
+        var held = RunPostStopCheck(setup,
+            new GuardProcess("postgres", 4200, registered + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.Running));
+
+        Assert.True(held.Refused, "the post-stop check let the copy go ahead with a process still running from the folder the service is registered at (#8546):\n  " + held.Text);
+        Assert.Contains(held.Lines, line => line.Contains("postgres (pid 4200)", StringComparison.Ordinal));
+    }
+
     private const string GuardRoot = @"C:\PerformanceMonitorDarling";
 
     /// <summary>What a stand-in process does once the guard has listed it.</summary>
@@ -775,26 +881,44 @@ public sealed class DarlingDeployRollbackRetentionTests
 
     private sealed record GuardProcess(string Name, int Id, string Path, Fate Fate);
 
+    /// <summary>What the guard finds on the machine besides the processes: the folder <c>-InstallRoot</c>
+    /// names, the folder the service is registered at (the same text unless given), the service's state,
+    /// and whether Windows and the shell are 64-bit.</summary>
+    private sealed record GuardSetup
+    {
+        public string InstallRoot { get; init; } = GuardRoot;
+        public string? RegisteredRoot { get; init; }
+        public string ServiceStatus { get; init; } = "Running";
+        public bool Is64BitOperatingSystem { get; init; } = true;
+        public bool Is64BitProcess { get; init; } = true;
+    }
+
     private sealed record GuardRun(bool Refused, List<string> Lines)
     {
         public string Text => Lines.Count == 0 ? "(the guard printed nothing)" : string.Join("\n  ", Lines);
     }
 
-    /// <summary>The guard before the stop: the statement that lists <c>$holders</c> through the <c>if</c>
-    /// that refuses on them.</summary>
-    private static GuardRun RunPreStopGuard(params GuardProcess[] processes) => RunGuardStatements("$holders", processes);
+    /// <summary>The guard before the stop, on a 64-bit shell with the service running from <see cref="GuardRoot"/>.</summary>
+    private static GuardRun RunPreStopGuard(params GuardProcess[] processes) => RunGuardStatements("pre-stop", new GuardSetup(), processes);
+
+    /// <summary>The guard before the stop: every statement between the check of the folder the service is
+    /// registered at and the pre-flight.</summary>
+    private static GuardRun RunPreStopGuard(GuardSetup setup, params GuardProcess[] processes) => RunGuardStatements("pre-stop", setup, processes);
+
+    /// <summary>The check after the stop, with <c>-InstallRoot</c> the folder the service is registered at.</summary>
+    private static GuardRun RunPostStopCheck(params GuardProcess[] processes) => RunGuardStatements("post-stop", new GuardSetup { ServiceStatus = "Stopped" }, processes);
 
     /// <summary>The check after the stop: the statement that lists <c>$stillHolding</c> through the
     /// <c>if</c> that refuses on them.</summary>
-    private static GuardRun RunPostStopCheck(params GuardProcess[] processes) => RunGuardStatements("$stillHolding", processes);
+    private static GuardRun RunPostStopCheck(GuardSetup setup, params GuardProcess[] processes) => RunGuardStatements("post-stop", setup, processes);
 
     /// <summary>
     /// Runs one phase of the stop guard as the script ships it, under Windows PowerShell 5.1, against
     /// <paramref name="processes"/> in place of the machine's own process list.
     ///
     /// <para>PowerShell's parser hands over every function the script defines, and the phase's own
-    /// statements: from the one that assigns <paramref name="listVariable"/> through the <c>if</c> that
-    /// refuses. None of the script's other code runs. <c>Get-Process</c> returns the stand-ins,
+    /// statements. None of the script's other code runs. <c>Get-Process</c> returns the stand-ins,
+    /// <c>Get-Service</c> and <c>Get-DarlingShellBitness</c> answer from <paramref name="setup"/>,
     /// <c>Note</c> and <c>Fail</c> print what they are given, and <c>Fail</c> ends the phase the way the
     /// script's own ends the run.</para>
     ///
@@ -802,28 +926,47 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// process does. Its name, id, <c>Path</c> and <c>HasExited</c> are the test's. <c>Path</c> and
     /// <c>HasExited</c> answer the way a process does at that point in its life: see <see cref="Fate"/>.</para>
     /// </summary>
-    private static GuardRun RunGuardStatements(string listVariable, GuardProcess[] processes)
+    private static GuardRun RunGuardStatements(string phase, GuardSetup setup, GuardProcess[] processes)
     {
         static string Quote(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+        static string Bool(bool value) => value ? "$true" : "$false";
 
         var probe = new StringBuilder();
         probe.AppendLine("$ErrorActionPreference = 'Stop'");
-        probe.AppendLine($"$listVariable = {Quote(listVariable)}");
+        probe.AppendLine($"$phase = {Quote(phase)}");
         probe.AppendLine($"$ast = [System.Management.Automation.Language.Parser]::ParseFile({Quote(PathTo("Darling", "tools", "upgrade-darling.ps1"))}, [ref]$null, [ref]$null)");
         probe.AppendLine("""
             foreach ($definition in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
                 . ([scriptblock]::Create($definition.Extent.Text))
             }
 
-            $listing = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq $listVariable }, $true)
-            if ($null -eq $listing) { throw "upgrade-darling.ps1 no longer lists $listVariable." }
+            $assigns = { param($node, $name) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq $name }
             $guard = @()
-            foreach ($statement in $listing.Parent.Statements) {
-                if ($statement.Extent.StartOffset -lt $listing.Extent.StartOffset) { continue }
-                $guard += $statement.Extent.Text
-                if ($statement -is [System.Management.Automation.Language.IfStatementAst]) { break }
+            $closed = $false
+            if ($phase -eq 'pre-stop') {
+                # Everything after the read of the registered folder and the if that checks it, up to the pre-flight.
+                $anchor = $ast.Find({ param($node) & $assigns $node '$registeredRoot' }, $true)
+                if ($null -eq $anchor) { throw 'upgrade-darling.ps1 no longer reads $registeredRoot.' }
+                $position = 0
+                foreach ($statement in $anchor.Parent.Statements) {
+                    if ($statement.Extent.StartOffset -lt $anchor.Extent.StartOffset) { continue }
+                    $position++
+                    if ($position -le 2) { continue }
+                    if (& $assigns $statement '$preflightProblem') { $closed = $true; break }
+                    $guard += $statement.Extent.Text
+                }
             }
-            if ($guard.Count -lt 2) { throw "upgrade-darling.ps1 no longer refuses on the $listVariable it lists." }
+            else {
+                # From the listing after the stop through the if that refuses on it.
+                $anchor = $ast.Find({ param($node) & $assigns $node '$stillHolding' }, $true)
+                if ($null -eq $anchor) { throw 'upgrade-darling.ps1 no longer lists $stillHolding.' }
+                foreach ($statement in $anchor.Parent.Statements) {
+                    if ($statement.Extent.StartOffset -lt $anchor.Extent.StartOffset) { continue }
+                    $guard += $statement.Extent.Text
+                    if ($statement -is [System.Management.Automation.Language.IfStatementAst]) { $closed = $true; break }
+                }
+            }
+            if (-not $closed -or $guard.Count -lt 2) { throw "upgrade-darling.ps1's $phase guard was not found where it is expected." }
 
             function New-TestProcess([string]$name, [int]$id, [string]$path, [string]$fate) {
                 $process = New-Object System.Object
@@ -846,9 +989,14 @@ public sealed class DarlingDeployRollbackRetentionTests
         {
             probe.AppendLine($"$testProcesses += New-TestProcess {Quote(process.Name)} {process.Id} {Quote(process.Path)} {Quote(process.Fate.ToString())}");
         }
-        probe.AppendLine($"$InstallRoot = {Quote(GuardRoot)}");
+        probe.AppendLine($"$InstallRoot = {Quote(setup.InstallRoot)}");
+        probe.AppendLine($"$registeredRoot = {Quote(setup.RegisteredRoot ?? setup.InstallRoot)}");
+        probe.AppendLine($"$testServiceStatus = {Quote(setup.ServiceStatus)}");
+        probe.AppendLine($"$testBitness = New-Object psobject -Property @{{ Is64BitOperatingSystem = {Bool(setup.Is64BitOperatingSystem)}; Is64BitProcess = {Bool(setup.Is64BitProcess)} }}");
         probe.AppendLine("""
             function Get-Process { return $testProcesses }
+            function Get-Service { return (New-Object psobject -Property @{ Status = $testServiceStatus }) }
+            function Get-DarlingShellBitness { return $testBitness }
             function Note([string]$message) { Write-Output "NOTE $message" }
             function Fail([string]$message) { Write-Output "REFUSED $message"; throw 'refused' }
 

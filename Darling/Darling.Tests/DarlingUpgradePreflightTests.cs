@@ -213,6 +213,8 @@ public sealed class DarlingUpgradePreflightTests
     }
 
     // The whole script, against a temp install root. The wrapper stands in for the service and records a Stop-Service call.
+    // A running service has a process, and the stop guard asks for it (#8546), so the wrapper's process list is that one
+    // process, running from the install root as the script spells it.
     // The script's own copy goes in a folder of its own, so it is not running from the install root.
     private static string ScriptWrapper(string mode, string scriptArguments, string patchedScriptPath, string setup = "", string sourceArgument = "$src")
     {
@@ -227,6 +229,7 @@ public sealed class DarlingUpgradePreflightTests
             Set-Content -LiteralPath (Join-Path $src 'PerformanceMonitor.Darling.Service.exe') -Value 'y'
             Set-Content -LiteralPath (Join-Path $root 'darling.json') -Value '{}'
             function Get-Service { [pscustomobject]@{ Name = 'PerformanceMonitor Darling'; Status = 'Running' } }
+            function Get-Process { $service = New-Object System.Object; $service | Add-Member -NotePropertyMembers @{ ProcessName = 'PerformanceMonitor.Darling.Service'; Id = 4100; Path = (Join-Path $InstallRoot 'PerformanceMonitor.Darling.Service.exe'); HasExited = $false }; $service }
             function Get-CimInstance {
                 param([string]$ClassName, [string]$Filter, $ErrorAction)
                 if ($ClassName -eq 'Win32_Service') { return [pscustomobject]@{ Name = 'PerformanceMonitor Darling'; StartName = 'LocalSystem'; PathName = '"' + (Join-Path $root 'PerformanceMonitor.Darling.Service.exe') + '"'; ProcessId = 0 } }
