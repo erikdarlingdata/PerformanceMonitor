@@ -910,14 +910,23 @@ public partial class PlanViewerControl
         // selection would throw away whatever width the user had dragged out, on every click.
         if (PropertiesPanel.Visibility != Visibility.Visible)
         {
-            PropertiesColumn.MinWidth = MinPropertiesWidth;
-            PropertiesColumn.MaxWidth = MaxPropertiesWidth;
-            PropertiesColumn.Width = new GridLength(
-                PerformanceMonitor.PlanAnalysis.PropertyRows.ClampWidth(_propertiesPanelWidth));
-            PropertiesSplitter.Visibility = Visibility.Visible;
-            PropertiesPanel.Visibility = Visibility.Visible;
+            _statementsOpenedLast = false;
+            if (_closedByFit == SidePanel.Properties)
+                _closedByFit = SidePanel.None;
+            RevealPropertiesPanel();
             FitSidePanels();
         }
+    }
+
+    /// <summary>Shows the Properties panel at its remembered width. The fit that follows gives it the width the viewer has room for.</summary>
+    private void RevealPropertiesPanel()
+    {
+        PropertiesColumn.MinWidth = MinPropertiesWidth;
+        PropertiesColumn.MaxWidth = MaxPropertiesWidth;
+        PropertiesColumn.Width = new GridLength(
+            PerformanceMonitor.PlanAnalysis.PropertyRows.ClampWidth(_propertiesPanelWidth));
+        PropertiesSplitter.Visibility = Visibility.Visible;
+        PropertiesPanel.Visibility = Visibility.Visible;
     }
 
     private void PropertiesFilter_TextChanged(object sender, TextChangedEventArgs e)
@@ -1213,7 +1222,8 @@ public partial class PlanViewerControl
         ClosePropertiesPanel();
     }
 
-    private void ClosePropertiesPanel()
+    /// <summary>Hides the Properties panel and keeps the operator selected, so the panel can come back showing it.</summary>
+    private void HidePropertiesPanel()
     {
         PropertiesPanel.Visibility = Visibility.Collapsed;
         PropertiesSplitter.Visibility = Visibility.Collapsed;
@@ -1222,6 +1232,14 @@ public partial class PlanViewerControl
         PropertiesColumn.MinWidth = 0;
         PropertiesColumn.MaxWidth = double.PositiveInfinity;
         PropertiesColumn.Width = new GridLength(0);
+    }
+
+    private void ClosePropertiesPanel()
+    {
+        // A panel the person closes, or the panel of a plan that is going, is not one for a later fit to bring back.
+        if (_closedByFit == SidePanel.Properties)
+            _closedByFit = SidePanel.None;
+        HidePropertiesPanel();
 
         // Deselect node
         if (_selectedNodeBorder != null)

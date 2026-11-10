@@ -242,10 +242,11 @@ public partial class ServerTab : UserControl
     /// <summary>
     /// #1980: the Query Store grid's inline "View" button — the capability its two sibling grids
     /// always had. Lite's QS rows carry no plan text, so the plan is fetched from the monitored server's
-    /// Query Store by the row's plan id, as the row's context menu and the history window fetch it, and
-    /// opened in the Plan Viewer via <see cref="OpenPlanTab"/>. The button is gated on
-    /// <c>HasQueryPlan</c> in XAML, so a row that names no plan is never clickable. A plan Query Store
-    /// no longer holds, or a fetch that fails, gets the history window's "Plan Not Found" message.
+    /// Query Store by the row's plan id, as the row's context menu and the history window fetch it,
+    /// opened in the Plan Viewer via <see cref="OpenPlanTab"/>, and the Plan Viewer tab is shown. The
+    /// button is gated on <c>HasQueryPlan</c> in XAML, so a row that names no plan is never clickable.
+    /// A plan Query Store no longer holds gets the history window's "Plan Not Found" message. A fetch
+    /// that fails says why it failed, as the history window's download does, and leaves the grid showing.
     /// </summary>
     private async void ViewQueryStorePlanInline_Click(object sender, RoutedEventArgs e)
     {
@@ -263,14 +264,15 @@ public partial class ServerTab : UserControl
         btn.Content = "...";
         try
         {
-            string? plan = null;
+            string? plan;
             try
             {
                 plan = await (QueryStorePlanFetch ?? FetchQueryStorePlanFromServerAsync)(row);
             }
-            catch
+            catch (Exception ex)
             {
-                // A failed fetch reads as a plan that is not there, as it does from the row's context menu.
+                PlanMessage($"Could not get the plan for server {_server.DisplayName} from Query Store: {DuckDbMemoryLimitSetting.Describe(ex)}.", "Error", MessageBoxImage.Error);
+                return;
             }
 
             if (string.IsNullOrEmpty(plan))
@@ -279,7 +281,9 @@ public partial class ServerTab : UserControl
                 return;
             }
 
-            await OpenPlanTab(plan, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
+            var opened = OpenPlanTab(plan, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
+            PlanViewerTabItem.IsSelected = true;
+            await opened;
         }
         finally
         {

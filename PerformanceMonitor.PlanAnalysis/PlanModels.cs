@@ -26,6 +26,14 @@ public class ParsedPlan
     public bool ExceedsParseLimit { get; set; }
 
     /// <summary>
+    /// True when the text is a ShowPlan document: XML whose root element is <c>ShowPlanXML</c> in the showplan namespace.
+    /// Set before the tree walk, so a plan the walk refuses for its depth, or fails on, is still known to be a plan. False
+    /// for text that is not XML, for XML that is something else, and for text over the parser's character limit, which is
+    /// not read (<see cref="ExceedsParseLimit"/>).
+    /// </summary>
+    public bool IsShowPlanXml { get; set; }
+
+    /// <summary>
     /// #4514: descends into stored procedure and UDF bodies via the shared
     /// <see cref="PlanStatements.EnumerateAll(ParsedPlan)"/> walk, so an EXEC &lt;procedure&gt;
     /// plan whose only missing-index suggestions live in the body is no longer reported as
