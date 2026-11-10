@@ -38,7 +38,7 @@ CREATE INDEX IF NOT EXISTS ix_web_access_group_tags_tag ON config.web_access_gro
 CREATE TABLE IF NOT EXISTS config.web_access_group_events (
     event_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     group_id uuid NOT NULL,
-    event text NOT NULL CHECK (event IN ('created','updated','rotated','deleted','activated','refused','tag_deleted')),
+    event text NOT NULL CHECK (event IN ('created','updated','rotated','deleted','activated','refused','tag_deleted','advanced_enabled','advanced_disabled')),
     event_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
     database_actor text NOT NULL DEFAULT session_user,
     actor text NOT NULL,

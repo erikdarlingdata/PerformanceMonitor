@@ -12,7 +12,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// epoch every group cookie is bound to. Turning the switch either way takes a new epoch, so every group session ends with it.</summary>
 public static class WebAccessAdvancedSchema
 {
-    /// <summary>The migration creating the switch. It follows <see cref="WebAccessGroupSchema.Version"/> and touches none of its tables.</summary>
+    /// <summary>The migration creating the switch. It follows <see cref="WebAccessGroupSchema.Version"/>; the only groups table it
+    /// touches is the journal, where a flip writes its row.</summary>
     public const int Version = 259;
 
     /// <summary>DDL for the switch, its owner guard, the protected setter and the hardening function. Every statement is re-runnable, so a
@@ -28,11 +29,21 @@ DROP TRIGGER IF EXISTS web_access_owner_guard ON config.web_access_advanced;
 CREATE TRIGGER web_access_owner_guard BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON config.web_access_advanced
 FOR EACH STATEMENT EXECUTE FUNCTION config.web_access_owner_guard();
 ALTER TABLE config.web_access_advanced ENABLE ALWAYS TRIGGER web_access_owner_guard;
+-- A flip rolls the session epoch, which ends every group session, and writes a journal row under the switch's own
+-- sentinel group id (the all-ones uuid, which no group has), with the database role that made it and when. Setting the
+-- switch to its current value changes nothing.
 CREATE OR REPLACE FUNCTION config.set_web_access_advanced(p_enabled boolean) RETURNS void
-LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $fn$
-    UPDATE config.web_access_advanced SET enabled=p_enabled,session_epoch=gen_random_uuid()
-    WHERE id=1 AND enabled IS DISTINCT FROM p_enabled;
-$fn$;
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $fn$
+DECLARE prior boolean;
+BEGIN
+    SELECT enabled INTO prior FROM config.web_access_advanced WHERE id=1 FOR UPDATE;
+    IF NOT FOUND OR prior IS NOT DISTINCT FROM p_enabled THEN RETURN; END IF;
+    UPDATE config.web_access_advanced SET enabled=p_enabled,session_epoch=gen_random_uuid() WHERE id=1;
+    INSERT INTO config.web_access_group_events(group_id,event,actor,before_state,after_state)
+        VALUES('ffffffff-ffff-ffff-ffff-ffffffffffff',
+            CASE WHEN p_enabled THEN 'advanced_enabled' ELSE 'advanced_disabled' END,
+            session_user,jsonb_build_object('enabled',prior),jsonb_build_object('enabled',p_enabled));
+END $fn$;
 -- Replayed after provisioning's blanket/default grants, and during the migration. The loop covers PUBLIC, the
 -- product's four logins and any role that holds a grant on these objects, and nothing else on the cluster.
 CREATE OR REPLACE FUNCTION config.harden_web_access_advanced() RETURNS void

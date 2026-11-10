@@ -162,18 +162,20 @@ internal sealed class DarlingWebGroupTokens : IDisposable
 
     internal async Task<DarlingWebSeat?> ResolveAsync(Guid groupId, Guid generation, CancellationToken ct)
     {
+        // No snapshot yet, an unhealthy sealing key or a changed key id: the cookie is not honoured before the store is asked, so an
+        // unavailable state costs no store trip, and the holder lands on the sign-in form, which refuses a managed token in that state.
+        // Only a store failure during the lookup below answers 503.
+        if (!Available) return null;
         var current = await _metadata.ReadEnabledGroupAsync(groupId, ct);
         if (current is not { } enabled)
             return null;
-        // No snapshot yet, an unhealthy sealing key or a changed key id: the cookie is not honoured, and the holder lands on the sign-in
-        // form, which refuses a managed token while the snapshot is unavailable. Only a store failure during the lookup answers 503.
-        if (!Available) return null;
         var group = enabled.Group;
         if (!group.Enabled || group.ActivationState != "active" || SessionGeneration(group.TokenGeneration, enabled.Epoch) != generation)
             return null;
         // The immutable ID/generation, not a reusable name, is the authenticated identity. A group over every server is an
         // unscoped reader seat, the same seat a named reader token without allowedTagIds gets; a tag-scoped group carries its tags.
-        return new DarlingWebSeat(group.Name,false,AllowedTagIds:group.Scope==WebAccessGroupScope.AllServers ? null : group.TagIds,
+        // The seat is a token seat named for the group, so every consumer treats it as it treats a configured named token.
+        return new DarlingWebSeat(group.Name,false,TokenName:group.Name,AllowedTagIds:group.Scope==WebAccessGroupScope.AllServers ? null : group.TagIds,
             GroupId:group.GroupId,GroupGeneration:generation);
     }
 

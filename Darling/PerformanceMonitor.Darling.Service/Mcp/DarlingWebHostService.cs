@@ -1582,9 +1582,12 @@ public sealed class DarlingWebHostService : BackgroundService
                 var isAuthFlowRoute = IsAuthFlowPath(context.Request.Path.Value ?? "/", oidcClient is not null);
 
                 var connectionIp = context.Items.TryGetValue(ConnectionIpItemKey, out var stashedIp) ? stashedIp as IPAddress : null;
-                // Only a cryptographically valid managed cookie, already inside the network gate,
-                // may read current group metadata. A database failure must never reuse stale grants.
+                // Only a cryptographically valid managed cookie, already inside the network gate, may read current group metadata.
+                // Every request it rides is checked, the page itself included, so a holder the group no longer admits is shown the
+                // sign-in form; only the page's own scripts and stylesheets, which carry no data, cost no store trip. A database
+                // failure must never reuse stale grants.
                 if (hasValidCookie && seat.GroupId is Guid groupId &&
+                    !IsPageAssetPath(context.Request.Path) &&
                     DecideWebRequest(remote, cidr, isAuthFlowRoute, hasValidCookie, connectionIp) == WebRequestAction.Allow)
                 {
                     try
@@ -1949,6 +1952,12 @@ public sealed class DarlingWebHostService : BackgroundService
     internal static bool IsApiPath(string path)
         => path.Equals("/api", StringComparison.OrdinalIgnoreCase)
             || path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True for one of the page's own scripts or stylesheets (<c>/js/*</c>, <c>/css/*</c>): static files that carry no data.
+    /// A managed group cookie is checked against the store on every other request, the page itself included.</summary>
+    internal static bool IsPageAssetPath(PathString path)
+        => path.StartsWithSegments("/js", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWithSegments("/css", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The body a read-only seat's write is refused with: <see cref="DarlingWebEndpoints.ReadOnlyAccountText"/> and the
     /// <see cref="DarlingWebStoreWrites.RefusalReason.ReadOnlySeat"/> reason (#7955).</summary>
@@ -2603,22 +2612,23 @@ public sealed class DarlingWebHostService : BackgroundService
         var sharedMatch = DarlingHostBinding.FixedTimeTokenEquals(posted, accessToken);
         var namedMatch = webTokens?.Match(posted);
         var groupMatch = managedGroups?.FindMatch(posted);
+        var groupCheckFailed = false;
         if (!sharedMatch && namedMatch is null && groupMatch is not null && managedGroups is not null)
         {
             try
             {
-                if (!managedGroups.Available)
-                    throw new InvalidOperationException("Managed access is temporarily unavailable.");
-                if (await managedGroups.ResolveAsync(groupMatch.GroupId, groupMatch.Generation, context.RequestAborted) is null)
+                if (!managedGroups.Available ||
+                    await managedGroups.ResolveAsync(groupMatch.GroupId, groupMatch.Generation, context.RequestAborted) is null)
                     groupMatch = null;
             }
             catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { throw; }
             catch (Exception)
             {
-                signInThrottle.Missed(attempt);
-                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-                await context.Response.WriteAsJsonAsync(new { error = "Managed access is temporarily unavailable." });
-                return;
+                /* A store failure here takes the refusal every unknown token gets, below, so an outage cannot tell a presenter that
+                   the string they hold is a live group token; the throttle counts the miss there as well. The per-request path keeps
+                   its 503, because that holder is already signed in. The service log alone says the store could not be asked. */
+                groupMatch = null;
+                groupCheckFailed = true;
             }
         }
         if (!sharedMatch && namedMatch is null && groupMatch is null)
@@ -2626,9 +2636,11 @@ public sealed class DarlingWebHostService : BackgroundService
             signInThrottle.Missed(attempt);
             refusals.Report(
                 _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status200OK, remote,
-                webTokens is { HasNamed: true }
-                    ? "the posted token matches neither web.network.encryptedToken nor a web.network.tokens entry, so the login page was served instead"
-                    : "the posted token does not match web.network.encryptedToken, so the login page was served instead",
+                groupCheckFailed
+                    ? "the posted token is a managed group's and the group could not be checked against the store, so the login page was served instead"
+                    : webTokens is { HasNamed: true }
+                        ? "the posted token matches neither web.network.encryptedToken nor a web.network.tokens entry, so the login page was served instead"
+                        : "the posted token does not match web.network.encryptedToken, so the login page was served instead",
                 now);
             /* The form is served again as the answer to this POST, so its address is /auth/login: the page names
                the target it was covering in the form itself, or the retry would post the form's own address. */
