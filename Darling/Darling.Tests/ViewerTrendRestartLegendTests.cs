@@ -141,18 +141,30 @@ public sealed class ViewerTrendRestartLegendTests
     [InlineData("Procedure Duration")]
     public void TheRestartSentence_ShowsWholeAcrossLines_WhenTheChartHasTheHeight(string series)
     {
-        var (problems, entry) = StaTestThread.Run(() =>
+        var (problems, entry, seriesRow, sentenceRow) = StaTestThread.Run(() =>
         {
             var found = new List<string>();
             var chart = TrendChart(series);
             Render(chart, 380, found);
-            var text = chart.Plot.Legend.GetItems().Select(i => i.LabelText).FirstOrDefault(t => t.StartsWith("SQL Server restarted", StringComparison.Ordinal)) ?? "";
-            return (found, text);
+            var plot = chart.Plot;
+            var text = plot.Legend.GetItems().Select(i => i.LabelText).FirstOrDefault(t => t.StartsWith("SQL Server restarted", StringComparison.Ordinal)) ?? "";
+
+            // The height the legend gives each entry's row, as the legend panel lays it out.
+            var layout = plot.RenderManager.LastRender.Layout;
+            var panel = plot.Axes.GetPanels().OfType<LegendPanel>().Single();
+            using var paint = Paint.NewDisposablePaint();
+            var rect = panel.GetPanelRect(layout.DataRect, layout.PanelSizes[panel], layout.PanelOffsets[panel], paint);
+            var tight = plot.Legend.GetLayout(rect.Size, paint);
+            var at = Array.FindIndex(tight.LegendItems, i => i.LabelText.StartsWith("SQL Server restarted", StringComparison.Ordinal));
+            var named = Array.FindIndex(tight.LegendItems, i => i.LabelText == series);
+            return (found, text, named < 0 ? 0f : tight.LabelRects[named].Height, at < 0 ? 0f : tight.LabelRects[at].Height);
         });
 
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
         Assert.Contains("\n", entry, StringComparison.Ordinal);
         Assert.Equal(Sentence, entry.Replace('\n', ' '));
+        // The series name's row is one line tall: the sentence's lines do not make every row as tall as the sentence.
+        Assert.True(seriesRow > 0 && seriesRow < sentenceRow - 1, $"the row of \"{series}\" is {seriesRow:0.#} px tall beside the sentence's {sentenceRow:0.#} px row");
     }
 
     private const string Spaceless = "SharePoint_AdminContent_3f2a9c1e-7b4d-4e8a-9f0b-1c2d3e4f5a6b";
