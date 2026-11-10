@@ -932,7 +932,10 @@ public sealed class DarlingSelfAlertTests
         Assert.Contains("client timeouts and cancels capture", fired.DetailText, StringComparison.Ordinal);
         Assert.DoesNotContain("locking", fired.DetailText, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("deadlock", fired.DetailText, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("ALTER ANY EVENT SESSION", fired.DetailText, StringComparison.Ordinal);
+        /* #8528: with no ensure failure on record the detail says what the collector found and what the service does next; it names a
+           grant only when the service's own ensure was refused for permission. */
+        Assert.Contains("found the Client timeouts session stopped, absent or unreadable", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("ALTER ANY EVENT SESSION", fired.DetailText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -5886,7 +5889,7 @@ public sealed class DarlingSelfAlertTests
             "await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken, sweepGeneration: generation);",
             sweep, StringComparison.Ordinal);
         Assert.Contains(
-            "await ApplyCaptureDownAsync(serverId, serverName, missing, notRunOnEngine, cancellationToken, sweepGeneration: generation);",
+            "await ApplyCaptureDownAsync(serverId, serverName, missing, notRunOnEngine, cancellationToken, sweepGeneration: generation, ensure: captureSessions);",
             sweep, StringComparison.Ordinal);
         Assert.Contains(
             "await ApplyAgentNotRunningAsync(serverId, serverName, freshRunning, everRan, cancellationToken, sweepGeneration: generation);",
