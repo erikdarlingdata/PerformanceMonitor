@@ -86,22 +86,29 @@ LEFT JOIN LATERAL (
     /// <paramref name="healthCaptureRefreshes"/> is whether the <c>query_store_health</c> collector's effective schedule lets it refresh
     /// the capture on this server.
     /// </summary>
-    public static Task<string?> MessageAsync(
+    public static async Task<string?> MessageAsync(
         NpgsqlDataSource postgres, int serverId, string serverName, bool healthCaptureRefreshes, int commandTimeoutSeconds, CancellationToken cancellationToken = default) =>
-        MessageCoreAsync(postgres, serverId, serverName, healthCaptureRefreshes, ownRunMaxAge: null, commandTimeoutSeconds, cancellationToken);
+        (await JudgeAsync(postgres, serverId, serverName, healthCaptureRefreshes, ownRunMaxAge: null, commandTimeoutSeconds, cancellationToken)).Message;
 
     /// <summary>
-    /// #8541: the judgment as the scheduler's gate on <c>query_store_hints</c> asks it. The same facts and rule as
-    /// <see cref="MessageAsync(NpgsqlDataSource, int, string, bool, int, CancellationToken)"/>, except that the collector's own run
-    /// that captured no database counts only while it is no older than <see cref="OwnRunProbeInterval"/>. Past that the gate opens for
-    /// one run, so a server whose databases stopped being secondaries is found within the hour, while the reads keep the answer the
-    /// newest run gave.
+    /// #8541: whether the scheduler's gate on <c>query_store_hints</c> stands down for a slot, from the same facts in the same round
+    /// trip. It does when the judgment calls the server a readable secondary, with the collector's own run that captured no database
+    /// counted only while it is no older than <see cref="OwnRunProbeInterval"/>. It also does on that run alone: a successful run no
+    /// older than the interval that stored no row found no database to capture, whatever the capture and the role read, so the gate
+    /// holds on a server whose capture has aged out of retention (the purge removes a capture past its retention whether or not its
+    /// collector runs). Past the interval the gate opens for one run, so a server whose databases stopped being secondaries, or
+    /// turned Query Store on, is found within the hour. The reads keep <see cref="MessageAsync(NpgsqlDataSource, int, string, bool, int, CancellationToken)"/>:
+    /// a run that stored no row does not say why, so without a capture they do not call the server a secondary.
     /// </summary>
-    public static Task<string?> GateMessageAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, bool healthCaptureRefreshes, int commandTimeoutSeconds, CancellationToken cancellationToken = default) =>
-        MessageCoreAsync(postgres, serverId, serverName, healthCaptureRefreshes, OwnRunProbeInterval, commandTimeoutSeconds, cancellationToken);
+    public static async Task<bool> GateStandsDownAsync(
+        NpgsqlDataSource postgres, int serverId, string serverName, bool healthCaptureRefreshes, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        var (message, ownRunCapturedNothing) = await JudgeAsync(
+            postgres, serverId, serverName, healthCaptureRefreshes, OwnRunProbeInterval, commandTimeoutSeconds, cancellationToken);
+        return message is not null || ownRunCapturedNothing;
+    }
 
-    private static async Task<string?> MessageCoreAsync(
+    private static async Task<(string? Message, bool OwnRunCapturedNothing)> JudgeAsync(
         NpgsqlDataSource postgres, int serverId, string serverName, bool healthCaptureRefreshes, TimeSpan? ownRunMaxAge, int commandTimeoutSeconds, CancellationToken cancellationToken)
     {
         try
@@ -112,10 +119,14 @@ LEFT JOIN LATERAL (
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
             {
-                return null;
+                return (null, false);
             }
 
-            return Message(
+            var ownRun = OwnRunCapturedNothing(
+                reader.IsDBNull(6) ? null : reader.GetInt64(6),
+                reader.IsDBNull(7) ? null : reader.GetDouble(7),
+                ownRunMaxAge);
+            return (Message(
                 serverName,
                 reader.IsDBNull(0) ? null : reader.GetString(0),
                 (int)reader.GetInt64(2),
@@ -124,14 +135,11 @@ LEFT JOIN LATERAL (
                 healthCaptureRefreshes,
                 reader.IsDBNull(4) ? null : reader.GetInt64(4),
                 reader.GetBoolean(5),
-                OwnRunCapturedNothing(
-                    reader.IsDBNull(6) ? null : reader.GetInt64(6),
-                    reader.IsDBNull(7) ? null : reader.GetDouble(7),
-                    ownRunMaxAge));
+                ownRun), ownRun);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return null;
+            return (null, false);
         }
     }
 
@@ -194,7 +202,8 @@ LEFT JOIN LATERAL (
 
     /// <summary>
     /// Whether the newest successful <c>query_store_hints</c> run newer than the capture stored no row at all
-    /// (<paramref name="rowsCollected"/> zero; null when there is no such run), and is no older than
+    /// (<paramref name="rowsCollected"/> zero, which is what the run log writes for a run that stored nothing: its count is never
+    /// null; null here when there is no such run), and is no older than
     /// <paramref name="maxAge"/> when one is given (<paramref name="ageSeconds"/> on the store's clock).
     /// </summary>
     public static bool OwnRunCapturedNothing(long? rowsCollected, double? ageSeconds, TimeSpan? maxAge) =>

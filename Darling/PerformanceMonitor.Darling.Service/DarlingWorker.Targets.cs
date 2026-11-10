@@ -848,9 +848,9 @@ public sealed partial class DarlingWorker
     /// The capture counts while the <c>query_store_health</c> collector's effective schedule lets it refresh on this server;
     /// disabled, the capture is frozen: a PRIMARY or SECONDARY role overrules it, and under any other role the newest query_store run
     /// decides, so a failover reaches the gate while a readable standby whose run reads nothing stays gated, as the reads judge it
-    /// (#8402). #8541: the collector's own newest run that captured no database keeps a frozen capture counting for an hour
-    /// whatever the role reads (the forwarder of a distributed availability group reads PRIMARY), then one run goes through and
-    /// reads each database's <c>readonly_reason</c> again. The read runs in the
+    /// (#8402). #8541: the collector's own newest run that stored no row keeps the gate closed for an hour whatever the capture
+    /// and the role read (the forwarder of a distributed availability group reads PRIMARY, and a capture ages out of retention),
+    /// then one run goes through and reads each database's <c>readonly_reason</c> again. The read runs in the
     /// sweep body and carries the sweep deadline like every other store command there. False when the store cannot answer, so the collector runs.
     /// </summary>
     internal async Task<bool> IsQueryStoreReadableSecondaryAsync(ServerLoopState server, ServerRuntime runtime, CancellationToken cancellationToken)
@@ -866,9 +866,8 @@ public sealed partial class DarlingWorker
         }
 
         var healthCaptureRefreshes = StoreConfigProvider.ResolveSchedule(QueryStoreHealthCollector.Instance.Name, runtime.ServerId, _scheduleOverrides).Enabled;
-        var message = await DarlingQueryStoreReadableSecondary.GateMessageAsync(
+        return await DarlingQueryStoreReadableSecondary.GateStandsDownAsync(
             _postgres, runtime.ServerId, server.Config.DisplayName, healthCaptureRefreshes, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
-        return message is not null;
     }
 
     /// <summary>
