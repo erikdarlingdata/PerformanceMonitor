@@ -5,6 +5,7 @@ using System.Numerics;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
 
@@ -74,9 +75,7 @@ SELECT
     /* #5633: DISTINCT (database, query_hash), like spilling_queries below. This count drives the QUERY_HIGH_DOP threshold (5/20) and
        its N-queries text, and v_query_stats holds one row per query per snapshot, so one high-DOP query seen in 20 collections
        scored at full severity as 20 queries. A NULL hash collapses to one per database, as for spilling_queries. */
-    COUNT(DISTINCT CASE WHEN v.max_dop > 8
-                         AND (m.value_in_use IS NULL OR m.value_in_use = 0 OR v.max_dop <= m.value_in_use)
-                        THEN COALESCE(v.database_name, '') || '/' || COALESCE(v.query_hash, '') END) AS high_dop_queries,
+" + QueryHighDopSignature.HighDopQueriesCountSql + @"
     COUNT(DISTINCT CASE WHEN v.delta_spills > 0
                         THEN COALESCE(v.database_name, '') || '/' || COALESCE(v.query_hash, '') END) AS spilling_queries,
     SUM(v.delta_execution_count) AS total_executions,
@@ -187,9 +186,6 @@ AND   v.delta_execution_count > 0";
         }
     }
 
-    /// <summary>The most offenders the PARAMETER_SENSITIVITY fact counts. Applied after the exact creation-time test (#4821), not in SQL.</summary>
-    private const int ParameterSensitivityOffenderCap = 20;
-
     /// <summary>
     /// Detects parameter-sensitive cached plans: a single query_plan_hash whose
     /// per-execution worker time varies wildly — one plan serving very different
@@ -282,11 +278,7 @@ SELECT
     query_plan_hash
 FROM latest
 WHERE rn = 1
-AND   min_worker_time >= 10000
-AND   max_worker_time >= 250000
-AND   execution_count >= 20
-AND   creation_time_utc <= $4
-AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
+" + ParameterSensitivitySignature.PredicateSql("creation_time_utc <= $4") + @"
 ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -320,7 +312,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                     continue;
                 }
 
-                if (offenderCount >= ParameterSensitivityOffenderCap)
+                if (offenderCount >= FactThresholds.ParameterSensitivity.OffenderCap)
                 {
                     break;
                 }
@@ -371,7 +363,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                     ["worst_min_worker_us"] = worstMinWorker,
                     ["worst_max_worker_us"] = worstMaxWorker,
                     ["worst_grant_ratio"] = worstGrantRatio,
-                    ["grant_divergence"] = worstGrantRatio >= 5 ? 1 : 0,
+                    ["grant_divergence"] = worstGrantRatio >= FactThresholds.ParameterSensitivity.GrantDivergenceRatio ? 1 : 0,
                     ["spill_divergence"] = worstSpillDivergence
                 }
             });

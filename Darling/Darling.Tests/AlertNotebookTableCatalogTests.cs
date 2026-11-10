@@ -143,6 +143,25 @@ public sealed class AlertNotebookTableCatalogTests
         Assert.Equal(["note_summary"], resolved.GetProperty("plain").EnumerateArray().Select(c => c.GetString()!).ToArray());
     }
 
+    /// <summary>A table cell that carries its own columns for get_alert_history (a Custom View built from a sample read keeps each column's key,
+    /// label and format) still shows a state-only row's stored 0 as the dash: the catalog's Value and Threshold columns carry the rule, and it
+    /// comes across to the cell's columns of the same key, format or no format.</summary>
+    [Fact]
+    public void ATableCellWithItsOwnColumns_StillCarriesTheStateZeroDashRule_OnItsAlertHistoryValueColumns()
+    {
+        var own = ReadCellOf("table", "get_alert_history");
+        own["rowsKey"] = "alerts";
+        own["columns"] = new JsonArray(
+            new JsonObject { ["key"] = "metric_name", ["label"] = "Metric" },
+            new JsonObject { ["key"] = "current_value", ["label"] = "Value", ["format"] = "num2" },
+            new JsonObject { ["key"] = "threshold_value", ["label"] = "Threshold", ["format"] = "num2" });
+
+        var resolved = ResolveCells([own]).Single();
+
+        Assert.Equal(["metric_name", "current_value", "threshold_value"], resolved.GetProperty("columns").EnumerateArray().Select(c => c.GetString()!).ToArray());
+        Assert.Equal(["current_value", "threshold_value"], resolved.GetProperty("stateZeroDash").EnumerateArray().Select(c => c.GetString()!).ToArray());
+    }
+
     private const string MatchedWaitType = "RESOURCE_SEMAPHORE";
     private const string MatchedCollector = "wait_stats_collector";
 

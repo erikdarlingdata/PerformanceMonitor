@@ -367,6 +367,15 @@ ORDER BY d.day";
         NpgsqlDataSource dataSource, int serverId, DateTime fromUtc, IReadOnlyList<DayBucket> days, int commandTimeoutSeconds,
         CancellationToken cancellationToken = default)
     {
+        /* The window's newest CPU sample, read first so the days run through it (#8503): the caller builds its days through its own
+           clock, and a sample the store's host wrote at or after the last day's end would otherwise match no day and leave the table.
+           The trend's rows come from the CPU samples, so with none in the window there is no row to return. */
+        if (await NewestSampleAsync(dataSource, ProvisioningTrendNewestSampleSql, serverId, fromUtc, commandTimeoutSeconds, cancellationToken) is not DateTime newest)
+        {
+            return [];
+        }
+        days = DaysThrough(days, newest);
+
         await using var command = dataSource.CreateCommand(ProvisioningTrendSql);
         command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
@@ -443,6 +452,13 @@ ORDER BY d.day";
         NpgsqlDataSource dataSource, int serverId, DateTime fromUtc, IReadOnlyList<DayBucket> days, int commandTimeoutSeconds,
         CancellationToken cancellationToken = default)
     {
+        /* The window's newest grant sample, read first so the days run through it (#8503), as the provisioning trend does. */
+        if (await NewestSampleAsync(dataSource, MemoryGrantEfficiencyNewestSampleSql, serverId, fromUtc, commandTimeoutSeconds, cancellationToken) is not DateTime newest)
+        {
+            return [];
+        }
+        days = DaysThrough(days, newest);
+
         await using var command = dataSource.CreateCommand(MemoryGrantEfficiencySql);
         command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
@@ -465,6 +481,57 @@ ORDER BY d.day";
                 reader.IsDBNull(8) ? 0 : Convert.ToInt64(reader.GetValue(8))));
         }
         return items;
+    }
+
+    /// <summary>The newest CPU sample at or after $2 for server $1: the newest sample <see cref="ProvisioningTrendSql"/> can return,
+    /// since its rows come from the CPU samples.</summary>
+    internal const string ProvisioningTrendNewestSampleSql = @"
+SELECT MAX(collection_time)
+FROM v_cpu_utilization_stats
+WHERE server_id = $1
+AND   collection_time >= $2";
+
+    /// <summary>The newest regular-semaphore grant sample at or after $2 for server $1: the newest sample
+    /// <see cref="MemoryGrantEfficiencySql"/> can return.</summary>
+    internal const string MemoryGrantEfficiencyNewestSampleSql = @"
+SELECT MAX(collection_time)
+FROM v_memory_grant_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before id 1 was collected */";
+
+    /// <summary>The newest sample a per-day read can return, by its own statement, or null with no sample in the window.</summary>
+    private static async Task<DateTime?> NewestSampleAsync(
+        NpgsqlDataSource dataSource, string sql, int serverId, DateTime fromUtc, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        await using var command = dataSource.CreateCommand(sql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(fromUtc, DateTimeKind.Unspecified) });
+        return await command.ExecuteScalarAsync(cancellationToken) is DateTime latest ? latest : null;
+    }
+
+    /// <summary>
+    /// <paramref name="days"/>, with days appended until the last one ends after <paramref name="latest"/>, the window's newest
+    /// sample. The caller builds its days through its own clock, and a sample stamped at or after the last day's end, which the
+    /// store's host writes when the caller's clock trails it, would otherwise match no day and leave the read's rows. Each appended
+    /// day starts where the last one ends and runs a day; one with no sample adds no row, since every per-day read takes its rows
+    /// from the samples.
+    /// </summary>
+    internal static IReadOnlyList<DayBucket> DaysThrough(IReadOnlyList<DayBucket> days, DateTime latest)
+    {
+        if (days.Count == 0 || days[^1].EndUtc > latest)
+        {
+            return days;
+        }
+
+        var covered = new List<DayBucket>(days);
+        while (covered[^1].EndUtc <= latest)
+        {
+            var last = covered[^1];
+            covered.Add(new DayBucket(last.Day.AddDays(1), last.EndUtc, last.EndUtc.AddDays(1)));
+        }
+        return covered;
     }
 
     /// <summary>
