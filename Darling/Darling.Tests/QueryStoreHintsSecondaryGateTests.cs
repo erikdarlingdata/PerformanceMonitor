@@ -485,6 +485,168 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
         });
     }
 
+    /// <summary>The note a <c>query_store_hints</c> run logs when it captured no database because every one it read is a readable secondary.</summary>
+    private const string SecondaryRunNote = "No database captured: every database whose Query Store is on is a read-only secondary replica (readonly_reason 8).";
+
+    /// <summary>A successful <c>query_store_hints</c> run that carries a note in <c>error_message</c>, as the runner logs one.</summary>
+    private static Task NotedHintsRunAsync(NpgsqlConnection c, int id, string name, int rows, TimeSpan age, string note, CancellationToken ct) =>
+        ExecAsync(c,
+            "INSERT INTO collection_log (log_id, collection_time, server_id, server_name, collector_name, status, duration_ms, rows_collected, error_message) VALUES ($1, $2, $3, $4, 'query_store_hints', 'SUCCESS', 40, $5, $6)",
+            ct, CollectionIdGenerator.Next(), Naive(DateTime.UtcNow - age), id, name, rows, note);
+
+    /// <summary>One database of a capture taken at <paramref name="at"/>, so several databases share one capture time.</summary>
+    private static Task CaptureAtAsync(NpgsqlConnection c, int id, string name, string database, string actualState, int readonlyReason, DateTime at, CancellationToken ct) =>
+        ExecAsync(c,
+            """
+            INSERT INTO query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason,
+                                            current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days,
+                                            max_plans_per_query, interval_length_minutes, query_capture_mode, wait_stats_capture_mode)
+            VALUES ($1, $2, $3, $4, $5, $6, 'READ_WRITE', $7, 100, 1000, 'AUTO', 30, 200, 60, 'AUTO', 'ON')
+            """, ct, CollectionIdGenerator.Next(), Naive(at), id, name, database, actualState, readonlyReason);
+
+    [Fact]
+    public async Task AForwarder_WhoseRunRecordedThatEveryDatabaseIsASecondary_IsStillCalledOne_OnceTheCaptureHasAgedOut()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* #8541: no capture is left and the role reads PRIMARY. The collector's own run read each database's readonly_reason and
+               logged that every one was a secondary, so the reads and the fleet form still call the server one, and the gate is
+               closed. A run that old still answers the reads, and lets one run through the gate. */
+            const int recordedId = 854_141;
+            const string recorded = "qs-forwarder-recorded";
+            const int probeId = 854_142;
+            const string probe = "qs-forwarder-recorded-probe-due";
+            foreach (var (id, name) in new[] { (recordedId, recorded), (probeId, probe) })
+            {
+                await RegisterAsync(connection, id, name, ct);
+                await RoleAsync(connection, id, name, "PRIMARY", TimeSpan.FromMinutes(5), ct);
+                await DisableAsync(connection, id, QueryStoreHealthCollector.Instance.Name, ct);
+            }
+
+            await NotedHintsRunAsync(connection, recordedId, recorded, 0, TimeSpan.FromMinutes(2), SecondaryRunNote, ct);
+            await NotedHintsRunAsync(connection, probeId, probe, 0, TimeSpan.FromHours(2), SecondaryRunNote, ct);
+
+            var worker = DailyRunKit.MakeWorker(new DailyRunLogger());
+            worker.StoreForTests = postgres;
+            worker.ScheduleOverridesForTest = new[]
+            {
+                new ScheduleOverride(recordedId, QueryStoreHealthCollector.Instance.Name, null, null, false),
+                new ScheduleOverride(probeId, QueryStoreHealthCollector.Instance.Name, null, null, false),
+            };
+
+            Assert.NotNull(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, recordedId, recorded, ct));
+            var recordedServer = DailyRunKit.MakeServer(recordedId, Hints);
+            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(recordedServer, recordedServer.Runtime!, ct));
+
+            Assert.NotNull(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, probeId, probe, ct));
+            var probeServer = DailyRunKit.MakeServer(probeId, Hints);
+            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(probeServer, probeServer.Runtime!, ct));
+
+            var fleet = await DarlingQueryStoreReadableSecondary.MessagesAsync(postgres, new[]
+            {
+                new DarlingQueryStoreReadableSecondary.FleetServer(recordedId, recorded, false),
+                new DarlingQueryStoreReadableSecondary.FleetServer(probeId, probe, false),
+            }, 30, ct);
+            Assert.True(fleet.ContainsKey(recordedId));
+            Assert.True(fleet.ContainsKey(probeId));
+        });
+    }
+
+    [Fact]
+    public async Task AZeroRowRun_ThatCarriesAnotherNote_IsNoAnswer_SoTheCollectorRunsAndTheReadsDoNotSaySecondary()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* #8541: a run that stored no row because a database's read failed, or the pass budget ended it, did not read every
+               database. With no capture it does not close the gate. With a frozen all-secondary capture under a PRIMARY role it
+               does not keep that capture counting either: the role overrules the capture, as after a failover. */
+            const string failed = "1 of 2 databases failed: db1 (Execution Timeout Expired)";
+            const int bareId = 854_151;
+            const string bare = "qs-partial-failure";
+            const int frozenId = 854_152;
+            const string frozen = "qs-partial-failure-frozen-capture";
+            foreach (var (id, name) in new[] { (bareId, bare), (frozenId, frozen) })
+            {
+                await RegisterAsync(connection, id, name, ct);
+                await RoleAsync(connection, id, name, "PRIMARY", TimeSpan.FromMinutes(5), ct);
+                await DisableAsync(connection, id, QueryStoreHealthCollector.Instance.Name, ct);
+            }
+
+            await CaptureAsync(connection, frozenId, frozen, "db1", 8, TimeSpan.FromDays(19), ct);
+            await NotedHintsRunAsync(connection, bareId, bare, 0, TimeSpan.FromMinutes(2), failed, ct);
+            await NotedHintsRunAsync(connection, frozenId, frozen, 0, TimeSpan.FromMinutes(2), failed, ct);
+
+            var worker = DailyRunKit.MakeWorker(new DailyRunLogger());
+            worker.StoreForTests = postgres;
+            worker.ScheduleOverridesForTest = new[]
+            {
+                new ScheduleOverride(bareId, QueryStoreHealthCollector.Instance.Name, null, null, false),
+                new ScheduleOverride(frozenId, QueryStoreHealthCollector.Instance.Name, null, null, false),
+            };
+
+            var bareServer = DailyRunKit.MakeServer(bareId, Hints);
+            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(bareServer, bareServer.Runtime!, ct));
+
+            var frozenServer = DailyRunKit.MakeServer(frozenId, Hints);
+            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(frozenServer, frozenServer.Runtime!, ct));
+            Assert.Null(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, frozenId, frozen, ct));
+            var fleet = await DarlingQueryStoreReadableSecondary.MessagesAsync(
+                postgres, new[] { new DarlingQueryStoreReadableSecondary.FleetServer(frozenId, frozen, false) }, 30, ct);
+            Assert.False(fleet.ContainsKey(frozenId));
+        });
+    }
+
+    [Fact]
+    public async Task AServerWhoseDatabasesAllHaveQueryStoreOff_RunsTheCollectorHourly_AndIsNotCalledASecondary()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* #8541: nothing here is a secondary. The collector's run stored no row because no database has Query Store on, so the
+               gate stands down for the hour on that run, and the reads do not say secondary. */
+            const int id = 854_161;
+            const string name = "qs-all-off";
+            await RegisterAsync(connection, id, name, ct);
+            await RoleAsync(connection, id, name, "Standalone", TimeSpan.FromMinutes(5), ct);
+            await DisableAsync(connection, id, QueryStoreHealthCollector.Instance.Name, ct);
+            await CaptureAtAsync(connection, id, name, "db1", "OFF", 0, DateTime.UtcNow - TimeSpan.FromDays(19), ct);
+            await HintsRunAsync(connection, id, name, 0, TimeSpan.FromMinutes(2), ct);
+
+            var worker = DailyRunKit.MakeWorker(new DailyRunLogger());
+            worker.StoreForTests = postgres;
+            worker.ScheduleOverridesForTest = new[] { new ScheduleOverride(id, QueryStoreHealthCollector.Instance.Name, null, null, false) };
+
+            var server = DailyRunKit.MakeServer(id, Hints);
+            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(server, server.Runtime!, ct));
+            Assert.Null(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, id, name, ct));
+        });
+    }
+
+    [Fact]
+    public async Task AReadOverACappedDatabaseAndTwoSecondaries_GivesTheStorageAdviceToTheCappedOne_AndNamesTheSecondariesApart()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* #8541: one capture of three READ_ONLY databases. Sales hit its storage cap (reason 65536); Billing and Orders are
+               secondaries (reason 8). The storage advice names Sales alone, and the other two are named with their own cause. */
+            const int id = 854_171;
+            const string name = "qs-mixed-readonly";
+            var at = DateTime.UtcNow - TimeSpan.FromMinutes(5);
+            await RegisterAsync(connection, id, name, ct);
+            await CaptureAtAsync(connection, id, name, "Sales", "READ_ONLY", 65536, at, ct);
+            await CaptureAtAsync(connection, id, name, "Orders", "READ_ONLY", 8, at, ct);
+            await CaptureAtAsync(connection, id, name, "Billing", "READ_ONLY", 8, at, ct);
+
+            var answer = await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, id, name, (string?)null, ct);
+
+            Assert.NotNull(answer);
+            Assert.Contains("\"status\":\"precondition\"", answer, StringComparison.Ordinal);
+            Assert.Contains("nothing new on Sales of ", answer, StringComparison.Ordinal);
+            Assert.Contains("For Sales it is almost always the storage cap", answer, StringComparison.Ordinal);
+            Assert.Contains("Billing and Orders are READ_ONLY for another reason: each is a secondary replica (readonly_reason 8)", answer, StringComparison.Ordinal);
+            Assert.DoesNotContain("this read covers (", answer, StringComparison.Ordinal);
+        });
+    }
+
     [Fact]
     public async Task AForwarder_WhoseCaptureHasAgedOutOfRetention_StaysStoodDown_OnItsOwnRunThatStoredNoRow_AndRunsAgainOnceThatRunIsAnHourOld()
     {
@@ -551,6 +713,8 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
             Assert.DoesNotContain("MAX_STORAGE_SIZE_MB", answer, StringComparison.Ordinal);
             Assert.Contains("secondary replica", answer, StringComparison.Ordinal);
             Assert.Contains("readonly_reason 8", answer, StringComparison.Ordinal);
+            /* Nothing on the server is in the way and there is no step to take, so the answer is not a precondition. */
+            Assert.Contains("\"status\":\"not_collected\"", answer, StringComparison.Ordinal);
         });
     }
 
