@@ -343,10 +343,11 @@ public sealed class AlertNotebookAuthoredContextTests
     [Fact]
     public void NoContextFamily_HasNoContextBuilder_SoTheEndpointNeverCallsPrefetch()
     {
-        // "Deadlocks Detected" registers a plain BuildCells (no context) -- the endpoint's own guard is
+        // "Blocking Detected" registers a plain BuildCells (no context) -- the endpoint's own guard is
         // `authored.BuildCellsWithContext is not null`, so an entry like this one is never routed into
-        // PrefetchAsync at all. This asserts the precondition that guard depends on.
-        var resolved = AlertNotebookEndpoint.ResolveAuthored("Deadlocks Detected");
+        // PrefetchAsync at all. This asserts the precondition that guard depends on. (Deadlocks Detected was the
+        // example until #8553 gave it the engine context.)
+        var resolved = AlertNotebookEndpoint.ResolveAuthored("Blocking Detected");
 
         Assert.NotNull(resolved);
         Assert.Null(resolved!.Value.Entry.BuildCellsWithContext);
