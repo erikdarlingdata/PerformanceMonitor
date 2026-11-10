@@ -166,7 +166,7 @@ public sealed class InvestigationDispatchCore
 
             var routeServerId = NotificationRouter.ParseServerId(serverId);
             var route = NotificationRouter.ResolveAgent(metricName, _settings.NotificationRoutes, routeServerId,
-                AlertSeverity.RouteLevelOf(metricName, context?.SeverityOverride));
+                AlertSeverity.RouteTierOf(metricName, context));
             if (route is null)
             {
                 return null;
@@ -304,7 +304,7 @@ public sealed class InvestigationDispatchCore
         try
         {
             (InvestigationRequestRow Row, string? Brief)? read = null;
-            if (readRequest is not null && GenericPostCarriesToken(serverId, metricName, AlertSeverity.RouteLevelOf(metricName, context?.SeverityOverride)))
+            if (readRequest is not null && GenericPostCarriesToken(serverId, metricName, AlertSeverity.RouteTierOf(metricName, context)))
             {
                 try
                 {

@@ -240,6 +240,17 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
             context.SeverityOverride ??= outcome.Severity;
         }
 
+        /* #8525: a recovery delivered as an alert of its own ("Server Restored", "AG Replica Reconnected") is routed at the tier
+           the firing it closes was delivered at, read from the episode's delivered fire: this process's record first, else the
+           firing's open history rows. Route-only: SeverityOverride stays null, so the recovery still renders RESOLVED. With no
+           record (nothing delivered, or a firing that carried no tier), the send falls back to the firing's own tierless rule. */
+        if (AlertFamily.RecoveryPairs.TryGetValue(outcome.MetricName, out var closedFiring)
+            && await FiredRouteTierAsync(outcome.ServerKey, closedFiring, outcome.MetricName, cancellationToken) is { } firedTier)
+        {
+            context ??= new AlertContext();
+            context.RouteSeverity = firedTier;
+        }
+
         /* #5642: the sample-age line rides the history row's detail_text and every channel's prose exactly
            once, whichever way the engine built the text; the context JSON below carries the typed field. */
         detailText = AlertDetailText.WithSampleAge(detailText, context);
@@ -356,6 +367,10 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
 
         public DateTime FiredAtUtc { get; }
 
+        /// <summary>#8525: the tier the newest delivered fire of the episode went out at, as its site graded it; null when the site
+        /// passed none. The pair's recovery routes at this tier, so it takes the route the firing took.</summary>
+        public AlertSeverityLevel? FiredSeverity { get; set; }
+
         public string LastValue { get; set; } = "";
 
         public string? TriageUrl { get; set; }
@@ -450,6 +465,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
 
             fire.LastValue = currentValue;
             fire.DetailText = detailText;
+            fire.FiredSeverity = context?.SeverityOverride;
             foreach (var (channel, where, routeId) in delivered)
             {
                 fire.AddDestination(channel, where, routeId);
@@ -758,6 +774,43 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer, IAlertResolutionSen
     /// supplied it. A route deleted or disabled since the fire gives that channel no destination. Null when the store
     /// cannot read history, no delivered fire is open, or the read fails (logged): the clear then sends nothing.
     /// </summary>
+    /// <summary>
+    /// #8525: the tier the open firing <paramref name="firing"/> on <paramref name="serverKey"/> was delivered at, for the route of its
+    /// recovery <paramref name="recovery"/>: this process's delivered fire, whose entry the recovery closes, else the severity of the
+    /// newest open fire row in history (a firing delivered before a restart). Null when nothing is recorded or the firing carried no
+    /// tier, and the recovery then routes as a tierless firing of its name does. Never throws except for the caller's own cancellation.
+    /// </summary>
+    private async Task<AlertSeverityLevel?> FiredRouteTierAsync(string serverKey, string firing, string recovery, CancellationToken cancellationToken)
+    {
+        lock (_deliveredFires)
+        {
+            if (_deliveredFires.Remove((serverKey, firing), out var fire))
+            {
+                return fire.FiredSeverity;
+            }
+        }
+
+        if (_historyStore is not IDeliveredFireReader reader)
+        {
+            return null;
+        }
+
+        try
+        {
+            var history = await reader.GetOpenDeliveredFiresAsync(serverKey, firing, recovery, cancellationToken);
+            return history is { Rows.Count: > 0 } ? AlertContextSerializer.TryReadSeverity(history.Rows[0].ContextJson) : null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Could not read the delivered fire of {Metric} on {Server} for its recovery: {Message}", firing, serverKey, ex.Message);
+            return null;
+        }
+    }
+
     private async Task<DeliveredFire?> ReadDeliveredFireAsync(AlertResolution resolution, CancellationToken cancellationToken)
     {
         if (_historyStore is not IDeliveredFireReader reader)

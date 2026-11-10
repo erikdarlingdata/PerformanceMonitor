@@ -68,6 +68,15 @@ public class AlertContext
     public AlertSeverityLevel? SeverityOverride { get; set; }
 
     /// <summary>
+    /// #8525: the tier a notification route's severity filter reads for this alert when it is not the alert's own. A recovery
+    /// delivered as an alert of its own ("Server Restored", "AG Replica Reconnected") carries the tier the firing it closes was
+    /// delivered at, so it takes the firing's route. Read only by <see cref="AlertSeverity.RouteTierOf"/>; the badge still comes
+    /// from <see cref="SeverityOverride"/>, so the recovery renders RESOLVED. Transient: never persisted (the serializer's
+    /// projection does not carry it) and never rendered.
+    /// </summary>
+    public AlertSeverityLevel? RouteSeverity { get; set; }
+
+    /// <summary>
     /// True when this firing is a tier ESCALATION the engine wants delivered at once (#5641): an open incident that
     /// was delivered at Warning has just been graded Critical. The email and webhook cooldowns
     /// (<see cref="IncidentCooldown"/>) and the repeat ceiling (<see cref="RepeatDeliveryBudget"/>) read it and let
