@@ -494,7 +494,12 @@ public partial class MainWindow : Window
                 /* #8012: a held story whose path loses a leaf is seeded from the wider path's page row. The wider path
                    is found among the distinct paths this server has stored under the same root across the findings
                    retention, so a restart long after the path shortened still finds it. */
-                getStoredStoryPaths: muteReadStore.GetStoryPathsAsync);
+                getStoredStoryPaths: muteReadStore.GetStoryPathsAsync,
+                /* #8542: the store's forcing state for a finding's force-plan targets, read when its notification
+                   is built, so the advice T-SQL gives no force statement for a plan the store blocks. */
+                readForcePlanTargetStates: (serverId, targets) => muteReadStore.TryGetForcePlanTargetStatesAsync(
+                    serverId,
+                    [new PerformanceMonitor.Analysis.AnalysisFinding { Remediation = new PerformanceMonitor.Analysis.RemediationAction("PLAN_REGRESSION", "force", targets) }]));
 
             _backgroundService = new CollectionBackgroundService(
                 _collectorService, _databaseInitializer, archiveService, retentionService, _serverManager,

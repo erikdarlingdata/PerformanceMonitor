@@ -2122,6 +2122,12 @@ public partial class MainWindow : Window
         /* #5558: the shared note when this server's node holds a secondary availability group copy of any database. */
         var replicaNote = await _dataService.GetSecondaryReplicaNoteAsync(server.ServerId);
 
+        /* The store's forcing and automatic-plan-correction state for the force-plan targets these findings carry: a
+           card gives no force statement for a plan the store blocks. A failed read does not fail the tab; the states
+           are then null and the reason opens each force-plan card's copy-paste text. */
+        var (forcePlanStates, forcePlanStateUnavailableReason) =
+            await _dataService.GetForcePlanTargetStatesAsync(server.ServerId, rows);
+
         ApplyRecommendationsViewModel(
             RecommendationsViewModel.FromFindings(
                 rows, server.DisplayName, serverClock,
@@ -2129,7 +2135,9 @@ public partial class MainWindow : Window
                 insufficientDataMessage: analysisState?.Message,
                 windowEmpty: analysisState?.WindowEmpty == true,
                 windowEmptyMessage: analysisState?.Message,
-                isPostgres: server.IsPostgres).WithReplicaNote(replicaNote));
+                isPostgres: server.IsPostgres,
+                forcePlanStates: forcePlanStates,
+                forcePlanStateUnavailableReason: forcePlanStateUnavailableReason).WithReplicaNote(replicaNote));
 
         /* #4766: the status line's time and the zone named after it both come from the selected server's clock in
            the display mode now in force. It used to end in a fixed "(local)" on a time that follows the display

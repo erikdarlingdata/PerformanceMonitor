@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -134,6 +135,20 @@ WHERE server_id = $1";
     /// </summary>
     public Task<string?> GetSecondaryReplicaNoteAsync(int serverId, CancellationToken cancellationToken = default) =>
         PgSecondaryReplicaScope.NoteAsync(_dataSource, serverId, logger: null, cancellationToken);
+
+    /// <summary>
+    /// The store's forcing and automatic-plan-correction state for every force-plan target the findings in
+    /// <paramref name="rows"/> carry, read through the shared <see cref="DarlingForcePlanTargetStateReader"/>, so a
+    /// Recommendations card gives no force statement for a plan the store blocks. A failed read is null states plus the
+    /// reason, never an error on the tab: the cards then keep every statement and open with that reason. Rows with no
+    /// force-plan target cost no statement.
+    /// </summary>
+    public Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> GetForcePlanTargetStatesAsync(
+        int serverId, IReadOnlyList<ViewerFindingRow> rows, CancellationToken cancellationToken = default) =>
+        DarlingForcePlanTargetStateReader.TryReadAsync(
+            _dataSource, serverId, rows.Where(r => r is not null).Select(r => r.Finding),
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds,
+            logger: ViewerStoreLogger.Instance, cancellationToken: cancellationToken);
 
     /// <summary>
     /// The latest analysis run's findings for one server, mapped to display rows. Reads
