@@ -237,6 +237,53 @@ public sealed class GridRowsArrivingAtAnEmptyGridTests
         AssertBuiltOnlyTheRowsInView(built, "Job History beside the sidebar of a 900x600 window");
     }
 
+    /// <summary>
+    /// Top Queries by Duration holds the read's top 50 queries in 47 columns, wider than any window, so its rows always arrive at a grid
+    /// that scrolls by pixel. It builds the rows in view, not all 50 of 47 cells each.
+    /// </summary>
+    [Fact]
+    public void TopQueriesByDuration_BuildsOnlyTheRowsInView_WhenQueriesArriveAtTheEmptyGrid()
+    {
+        var rows = Enumerable.Range(0, 50).Select(i => new QueryStatsRow
+        {
+            DatabaseName = "db" + (i % 7),
+            QueryHash = "0x" + (0x1A2B3C4D5E6F7000L + i).ToString("X16"),
+            QueryText = "SELECT o.order_id, o.status FROM dbo.orders AS o WHERE o.customer_id = " + i,
+            TotalExecutions = 1000 + i,
+            TotalCpuUs = 5_000_000L + i,
+            TotalElapsedUs = 9_000_000L + i,
+            TotalLogicalReads = 120_000 + i,
+            LastExecutionTime = new DateTime(2026, 11, 10, 12, 0, 0).AddSeconds(-i),
+        }).ToList();
+
+        var built = OnTheServerTab("QueryStatsGrid", rows);
+
+        AssertBuiltOnlyTheRowsInView(built, "Queries > Top Queries by Duration at 900x600");
+        Assert.True(built.Containers < built.Rows, $"Top Queries by Duration built a row container for each of its {built.Rows} rows, where about {built.RowsInView} are in view");
+    }
+
+    /// <summary>Query Store by Duration holds the read's top 50 queries in 57 columns. It builds the rows in view, not all 50 of 57 cells each.</summary>
+    [Fact]
+    public void QueryStoreByDuration_BuildsOnlyTheRowsInView_WhenQueriesArriveAtTheEmptyGrid()
+    {
+        var rows = Enumerable.Range(0, 50).Select(i => new QueryStoreRow
+        {
+            DatabaseName = "db" + (i % 7),
+            QueryId = 4000 + i,
+            PlanId = 9000 + i,
+            QueryHash = "0x" + (0x1A2B3C4D5E6F7000L + i).ToString("X16"),
+            QueryText = "SELECT o.order_id, o.status FROM dbo.orders AS o WHERE o.customer_id = " + i,
+            TotalExecutions = 1000 + i,
+            AvgDurationMs = 12.5 * (i + 1),
+            LastExecutionTime = new DateTime(2026, 11, 10, 12, 0, 0).AddSeconds(-i),
+        }).ToList();
+
+        var built = OnTheServerTab("QueryStoreGrid", rows);
+
+        AssertBuiltOnlyTheRowsInView(built, "Queries > Query Store by Duration at 900x600");
+        Assert.True(built.Containers < built.Rows, $"Query Store by Duration built a row container for each of its {built.Rows} rows, where about {built.RowsInView} are in view");
+    }
+
     /// <summary>The named grid of a real server tab in a 900x600 window, shown empty on its own sub-tab and then handed <paramref name="rows"/>.</summary>
     private static Built OnTheServerTab(string gridName, System.Collections.IList rows, bool whileItsTabIsDeselected = false)
     {
