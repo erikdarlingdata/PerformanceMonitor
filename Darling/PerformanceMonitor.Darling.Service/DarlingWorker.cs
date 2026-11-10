@@ -625,6 +625,13 @@ public sealed partial class DarlingWorker : BackgroundService
     internal Func<ServerLoopState, ServerRuntime, string, CancellationToken, Task<int>>? RunOneBodyOverride { get; set; }
 
     /// <summary>
+    /// Test seam (#8539): stands in for the scheduled analysis pass in <see cref="RunScheduledAnalysisIfDueAsync"/>, so a
+    /// test can hold a pass open and watch which passes start around it with no store and no monitored server. Null in
+    /// production, which runs the pass for real.
+    /// </summary>
+    internal Func<ServerLoopState, CancellationToken, Task>? ScheduledAnalysisOverride { get; set; }
+
+    /// <summary>
     /// Test seam (#6186): with <see cref="RunOneBodyOverride"/> set, a non-null answer here stands for the monitored server
     /// refusing that collector (a PERMISSIONS run with this message). The override's run is recorded the way the real
     /// run's outcome is, so the backoff sees it.

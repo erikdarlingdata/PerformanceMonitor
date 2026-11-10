@@ -2191,50 +2191,8 @@ public sealed partial class DarlingWorker
                the pass serves. */
             await RefreshMsdbCacheAsync(server, stoppingToken);
 
-            /* AN3: the scheduled analysis pipeline, per-server. The cadence, the enabled gate, and the notify
-               gate are now control-plane knobs read LIVE from config.Analysis (a reload takes effect on the next
-               tick). When analysis is disabled the pass is skipped and NextAnalysisDue is left in the past, so
-               re-enabling runs immediately. The next-due stamp advances up front (Lite's scheduler shape), so a
-               timed-out pass is skipped, not retried immediately. Delivery is gated on the master switch
-               AND analysis_notifications_enabled (ShouldNotifyAnalysisFindings — #3464; Lite's D0 split
-               stands: production unconditional, delivery gated); the interval is clamped to Lite's 5-360
-               range. */
-            /* #5824: the pass runs here, inside this body, so it holds this server's fleet collection slot for its whole
-               length (up to the 120 s budget plus the 5 s unwind grace, then the notify and force-plan steps). The next
-               body reads its length as a candidate cause of any slot this server steps over. */
-            server.LastAnalysisMs = 0;
-            var analysisIntervalMinutes = Math.Clamp(config.Analysis.IntervalMinutes, MinAnalysisIntervalMinutes, MaxAnalysisIntervalMinutes);
-            /* #5812 (ruling R3): an MCP or viewer call reuses PLAN_REGRESSION candidates for one analysis cadence, never
-               longer than the scheduled pass that replaces them. */
-            PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RefreshAfter = TimeSpan.FromMinutes(analysisIntervalMinutes);
-            if (config.Analysis.Enabled && StampIsDue(server.NextAnalysisDue, TimeSpan.FromMinutes(analysisIntervalMinutes), DateTime.UtcNow))
-            {
-                server.NextAnalysisDue = DateTime.UtcNow.AddMinutes(analysisIntervalMinutes);
-
-                /* Every engine takes the pass (#3542). Until the PostgreSQL-target analysis engine existed,
-                   this site gated on the target engine and wrote a tombstone into analysis_state for a
-                   PostgreSQL server instead of running: the pipeline was SQL-Server-shaped, its data-span
-                   gate read wait_stats, and a PostgreSQL server_id would have sat at "0 hours, still
-                   collecting" for the life of the deployment. That gate is gone, and the invariant that
-                   replaced it lives one layer down: the pass ROUTES BY THE REGISTRY'S engine_kind INSIDE
-                   DarlingAnalysisService (its ResolveEngineAsync picks the PostgreSQL-target component set
-                   and the pg_database_stats span gate for a postgres / aurora-postgres row), so the worker
-                   no longer knows or cares which engine it is scheduling. The first real pass then
-                   overwrites any tombstone row still standing with the honest state (D7 — the lazy
-                   overwrite, no migration). */
-                var analysisStarted = Stopwatch.GetTimestamp();
-                Interlocked.Increment(ref _analysisPassesInSlot);
-                try
-                {
-                    await RunScheduledAnalysisAsync(
-                        server, planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), stoppingToken);
-                }
-                finally
-                {
-                    Interlocked.Decrement(ref _analysisPassesInSlot);
-                    server.LastAnalysisMs = (long)Stopwatch.GetElapsedTime(analysisStarted).TotalMilliseconds;
-                }
-            }
+            /* The scheduled analysis step, inside this body's fleet collection slot, after the collectors. */
+            await RunScheduledAnalysisIfDueAsync(server, planFetcher, notificationService, config, stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -2258,6 +2216,71 @@ public sealed partial class DarlingWorker
         finally
         {
             gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// The scheduled analysis step of one server's body: runs the server's analysis pass when its stamp is due. Called
+    /// inside the body's fleet collection slot, after its collectors. Internal so a test can drive the step with
+    /// <see cref="ScheduledAnalysisOverride"/> standing in for the pass; production calls it only from the per-server body.
+    /// </summary>
+    internal async Task RunScheduledAnalysisIfDueAsync(
+        ServerLoopState server,
+        PgPlanFetcher planFetcher,
+        AnalysisNotificationService notificationService,
+        DarlingConfig config,
+        CancellationToken stoppingToken)
+    {
+        /* AN3: the scheduled analysis pipeline, per-server. The cadence, the enabled gate, and the notify
+           gate are now control-plane knobs read LIVE from config.Analysis (a reload takes effect on the next
+           tick). When analysis is disabled the pass is skipped and NextAnalysisDue is left in the past, so
+           re-enabling runs immediately. The next-due stamp advances up front (Lite's scheduler shape), so a
+           timed-out pass is skipped, not retried immediately. Delivery is gated on the master switch
+           AND analysis_notifications_enabled (ShouldNotifyAnalysisFindings — #3464; Lite's D0 split
+           stands: production unconditional, delivery gated); the interval is clamped to Lite's 5-360
+           range. */
+        /* #5824: the pass runs here, inside this body, so it holds this server's fleet collection slot for its whole
+           length (up to the 120 s budget plus the 5 s unwind grace, then the notify and force-plan steps). The next
+           body reads its length as a candidate cause of any slot this server steps over. */
+        server.LastAnalysisMs = 0;
+        var analysisIntervalMinutes = Math.Clamp(config.Analysis.IntervalMinutes, MinAnalysisIntervalMinutes, MaxAnalysisIntervalMinutes);
+        /* #5812: an MCP or viewer call reuses PLAN_REGRESSION candidates for one analysis cadence, never
+           longer than the scheduled pass that replaces them. */
+        PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RefreshAfter = TimeSpan.FromMinutes(analysisIntervalMinutes);
+        if (config.Analysis.Enabled && StampIsDue(server.NextAnalysisDue, TimeSpan.FromMinutes(analysisIntervalMinutes), DateTime.UtcNow))
+        {
+            server.NextAnalysisDue = DateTime.UtcNow.AddMinutes(analysisIntervalMinutes);
+
+            /* Every engine takes the pass (#3542). Until the PostgreSQL-target analysis engine existed,
+               this site gated on the target engine and wrote a tombstone into analysis_state for a
+               PostgreSQL server instead of running: the pipeline was SQL-Server-shaped, its data-span
+               gate read wait_stats, and a PostgreSQL server_id would have sat at "0 hours, still
+               collecting" for the life of the deployment. That gate is gone, and the invariant that
+               replaced it lives one layer down: the pass ROUTES BY THE REGISTRY'S engine_kind INSIDE
+               DarlingAnalysisService (its ResolveEngineAsync picks the PostgreSQL-target component set
+               and the pg_database_stats span gate for a postgres / aurora-postgres row), so the worker
+               no longer knows or cares which engine it is scheduling. The first real pass then
+               overwrites any tombstone row still standing with the honest state (D7 — the lazy
+               overwrite, no migration). */
+            var analysisStarted = Stopwatch.GetTimestamp();
+            Interlocked.Increment(ref _analysisPassesInSlot);
+            try
+            {
+                if (ScheduledAnalysisOverride is { } standIn)
+                {
+                    await standIn(server, stoppingToken);
+                }
+                else
+                {
+                    await RunScheduledAnalysisAsync(
+                        server, planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), stoppingToken);
+                }
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _analysisPassesInSlot);
+                server.LastAnalysisMs = (long)Stopwatch.GetElapsedTime(analysisStarted).TotalMilliseconds;
+            }
         }
     }
 
