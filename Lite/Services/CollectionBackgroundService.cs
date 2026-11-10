@@ -170,7 +170,32 @@ public class CollectionBackgroundService : BackgroundService
 
     public bool IsPaused { get; set; }
     public DateTime? LastCollectionTime { get; private set; }
-    public bool IsCollecting { get; private set; }
+
+    /// <summary>
+    /// #8533: raised on the loop's own thread when a cycle starts and when it ends, after <see cref="IsCollecting"/> has changed
+    /// and, for a cycle that finished, after <see cref="LastCollectionTime"/> has. The status bar repaints its collection label
+    /// from it. A listener that throws is logged and does not reach the loop.
+    /// </summary>
+    public event Action? CycleStateChanged;
+
+    private volatile bool _isCollecting;
+
+    public bool IsCollecting
+    {
+        get => _isCollecting;
+        private set
+        {
+            _isCollecting = value;
+            try
+            {
+                CycleStateChanged?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "A cycle-state listener failed");
+            }
+        }
+    }
 
     public CollectionBackgroundService(
         RemoteCollectorService collectorService,
