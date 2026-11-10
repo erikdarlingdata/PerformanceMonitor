@@ -31,7 +31,9 @@ public sealed class TrendRestartLegendTests
     private static readonly string Sentence =
         BaselineDiscontinuities.Sentence(new DateTime(2026, 11, 8, 12, 40, 0), BaselineDiscontinuities.RestartReason);
 
-    private static WpfPlot TrendChart(string series)
+    private static WpfPlot TrendChart(string series) => TrendChart(series, Sentence, out _);
+
+    private static WpfPlot TrendChart(string series, string markerText, out ScottPlot.Plottables.Scatter plotted)
     {
         var chart = new WpfPlot();
         ChartStyle.ApplyThemeToChart(chart);
@@ -39,7 +41,8 @@ public sealed class TrendRestartLegendTests
         var xs = Enumerable.Range(0, 48).Select(k => t0 + (k / 48.0)).ToArray();
         var line = chart.Plot.Add.Scatter(xs, xs.Select(x => (x - t0) * 100).ToArray());
         line.LegendText = series;
-        ChartStyle.AddDiscontinuityMarker(chart, xs[25], Sentence);
+        plotted = line;
+        ChartStyle.AddDiscontinuityMarker(chart, xs[25], markerText);
         chart.Plot.Axes.DateTimeTicksBottom();
         ChartStyle.ReapplyAxisColors(chart);
         chart.Plot.YLabel("ms/sec");
@@ -51,6 +54,36 @@ public sealed class TrendRestartLegendTests
     /// <summary>Renders the chart at the height given and returns how the legend showed the marker's entry: "whole", "ellipsis" or "more".
     /// Adds one line to <paramref name="problems"/> for each entry wider than the legend's row, and for a marker entry in no such form.</summary>
     private static string Render(WpfPlot chart, int height, List<string> problems)
+    {
+        var shown = Shown(chart, height, problems);
+        var marker = shown.Select(i => i.LabelText.Replace('\n', ' ')).FirstOrDefault(t => t.StartsWith("SQL Server restarted", StringComparison.Ordinal));
+        if (marker is null)
+        {
+            if (!shown.Any(i => i.LabelText.StartsWith('+')))
+            {
+                problems.Add($"at {ChartWidth}x{height} the legend shows neither the marker's entry nor a \"+N more\" entry: {string.Join(" / ", shown.Select(i => i.LabelText))}");
+            }
+
+            return "more";
+        }
+
+        if (marker == Sentence)
+        {
+            return "whole";
+        }
+
+        if (marker.EndsWith(Ellipsis, StringComparison.Ordinal) && Sentence.StartsWith(marker[..^Ellipsis.Length], StringComparison.Ordinal))
+        {
+            return "ellipsis";
+        }
+
+        problems.Add($"at {ChartWidth}x{height} the marker's entry reads \"{marker}\", neither the whole sentence nor its start and an ellipsis");
+        return "other";
+    }
+
+    /// <summary>Renders the chart at the height given and returns the entries the legend showed, adding one line to <paramref name="problems"/>
+    /// for each entry wider than the legend's row.</summary>
+    private static LegendItem[] Shown(WpfPlot chart, int height, List<string> problems)
     {
         var plot = chart.Plot;
         for (var pass = 0; pass < 2; pass++)
@@ -76,29 +109,7 @@ public sealed class TrendRestartLegendTests
             }
         }
 
-        var marker = shown.Select(i => i.LabelText.Replace('\n', ' ')).FirstOrDefault(t => t.StartsWith("SQL Server restarted", StringComparison.Ordinal));
-        if (marker is null)
-        {
-            if (!shown.Any(i => i.LabelText.StartsWith('+')))
-            {
-                problems.Add($"at {ChartWidth}x{height} the legend shows neither the marker's entry nor a \"+N more\" entry: {string.Join(" / ", shown.Select(i => i.LabelText))}");
-            }
-
-            return "more";
-        }
-
-        if (marker == Sentence)
-        {
-            return "whole";
-        }
-
-        if (marker.EndsWith(Ellipsis, StringComparison.Ordinal) && Sentence.StartsWith(marker[..^Ellipsis.Length], StringComparison.Ordinal))
-        {
-            return "ellipsis";
-        }
-
-        problems.Add($"at {ChartWidth}x{height} the marker's entry reads \"{marker}\", neither the whole sentence nor its start and an ellipsis");
-        return "other";
+        return shown;
     }
 
     [Theory]
@@ -142,5 +153,77 @@ public sealed class TrendRestartLegendTests
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
         Assert.Contains("\n", entry, StringComparison.Ordinal);
         Assert.Equal(Sentence, entry.Replace('\n', ' '));
+    }
+
+    private const string Spaceless = "SharePoint_AdminContent_3f2a9c1e-7b4d-4e8a-9f0b-1c2d3e4f5a6b";
+
+    /// <summary>A name with no space in it cannot be broken across lines, so it is cut to the row and ends in an ellipsis, alone or as one word of a longer entry.</summary>
+    [Theory]
+    [InlineData(Spaceless)]
+    [InlineData("Latency for " + Spaceless + " reads")]
+    public void AWordWiderThanTheRow_EndsInAnEllipsis_AndIsNeverCut(string name)
+    {
+        var (problems, tallest) = StaTestThread.Run(() =>
+        {
+            var found = new List<string>();
+            var chart = TrendChart("tempdb", name, out _);
+            var last = "";
+            for (var height = 200; height <= 380; height += 20)
+            {
+                var shown = Shown(chart, height, found);
+                last = shown.Select(i => i.LabelText).FirstOrDefault(t => t.Contains("SharePoint", StringComparison.Ordinal)) ?? "";
+            }
+
+            return (found, last);
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems.Take(5)) + $"{Environment.NewLine}({problems.Count} in all)");
+        // At 380 px the chart has the height for the entry: it shows, with the long word cut to the row.
+        Assert.Contains("SharePoint_AdminContent", tallest, StringComparison.Ordinal);
+        Assert.Contains(Ellipsis, tallest, StringComparison.Ordinal);
+    }
+
+    /// <summary>The hover over an entry that ends in an ellipsis is the entry's whole text.</summary>
+    [Theory]
+    [InlineData("Query Duration")]
+    [InlineData("Procedure Duration")]
+    public void TheHoverOverAShortenedEntry_IsTheWholeSentence(string series)
+    {
+        var (form, hover) = StaTestThread.Run(() =>
+        {
+            var found = new List<string>();
+            var chart = TrendChart(series, Sentence, out var plotted);
+            var helper = new ChartHoverHelper(chart, "ms/sec");
+            helper.Add(plotted, series);
+
+            // The first height at which the legend shows the sentence's start and an ellipsis.
+            var shownAs = "";
+            for (var height = 200; height <= 380 && shownAs != "ellipsis"; height += 2)
+            {
+                shownAs = Render(chart, height, found);
+            }
+
+            if (shownAs != "ellipsis")
+            {
+                return (shownAs, (string?)null);
+            }
+
+            // The middle of the entry's label, placed as the legend panel places it.
+            var plot = chart.Plot;
+            var layout = plot.RenderManager.LastRender.Layout;
+            var panel = plot.Axes.GetPanels().OfType<LegendPanel>().Single();
+            using var paint = Paint.NewDisposablePaint();
+            var rect = panel.GetPanelRect(layout.DataRect, layout.PanelSizes[panel], layout.PanelOffsets[panel], paint);
+            var tight = plot.Legend.GetLayout(rect.Size, paint);
+            var placed = tight.LegendRect.AlignedInside(rect, panel.Alignment);
+            var at = Array.FindIndex(tight.LegendItems, i => i.LabelText.StartsWith("SQL Server restarted", StringComparison.Ordinal));
+            var label = tight.LabelRects[at].WithOffset(new PixelOffset(placed.Left, placed.Top));
+            var scale = (float)plot.ScaleFactor;
+            var pixel = new Pixel((label.Left + label.Right) / 2 * scale, (label.Top + label.Bottom) / 2 * scale);
+            return (shownAs, helper.HoverTextAt(pixel));
+        });
+
+        Assert.Equal("ellipsis", form);
+        Assert.Equal(Sentence, hover);
     }
 }

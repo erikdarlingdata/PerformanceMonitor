@@ -78,11 +78,11 @@ public sealed class CheckBoxOutlineTests
         return (Math.Max(la, lb) + 0.05) / (Math.Min(la, lb) + 0.05);
     }
 
-    /// <summary>The floor is 3:1 on the two light themes. The Dark theme outlines its controls at a lower contrast, so there the box is held to its text box alone.</summary>
+    /// <summary>The floor is 3:1 on the two light themes. On Dark it is 1.4:1, which the theme's control outline (1.59:1 on the page, 1.41:1 on a card) meets and its grid-line colour (1.25:1 and 1.12:1) does not.</summary>
     [Theory]
     [InlineData("Light", 3.0)]
     [InlineData("CoolBreeze", 3.0)]
-    [InlineData("Dark", 1.0)]
+    [InlineData("Dark", 1.4)]
     public void AnUncheckedCheckBox_IsOutlinedLikeTheTextBoxBesideIt(string theme, double floor)
     {
         var o = Render(theme);
@@ -100,7 +100,7 @@ public sealed class CheckBoxOutlineTests
     [Theory]
     [InlineData("Light", 3.0)]
     [InlineData("CoolBreeze", 3.0)]
-    [InlineData("Dark", 1.0)]
+    [InlineData("Dark", 1.4)]
     public void AnUnchosenRadioButton_IsOutlinedLikeTheTextBoxBesideIt(string theme, double floor)
     {
         var o = Render(theme);
