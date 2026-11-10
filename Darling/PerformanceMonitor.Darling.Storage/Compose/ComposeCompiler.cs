@@ -227,7 +227,7 @@ public static class ComposeCompiler
         string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam, ComposeRunContext context, string? wideStartParam = null,
         IReadOnlyList<string>? dimensionFilters = null, string? serverScopeSql = null, bool restrictDedupe = false,
         string? edgeStartParam = null, string? edgeEndParam = null, ComposeAggregate aggregate = ComposeAggregate.Sum,
-        StampRelation? stamp = null, string? splitRawParam = null)
+        StampRelation? stamp = null, string? splitRawParam = null, string? sumPerCaptureColumn = null)
     {
         if (route.Tier == ComposeSourceTier.HourlyRawEdges)
         {
@@ -297,6 +297,19 @@ public static class ComposeCompiler
                 + $"FROM {PgSchemaGenerator.CollectSchema}.{DefaultTraceTable} "
                 + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam}"
                 + ") AS dte_ranked WHERE dte_rn = 1)";
+        }
+
+        /* #8573: a SumPerCapture measure (the connected-backend count) is a level held one row per database, so a capture's figure
+           is the sum across its rows, and the panel's aggregate must run over those per-capture sums. Summing within each
+           (server, collection_time) first keeps avg and max from ever adding captures together. The group columns are the ones the
+           outer server scope and window filter on, so both push into this subquery. A capture whose every row is NULL (a row written
+           before the column existed) sums to NULL and stays out of the aggregate. */
+        if (sumPerCaptureColumn is not null)
+        {
+            return $"(SELECT server_id, server_name, {timeColumn}, SUM({sumPerCaptureColumn}) AS {sumPerCaptureColumn} "
+                + $"FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} "
+                + $"WHERE {timeColumn} >= {startParam} AND {timeColumn} <= {endParam} "
+                + $"GROUP BY server_id, server_name, {timeColumn})";
         }
 
         if (!string.Equals(sourceTable, QueryStoreTable, StringComparison.Ordinal))
@@ -667,7 +680,7 @@ public static class ComposeCompiler
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
-            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate, stampRelation, splitRawParam));
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, context, wideStartParam, pushableFilterClauses, hasServerScope ? FactScope() : null, restrictDedupe, edgeStartParam, edgeEndParam, plan.Aggregate, stampRelation, splitRawParam, plan.Measure.SumPerCapture ? plan.Measure.Column : null));
 
             /* #3653 A6: a CAGG route's FROM-clause item (route.CaggFromClause) is already a complete, aliased
                relation — "collect.<x> AS f" or a stitched "(... UNION ALL ...) AS f" — so it must NOT get a

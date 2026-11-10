@@ -259,6 +259,11 @@ public sealed record ComposeMeasure
     /// Null for every measure that needs none.</summary>
     public string? Note { get; init; }
 
+    /// <summary>Scalar gauge only: the column is one row per entity (one per database) and a capture's figure is the
+    /// SUM across those rows. The compiler's fact relation sums <see cref="Column"/> within each (server, collection_time)
+    /// first, so every aggregate (avg, min, max) runs over the per-capture sums and never across captures (#8573).</summary>
+    public bool SumPerCapture { get; init; }
+
     public required string NativeUnit { get; init; }
     public required string DefaultUnit { get; init; }
     public required string UnitFamily { get; init; }
@@ -1711,6 +1716,14 @@ public static class MeasureCatalog
             NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
             DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgDatabaseDims,
         },
+        new ComposeMeasure
+        {
+            Key = "pg_db_connected_backends", DisplayName = "Connected backends", Category = CatPgDatabases, SourceTable = "pg_database_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "numbackends", SumPerCapture = true,
+            Note = "Counts every connected backend across all databases, sampled each capture: the per-database counts are added within one capture, then the aggregate runs over the captures. Present on every capture, unlike the session total, which needs a stored session row. Has no database dimension, since it is the sum across them.",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = NoDims,
+        },
 
         /* ── pg_table_bloat_stats (statistics-based estimate; !in-recovery) - point-in-time gauges ── */
         new ComposeMeasure
@@ -2032,6 +2045,7 @@ public static class MeasureCatalog
         {
             Key = "pg_sess_total_sessions", DisplayName = "Total sessions", Category = CatPgSessions, SourceTable = "pg_session_states",
             Archetype = MeasureArchetype.Gauge, Column = "total_sessions",
+            Note = "Exists only on captures that stored a session row, which the collector writes only while a session holds a transaction old enough to capture. It is not a connection count: for that, use Connected backends (pg_db_connected_backends).",
             NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
             DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgSessionDims,
         },
