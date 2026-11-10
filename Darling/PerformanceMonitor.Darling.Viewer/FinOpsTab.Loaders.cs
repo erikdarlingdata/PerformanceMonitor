@@ -434,9 +434,9 @@ public partial class FinOpsTab
         FinOpsNoTableSizesMessage.Visibility = page.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         FinOpsTableSizesNote.Text = page.Count == 0
             ? ""
-            : $"{page.Count} table(s), largest first, at the {HistoryTime.SnapshotCollected(page[0].LatestSnapshotTime, "--")} snapshot"
+            : $"{CountText.Plural(page.Count, "table")}, largest first, at the {HistoryTime.SnapshotCollected(page[0].LatestSnapshotTime, "--")} snapshot"
               + (truncated ? $"; the {DarlingTableSizeGrowthReader.TopTables} largest of more" : "")
-              + (page[0].DaysOfData < 30 ? $"; the store holds {page[0].DaysOfData} day(s) of snapshots, so growth the history does not reach shows n/a" : "");
+              + (page[0].DaysOfData < 30 ? $"; the store holds {CountText.Plural(page[0].DaysOfData, "day")} of snapshots, so growth the history does not reach shows n/a" : "");
     }
 
     // ── Version Store (PVS) ──

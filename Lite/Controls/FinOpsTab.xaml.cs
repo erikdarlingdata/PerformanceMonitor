@@ -81,9 +81,27 @@ public partial class FinOpsTab : UserControl
        _perfmonPickerGen); this is that idiom with the key spelled once. */
     private readonly ScopedLoadGenerations _loads = new();
 
+    /// <summary>The Server Inventory grid's filters, for the tests that drive a column filter the way the funnel does.</summary>
+    internal DataGridFilterManager<ServerPropertyRow>? ServerInventoryFilters => _serverInventoryFilterMgr;
+
+    /// <summary>#8474: the Hardware Note column is on screen only while a bound inventory row carries a note (a server whose hardware
+    /// read was denied), so a column blank on every server takes no width from the text columns beside it. The rows are re-read on every
+    /// reload and filter, because each one binds the grid again. It reads the unfiltered rows, not the grid's filtered items, and keeps the
+    /// column while a filter is set on it: a filter on the column itself (IsEmpty hides every noted row) must not collapse the column and
+    /// with it the funnel that clears the filter. Before the first load the grid's own items are all there is.</summary>
+    private void ShowHardwareNoteColumnWhenAnyRowHasANote()
+    {
+        var rows = _serverInventoryFilterMgr?.UnfilteredRows ?? ServerInventoryDataGrid.Items.OfType<ServerPropertyRow>().ToList();
+        var any = rows.Any(r => !string.IsNullOrEmpty(r.HardwareUnavailableReason))
+            || (_serverInventoryFilterMgr?.HasActiveFilterOn(nameof(ServerPropertyRow.HardwareUnavailableReason)) ?? false);
+        HardwareNoteColumn.Visibility = any ? Visibility.Visible : Visibility.Collapsed;
+    }
+
     public FinOpsTab()
     {
         InitializeComponent();
+        ((System.Collections.Specialized.INotifyCollectionChanged)ServerInventoryDataGrid.Items).CollectionChanged += (_, _) => ShowHardwareNoteColumnWhenAnyRowHasANote();
+        ShowHardwareNoteColumnWhenAnyRowHasANote();
         DataGridNumberHeaders.Apply(this); // #8223: a number column's header on the same edge as its values
         /* #5562: every list opened on the last 24 hours (1d); the heatmap on 30 days (1mo). */
         /* R5: the lists and the heatmap read "hours back from now", so each picker is rolling only (the heatmap in whole days). */
@@ -706,8 +724,8 @@ public partial class FinOpsTab : UserControl
     }
 
     /// <summary>
-    /// The zone the selected server's days are counted in for the 7-Day Provisioning Trend and Memory Grant Efficiency: the
-    /// selected time display on that server's clock (its own collected clock, else its open tab's, else the machine's), the rule
+    /// The zone the selected server's days are counted in for the 7-Day Provisioning Trend, Memory Grant Efficiency and the Object
+    /// Growth heatmap: the selected time display on that server's clock (its own collected clock, else its open tab's, else the machine's), the rule
     /// the Application Connections rows and the PVS trend use. The open tab is asked here, on the UI thread, because the tabs are
     /// UI objects.
     /// </summary>

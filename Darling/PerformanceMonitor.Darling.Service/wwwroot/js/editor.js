@@ -29,6 +29,7 @@
 
 import { el, mount, apiGetFleet, readToolWithinKeptHistory, storeHash } from "./util.js";
 import { renderPanel, VIZ } from "./panels.js";
+import { withCatalogWords } from "./read-fields.js";
 import { orderServers } from "./server-order.js";
 import { SERIES_COLORS, normalizeColor } from "./charts.js";
 import { renderComposedPanelCard } from "./compose.js";
@@ -938,7 +939,9 @@ function buildReadPanelEditor(p, index, ctx, kindToggle) {
       mount(previewBox, el("div", { class: "strip empty", text: problem }));
       return;
     }
-    mount(previewBox, renderPanel(panelToDesc(p)));
+    /* #8492: the preview takes the catalog's words and rules for a read table's own columns (withCatalogWords), the step the saved view
+       takes on its way to renderPanel, so the two draw the same cells. */
+    mount(previewBox, renderPanel(withCatalogWords(panelToDesc(p))));
   }
 
   rebuildParams();

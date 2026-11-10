@@ -269,7 +269,7 @@ public sealed class PgTargetTempTests
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.TempSpill, lookup)!;
         Assert.Equal("Temp-file spill: 2 MB/s of observed time, 28 GB across 239 temp files in the window, 100% of it in appdb", block.Headline);
         Assert.Contains("this server wrote 28 GB in 239 temp files: 2 MB/s, 0.017 files/s, an average of 120 MB per file", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("the counters were reset 1 time(s) in the window (1 rewind(s) seen), each clamped to zero", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("the counters were reset 1 time in the window (1 rewind seen), each clamped to zero", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("is fleet-measured, about the 99.7th percentile of the measured fleet's five-minute spill rates (threshold_lineage = 1)", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("work_mem on this host is 4 MB, the shipped default", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("pg_temp_spill_statements", block.Investigation, StringComparison.Ordinal);

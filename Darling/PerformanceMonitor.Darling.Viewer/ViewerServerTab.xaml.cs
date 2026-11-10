@@ -308,8 +308,16 @@ public partial class ViewerServerTab : UserControl
     /// so after each load we loop when the selection moved on and load again — leaving no inner tab
     /// stranded. A trigger that arrives mid-load (the auto-refresh tick, an inner-tab switch) sets
     /// <see cref="_refreshRequested"/> instead of being dropped, so the running loop reloads once more.
+    /// <para>The load runs through <see cref="Dispatcher.Invoke{TResult}(Func{TResult})"/>, which on this tab's own thread runs it at once
+    /// with the dispatcher's synchronization context installed, so the code after each of its awaits resumes on this thread whatever
+    /// context the caller's thread had. The app's UI thread has that context already, and the load runs as it would without the call. A
+    /// host that drives the tab on its dispatcher thread with no context installed would otherwise resume the load on the thread pool and
+    /// touch the time range picker from the wrong thread (#8506).</para>
     /// </summary>
-    public async Task RefreshActiveInnerTabAsync()
+    public Task RefreshActiveInnerTabAsync() => Dispatcher.Invoke(RefreshActiveInnerTabUnderDispatcherContextAsync);
+
+    /// <summary>The body of <see cref="RefreshActiveInnerTabAsync"/>, entered with the dispatcher's synchronization context current.</summary>
+    private async Task RefreshActiveInnerTabUnderDispatcherContextAsync()
     {
         if (_refreshInFlight)
         {

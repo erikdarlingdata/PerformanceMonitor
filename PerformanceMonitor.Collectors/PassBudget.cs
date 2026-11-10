@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -82,8 +83,7 @@ public sealed class PassBudget
 
     /// <summary>The collection_log note for a pass that stopped on its budget.</summary>
     public static string StopNote(int budgetSeconds, int reached, int total) =>
-        string.Format(
+        string.Create(
             CultureInfo.InvariantCulture,
-            "pass budget ({0} s) spent after {1} of {2} database(s); the rest were not read and have no marker, the next pass resumes after the last one read",
-            budgetSeconds, reached, total);
+            $"pass budget ({budgetSeconds} s) spent after {reached} of {CountText.Plural(total, "database")}; the rest were not read and have no marker, the next pass resumes after the last one read");
 }

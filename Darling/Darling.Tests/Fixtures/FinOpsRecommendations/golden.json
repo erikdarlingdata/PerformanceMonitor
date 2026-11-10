@@ -13,7 +13,7 @@
         "Category": "Databases",
         "Severity": "Medium",
         "Confidence": "High",
-        "Finding": "1 idle database(s) consuming 2.0GB",
+        "Finding": "1 idle database consuming 2.0GB",
         "Detail": "No query activity in 7 days: ArchiveA. Consider archiving or removing these databases.",
         "EstMonthlySavings": 39.348293882569935444205348900
       },
@@ -21,7 +21,7 @@
         "Category": "Environment",
         "Severity": "Medium",
         "Confidence": "Low",
-        "Finding": "2 possible dev/test database(s) on production server",
+        "Finding": "2 possible dev/test databases on production server",
         "Detail": "Databases matching dev/test patterns: app_dev_a, qa1_a. If these are non-production workloads, consider moving to a lower-cost tier or separate server.",
         "EstMonthlySavings": null
       },
@@ -103,7 +103,7 @@
         "Category": "Databases",
         "Severity": "Medium",
         "Confidence": "High",
-        "Finding": "1 idle database(s) consuming 2.0GB",
+        "Finding": "1 idle database consuming 2.0GB",
         "Detail": "No query activity in 7 days: ArchiveA. Consider archiving or removing these databases.",
         "EstMonthlySavings": null
       },
@@ -111,7 +111,7 @@
         "Category": "Environment",
         "Severity": "Medium",
         "Confidence": "Low",
-        "Finding": "2 possible dev/test database(s) on production server",
+        "Finding": "2 possible dev/test databases on production server",
         "Detail": "Databases matching dev/test patterns: app_dev_a, qa1_a. If these are non-production workloads, consider moving to a lower-cost tier or separate server.",
         "EstMonthlySavings": null
       },

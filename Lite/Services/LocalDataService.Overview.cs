@@ -579,18 +579,37 @@ public class ServerSummaryItem
     {
         get
         {
-            if (CpuIsStale || !CpuPercent.HasValue) return "--";
-            /* #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so there is no total to show. The
-               figure is the SQL Server's own, and says so. */
-            if (!OtherProcessCpuPercent.HasValue) return $"SQL CPU {CpuPercent:F0}%";
-            return $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
+            if (IsOffline || CpuIsStale || !CpuPercent.HasValue) return "--";
+            return CpuFigure;
         }
     }
+
+    /// <summary>The CPU reading in the headline's words, with no gate on it: "64% (SQL 60%)", or "SQL CPU 60%" when the host
+    /// total is unknown (#7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so the figure is the SQL Server's own
+    /// and says so). <see cref="CpuDisplay"/> shows it only for a reading the card can stand behind; <see cref="StatusReason"/>
+    /// quotes it for an offline card too, because the reason is the card's own account of the numbers it holds and the tooltip
+    /// decides whether to show them (#8465).</summary>
+    private string CpuFigure =>
+        !OtherProcessCpuPercent.HasValue ? $"SQL CPU {CpuPercent:F0}%" : $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
     /// <summary>#8162: the CPU row's detail column, the host's other-process share ("Other: 5%"). Empty when the CPU figure is not shown
-    /// (stale, or never measured) or the server cannot report the other-process figure (#7682).</summary>
+    /// (stale, or never measured) or the server cannot report the other-process figure (#7682). #8465: an offline card's row says
+    /// when the server was last collected instead (<see cref="StaleDetail"/>), the Darling card's rule.</summary>
     public string CpuDetail =>
-        CpuIsStale || !CpuPercent.HasValue || !OtherProcessCpuPercent.HasValue ? "" : $"Other: {OtherProcessCpuPercent:F0}%";
-    public string MemoryDisplay => MemoryMb.HasValue ? $"{MemoryMb / 1024.0:F1} GB" : "--";
+        IsOffline ? StaleDetail
+        : CpuIsStale || !CpuPercent.HasValue || !OtherProcessCpuPercent.HasValue ? "" : $"Other: {OtherProcessCpuPercent:F0}%";
+
+    /* #8465: an offline card shows no measurement at all. Its memory figure is from before the server went dark, and a calm
+       "32.0 GB" under a red Offline reads as live health, so Memory reads "--" as CPU, Blocking and Deadlocks do: the Darling
+       card's rule. The figure stays on the item, because the alert engine reads it. */
+    public string MemoryDisplay => MemoryMb.HasValue && !IsOffline ? $"{MemoryMb / 1024.0:F1} GB" : "--";
+
+    /// <summary>#8465: the detail an offline card's CPU row carries in place of a reading, in the Darling card's words: when the
+    /// server was last collected ("last collected 3d ago", <see cref="MinutesAgoText"/>), or "no recent collection" when nothing
+    /// was. A server whose newest collection is past the offline mark has no current value, only the last one collected.</summary>
+    public string StaleDetail =>
+        LastCollectionTime.HasValue
+            ? "last collected " + MinutesAgoText.Format(Math.Max(0, (int)(DateTime.UtcNow - LastCollectionTime.Value).TotalMinutes))
+            : "no recent collection";
     /* #8304: an offline card has no hour counts to show. Its stored counts are from before the server went dark, and a green
        "0" under a red Offline reads as a healthy server, so Blocking and Deadlocks read "--" in the card's unknown grey, as
        CPU does for a reading it cannot show. The counts themselves stay on the item: the alert engine reads them. */
@@ -768,8 +787,11 @@ public class ServerSummaryItem
         CollectionFreshness is ServerFreshness.Stale or ServerFreshness.Offline or ServerFreshness.NeverCollected;
 
     /* Color coding. A CPU row with no shown figure (stale, #7196, or never measured) is the card's unknown grey, the one
-       StatusBrush's fallback uses, never the Healthy green (#3635): Darling bands the same case Unknown. */
-    public SolidColorBrush CpuBrush => MakeBrush(CpuIsCritical ? "#E57373" : CpuIsElevated ? "#FFB74D" : ShownCpuPercentForAlert is null ? "#888888" : "#81C784");
+       StatusBrush's fallback uses, never the Healthy green (#3635): Darling bands the same case Unknown. #8465: an offline card's
+       CPU row reads "--" too, and takes the same grey whatever its last reading was, as Blocking and Deadlocks do. The reading
+       stays inside CpuFreshnessBound for at least fifteen minutes after a server goes dark, so without this arm the "--" and its
+       dot were painted in the colour of a figure the card no longer shows. */
+    public SolidColorBrush CpuBrush => IsOffline ? MakeBrush("#888888") : MakeBrush(CpuIsCritical ? "#E57373" : CpuIsElevated ? "#FFB74D" : ShownCpuPercentForAlert is null ? "#888888" : "#81C784");
     /* #8304: on a dark server the Blocking and Deadlocks rows read "--", so their dots take the same unknown grey as a CPU row
        with no shown figure; the gates below are read only for a reachable server, by the brush and the reason alike. */
     public SolidColorBrush BlockingBrush => IsOffline ? MakeBrush("#888888") : MakeBrush(BlockingIsElevated ? "#FFB74D" : "#81C784");
@@ -868,8 +890,10 @@ public class ServerSummaryItem
 
             if (CpuIsElevated)
             {
-                /* #7682: "SQL CPU 12%" already names the metric, so it takes no second "CPU" in front. */
-                parts.Add(CpuDisplay.StartsWith("SQL CPU", StringComparison.Ordinal) ? CpuDisplay : "CPU " + CpuDisplay);
+                /* #7682: "SQL CPU 12%" already names the metric, so it takes no second "CPU" in front. #8465: the figure itself,
+                   not CpuDisplay, which reads "--" on an offline card: the reason keeps the pre-blackout number and the tooltip
+                   leaves it out. */
+                parts.Add(CpuFigure.StartsWith("SQL CPU", StringComparison.Ordinal) ? CpuFigure : "CPU " + CpuFigure);
             }
 
             /* #8304: a dark server's Blocking and Deadlocks rows read "--", so the reason names neither; it quotes the rows as they read. */
