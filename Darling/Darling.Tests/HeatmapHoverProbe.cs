@@ -73,7 +73,7 @@ internal static class HeatmapHoverProbe
             throw new Xunit.Sdk.XunitException($"the mouse was sent to {point} of the chart and WPF reads it at {seen}");
         }
 
-        chart.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, Environment.TickCount) { RoutedEvent = Mouse.MouseMoveEvent });
+        chart.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseMoveEvent });
     }
 
     /// <summary>Takes WPF's mouse off the window, so the device holds no source once the window closes.</summary>
@@ -93,7 +93,7 @@ internal static class HeatmapHoverProbe
         var reportType = core.GetType("System.Windows.Input.RawMouseInputReport", throwOnError: true)!;
         var argsType = core.GetType("System.Windows.Input.InputReportEventArgs", throwOnError: true)!;
         var report = Activator.CreateInstance(reportType, Any, null,
-            [InputMode.Foreground, Environment.TickCount, source, Enum.ToObject(actionsType, actions), x, y, 0, IntPtr.Zero], null)!;
+            [InputMode.Foreground, 0, source, Enum.ToObject(actionsType, actions), x, y, 0, IntPtr.Zero], null)!;
         var args = (InputEventArgs)Activator.CreateInstance(argsType, Any, null, [null, report], null)!;
         args.RoutedEvent = (RoutedEvent)typeof(InputManager).GetField("PreviewInputReportEvent", Any)!.GetValue(null)!;
         InputManager.Current.ProcessInput(args);
