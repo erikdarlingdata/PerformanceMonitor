@@ -72,6 +72,18 @@ public static partial class PgTargetScorer
         };
     }
 
+    /// <summary>
+    /// #8574: whether the scorer ever grades this PostgreSQL-target fact. The keys it never grades are context whose
+    /// severity is 0 by design: <c>PG_TPS</c> (see <c>ScoreDatabaseFact</c>), <c>PG_WAL_VOLUME_SHIFT</c> (graded only
+    /// through its anomaly) and <c>PG_IO_WRITE_LATENCY_MS</c> (never graded). Every other key has a ladder, even when a
+    /// given reading sits below its bar.
+    /// </summary>
+    public static bool IsGraded(Fact fact)
+    {
+        ArgumentNullException.ThrowIfNull(fact);
+        return fact.Key is not (PgTargetFactKeys.Tps or PgTargetFactKeys.WalVolumeShift or PgTargetFactKeys.IoWriteLatencyMs);
+    }
+
     /// <summary>Whether <paramref name="key"/> is a PostgreSQL-target key (any of the three prefixes) — the
     /// predicate <see cref="FactScorer"/>'s amplifier switch routes on, ahead of its <c>ANOMALY_</c> arm so
     /// <c>ANOMALY_PG_*</c> lands here and not in the SQL Server anomaly table.</summary>
