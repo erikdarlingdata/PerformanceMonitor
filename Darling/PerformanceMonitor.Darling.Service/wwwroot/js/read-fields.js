@@ -168,6 +168,35 @@ export const READ_FIELDS = {
       series: [{ key: "count", label: "Deadlocks" }],
     },
   },
+  /* #8553: the PostgreSQL deadlock reads a deadlock alert's notebook carries on a PostgreSQL target. The columns are the
+     Activity tab's (PG_DEADLOCK_COLUMNS, PG_DEADLOCK_GRAPH_COLUMNS in server-tabs/pg-activity.js). */
+  get_pg_deadlocks: {
+    table: {
+      rowsKey: "deadlocks",
+      emptyText: "No deadlock in this window. If you expected one, the server log may not be readable.",
+      noteKey: "truncation_note",
+      columns: [
+        { key: "occurred_at", label: "When", format: "time" },
+        { key: "victim_pid", label: "Victim PID", format: "id" },
+        { key: "participant_count", label: "Sessions", format: "int" },
+        { key: "lock_modes", label: "Lock Modes" },
+        { key: "resources", label: "Resources" },
+        { key: "victim_statement", label: "Victim Statement", wrap: true },
+        { key: "times_seen", label: "Sightings", format: "int" },
+      ],
+    },
+  },
+  get_pg_deadlock_detail: {
+    table: {
+      rowsKey: "deadlocks",
+      emptyText: "No deadlock graph stored for this server.",
+      columns: [
+        { key: "occurred_at", label: "When", format: "time" },
+        { key: "victim_pid", label: "Victim PID", format: "id" },
+        { key: "graph", label: "Graph", wrap: true },
+      ],
+    },
+  },
   get_pg_wait_stats: {
     table: {
       rowsKey: "waits",

@@ -20,6 +20,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
@@ -383,9 +384,29 @@ internal static partial class AlertNotebookEndpoint
             StatusCell(status),
         };
 
-        foreach (var section in sections)
+        /* #8553: the Deadlocks Cleared notebook is mechanical (the alias shares Deadlocks Detected's SQL Server reads), so
+           it learns the resolved server's engine here, as the firing template does through its context (#8323's pattern):
+           a PostgreSQL target gets the PostgreSQL deadlock cells and no SQL Server read, an engine that cannot be resolved
+           gets both. Only this metric pays the registry read; a SQL Server target's cells are exactly what they were. */
+        var isDeadlockResolution = trimmedMetric is not null
+            && string.Equals(ResolvedMetricOf(trimmedMetric), DeadlocksFiringMetric, StringComparison.Ordinal);
+        CollectorTargetEngine? deadlockEngine = null;
+        if (isDeadlockResolution && serverId is { } deadlockServerId)
         {
-            mechanicalCells.Add(ReadCell(section, serverName, asOf, lookbackHours));
+            deadlockEngine = MonitoredEngineKind.EngineOf(await ReadEngineKindAsync(postgres, deadlockServerId, logger, ct));
+        }
+
+        if (!isDeadlockResolution || deadlockEngine is null or CollectorTargetEngine.SqlServer)
+        {
+            foreach (var section in sections)
+            {
+                mechanicalCells.Add(ReadCell(section, serverName, asOf, lookbackHours));
+            }
+        }
+
+        if (isDeadlockResolution && deadlockEngine is null or CollectorTargetEngine.PostgreSql)
+        {
+            PgDeadlockCells(mechanicalCells, serverName, asOf, listHours: "4");
         }
 
         return (mechanicalCells, "mechanical/" + (trimmedMetric ?? "default"), MechanicalTemplateVersion);
@@ -598,7 +619,7 @@ internal static partial class AlertNotebookEndpoint
         (new[] { "Collection Stopped", "Capture Down", "Collector Cost Regression" },
             new AuthoredTemplateEntry("authored/self-monitor", SelfMonitorTemplateVersion, BuildSelfMonitorCells)),
         (new[] { "Deadlocks Detected" },
-            new AuthoredTemplateEntry("authored/deadlocks", DeadlocksTemplateVersion, BuildDeadlockCells)),
+            new AuthoredTemplateEntry("authored/deadlocks", DeadlocksTemplateVersion, BuildCells: null, BuildCellsWithContext: BuildDeadlockCells)),
         (new[] { "Failed Agent Job", "Long-Running Job", "Agent Not Running" },
             new AuthoredTemplateEntry("authored/agent-job", AgentJobTemplateVersion, BuildAgentJobCells)),
         (new[] { "Forced Plan Failing" },
