@@ -10,6 +10,7 @@
       and navigate. All colors are theme DynamicResources resolved from the host app — this control
       ships no theme of its own.
     -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #8532: scrolls when the day cells and the day-detail panel cannot both keep their height -->
     <Grid Margin="4">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -204,4 +205,5 @@
             </StackPanel>
         </Border>
     </Grid>
+    </ScrollViewer>
 </UserControl>
