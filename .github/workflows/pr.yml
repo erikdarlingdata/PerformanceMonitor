@@ -386,10 +386,15 @@ jobs:
 
       # Locked mode and `set -euo pipefail`: a multi-line run block under the default shell reports only its last
       # command's exit code, so the first restore could fail unseen (LockedModeRestoreCoverageTests enforces both).
+      # This is the step a pull request fails when a lock file inside the solution is behind, so its ERR trap carries
+      # the message build.yml's restore step carries: a title that says only that a restore failed, and both
+      # regeneration commands, offered for NU1004 alone.
       - name: Restore the test projects
         shell: bash
         run: |
           set -euo pipefail
+
+          trap 'echo "::error title=A locked-mode restore failed::If the errors above are NU1004, a lock file is out of step with its package graph: regenerate with '"'"'dotnet restore PerformanceMonitor.sln --force-evaluate'"'"' and, on Windows, '"'"'dotnet restore tools/ui-smoke-wpf/UiSmokeWpf.csproj --force-evaluate'"'"' (the WPF smoke harness is outside the solution, so the first command does not rewrite its lock file), and commit every packages.lock.json they rewrite. Do not remove --locked-mode: the lock files are the only pin on the transitive closure, and the props diff does not show it moving. Any other error is not a lock file mismatch, and regenerating does not clear it."' ERR
 
           dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
