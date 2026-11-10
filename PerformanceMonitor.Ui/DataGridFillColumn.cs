@@ -14,6 +14,7 @@ using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Data;
 
 namespace PerformanceMonitor.Ui;
 
@@ -57,7 +58,11 @@ public static class DataGridFillColumn
     /// <summary>The handler each grid listens for row changes with, kept so turning the fit off (or applying the style again) detaches the same one.</summary>
     private static readonly ConditionalWeakTable<DataGrid, NotifyCollectionChangedEventHandler> s_itemsChanged = new();
 
-    /// <summary>Scroll viewers whose content scrolls by pixel because their grid is empty (see <see cref="KeepEmptyGridScrollable"/>).</summary>
+    /// <summary>
+    /// Scroll viewers whose content scrolls by pixel because their grid is empty (see <see cref="KeepEmptyGridScrollable"/>), each with what its
+    /// <see cref="ScrollViewer.CanContentScroll"/> held before: the binding to its grid that WPF gives a template's scroll viewer, a local value, or
+    /// <see cref="DependencyProperty.UnsetValue"/> for neither.
+    /// </summary>
     private static readonly ConditionalWeakTable<ScrollViewer, object> s_emptyScroll = new();
 
     private static void OnEnabledChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
@@ -177,6 +182,10 @@ public static class DataGridFillColumn
     /// (the health grids, all fixed columns, empty most of the time) were cut at the edge, the last one mid-header, with no way to reach the rest. While the
     /// grid is empty and its columns are wider than the viewport, the scroll viewer scrolls by pixel and its content is held as wide as the columns, so
     /// the horizontal scroll bar shows and the headers scroll with it. Rows arriving put it back to scrolling by row.
+    /// <para>#8534: it goes back by restoring the scroll viewer's binding to its grid, which takes effect at once. Clearing the value would leave the
+    /// property at its default, scrolling by pixel, until the scroll viewer is next measured, and the rows that just arrived are measured before
+    /// it: a rows presenter with no scroll owner is given unbounded height and builds a container for every row it was handed, thousands where a
+    /// dozen are in view. With the binding back, the presenter has its scroll owner before the layout pass and builds only the rows in view.</para>
     /// </summary>
     private static void KeepEmptyGridScrollable(DataGrid grid, ScrollViewer scroll)
     {
@@ -192,7 +201,8 @@ public static class DataGridFillColumn
         {
             if (!s_emptyScroll.TryGetValue(scroll, out _))
             {
-                s_emptyScroll.Add(scroll, scroll);
+                s_emptyScroll.Add(scroll, (object?)BindingOperations.GetBindingBase(scroll, ScrollViewer.CanContentScrollProperty)
+                    ?? scroll.ReadLocalValue(ScrollViewer.CanContentScrollProperty));
                 scroll.CanContentScroll = false;
             }
 
@@ -201,10 +211,22 @@ public static class DataGridFillColumn
                 presenter.MinWidth = total;
             }
         }
-        else if (s_emptyScroll.TryGetValue(scroll, out _))
+        else if (s_emptyScroll.TryGetValue(scroll, out var before))
         {
             s_emptyScroll.Remove(scroll);
-            scroll.ClearValue(ScrollViewer.CanContentScrollProperty);
+            if (before is BindingBase binding)
+            {
+                BindingOperations.SetBinding(scroll, ScrollViewer.CanContentScrollProperty, binding);
+            }
+            else if (before == DependencyProperty.UnsetValue)
+            {
+                scroll.ClearValue(ScrollViewer.CanContentScrollProperty);
+            }
+            else
+            {
+                scroll.SetValue(ScrollViewer.CanContentScrollProperty, before);
+            }
+
             presenter.ClearValue(FrameworkElement.MinWidthProperty);
         }
     }
