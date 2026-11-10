@@ -992,6 +992,10 @@ public sealed partial class DarlingWorker : BackgroundService
        when it got one. Interlocked. */
     private int _analysisPassesInSlot;
 
+    /* #8539: how many bodies are waiting for a fleet collection slot right now (ProcessServerSweepAsync). A due scheduled
+       analysis pass gives way while this is above zero (ScheduledAnalysisAdmission). Interlocked. */
+    private int _bodiesWaitingForSlot;
+
     /* How far past its budget an in-flight pass must be before the sweep starts reporting it. The
        ordinary overrun already gets the "exceeded Ns" warning; this is for the pass that ignored the
        cancellation raised at that budget — wedged inside one of the store reads that still take no
@@ -1857,6 +1861,10 @@ LIMIT 1";
            analysis pass, so without these a slot held by the pass read as "no single cause". */
         public long LastAnalysisMs;
         public int LastGateWaitAnalysisHolders;
+
+        /* #8539: how many of this server's bodies in a row left its due scheduled analysis pass unstarted
+           (ScheduledAnalysisAdmission). Reset when the pass starts. Written only by the server's own body. */
+        public int AnalysisYields;
 
         /// <summary>#5597: the UTC ticks at which the connect body finished seeding this server's collector due stamps (0 =
         /// never). The stamps are seeded from a clock read before the body's on-load snapshots, so a slot that came due

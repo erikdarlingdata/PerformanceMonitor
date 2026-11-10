@@ -2121,7 +2121,19 @@ public sealed partial class DarlingWorker
         /* #4732: the time this body queued for a fleet slot, kept per minute in _fleetGateStats. A wait that ends in a
            cancel records nothing (the throw skips the line below), like the permit it never took. */
         var gateWaitStarted = Stopwatch.GetTimestamp();
-        await gate.WaitAsync(stoppingToken);
+
+        /* #8539: counted for as long as it waits, a cancelled wait included, so a due scheduled analysis pass gives way to
+           it rather than take a slot it is waiting for. */
+        Interlocked.Increment(ref _bodiesWaitingForSlot);
+        try
+        {
+            await gate.WaitAsync(stoppingToken);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _bodiesWaitingForSlot);
+        }
+
         var gateWaited = Stopwatch.GetElapsedTime(gateWaitStarted);
         _fleetGateStats?.RecordQueueWait(gateWaited);
         server.LastGateWaitMs = (long)gateWaited.TotalMilliseconds;
@@ -2249,23 +2261,45 @@ public sealed partial class DarlingWorker
         PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RefreshAfter = TimeSpan.FromMinutes(analysisIntervalMinutes);
         if (config.Analysis.Enabled && StampIsDue(server.NextAnalysisDue, TimeSpan.FromMinutes(analysisIntervalMinutes), DateTime.UtcNow))
         {
-            server.NextAnalysisDue = DateTime.UtcNow.AddMinutes(analysisIntervalMinutes);
+            /* #8539: the pass holds this body's fleet collection slot for its whole length, so it starts only when that
+               does not hold collection back: no body is waiting for a slot (for up to the yield limit past the pass's due
+               time), and passes hold less than their share of the slots. A pass that does not start keeps its stamp, so it
+               is still due on this server's next body. */
+            var nowUtc = DateTime.UtcNow;
+            var dueUtc = CollectorCadence.ClampDue(server.NextAnalysisDue, nowUtc, TimeSpan.FromMinutes(analysisIntervalMinutes));
+            if (ScheduledAnalysisAdmission.GivesWay(Volatile.Read(ref _bodiesWaitingForSlot), dueUtc, nowUtc)
+                || !ScheduledAnalysisAdmission.TryTakePlace(ref _analysisPassesInSlot, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps)))
+            {
+                server.AnalysisYields++;
+                return;
+            }
 
-            /* Every engine takes the pass (#3542). Until the PostgreSQL-target analysis engine existed,
-               this site gated on the target engine and wrote a tombstone into analysis_state for a
-               PostgreSQL server instead of running: the pipeline was SQL-Server-shaped, its data-span
-               gate read wait_stats, and a PostgreSQL server_id would have sat at "0 hours, still
-               collecting" for the life of the deployment. That gate is gone, and the invariant that
-               replaced it lives one layer down: the pass ROUTES BY THE REGISTRY'S engine_kind INSIDE
-               DarlingAnalysisService (its ResolveEngineAsync picks the PostgreSQL-target component set
-               and the pg_database_stats span gate for a postgres / aurora-postgres row), so the worker
-               no longer knows or cares which engine it is scheduling. The first real pass then
-               overwrites any tombstone row still standing with the honest state (D7 — the lazy
-               overwrite, no migration). */
+            /* The place is held from here, so everything up to the end of the pass sits inside the try that gives it
+               back. */
             var analysisStarted = Stopwatch.GetTimestamp();
-            Interlocked.Increment(ref _analysisPassesInSlot);
             try
             {
+                if (server.AnalysisYields > 0)
+                {
+                    _logger.LogInformation(
+                        "[{Server}] Scheduled analysis starts after giving way to collection on {Yields} of this server's collection passes",
+                        server.Config.DisplayName, server.AnalysisYields);
+                    server.AnalysisYields = 0;
+                }
+
+                server.NextAnalysisDue = DateTime.UtcNow.AddMinutes(analysisIntervalMinutes);
+
+                /* Every engine takes the pass (#3542). Until the PostgreSQL-target analysis engine existed,
+                   this site gated on the target engine and wrote a tombstone into analysis_state for a
+                   PostgreSQL server instead of running: the pipeline was SQL-Server-shaped, its data-span
+                   gate read wait_stats, and a PostgreSQL server_id would have sat at "0 hours, still
+                   collecting" for the life of the deployment. That gate is gone, and the invariant that
+                   replaced it lives one layer down: the pass ROUTES BY THE REGISTRY'S engine_kind INSIDE
+                   DarlingAnalysisService (its ResolveEngineAsync picks the PostgreSQL-target component set
+                   and the pg_database_stats span gate for a postgres / aurora-postgres row), so the worker
+                   no longer knows or cares which engine it is scheduling. The first real pass then
+                   overwrites any tombstone row still standing with the honest state (D7 — the lazy
+                   overwrite, no migration). */
                 if (ScheduledAnalysisOverride is { } standIn)
                 {
                     await standIn(server, stoppingToken);
