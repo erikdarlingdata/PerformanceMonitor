@@ -914,6 +914,7 @@ public static partial class DarlingWebEndpoints
 
             /* ── alerts / mute rules (DarlingMcpAlertTools) ── */
             ["get_alert_history"] = R(CatAlerts, "Recent fired-alert history for a server, newest first and bounded by limit. Excludes operator-dismissed alerts unless include_dismissed is true (dismissed_excluded_count says how many the default hid). include_streak adds streak_days to each row: days in a row this metric fired at this time of day before the alert, muted fires counting.", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("include_dismissed", false), PText("metric_name"), PText("family"), PBool("include_streak", false)),
+            ["get_alert_badge_summary"] = R(CatAlerts, "What the sidebar's alert badge shows, one entry per server with something to show: the count of actionable alerts in the last 24 hours (not muted, not dismissed, not a resolution), whether any fired critical, and the newest alert's time. Grouped in the store, so it is never cut short by a row cap the way a page of get_alert_history is."),
             ["get_alert_settings"] = R(CatAlerts, "The current alert-settings configuration."),
             ["get_daily_health_report"] = R(CatAlerts, "The Daily Health Report for one day (#7041), built from the store and sent nowhere. date is a local date in the report's time zone, default the latest finished period.", PText("date")),
             /* #5241: a web-only read (no MCP tool behind it, see WebOnlyReadNames): one alert's advice and fix script,

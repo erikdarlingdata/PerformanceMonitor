@@ -85,6 +85,8 @@ public static partial class DarlingWebEndpoints
 
             /* ── alerts / mute rules ── */
             ["get_alert_history"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertHistory(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), include_dismissed: QueryBool(c, "include_dismissed", false), metric_name: Str(c, "metric_name"), family: Str(c, "family"), include_streak: QueryBool(c, "include_streak", false), cancellationToken: c.RequestAborted),
+            /* #8551: the sidebar badge's per-server summary, grouped in the store; web only, fixed 24-hour window, no parameters. */
+            ["get_alert_badge_summary"] = (c, pg, an) => DarlingWebAlertBadgeSummary.GetAlertBadgeSummary(pg, null, c.RequestAborted),
             ["get_alert_details"] = (c, pg, an) => First(c, "server_id") is null ? MissingParam("server_id")
                 : !RequireText(c, "metric_name", out var detailsMetric) ? MissingParam("metric_name")
                 : !RequireText(c, "alert_time", out var detailsTime) ? MissingParam("alert_time")

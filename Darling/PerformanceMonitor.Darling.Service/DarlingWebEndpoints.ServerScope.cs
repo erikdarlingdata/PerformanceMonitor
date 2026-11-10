@@ -167,7 +167,7 @@ public static partial class DarlingWebEndpoints
     };
 
     internal static bool IsScopedFleetRead(string name) =>
-        name is "list_servers" or "get_alert_history" or "get_fleet_overview" or "get_query_fleet_summary"
+        name is "list_servers" or "get_alert_history" or "get_alert_badge_summary" or "get_fleet_overview" or "get_query_fleet_summary"
             or "get_finops_inventory" or "list_investigation_requests" or "get_investigation_reports" or "get_sweep_reports"
             or "list_query_tags" or "get_job_history";
 

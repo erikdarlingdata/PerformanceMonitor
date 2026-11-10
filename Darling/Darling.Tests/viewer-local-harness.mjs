@@ -24,11 +24,12 @@ function load(storage) {
   vm.runInContext(source + "\n;globalThis.api = { " +
     "KEY_FAVORITES, KEY_ACKS, KEY_SEVERITY_COLORS, KEY_SIDEBAR, isFavorite, toggleFavorite, favoritesFirst, updateAttention, attentionFor, " +
     "acknowledge, isAcknowledged, severityColor, setSeverityColor, applySeverityColors, isSidebarCollapsed, setSidebarCollapsed, " +
-    "refreshAttention, summarizeAlerts, KEY_DB_FILTER, getDatabaseFilter, setDatabaseFilter, MAX_DB_NAMES, MAX_DB_QUERY_BYTES, databaseQueryBytes };", ctx);
+    "refreshAttention, summarizeBadges, KEY_DB_FILTER, getDatabaseFilter, setDatabaseFilter, MAX_DB_NAMES, MAX_DB_QUERY_BYTES, databaseQueryBytes };", ctx);
   return ctx.api;
 }
 
-const row = (id, t, extra = {}) => ({ server_id: id, alert_time: t, metric_name: "M", severity: "warning", muted: false, ...extra });
+/* One server's entry in a get_alert_badge_summary answer: the store has already left out muted, dismissed and resolution rows (#8551). */
+const entry = (id, count, t, critical = false) => ({ server_id: id, count, critical, latest_alert_time: t });
 const out = {};
 
 if (scenario === "favorites") {
@@ -46,16 +47,16 @@ if (scenario === "favorites") {
 } else if (scenario === "ack") {
   const st = makeStorage();
   const a = load(st);
-  a.updateAttention([row(1, "2026-01-01T10:00:00"), row(1, "2026-01-01T10:05:00", { severity: "critical" }), row(2, "2026-01-01T10:00:00", { muted: true }), row(2, "2026-01-01T10:01:00", { severity: "resolution" }), row(4, "2026-01-01T10:00:00", { dismissed: true })]);
+  a.updateAttention([entry(1, 2, "2026-01-01T10:05:00", true), entry(2, 0, "2026-01-01T10:01:00")]);
   out.before = a.attentionFor(1);
-  out.mutedAndResolved = a.attentionFor(2);
-  out.dismissed = a.attentionFor(4);
+  out.noActionable = a.attentionFor(2);
+  out.absent = a.attentionFor(4);
   a.acknowledge(1, Date.parse("2026-01-01T10:10:00Z"));
   out.acked = a.attentionFor(1);
   const b = load(st);
-  b.updateAttention([row(1, "2026-01-01T10:00:00"), row(1, "2026-01-01T10:05:00")]); // same rows after a reload
+  b.updateAttention([entry(1, 2, "2026-01-01T10:05:00")]); // same answer after a reload
   out.afterReloadSameRows = b.attentionFor(1);
-  b.updateAttention([row(1, "2026-01-01T10:20:00"), row(1, "2026-01-01T10:05:00")]); // a newer alert
+  b.updateAttention([entry(1, 2, "2026-01-01T10:20:00")]); // a newer alert
   out.afterNewer = b.attentionFor(1);
   out.persistedCleared = load(st).isAcknowledged(1);
 } else if (scenario === "corrupt") {
@@ -72,7 +73,7 @@ if (scenario === "favorites") {
     const st = makeStorage({ "darling.local.favorites.v1": raw, "darling.local.acks.v1": raw, "darling.local.severityColors.v1": raw, "darling.local.sidebar.v1": raw });
     let a;
     try { a = load(st); } catch (e) { out.results[name] = "THREW " + e.message; continue; }
-    a.updateAttention([row(1, "2026-01-01T10:00:00"), row(3, "2026-01-01T10:00:00")]);
+    a.updateAttention([entry(1, 1, "2026-01-01T10:00:00"), entry(3, 1, "2026-01-01T10:00:00")]);
     out.results[name] = {
       fav: [1, 3, 7].filter(a.isFavorite),
       ack: [1, 2, 3].filter(a.isAcknowledged),
@@ -119,8 +120,10 @@ if (scenario === "favorites") {
   const st = makeStorage();
   const a = load(st);
   let reads = 0;
-  const readTool = async (tool, params) => { reads++; return { kind: "data", data: { alerts: [row(1, "2026-01-01T10:00:00")], tool, params } }; };
+  const asked = [];
+  const readTool = async (tool, params) => { reads++; asked.push({ tool, params }); return { kind: "data", data: { servers: [entry(1, 1, "2026-01-01T10:00:00")] } }; };
   await a.refreshAttention(readTool, 1000);
+  out.asked = asked[0];
   await a.refreshAttention(readTool, 2000);
   out.readsWithinTtl = reads;
   out.count = a.attentionFor(1).count;

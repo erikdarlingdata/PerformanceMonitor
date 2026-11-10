@@ -38,6 +38,7 @@ public static partial class CustomViewValidation
         "get_session_stats",
         "get_waiting_tasks",
         "get_alert_history",
+        "get_alert_badge_summary",
         "get_alert_settings",
         "get_daily_health_report",
         "get_alert_details",
