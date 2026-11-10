@@ -7,9 +7,11 @@
  */
 
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Notifications;
 using Xunit;
@@ -18,9 +20,10 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #8525: a recovery the product delivers as an alert of its own ("Server Restored", "AG Replica Reconnected") is routed at
-/// the tier of the firing it closes, not at its own RESOLVED badge. With one family split across a Critical-only route and a
-/// Warning-only route, the recovery follows its Critical firing to the Critical route; a recovery whose firing's tier is not
-/// known is taken by every route; a route that takes both tiers and an exact-name route behave as before.
+/// the tier the firing it closes went out at, not at its own RESOLVED badge. Through the deliverer, the recovery reads the tier
+/// its firing was delivered at: a Warning-graded firing's recovery and PagerDuty resolve go to the Warning-only route, a Critical
+/// firing's to the Critical-only route. With no delivered fire on record, the recovery routes as a tierless firing of that name
+/// does. A route that takes both tiers and an exact-name route behave as before.
 /// </summary>
 public sealed class RecoveryRouteSeverityTests
 {
@@ -44,16 +47,60 @@ public sealed class RecoveryRouteSeverityTests
     private static string? SlackFor(string metric, AlertSeverityLevel? fireSite, IReadOnlyList<NotificationRoute> routes) =>
         NotificationRouter.Resolve(metric, routes, Defaults(), severity: AlertSeverity.RouteLevelOf(metric, fireSite)).Slack.Destination;
 
-    /// <summary>A recovery's route tier is its firing's: both firings in the census fire Critical, so both recoveries route as Critical.</summary>
+    /// <summary>An alert as a fire site hands it to the deliverer: the tier is the site's, or null for a site that grades nothing.</summary>
+    private static AlertOutcome Outcome(string metric, string value, string threshold, AlertSeverityLevel? severity) =>
+        new("7", "SQL01", metric, value, threshold, Context: null, DetailText: null,
+            NumericCurrentValue: null, NumericThresholdValue: null, Muted: false, Severity: severity);
+
+    /// <summary>A deliverer over the issue's two PagerDuty routes with auto-resolve on, capturing every PagerDuty post.</summary>
+    private static (DarlingAlertDeliverer Deliverer, List<string> Posted) PagerDutyDeliverer()
+    {
+        var config = new DarlingConfig();
+        config.Webhooks.PagerDutyAutoResolve = true;
+        config.NotificationRoutes = new[]
+        {
+            Route(1, AlertFamily.Performance, NotificationRouteKinds.SeveritiesCritical, pagerDuty: "rk-critical"),
+            Route(2, AlertFamily.Performance, NotificationRouteKinds.SeveritiesWarning, pagerDuty: "rk-warning"),
+        };
+        var settings = new DarlingAlertSettings(config);
+        var posted = new List<string>();
+        var history = new CapturingHistoryStore();
+        var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history)
+        {
+            PostPagerDutyAsyncOverride = (_, payload) =>
+            {
+                posted.Add(payload);
+                return Task.FromResult<string?>(null);
+            },
+        };
+        return (new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance), posted);
+    }
+
+    private static (string Action, string Key) Posted(string payload)
+    {
+        var root = JsonDocument.Parse(payload).RootElement;
+        return (root.GetProperty("event_action").GetString()!, root.GetProperty("routing_key").GetString()!);
+    }
+
+    /// <summary>With no delivered fire on record, a recovery routes exactly as a tierless firing of its name does: one badge rule for
+    /// both edges, so the destination never depends on the order routes were created in. Both census firings read Critical.</summary>
     [Theory]
     [InlineData("Server Restored")]
     [InlineData("AG Replica Reconnected")]
-    public void ARecoveryRoutesAtItsFiringsTier(string recovery)
+    public void ARecoveryWithNoRecordedFire_RoutesAsATierlessFiringOfItsNameDoes(string recovery)
     {
         var firing = AlertFamily.RecoveryPairs[recovery];
 
         Assert.Equal<AlertSeverityLevel?>(AlertSeverityLevel.Critical, AlertSeverity.RouteLevelOf(firing, null));
-        Assert.Equal<AlertSeverityLevel?>(AlertSeverityLevel.Critical, AlertSeverity.RouteLevelOf(recovery, null));
+        Assert.Equal<AlertSeverityLevel?>(AlertSeverity.RouteLevelOf(firing, null), AlertSeverity.RouteLevelOf(recovery, null));
+
+        Assert.Equal(CriticalSlack, SlackFor(recovery, null, SplitFamily()));
+        var warningFirst = new[]
+        {
+            Route(1, AlertFamily.Performance, NotificationRouteKinds.SeveritiesWarning, slack: WarningSlack),
+            Route(2, AlertFamily.Performance, NotificationRouteKinds.SeveritiesCritical, slack: CriticalSlack),
+        };
+        Assert.Equal(CriticalSlack, SlackFor(recovery, null, warningFirst));
     }
 
     /// <summary>The issue's table: the firing went to the Critical-only route, and the recovery goes there too, not to the Warning-only one.</summary>
@@ -78,20 +125,6 @@ public sealed class RecoveryRouteSeverityTests
         Assert.Equal(WarningSlack, NotificationRouter.Resolve("Server Restored", routes, Defaults(), severity: AlertSeverityLevel.Warning).Slack.Destination);
     }
 
-    /// <summary>A recovery whose firing's tier is not known is taken by every route: the most specific route wins whatever its filter.</summary>
-    [Fact]
-    public void ARecoveryWithNoKnownFiringTier_IsTakenByEveryRoute()
-    {
-        Assert.Equal(CriticalSlack, NotificationRouter.Resolve("Server Restored", SplitFamily(), Defaults(), severity: null).Slack.Destination);
-
-        var warningFirst = new[]
-        {
-            Route(1, AlertFamily.Performance, NotificationRouteKinds.SeveritiesWarning, slack: WarningSlack),
-            Route(2, AlertFamily.Performance, NotificationRouteKinds.SeveritiesCritical, slack: CriticalSlack),
-        };
-        Assert.Equal(WarningSlack, NotificationRouter.Resolve("Server Restored", warningFirst, Defaults(), severity: null).Slack.Destination);
-    }
-
     /// <summary>A route with no severity filter takes the recovery as it always has.</summary>
     [Fact]
     public void ARouteThatTakesBothTiers_IsUnchanged()
@@ -105,7 +138,7 @@ public sealed class RecoveryRouteSeverityTests
     }
 
     /// <summary>An exact-name route still outranks the family: one on the recovery's own name, and one on its firing's name that takes
-    /// Critical only, which the recovery now reaches because it routes at the firing's tier.</summary>
+    /// Critical only, which the recovery reaches because it routes at the firing's tier.</summary>
     [Fact]
     public void AnExactNameRoute_StillOutranksTheFamily()
     {
@@ -129,10 +162,42 @@ public sealed class RecoveryRouteSeverityTests
         Assert.Equal(exactFiring, SlackFor("AG Replica Reconnected", null, onTheFiring));
     }
 
-    /// <summary>Through the webhook send with PagerDuty auto-resolve on: the firing's trigger and the recovery's resolve carry the
-    /// Critical-only route's routing key, so the incident the firing opened is the one the recovery closes.</summary>
+    /// <summary>Through the deliverer, a firing graded Warning at its site: its trigger goes to the Warning-only route's key, and the
+    /// recovery, sent with no tier of its own, reads the tier the firing was delivered at and resolves on that same key.</summary>
+    [Theory]
+    [InlineData("AG Replica Disconnected", "DISCONNECTED", "AG Replica Reconnected", "CONNECTED")]
+    [InlineData("Server Unreachable", "Login timeout", "Server Restored", "Online")]
+    public async Task AWarningGradedFiring_ThroughTheDeliverer_HasItsRecoveryResolveOnTheWarningRoutesKey(
+        string firing, string firingValue, string recovery, string recoveryValue)
+    {
+        var (deliverer, posted) = PagerDutyDeliverer();
+
+        await deliverer.DeliverAsync(Outcome(firing, firingValue, "CONNECTED", AlertSeverityLevel.Warning), TestContext.Current.CancellationToken);
+        await deliverer.DeliverAsync(Outcome(recovery, recoveryValue, "CONNECTED", null), TestContext.Current.CancellationToken);
+
+        Assert.Equal(new[] { ("trigger", "rk-warning"), ("resolve", "rk-warning") }, posted.Select(Posted).ToArray());
+    }
+
+    /// <summary>Through the deliverer, the firing at the tier its site gives it today, Critical: the recovery resolves on the Critical-only
+    /// route's key, the one the trigger opened the incident on.</summary>
+    [Theory]
+    [InlineData("AG Replica Disconnected", "DISCONNECTED", "AG Replica Reconnected", "CONNECTED")]
+    [InlineData("Server Unreachable", "Login timeout", "Server Restored", "Online")]
+    public async Task ACriticalFiring_ThroughTheDeliverer_HasItsRecoveryResolveOnTheCriticalRoutesKey(
+        string firing, string firingValue, string recovery, string recoveryValue)
+    {
+        var (deliverer, posted) = PagerDutyDeliverer();
+
+        await deliverer.DeliverAsync(Outcome(firing, firingValue, "CONNECTED", AlertSeverityLevel.Critical), TestContext.Current.CancellationToken);
+        await deliverer.DeliverAsync(Outcome(recovery, recoveryValue, "CONNECTED", null), TestContext.Current.CancellationToken);
+
+        Assert.Equal(new[] { ("trigger", "rk-critical"), ("resolve", "rk-critical") }, posted.Select(Posted).ToArray());
+    }
+
+    /// <summary>Through the webhook send alone, with nothing delivered before it: the recovery falls back to its firing's tierless rule,
+    /// Critical for both census pairs, and its resolve carries the Critical-only route's key.</summary>
     [Fact]
-    public async Task TheRecoverysPagerDutyResolve_ClosesTheIncidentOnTheCriticalRoutesKey()
+    public async Task TheRecoverysPagerDutyResolve_WithNoRecordedFire_FallsBackToTheCriticalRoutesKey()
     {
         var config = new DarlingConfig();
         config.Webhooks.PagerDutyAutoResolve = true;
@@ -152,18 +217,9 @@ public sealed class RecoveryRouteSeverityTests
         };
 
         await webhooks.TrySendWebhookAlertsAsync(
-            "Server Unreachable", "SQL01", "Login timeout", "Online", "7",
-            new AlertContext { SeverityOverride = AlertSeverityLevel.Critical }, cancellationToken: TestContext.Current.CancellationToken);
-        await webhooks.TrySendWebhookAlertsAsync(
             "Server Restored", "SQL01", "Online", "Online", "7",
             context: null, cancellationToken: TestContext.Current.CancellationToken);
 
-        Assert.Equal(2, posted.Count);
-        var trigger = JsonDocument.Parse(posted[0]).RootElement;
-        var resolve = JsonDocument.Parse(posted[1]).RootElement;
-        Assert.Equal("trigger", trigger.GetProperty("event_action").GetString());
-        Assert.Equal("rk-critical", trigger.GetProperty("routing_key").GetString());
-        Assert.Equal("resolve", resolve.GetProperty("event_action").GetString());
-        Assert.Equal("rk-critical", resolve.GetProperty("routing_key").GetString());
+        Assert.Equal(new[] { ("resolve", "rk-critical") }, posted.Select(Posted).ToArray());
     }
 }
