@@ -199,7 +199,13 @@ public partial class ServerTab : UserControl
             if (data.Count == 0)
             {
                 QueryStoreSlicer.ShowEmpty(QueryStoreEmptyWindowText);
-                await ShowQueryStoreEmptyReasonAsync(QueryStoreSlicer, _dataService, _serverId, _server.DisplayName, _isQueryStoreHealthEnabled(), healthIntervalMinutes: 60);
+                var healthSchedule = _queryStoreHealthSchedule();
+                await ShowQueryStoreEmptyReasonAsync(
+                    QueryStoreSlicer, _dataService, _serverId, _server.DisplayName,
+                    healthSchedule?.Enabled ?? true,
+                    healthSchedule?.FrequencyMinutes is int minutes and > 0
+                        ? minutes
+                        : PerformanceMonitor.Collectors.CollectorScheduleDefaults.All["query_store_health"].FrequencyMinutes);
             }
             else
                 QueryStoreSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
@@ -235,7 +241,7 @@ public partial class ServerTab : UserControl
         }
 
         var (readableSecondary, staleCapture) = await System.Threading.Tasks.Task.Run(
-            () => QueryStoreEmptyReasonAsync(dataService, serverId, serverName, healthCollectorEnabled));
+            () => QueryStoreEmptyReasonAsync(dataService, serverId, serverName, healthCollectorEnabled, healthIntervalMinutes));
         var text = readableSecondary ?? (staleCapture is null ? null : shown + " " + staleCapture);
         if (text is not null && ReferenceEquals(slicer.EmptyText, shown))
         {
@@ -247,11 +253,12 @@ public partial class ServerTab : UserControl
     /// #8541: why a Query Store read on this server has no rows. A readable secondary Lite does not collect Query Store from answers
     /// <c>ReadableSecondary</c>, the sentence the MCP reads give. Otherwise a server whose newest <c>query_store_health</c> capture is
     /// older than <see cref="QueryStoreSnapshotStaleness.Threshold"/> answers <c>StaleCapture</c>, which says whether that collector's
-    /// schedule still takes a capture (<paramref name="healthCollectorEnabled"/>). Both are null when the store has no reason to give,
+    /// schedule still takes a capture (<paramref name="healthCollectorEnabled"/>) and at what cadence
+    /// (<paramref name="healthIntervalMinutes"/>). Both are null when the store has no reason to give,
     /// and when a read fails: the panel has already said its window is empty.
     /// </summary>
     private static async System.Threading.Tasks.Task<(string? ReadableSecondary, string? StaleCapture)> QueryStoreEmptyReasonAsync(
-        LocalDataService dataService, int serverId, string serverName, bool healthCollectorEnabled)
+        LocalDataService dataService, int serverId, string serverName, bool healthCollectorEnabled, int healthIntervalMinutes)
     {
         try
         {
@@ -264,7 +271,8 @@ public partial class ServerTab : UserControl
             return captures.Count == 0
                 ? (null, null)
                 : (null, QueryStoreSnapshotStaleness.PanelNote(
-                    DateTime.SpecifyKind(captures[0].CaptureTime, DateTimeKind.Utc), DateTime.UtcNow, "query_store_health", healthCollectorEnabled));
+                    DateTime.SpecifyKind(captures[0].CaptureTime, DateTimeKind.Utc), DateTime.UtcNow, "query_store_health",
+                    healthCollectorEnabled, healthIntervalMinutes));
         }
         catch (Exception ex)
         {

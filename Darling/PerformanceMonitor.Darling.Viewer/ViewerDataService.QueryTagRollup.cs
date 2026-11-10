@@ -222,7 +222,7 @@ public sealed partial class ViewerDataService
     /// give (<see cref="DarlingQueryStoreReadableSecondary"/>, with the <c>query_store_health</c> collector's effective schedule read
     /// from the store's rows). Otherwise a server whose newest <c>query_store_health</c> capture is older than
     /// <see cref="PerformanceMonitor.Common.QueryStoreSnapshotStaleness.Threshold"/> on the store's clock answers
-    /// <paramref name="StaleCapture"/>, which says whether that collector's schedule still takes a capture. Both are null when the
+    /// <paramref name="StaleCapture"/>, which says whether that collector's schedule still takes a capture and at what cadence. Both are null when the
     /// store has no reason to give, and when a read fails: the panel has already said its window is empty.
     /// </summary>
     public async Task<(string? ReadableSecondary, string? StaleCapture)> GetQueryStoreEmptyReasonAsync(
@@ -230,7 +230,9 @@ public sealed partial class ViewerDataService
     {
         try
         {
-            var healthCaptureRefreshes = QueryStoreHealthCaptureRefreshes(await ReadScheduleOverridesForHealthAsync(cancellationToken), serverId);
+            var healthCollector = PerformanceMonitor.Collectors.QueryStoreHealthCollector.Instance.Name;
+            var scheduleRows = await ReadScheduleOverridesForHealthAsync(cancellationToken);
+            var healthCaptureRefreshes = QueryStoreHealthCaptureRefreshes(scheduleRows, serverId);
             if (await DarlingQueryStoreReadableSecondary.MessageAsync(
                     _dataSource, serverId, displayName, healthCaptureRefreshes,
                     ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken) is { } secondary)
@@ -250,8 +252,12 @@ public sealed partial class ViewerDataService
             return (null, PerformanceMonitor.Common.QueryStoreSnapshotStaleness.PanelNote(
                 DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
                 DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc),
-                PerformanceMonitor.Collectors.QueryStoreHealthCollector.Instance.Name,
-                healthCaptureRefreshes));
+                healthCollector,
+                healthCaptureRefreshes,
+                /* The interval the health reads judge the collector by: the server's row, else the fleet row, else the shipped one. */
+                PerformanceMonitor.Collectors.CollectorScheduleDefaults.ResolveEffectiveIntervalMinutes(healthCollector, serverId, scheduleRows) is int minutes and > 0
+                    ? minutes
+                    : PerformanceMonitor.Collectors.CollectorScheduleDefaults.All[healthCollector].FrequencyMinutes));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
