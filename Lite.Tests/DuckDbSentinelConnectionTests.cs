@@ -417,7 +417,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     /// read 0. This test holds that precondition on purpose: another thread holds the read lock when the cycle is
     /// called, and with <see cref="DuckDbInitializer.TrimLockWaitForTests"/> set the cycle must still complete
     /// exactly one cycle. The hold is released only once the cycle is parked on the write lock, read through
-    /// <see cref="DuckDbInitializer.WaitingWriteCountForTests"/>, so the cycle has met the holder before the
+    /// <see cref="DuckDbInitializer.ParkedWriterCountForTests"/>, so the cycle has met the holder before the
     /// holder lets go.
     /// </summary>
     [Fact]
@@ -447,7 +447,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
             var releaser = Task.Run(() =>
             {
                 TestWait.TryWaitUntil(
-                    () => Volatile.Read(ref stopWatchingForTheParkedWriter) || DuckDbInitializer.WaitingWriteCountForTests > 0,
+                    () => Volatile.Read(ref stopWatchingForTheParkedWriter) || initializer.ParkedWriterCountForTests > 0,
                     TimeSpan.FromSeconds(30),
                     TimeSpan.FromMilliseconds(1));
                 releaseReader.Set();

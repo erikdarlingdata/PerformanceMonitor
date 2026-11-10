@@ -7,11 +7,15 @@
  */
 
 using System;
+using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
+using Darling.Tests;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common.QueryTags;
+using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitorLite.Tests;
@@ -209,6 +213,82 @@ public sealed class McpQueryTagToolTests : IClassFixture<SharedDuckDbFixture>
 
         Assert.NotEqual("moved", added.GetProperty("status").GetString());
         Assert.Equal(2, (await _data.GetQueryTagAssignmentsAsync()).Count);
+    }
+
+    /// <summary>How long a budgeted writer through the fixture's initializer may take to show up as a parked writer once it asks for
+    /// the held lock. A writer that parks is one on its first step, with no sleep between asking and parking; one that polls stays out
+    /// of the parked count for all but the last second of its budget. Ten seconds decides which, with no timing margin.</summary>
+    private static readonly TimeSpan ParkBackstop = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// #8490: the write lock is process-wide, and the classes running alongside take it while they build their own databases. A
+    /// budgeted writer polls for it with no queue position for all but the last second of its budget (#7256), and the writers those
+    /// classes park on the lock win every handoff, so an assign through this fixture could spend its whole budget polling and answer
+    /// with an error, which the case-twin test below discards before reading "assigned" where it expects "moved". This host starts
+    /// every initializer parked for its whole budget instead: while another writer holds the lock, a write through this fixture is a
+    /// waiting writer the moment it asks, and once the holder releases, the assign answers "assigned" and the case twin moves it. The
+    /// write held at the door is a tag create, which opens the same user-budget write connection the assign's store write opens; the
+    /// assign itself reads before it writes, and a read cannot enter while the lock is held. The holder is its own initializer's
+    /// budgeted writer on its own thread, released in finally on every path, and the write's mode is read from the fixture
+    /// initializer's own writer counts, so neither depends on what the other classes' writers are doing.
+    /// </summary>
+    [Fact]
+    public async Task AWrite_ParksOnTheWriteLock_WhileAnotherWriterHoldsIt_AndTheAssignThenMovesTheCaseTwin()
+    {
+        var first = await _data.CreateQueryTagAsync("First", null);
+        var second = await _data.CreateQueryTagAsync("Second", null);
+
+        var budget = LocalDataService.UserWriteLockBudget;
+        var holderDir = Path.Combine(Path.GetTempPath(), "QueryTagHolder_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(holderDir);
+        using var holderDb = new DuckDbInitializer(Path.Combine(holderDir, "holder.duckdb")) { WriteLockParkTail = budget };
+        var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim(false);
+        var holder = Task.Factory.StartNew(() =>
+        {
+            using var writeLock = holderDb.AcquireWriteLock(budget);
+            held.SetResult();
+            release.Wait(budget);
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        Task<int>? create = null;
+        try
+        {
+            await Task.WhenAny(held.Task, holder);
+            if (holder.IsFaulted)
+            {
+                await holder;
+            }
+
+            create = Task.Run(() => _data.CreateQueryTagAsync("parked", null), CancellationToken.None);
+            TestWait.WaitUntil(() => _fixture.DuckDb.PollingWriterCountForTests + _fixture.DuckDb.ParkedWriterCountForTests > 0, ParkBackstop, TimeSpan.FromMilliseconds(5), "the write reached the write-lock wait");
+
+            Assert.True(
+                TestWait.TryWaitUntil(() => _fixture.DuckDb.ParkedWriterCountForTests > 0, ParkBackstop, TimeSpan.FromMilliseconds(5)),
+                "a write through this fixture polls for the write lock with no queue position instead of parking as a waiting writer, so the parked writers of the classes running alongside win every handoff, its budget runs out, and the tool answers with an error");
+
+            release.Set();
+            await holder;
+            Assert.True(await create.WaitAsync(budget) > 0);
+
+            var assigned = Parse(await McpQueryTagTools.AssignQueryTagCore(_data, [], first, "hash", "0xabcdef", null, null, null, null, null));
+            Assert.Equal("assigned", assigned.GetProperty("status").GetString());
+            var moved = Parse(await McpQueryTagTools.AssignQueryTagCore(_data, [], second, "hash", "0xABCDEF", null, null, null, null, null));
+            Assert.Equal("moved", moved.GetProperty("status").GetString());
+        }
+        finally
+        {
+            release.Set();
+            await holder;
+            if (create is not null)
+            {
+                await create;
+            }
+
+            try { Directory.Delete(holderDir, recursive: true); }
+            catch (IOException) { /* best-effort cleanup */ }
+            catch (UnauthorizedAccessException) { /* best-effort cleanup */ }
+        }
     }
 
     [Fact]
