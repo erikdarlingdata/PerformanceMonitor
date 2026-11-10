@@ -26,7 +26,7 @@ public sealed partial class PgFactCollector
     /// every pass.
     ///
     /// <para><b>When a pass reuses.</b> Only a current MCP or viewer call (<see cref="AnalysisContext.ReusePlanRegressionCandidates"/>,
-    /// no <c>as_of</c>), only within <see cref="RefreshAfter"/> (one analysis cadence) of the read that filled the entry, and only for the same
+    /// no <c>as_of</c>), only within <see cref="RefreshAfter"/> (one analysis cadence, plus the longest the scheduled pass is ordinarily deferred) of the read that filled the entry, and only for the same
     /// read shape (<see cref="ShapeOf"/>): the same SQL after the secondary-replica scope, the same day-aligned window
     /// start, the same built days and their watermarks, the same scope values, and for the exact-bound reads (table or
     /// raw) the same exact window start. A new day (the window start moves), a built day turning stale or a new built day,
@@ -44,12 +44,13 @@ public sealed partial class PgFactCollector
     /// being monitored.</para>
     ///
     /// <para><b>What an operator sees.</b> The scheduled pass, its findings and its alerts are unchanged. An
-    /// <c>analyze_server</c> or <c>get_analysis_facts</c> call with no <c>as_of</c> that comes within one analysis cadence
+    /// <c>analyze_server</c> or <c>get_analysis_facts</c> call with no <c>as_of</c> that comes within <see cref="RefreshAfter"/>
     /// of the last read answers PLAN_REGRESSION from that read, so it can miss a regression that began after it, or still
-    /// show one that ended, for up to one cadence (30 minutes by default). An <c>analyze_server</c> call with no
+    /// show one that ended, for up to one cadence (30 minutes by default), and for up to seven minutes more while the
+    /// scheduled pass that replaces the read is deferred (#8539). An <c>analyze_server</c> call with no
     /// <c>as_of</c> also saves its findings (<see cref="AnalysisContext.PersistFindings"/>), stamped with the call's time, so a
     /// saved on-demand pass may hold PLAN_REGRESSION findings built from a read up to <see cref="RefreshAfter"/> old: the
-    /// same band as the scheduled pass's own findings, which are at most one cadence old when the next call reads them. No
+    /// same band as the scheduled pass's own findings, which are that old when a call reads them just before the next pass. No
     /// alert threshold, severity or policy changes.</para>
     /// </summary>
     internal sealed class PlanRegressionCandidateCache
@@ -63,9 +64,11 @@ public sealed partial class PgFactCollector
 
         private long _refreshAfterTicks = DefaultRefreshAfter.Ticks;
 
-        /// <summary>How long a read's candidates serve the MCP and viewer calls after it: one analysis cadence, which the
-        /// service sets from the configured interval on every scheduling tick (<c>DarlingWorker</c>), so a call never
-        /// answers from a read older than the scheduled pass that would replace it.</summary>
+        /// <summary>How long a read's candidates serve the MCP and viewer calls after it: one analysis cadence plus the
+        /// longest the scheduled pass is ordinarily deferred (#8539: five minutes of giving way to collection, then one
+        /// pass budget for a place among the running passes). The service sets it from the configured interval on every
+        /// scheduling tick (<c>DarlingWorker</c>), so the entry is still served while the pass that replaces it is
+        /// deferred, and a call never answers from a read older than that.</summary>
         internal TimeSpan RefreshAfter
         {
             get => TimeSpan.FromTicks(System.Threading.Interlocked.Read(ref _refreshAfterTicks));

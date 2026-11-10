@@ -625,6 +625,13 @@ public sealed partial class DarlingWorker : BackgroundService
     internal Func<ServerLoopState, ServerRuntime, string, CancellationToken, Task<int>>? RunOneBodyOverride { get; set; }
 
     /// <summary>
+    /// Test seam (#8539): stands in for the scheduled analysis pass in <see cref="RunScheduledAnalysisIfDueAsync"/>, so a
+    /// test can hold a pass open and watch which passes start around it with no store and no monitored server. Null in
+    /// production, which runs the pass for real.
+    /// </summary>
+    internal Func<ServerLoopState, CancellationToken, Task>? ScheduledAnalysisOverride { get; set; }
+
+    /// <summary>
     /// Test seam (#6186): with <see cref="RunOneBodyOverride"/> set, a non-null answer here stands for the monitored server
     /// refusing that collector (a PERMISSIONS run with this message). The override's run is recorded the way the real
     /// run's outcome is, so the backoff sees it.
@@ -984,6 +991,14 @@ public sealed partial class DarlingWorker : BackgroundService
        slot (ProcessServerSweepAsync). A body that waited long for a slot says how many of the slots were held by a pass
        when it got one. Interlocked. */
     private int _analysisPassesInSlot;
+
+    /// <summary>#8539: the bodies waiting for a fleet collection slot right now, each with the time it started waiting
+    /// (ProcessServerSweepAsync). A due scheduled analysis pass reads how long the longest of them has waited
+    /// (<see cref="ScheduledAnalysisAdmission"/>). Created on first use, so a worker built without its constructor has
+    /// one. Internal so a test can state a wait of a given length.</summary>
+    internal FleetSlotWaiters SlotWaiters => LazyInitializer.EnsureInitialized(ref _slotWaiters, static () => new FleetSlotWaiters());
+
+    private FleetSlotWaiters? _slotWaiters;
 
     /* How far past its budget an in-flight pass must be before the sweep starts reporting it. The
        ordinary overrun already gets the "exceeded Ns" warning; this is for the pass that ignored the
@@ -1850,6 +1865,15 @@ LIMIT 1";
            analysis pass, so without these a slot held by the pass read as "no single cause". */
         public long LastAnalysisMs;
         public int LastGateWaitAnalysisHolders;
+
+        /* #8539: how many of this server's bodies in a row left its due scheduled analysis pass unstarted, by reason: it
+           gave way to a collection body waiting for a fleet slot, or the analysis share was full
+           (ScheduledAnalysisAdmission). When the first of them did, and when the pass was last reported as refused for
+           more than one interval. All four reset when the pass starts. Written only by the server's own body. */
+        public int AnalysisGaveWay;
+        public int AnalysisShareFull;
+        public DateTime AnalysisFirstRefusedUtc = DateTime.MinValue;
+        public DateTime AnalysisLateWarnedUtc = DateTime.MinValue;
 
         /// <summary>#5597: the UTC ticks at which the connect body finished seeding this server's collector due stamps (0 =
         /// never). The stamps are seeded from a clock read before the body's on-load snapshots, so a slot that came due

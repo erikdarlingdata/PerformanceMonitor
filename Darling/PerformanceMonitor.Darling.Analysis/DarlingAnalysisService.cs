@@ -386,7 +386,7 @@ public sealed class DarlingAnalysisService
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
             AsOfUtc = asOfUtc,
-            /* #5812: an on-demand current pass may reuse PLAN_REGRESSION candidates younger than one analysis cadence; the
+            /* #5812: an on-demand current pass may reuse PLAN_REGRESSION candidates younger than the reuse window; the
                scheduled pass (the one caller that persists caveats, #5633) always reads and refills them; a past as_of reads
                live. */
             ReusePlanRegressionCandidates = asOfUtc is null && !persistCollectionCaveats,
@@ -688,7 +688,7 @@ public sealed class DarlingAnalysisService
             //    full; only the row is withheld, because the row would claim to be a current
             //    observation. AnalysisContext.PersistFindings carries the whole argument.
             //    #5812 (L2): a current on-demand pass persists too, and its PLAN_REGRESSION findings may come from a
-            //    reused read up to PlanRegressionCandidateCache.RefreshAfter (one analysis cadence) old: the same band as
+            //    reused read up to PlanRegressionCandidateCache.RefreshAfter old: the same band as
             //    the scheduled pass's own findings when the next call reads them (see PgFactCollector.PlanRegressionCache).
             if (context.PersistFindings)
             {
