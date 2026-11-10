@@ -95,6 +95,28 @@ public static class ProvisioningVerdict
     /// <summary>The tooltip on a Status cell that reads <see cref="NotCollectedLabel"/>: what was not collected, and over what window.</summary>
     public const string NoStatusNote = "No CPU sample in the last 24 hours";
 
+    /// <summary>What a Server Inventory Health cell shows in place of a score for a server whose Status holds a verdict. A score needs
+    /// a CPU sample in the last 24 hours and a memory sample; a verdict needs only the CPU sample, so this server lacks the memory
+    /// sample.</summary>
+    public const string NoMemorySampleLabel = "No memory sample";
+
+    /// <summary>The tooltip on a Health cell that reads <see cref="NoMemorySampleLabel"/>.</summary>
+    public const string NoMemorySampleNote = "No health score: no memory sample has been collected";
+
+    /// <summary>The tooltip on a Health cell that reads <see cref="NotCollectedLabel"/>: the server has no verdict either, so the
+    /// last 24 hours hold no CPU sample.</summary>
+    public const string NoCpuSampleHealthNote = "No health score: the last 24 hours hold no CPU sample";
+
+    /// <summary>The words a Server Inventory Health cell shows in place of a score, for the Viewer and Lite alike: which input the
+    /// score lacks. With no verdict that is the CPU sample (<see cref="NotCollectedLabel"/>, the Status cell's words); beside a
+    /// verdict it is the memory sample (<see cref="NoMemorySampleLabel"/>).</summary>
+    public static string NoHealthScoreLabel(string? provisioningStatus) =>
+        string.IsNullOrEmpty(provisioningStatus) ? NotCollectedLabel : NoMemorySampleLabel;
+
+    /// <summary>The tooltip on the words <see cref="NoHealthScoreLabel"/> returns: the one cause that applies to the server.</summary>
+    public static string NoHealthScoreNote(string? provisioningStatus) =>
+        string.IsNullOrEmpty(provisioningStatus) ? NoCpuSampleHealthNote : NoMemorySampleNote;
+
     /// <summary>What a Server Inventory Status or Health cell shows for a server with no value when the read of the collected
     /// metrics failed: the store may hold a value, and this read could not say. Never <see cref="NotCollectedLabel"/>, which is
     /// a statement about the server.</summary>

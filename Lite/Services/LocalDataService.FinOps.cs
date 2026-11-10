@@ -508,7 +508,7 @@ public class ServerPropertyRow : System.ComponentModel.INotifyPropertyChanged
         {
             if (_provisioningStatus == value) return;
             _provisioningStatus = value;
-            Raise(nameof(ProvisioningStatus), nameof(ProvisioningDisplay), nameof(ProvisioningNote));
+            Raise(nameof(ProvisioningStatus), nameof(ProvisioningDisplay), nameof(ProvisioningNote), nameof(HealthDisplay), nameof(HealthScoreNote));
         }
     }
 
@@ -574,8 +574,8 @@ public class ServerPropertyRow : System.ComponentModel.INotifyPropertyChanged
     }
 
     // Health score (Increment 6)
-    /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server: the grid says Not collected,
-    /// not a score built from memory and storage alone. It is the Utilization tab's score for the same server
+    /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server or it has no memory
+    /// sample: the grid says which (<see cref="HealthDisplay"/>), not a score built from the inputs it has. It is the Utilization tab's score for the same server
     /// (<see cref="FinOpsHealthCalculator.Score"/>), read by <see cref="LocalDataService.GetServerMetricsAsync"/>.</summary>
     public int? HealthScore
     {
@@ -590,13 +590,15 @@ public class ServerPropertyRow : System.ComponentModel.INotifyPropertyChanged
 
     public string HealthScoreColor => HealthScore is int score ? FinOpsHealthCalculator.ScoreColor(score) : FinOpsHealthCalculator.NoScoreColor;
 
-    /// <summary>The Health cell: the score, or the words shown in place of one (<see cref="ProvisioningVerdict.NotCollectedLabel"/>,
-    /// or <see cref="ProvisioningVerdict.CouldNotReadLabel"/> when the overlay read failed). The column sorts on <see cref="HealthScore"/>.</summary>
-    public string HealthDisplay => HealthScore is int score ? score.ToString(System.Globalization.CultureInfo.CurrentCulture) : NoValueLabel;
+    /// <summary>The Health cell: the score, or the words shown in place of one. <see cref="ProvisioningVerdict.CouldNotReadLabel"/>
+    /// when the overlay read failed; else the input the score lacks (<see cref="ProvisioningVerdict.NoHealthScoreLabel"/>): "Not
+    /// collected" for a server with no verdict, "No memory sample" beside a verdict. The column sorts on <see cref="HealthScore"/>.</summary>
+    public string HealthDisplay => HealthScore is int score ? score.ToString(System.Globalization.CultureInfo.CurrentCulture)
+        : OverlayReadFailed ? ProvisioningVerdict.CouldNotReadLabel : ProvisioningVerdict.NoHealthScoreLabel(ProvisioningStatus);
 
-    /// <summary>The tooltip on the words shown in place of a score; null when there is a score.</summary>
+    /// <summary>The tooltip on the words shown in place of a score, naming the one cause that applies; null when there is a score.</summary>
     public string? HealthScoreNote => HealthScore.HasValue ? null
-        : OverlayReadFailed ? ProvisioningVerdict.CouldNotReadNote : FinOpsHealthCalculator.NoInventoryScoreNote;
+        : OverlayReadFailed ? ProvisioningVerdict.CouldNotReadNote : ProvisioningVerdict.NoHealthScoreNote(ProvisioningStatus);
 }
 
 public class StorageGrowthRow
@@ -680,10 +682,6 @@ public static class FinOpsHealthCalculator
 
     /// <summary>The tooltip on the dash shown in place of a health score when the last 24 hours hold no CPU sample.</summary>
     public const string NoScoreNote = "No health score: the last 24 hours hold no CPU sample.";
-    /// <summary>The tooltip on the words shown in place of a health score on the Server Inventory. That score is null for two reasons: the last 24 hours hold no
-    /// CPU sample, or no memory sample has been collected (memory_stats off in the schedule, or not yet run on a new server). The row does not say which,
-    /// so the note names both. The Utilization view keeps <see cref="NoScoreNote"/>: it has no row at all without a memory sample.</summary>
-    public const string NoInventoryScoreNote = "No health score: the last 24 hours hold no CPU sample, or no memory sample has been collected.";
 
     public static int CpuScore(decimal p95Pct)
     {

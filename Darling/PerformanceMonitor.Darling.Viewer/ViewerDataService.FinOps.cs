@@ -678,13 +678,18 @@ public sealed class ServerPropertyRow
     /// <summary>License-limit warning for Standard edition (CPU/RAM caps). Same math as Lite.</summary>
     public string? LicenseWarning => FinOpsInventoryFigures.LicenseWarning(Edition, EngineEdition, _cpuCount, _physicalMemoryMb);
 
-    /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server: the grid says Not collected,
-    /// not a score built from the memory and storage defaults (<see cref="FinOpsUtilizationFigures.HealthScore(bool, decimal, int, int, decimal)"/>).</summary>
+    /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server or it has no memory
+    /// sample: the grid says which (<see cref="HealthDisplay"/>), not a score built from the memory and storage defaults (<see cref="FinOpsUtilizationFigures.HealthScore(bool, decimal, int, int, decimal)"/>).</summary>
     public int? HealthScore { get; set; }
     public string HealthScoreColor => HealthScore is int score ? FinOpsHealthCalculator.ScoreColor(score) : FinOpsHealthCalculator.NoScoreColor;
 
-    /// <summary>The tooltip on the words shown in place of a score; null when there is a score.</summary>
-    public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoInventoryScoreNote;
+    /// <summary>The Health cell: the score, or the input the score lacks (<see cref="ProvisioningVerdict.NoHealthScoreLabel"/>): "Not
+    /// collected" for a server with no verdict, "No memory sample" beside a verdict. The column sorts on <see cref="HealthScore"/>.</summary>
+    public string HealthDisplay => HealthScore is int score ? score.ToString(System.Globalization.CultureInfo.CurrentCulture)
+        : ProvisioningVerdict.NoHealthScoreLabel(ProvisioningStatus);
+
+    /// <summary>The tooltip on the words shown in place of a score, naming the one cause that applies; null when there is a score.</summary>
+    public string? HealthScoreNote => HealthScore.HasValue ? null : ProvisioningVerdict.NoHealthScoreNote(ProvisioningStatus);
 }
 
 /// <summary>Per-database storage growth vs 7d/30d ago (Storage Growth parent grid).</summary>

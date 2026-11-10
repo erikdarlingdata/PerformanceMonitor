@@ -1112,7 +1112,7 @@
                                     <DataGridTextColumn Header="Monitoring" Binding="{Binding MonitoringStatus}" Width="120"/>
                                     <DataGridTextColumn Header="Monthly ($)" Binding="{Binding MonthlyCost, StringFormat=N0}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Annual ($)" Binding="{Binding AnnualCost, StringFormat=N0}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Health" Binding="{Binding HealthScore, TargetNullValue='Not collected'}" Width="Auto" MinWidth="60">
+                                    <DataGridTextColumn Header="Health" Binding="{Binding HealthDisplay}" SortMemberPath="HealthScore" Width="Auto" MinWidth="60">
                                         <DataGridTextColumn.ElementStyle>
                                             <Style TargetType="TextBlock">
                                                 <Setter Property="HorizontalAlignment" Value="Center"/><Setter Property="FontWeight" Value="Bold"/>
