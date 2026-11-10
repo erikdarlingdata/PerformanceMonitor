@@ -65,8 +65,9 @@
                           PreviewMouseLeftButtonDown="ChainScrollViewer_PreviewMouseLeftButtonDown"
                           PreviewMouseMove="ChainScrollViewer_PreviewMouseMove"
                           PreviewMouseLeftButtonUp="ChainScrollViewer_PreviewMouseLeftButtonUp">
+                <!-- #8534: a chain smaller than the viewer sits in the middle of it. One larger than the viewer fills the scroll extent, so it starts at the top-left and scrolls. -->
                 <Canvas x:Name="ChainCanvas" ClipToBounds="False"
-                        HorizontalAlignment="Left" VerticalAlignment="Top">
+                        HorizontalAlignment="Center" VerticalAlignment="Center">
                     <Canvas.LayoutTransform>
                         <ScaleTransform x:Name="ZoomTransform" ScaleX="1" ScaleY="1"/>
                     </Canvas.LayoutTransform>
