@@ -375,6 +375,9 @@ public static partial class DarlingWebEndpoints
         /// <summary>The outcome the route answered with.</summary>
         internal void Complete(ReadOutcome outcome) => _outcome = outcome;
 
+        /// <summary>How long the route has run since it was admitted, for a failure line written before the run is disposed.</summary>
+        internal long ElapsedMilliseconds => _stopwatch.ElapsedMilliseconds;
+
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _recorded, 1) != 0)

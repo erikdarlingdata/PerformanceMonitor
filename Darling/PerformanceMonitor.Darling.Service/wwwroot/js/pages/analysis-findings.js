@@ -442,8 +442,7 @@ function generateBar(server, signal) {
   (async () => {
     const session = await getSession();
     if (!session || !session.can_edit) return;
-    /* A scoped seat cannot queue an analysis: the probe is answered here as unavailable instead of asked for and refused at the gate. */
-    const avail = peekSession()?.scoped ? { available: false } : await apiGet("/api/analyze-now/available", signal);
+    const avail = await apiGet("/api/analyze-now/available", signal);
     if (avail.kind !== "data" || !avail.data) return;
     if (avail.data.can_queue !== true) {
       slot.appendChild(noticeStrip(generateUnavailableNote(avail.data.managed_store === true)));
@@ -512,7 +511,8 @@ function card(server, f, showTitle) {
   }
   const actions = [];
   if (f.remediation_command) actions.push(copyButton(f.remediation_command));
-  actions.push(askAiButton(server, f));
+  /* A scoped session gets no Ask AI button: the prompt read behind it is not one a scoped token is served. */
+  if (!peekSession()?.scoped) actions.push(askAiButton(server, f));
   const tab = findingTab(f);
   if (tab) {
     actions.push(el("a", { class: "btn small", href: storeHash("#/server/") + encodeURIComponent(server) + "/" + tab.id, text: "Open " + tab.label + " tab" }));

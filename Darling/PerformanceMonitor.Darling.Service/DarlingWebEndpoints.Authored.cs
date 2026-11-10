@@ -103,17 +103,25 @@ public static partial class DarlingWebEndpoints
                     return JsonNodeResult(BuildCatalogNode(null, grantSchedules));
                 }
 
-                var authorizedId = await AuthorizedWebServerAsync(postgres, context, catalogTags);
-                if (authorizedId is null)
+                var authorized = await AuthorizedWebServerRowAsync(postgres, context, catalogTags);
+                if (authorized.StoreFault is { } registryFault)
+                {
+                    /* The registry could not be read: a fault of the store, logged once and answered with the fixed failure body. */
+                    run.Complete(ToolResultOutcome(registryFault, context.RequestAborted));
+                    ThrowIfCallerGone(registryFault, context.RequestAborted);
+                    return ToHttpResult(registryFault, DarlingWebFailureLog.RouteOf(context.Request), logger, run.ElapsedMilliseconds, context.RequestAborted);
+                }
+
+                if (authorized.Row is not { } authorizedServer)
                 {
                     run.Complete(ReadOutcome.Ok);
                     return ErrorResult("Server data is unavailable to this token.", StatusCodes.Status403Forbidden);
                 }
 
                 // Keep the authorized ID: resolving the name again could select another server after a rename.
-                var scopedSchedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, authorizedId.Value, context.RequestAborted);
+                var scopedSchedules = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, authorizedServer.ServerId, context.RequestAborted);
                 run.Complete(ReadOutcome.Ok);
-                return JsonNodeResult(BuildCatalogNode(authorizedId.Value, scopedSchedules));
+                return JsonNodeResult(BuildCatalogNode(authorizedServer.ServerId, scopedSchedules));
             }
             if (string.IsNullOrWhiteSpace(serverName))
             {

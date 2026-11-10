@@ -219,14 +219,19 @@ public static partial class DarlingWebEndpoints
         return ids.ToArray();
     }
 
-    internal static async Task<int?> AuthorizedWebServerAsync(
-        NpgsqlDataSource postgres, HttpContext context, IReadOnlyList<int> allowedTagIds, int[]? allowedServerIds = null) =>
-        (await AuthorizedWebServerRowAsync(postgres, context, allowedTagIds, allowedServerIds))?.ServerId;
+    /// <summary>What the authorizing read answers for a scoped reader's request. <c>Row</c> is the registry row the request selects.
+    /// <c>StoreFault</c> is the resolver's registry-read sentence when the registry itself could not be read: a fault of the store, which
+    /// the route answers and logs the way it does for an unscoped reader. Both null means the request names no server the reader may
+    /// read, which is the route's fixed 403.</summary>
+    internal readonly record struct AuthorizedWebServer((int ServerId, string ServerName, string DisplayName)? Row, string? StoreFault)
+    {
+        internal bool Refused => Row is null && StoreFault is null;
+    }
 
-    /// <summary>The registry row a scoped reader's request selects, or null when the request names no server it may read. One registry
-    /// read: the row is the resolution the caller uses, so no later read resolves the name again. The alert-details form authorizes by
-    /// server_id alone and carries no name.</summary>
-    internal static async Task<(int ServerId, string ServerName, string DisplayName)?> AuthorizedWebServerRowAsync(
+    /// <summary>The registry row a scoped reader's request selects, a store fault when the registry read failed, or neither when the
+    /// request names no server it may read. One registry read: the row is the resolution the caller uses, so no later read resolves the
+    /// name again. The alert-details form authorizes by server_id alone and carries no name.</summary>
+    internal static async Task<AuthorizedWebServer> AuthorizedWebServerRowAsync(
         NpgsqlDataSource postgres, HttpContext context, IReadOnlyList<int> allowedTagIds, int[]? allowedServerIds = null)
     {
         var query = context.Request.Query;
@@ -236,11 +241,11 @@ public static partial class DarlingWebEndpoints
             if (query["server_id"].Count != 1 || query.ContainsKey("server") || query.ContainsKey("server_name") ||
                 !int.TryParse(query["server_id"], out var id))
             {
-                return null;
+                return default;
             }
 
             var ids = allowedServerIds ?? await AllowedWebServerIdsAsync(postgres, allowedTagIds, context.RequestAborted);
-            return Array.IndexOf(ids, id) >= 0 ? (id, string.Empty, string.Empty) : null;
+            return Array.IndexOf(ids, id) >= 0 ? new AuthorizedWebServer((id, string.Empty, string.Empty), null) : default;
         }
 
         if (query.ContainsKey("server_id") ||
@@ -250,7 +255,7 @@ public static partial class DarlingWebEndpoints
             string.Equals(Server(context)?.Trim(), "*", StringComparison.Ordinal) ||
             DarlingServerResolver.IsFleetSentinelName(Server(context)))
         {
-            return null;
+            return default;
         }
 
         var serverIds = allowedServerIds ?? await AllowedWebServerIdsAsync(postgres, allowedTagIds, context.RequestAborted);
@@ -258,7 +263,11 @@ public static partial class DarlingWebEndpoints
             () => DarlingServerResolver.ResolveOrErrorAsync(postgres, Server(context), context.RequestAborted));
         if (error is not null)
         {
-            return null;
+            /* The registry read failing is the one error that is not an answer about the grant: it is raised before the grant is
+               checked, and it is the only registry read a scoped per-server read makes. Every other error is the refusal. */
+            return error.StartsWith(DarlingServerResolver.RegistryReadFaultPrefix, StringComparison.Ordinal)
+                ? new AuthorizedWebServer(null, error)
+                : default;
         }
 
         /* From here the request names the server by its canonical server_name, so a read's own resolution is an exact match inside
@@ -279,6 +288,6 @@ public static partial class DarlingWebEndpoints
 
         canonical.Add(new KeyValuePair<string, string?>("server", resolved.ServerName));
         context.Request.QueryString = QueryString.Create(canonical);
-        return resolved;
+        return new AuthorizedWebServer(resolved, null);
     }
 }
