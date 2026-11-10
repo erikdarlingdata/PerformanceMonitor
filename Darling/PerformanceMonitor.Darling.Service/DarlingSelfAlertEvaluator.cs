@@ -1498,10 +1498,14 @@ internal sealed class DarlingSelfAlertEvaluator
     /// </summary>
     /// <param name="captureSessions">#8528: what the service's own ensure of the capture sessions found on this server, judged beside
     /// the store's newest rows by <see cref="ApplyCaptureDownAsync"/>. Null is an empty report.</param>
+    /// <param name="captureSessionsAfterRead">#8528: the same report, taken again once the capture read has returned. The first
+    /// is taken before this pass's reads, and a run can set a hold and write its row while they are in flight; a capture that
+    /// either report holds is held (<see cref="HeldByEither"/>). Null takes the first report alone.</param>
     public async Task EvaluateStoreAlertsAsync(
         NpgsqlDataSource postgres, int serverId, string serverName, bool connected, CancellationToken cancellationToken,
         CollectorTargetEngine engine = CollectorTargetEngine.SqlServer,
-        CaptureSessionEnsureReport? captureSessions = null)
+        CaptureSessionEnsureReport? captureSessions = null,
+        Func<CaptureSessionEnsureReport>? captureSessionsAfterRead = null)
     {
         if (!_settings.AlertsEnabled)
         {
@@ -1590,6 +1594,7 @@ internal sealed class DarlingSelfAlertEvaluator
             }
 
             captureReadClock.Restart();
+            captureSessions = HeldByEither(captureSessions, captureSessionsAfterRead?.Invoke());
             await ApplyCaptureDownAsync(serverId, serverName, missing, notRunOnEngine, cancellationToken, sweepGeneration: generation, ensure: captureSessions);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -2032,7 +2037,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 try
                 {
                     var standing = await _historyStore.GetOpenFireAsync(
-                        key, CaptureDownMetric, new[] { "Capture Restored", "Capture Cleared" }, null, _serviceStartUtc);
+                        key, CaptureDownMetric, PerformanceMonitor.Darling.Storage.AlertClosingTitles.CaptureDown, null, _serviceStartUtc);
                     if (standing is not null)
                     {
                         _lastCaptureDownAlert[key] = standing.FireAtUtc;
@@ -2087,6 +2092,17 @@ internal sealed class DarlingSelfAlertEvaluator
             _logger?.LogDebug(
                 "[{Server}] The {Captures} capture session{Plural} started by the service, or its check did not complete, after the newest SESSION_MISSING run; Capture Down waits for the collector's next read or the service's next check",
                 serverName, string.Join(" and ", awaitingRead), awaitingRead.Count == 1 ? " was" : "s were");
+        }
+        else if (_activeCaptureDown.ContainsKey(key)
+            && _lastCaptureDownList.TryGetValue(key, out var standing)
+            && CapturesNotReadSince(standing, ensure) is { Count: > 0 } notRead)
+        {
+            /* #8528: a capture that was down has left the read on a row that did not read its session: the read failed, yielded,
+               was skipped or was abandoned. Nothing is known about the session, so the alert stands as it is, with no closing row
+               and no repeat, until a row that read the session says whether it is running. */
+            _logger?.LogDebug(
+                "[{Server}] The newest {Captures} capture run did not read its session; Capture Down stays open until a run that does",
+                serverName, string.Join(" and ", notRead));
         }
         else if (_captureDownSeedDone.TryAdd(key, true) && !_activeCaptureDown.ContainsKey(key))
         {
@@ -2165,11 +2181,53 @@ internal sealed class DarlingSelfAlertEvaluator
             : missing.Where(capture => !ensure.IsNotCollecting(CaptureCollectorName(capture))).ToArray();
 
     /// <summary>
+    /// #8528: the captures of a standing Capture Down whose collector's newest run, as the service wrote it, did not read the
+    /// session (<see cref="CaptureSessionRestarts.StatusSettles"/> is false for it: ERROR, YIELDED, SKIPPED, ABANDONED). Such a row
+    /// takes the capture out of the store read without saying anything about its session. A collector that is turned off, or
+    /// that has not run in this process, is not among them.
+    /// </summary>
+    internal static IReadOnlyList<string> CapturesNotReadSince(string? wasDown, CaptureSessionEnsureReport ensure)
+    {
+        var notRead = new List<string>();
+        foreach (var capture in (wasDown ?? string.Empty).Split(" and ", StringSplitOptions.RemoveEmptyEntries))
+        {
+            var collector = CaptureCollectorName(capture);
+            if (!ensure.IsNotCollecting(collector)
+                && ensure.LastRowStatusOf(collector) is { } status
+                && !CaptureSessionRestarts.StatusSettles(status))
+            {
+                notRead.Add(capture);
+            }
+        }
+
+        return notRead;
+    }
+
+    /// <summary>
+    /// #8528: one report that holds every capture either of two holds: the one taken before the pass's reads and the one taken
+    /// after the capture read. Everything else comes from the later one.
+    /// </summary>
+    internal static CaptureSessionEnsureReport? HeldByEither(CaptureSessionEnsureReport? before, CaptureSessionEnsureReport? afterRead)
+    {
+        if (afterRead is null || before is null)
+        {
+            return afterRead ?? before;
+        }
+
+        return afterRead with
+        {
+            RestartedAwaitingRead = before.RestartedAwaitingRead.Union(afterRead.RestartedAwaitingRead, StringComparer.OrdinalIgnoreCase).ToArray(),
+            AwaitingRetry = before.AwaitingRetry.Union(afterRead.AwaitingRetry, StringComparer.OrdinalIgnoreCase).ToArray(),
+        };
+    }
+
+    /// <summary>
     /// #8528: the closing text for a Capture Down whose captures left the read without all of them running again, or null when every
     /// capture that was down is running. A capture leaves the read when its collector's newest row is no longer SESSION_MISSING: a
-    /// success, but also the PERMISSIONS row of a session the server refused to create, and a collector that is turned off is not
-    /// counted at all. Neither is a session that came back, so the row is a clear that says why, and names any capture that is
-    /// running again beside it.
+    /// success, but also a PERMISSIONS row (a create the server refused the ensure, or a run refused for permission by the row the
+    /// service wrote), and a collector that is turned off is not counted at all. Neither is a session that came back, so the row
+    /// is a clear that says why, and names any capture that is running again beside it. A capture whose newest row did not read
+    /// the session never reaches this: the alert stays open for it (<see cref="CapturesNotReadSince"/>).
     /// </summary>
     internal static string? CaptureDownClearedNotRestored(string? wasDown, CaptureSessionEnsureReport ensure)
     {
@@ -2191,6 +2249,12 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 sentences.Add(
                     $"The {capture} capture is not running and is no longer reported as down: the monitoring login was refused the permission to create its session, " +
+                    "which collection health reports as PERMISSIONS.");
+            }
+            else if (string.Equals(ensure.LastRowStatusOf(collector), "PERMISSIONS", StringComparison.Ordinal))
+            {
+                sentences.Add(
+                    $"The {capture} capture is not running and is no longer reported as down: its collector's newest run was refused for permission, " +
                     "which collection health reports as PERMISSIONS.");
             }
             else
@@ -2283,21 +2347,23 @@ internal sealed class DarlingSelfAlertEvaluator
     internal const int MaxQuotedServerText = 300;
 
     /// <summary>
-    /// #8528: " The server said: ..." for the detail: the server's own text from the failed ensure, on one line (a SqlException's
-    /// message holds one line per error), cut at <see cref="MaxQuotedServerText"/> and ended with a full stop. Empty when the failure
-    /// carries no server text, so the service's own sentence is never quoted as the server's.
+    /// #8528: " The server said: ..." for the detail: the server's own text from the failed ensure, through the cleaner every
+    /// text a monitored server sent goes through (<see cref="CustomAlertEvaluator.SanitizeDisplayText"/>): on one line (a
+    /// SqlException's message holds one line per error), without control characters or the code points that hide or reorder text
+    /// (an engine message carries object and database names), cut between characters at <see cref="MaxQuotedServerText"/> and ended
+    /// with a full stop. Empty when the failure carries no server text, so the service's own sentence is never quoted as the server's.
     /// </summary>
     internal static string ServerSaid(DarlingXeSessions.XeEnsureFailure failure)
     {
-        var text = string.Join(' ', (failure.ServerText ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        var text = CustomAlertEvaluator.SanitizeDisplayText(failure.ServerText, MaxQuotedServerText);
         if (text.Length == 0)
         {
             return string.Empty;
         }
 
-        if (text.Length > MaxQuotedServerText)
+        if (CustomAlertEvaluator.SanitizeDisplayText(failure.ServerText, int.MaxValue).Length > text.Length)
         {
-            text = text[..MaxQuotedServerText].TrimEnd() + "...";
+            text += "...";
         }
         else if (text[^1] is not ('.' or '!' or '?'))
         {

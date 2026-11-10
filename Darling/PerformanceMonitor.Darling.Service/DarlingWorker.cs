@@ -2182,10 +2182,11 @@ LIMIT 1";
             return new CaptureSessionEnsureReport(CaptureSessionRestarts.AwaitingRead(utcNow, ReadBound).Where(Collecting).ToArray(), failures)
             {
                 AwaitingRetry = CaptureSessionRestarts.AwaitingRetry(utcNow).Where(Collecting).ToArray(),
-                StartedAtLastEnsure = ensure.Started.ToArray(),
+                StartedAtLastEnsure = ensure.Started.Concat(CaptureSessionRestarts.StoppedAfterStart()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
                 TransientAtLastEnsure = captureCollectors.Where(ensure.IsTransientFor).ToArray(),
                 CheckedAfterMissingRead = CaptureSessionRestarts.CheckedAfterMissingRead(),
                 NotCollecting = captureCollectors.Where(collectorName => !Collecting(collectorName)).ToArray(),
+                LastRowStatuses = CaptureSessionRestarts.LastRowStatuses(captureCollectors),
             };
         }
 
@@ -2261,14 +2262,17 @@ LIMIT 1";
         }
 
         outcome.CarryForwardTransient(server.CaptureEnsure);
-        server.CaptureEnsure = outcome;
-        ApplyTransientEnsureRetry(server, outcome, utcNow);
 
-        server.CaptureSessionRestarts.EnsureRan();
+        /* The marks first, then the end of the retry holds, then the outcome: the fleet pass reads all three from another thread,
+           and a report taken between any two of these steps still holds every session this ensure started. */
         foreach (var collectorName in outcome.Started)
         {
             server.CaptureSessionRestarts.Mark(collectorName);
         }
+
+        server.CaptureSessionRestarts.EnsureRan();
+        server.CaptureEnsure = outcome;
+        ApplyTransientEnsureRetry(server, outcome, utcNow);
     }
 
     /// <summary>

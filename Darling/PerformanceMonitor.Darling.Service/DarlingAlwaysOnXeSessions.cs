@@ -114,7 +114,7 @@ internal static class DarlingAlwaysOnXeSessions
                not a permission), so the caller can name the databases that refused it in the run note, as Lite does; the caller's
                PERMISSIONS rule still looks at IsPermission alone. */
             return kind == AlwaysOnXeSessionKind.Attention && DarlingXeSessions.AttentionFaultFor(ex) is { } attentionFault
-                ? new DarlingXeSessions.XeEnsureFailure(attentionFault.Message, IsPermission: true) { ServerText = AlwaysOnXeSessions.DescribeFailure(ex) }
+                ? new DarlingXeSessions.XeEnsureFailure(attentionFault.Message, IsPermission: true) { ServerText = ex.Message }
                 : DarlingXeSessions.CaptureFaultFor(ex, captureName);
         }
     }

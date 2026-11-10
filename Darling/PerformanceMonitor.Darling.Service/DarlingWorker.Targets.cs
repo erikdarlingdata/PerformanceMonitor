@@ -3329,16 +3329,17 @@ LIMIT 1";
                 "  [{Server}] {Collector} => XE session missing (capture down): {Message}",
                 server.Config.DisplayName, collectorName, ex.Message);
 
-            await LogRunAsync(
-                server, runtime, collectorName, "SESSION_MISSING", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
-
             /* #8528: the last ensure of this capture's session failed with a transient error, so nothing is known about the session
-               until its retry (DarlingXeSessions.TransientRetryInterval). The row above stands; the Capture Down self-alert holds its
-               verdict for the collector until the retry has run, once per run of SESSION_MISSING rows, so a retry that fails again fires. */
+               until its retry (DarlingXeSessions.TransientRetryInterval). The row below stands; the Capture Down self-alert holds its
+               verdict for the collector until the retry has run, once per streak of SESSION_MISSING rows, so a retry that fails again
+               fires. The hold is set before the row is written, so a pass that reads the row finds the hold. */
             if (IsCaptureSessionCollector(collectorName) && server.CaptureEnsure.IsTransientFor(collectorName))
             {
                 server.CaptureSessionRestarts.TryHoldForRetry(collectorName);
             }
+
+            await LogRunAsync(
+                server, runtime, collectorName, "SESSION_MISSING", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
 
             return 0;
         }
@@ -4120,11 +4121,19 @@ LIMIT 1";
     /// new identity; a capture run that comes first, or a sweep where the collectors that observe it are not due or fail, reads a
     /// stopped session. So a read that finds the session missing ensures the sessions once, through the same
     /// <see cref="EnsureAlwaysOnXeSessionsAsync"/>, and reads again: a session the ensure started is read as running and the run
-    /// records what that read finds. It does not ensure when this run already did before its read, when a transient ensure failure
-    /// has its retry pending (the retry interval stands), or when an earlier run of the same streak of SESSION_MISSING rows already
-    /// did: a session that stays unreadable is left to the hourly pass. An ensure that left a fault for the run ends it the way the
-    /// gates before the read do (PERMISSIONS for a refusal, SESSION_MISSING otherwise).
+    /// records what that read finds, with a note on its row that nothing was captured while the session was stopped. It does not
+    /// ensure when this run already did before its read; when the ensure of this collector's own session failed transiently and has
+    /// its retry pending; or when <see cref="CaptureSessionRestarts.TryBeginReadEnsure"/> refuses: an ensure has run since this
+    /// collector's previous row (one ensure per sweep), an earlier run of the same streak of SESSION_MISSING rows already ensured
+    /// (the run whose read-time start recorded SUCCESS included), or the session was started at a read twice within the hour. A
+    /// session that stays unreadable is left to the hourly pass, and one that keeps stopping records SESSION_MISSING, so Capture
+    /// Down fires. An ensure that left a fault for the run ends it the way the gates before the read do (PERMISSIONS for a
+    /// refusal, SESSION_MISSING otherwise).
     /// </summary>
+    /// <summary>#8528: the note on the row of a capture run whose ensure at its read started the stopped session.</summary>
+    internal const string SessionStartedAtReadNote =
+        "The session was stopped and was started before this read; events between the stop and this start were not captured.";
+
     private DispatchEntry CaptureReadThatStartsAStoppedSession(
         ServerLoopState server, string collectorName, bool ensuredBeforeRead, DispatchEntry read) =>
         async (runner, runtime, cancellationToken) =>
@@ -4136,8 +4145,8 @@ LIMIT 1";
             catch (DarlingXeSessionMissingException)
             {
                 var ensuredAtRead = !ensuredBeforeRead
-                    && !server.CaptureEnsure.TransientFailure
-                    && server.CaptureSessionRestarts.TryBeginReadEnsure(collectorName);
+                    && !server.CaptureEnsure.IsTransientFor(collectorName)
+                    && server.CaptureSessionRestarts.TryBeginReadEnsure(collectorName, DateTime.UtcNow);
                 if (!ensuredAtRead)
                 {
                     NoteCaptureCheckedAfterMissingRead(server, collectorName, ensured: ensuredBeforeRead);
@@ -4162,7 +4171,12 @@ LIMIT 1";
 
                 try
                 {
-                    return await read(runner, runtime, cancellationToken);
+                    var started = await read(runner, runtime, cancellationToken);
+
+                    /* The session was stopped and this run started it. The start is counted, and the row carries a note, so its
+                       SUCCESS does not read as a quiet server: nothing was captured between the stop and this start. */
+                    server.CaptureSessionRestarts.NoteStartedAtRead(collectorName, DateTime.UtcNow);
+                    return started with { HostNote = EnumeratedCollectorDriver.MergeNotes(started.HostNote, SessionStartedAtReadNote) };
                 }
                 catch (DarlingXeSessionMissingException)
                 {

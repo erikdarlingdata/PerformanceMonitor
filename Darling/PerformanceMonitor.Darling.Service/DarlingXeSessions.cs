@@ -69,8 +69,9 @@ public static class DarlingXeSessions
     public sealed record XeEnsureFailure(string Message, bool IsPermission)
     {
         /// <summary>
-        /// #8528: what the server itself said when the ensure failed (<see cref="AlwaysOnXeSessions.DescribeFailure"/>), apart from
-        /// <see cref="Message"/>, which is the service's own sentence with that text at its end. The Capture Down detail quotes this
+        /// #8528: what the server itself said when the ensure failed: the exception's message alone, without the sentence about
+        /// Azure SQL Database's session limits that <see cref="AlwaysOnXeSessions.DescribeFailure"/> adds for the log and the run
+        /// row. <see cref="Message"/> is the service's own sentence with that text at its end. The Capture Down detail quotes this
         /// and nothing else after "The server said:". Null when the failure was built without the server's text.
         /// </summary>
         public string? ServerText { get; init; }
@@ -266,7 +267,7 @@ public static class DarlingXeSessions
         if (outcome is not null)
         {
             outcome.Attention = permissionFault is not null
-                ? new XeEnsureFailure(permissionFault.Message, IsPermission: true) { ServerText = AlwaysOnXeSessions.DescribeFailure(ex) }
+                ? new XeEnsureFailure(permissionFault.Message, IsPermission: true) { ServerText = ex.Message }
                 : CaptureFaultFor(ex, "client timeout");
         }
 
@@ -322,7 +323,7 @@ public static class DarlingXeSessions
                 $"The {captureName} XE session could not be created because the monitoring login lacks the permission to create Extended Events sessions (ALTER ANY EVENT SESSION on-premises, CREATE ANY DATABASE EVENT SESSION on Azure SQL Database), so no {captureName} events can be captured until it is granted: {AlwaysOnXeSessions.DescribeFailure(ex)}",
                 IsPermission: true)
             {
-                ServerText = AlwaysOnXeSessions.DescribeFailure(ex),
+                ServerText = ex.Message,
             };
         }
 
@@ -330,7 +331,7 @@ public static class DarlingXeSessions
             $"The {captureName} XE session could not be created or started, so no {captureName} events can be captured until it is: {AlwaysOnXeSessions.DescribeFailure(ex)}",
             IsPermission: false)
         {
-            ServerText = AlwaysOnXeSessions.DescribeFailure(ex),
+            ServerText = ex.Message,
         };
     }
 

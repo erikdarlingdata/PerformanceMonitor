@@ -10,6 +10,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -56,6 +57,18 @@ public sealed record CaptureSessionEnsureReport(
     /// SESSION_MISSING row stays the newest: the self-alert judges no capture by it, neither as down nor as awaiting a read.
     /// </summary>
     public IReadOnlyCollection<string> NotCollecting { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// The newest run status the service wrote for each capture collector in this process (SUCCESS, PERMISSIONS, ERROR and the
+    /// rest). The store read names only the collectors whose newest row is SESSION_MISSING; this tells a row that read the running
+    /// session from one that read nothing. A collector with no run in this process has no entry.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> LastRowStatuses { get; init; } =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The newest run status the service wrote for this collector, or null when it has not run in this process.</summary>
+    public string? LastRowStatusOf(string collectorName) =>
+        LastRowStatuses.TryGetValue(collectorName, out var status) ? status : null;
 
     /// <summary>Whether the ensure started this collector's session and the collector has not read it since.</summary>
     public bool IsAwaitingRead(string collectorName) => Names(RestartedAwaitingRead, collectorName);
@@ -108,32 +121,127 @@ internal sealed class CaptureSessionRestarts
     private readonly ConcurrentDictionary<string, bool> _retryHoldSpent = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, bool> _readEnsureSpent = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, bool> _checkedAfterMissingRead = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, bool> _rowFromReadStart = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, bool> _startedAtRead = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, bool> _stoppedAfterStart = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DateTime[]> _readStarts = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, long> _lastRowSequence = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, string> _lastRowStatus = new(StringComparer.OrdinalIgnoreCase);
+    private long _sequence;
+    private long _lastEnsureSequence;
+
+    /// <summary>How many times in <see cref="ReadStartWindow"/> a collector's read may start its stopped session before the next stop is left to fire.</summary>
+    public const int MaxReadStartsPerWindow = 2;
+
+    /// <summary>The window <see cref="MaxReadStartsPerWindow"/> counts over.</summary>
+    public static readonly TimeSpan ReadStartWindow = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Whether a run status says something about the session: SUCCESS read it, PERMISSIONS was refused it, SESSION_MISSING found
+    /// it stopped. ERROR, YIELDED, SKIPPED and ABANDONED rows did not read the session and settle nothing.
+    /// </summary>
+    public static bool StatusSettles(string? status) => status is "SUCCESS" or "PERMISSIONS" or "SESSION_MISSING";
 
     /// <summary>The ensure started this collector's session; its newest row is from before the start.</summary>
     public void Mark(string collectorName) => _awaitingRead[collectorName] = DateTime.UtcNow;
 
     /// <summary>
-    /// The collector wrote a run row. The row is its own reading after any start, so the session no longer awaits its read. A row
-    /// that is not SESSION_MISSING also ends the collector's run of missing-session rows: the next one may ensure at its read and
-    /// may be held for a retry again.
+    /// The collector wrote a run row. A row whose status settles nothing (<see cref="StatusSettles"/>) changes nothing here: the
+    /// collector did not read the session, so a started session still awaits its read and the streak of SESSION_MISSING rows goes
+    /// on. A row that read the session is the collector's own reading after any start, so the session stops awaiting its read.
+    /// A SUCCESS or PERMISSIONS row also ends the streak, and the next missing-session row may ensure at its read and be held for
+    /// a retry again; the SUCCESS of the run that started the session at its read is the exception, because that session has not
+    /// yet been read running without a start.
     /// </summary>
     public void RowWritten(string collectorName, string status)
     {
-        _awaitingRead.TryRemove(collectorName, out _);
-        if (!string.Equals(status, "SESSION_MISSING", StringComparison.Ordinal))
+        _lastRowStatus[collectorName] = status;
+        _lastRowSequence[collectorName] = Interlocked.Increment(ref _sequence);
+        if (!StatusSettles(status))
         {
-            _awaitingRetry.TryRemove(collectorName, out _);
-            _retryHoldSpent.TryRemove(collectorName, out _);
-            _readEnsureSpent.TryRemove(collectorName, out _);
-            _checkedAfterMissingRead.TryRemove(collectorName, out _);
+            return;
         }
+
+        _awaitingRead.TryRemove(collectorName, out _);
+        if (string.Equals(status, "SESSION_MISSING", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (_rowFromReadStart.TryRemove(collectorName, out _) && string.Equals(status, "SUCCESS", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _awaitingRetry.TryRemove(collectorName, out _);
+        _retryHoldSpent.TryRemove(collectorName, out _);
+        _readEnsureSpent.TryRemove(collectorName, out _);
+        _checkedAfterMissingRead.TryRemove(collectorName, out _);
+        _startedAtRead.TryRemove(collectorName, out _);
+        _stoppedAfterStart.TryRemove(collectorName, out _);
     }
 
     /// <summary>
-    /// Whether this collector's run may ensure the sessions at its read: once per run of SESSION_MISSING rows, so a session that
-    /// stays unreadable is ensured by the hourly pass and not on every run.
+    /// Whether this collector's run may ensure the sessions at its read. Not when an ensure has run since the collector's previous
+    /// row: that ensure looked at every session, so one sweep ensures once whichever collector asks first. Not when the session
+    /// was started at a read <see cref="MaxReadStartsPerWindow"/> times within <see cref="ReadStartWindow"/>. And once per streak of
+    /// SESSION_MISSING rows, which the SUCCESS of a read-time start does not end: a session that is stopped again by the next run
+    /// is left stopped, its row is SESSION_MISSING and Capture Down fires. A session that stays unreadable is ensured by the
+    /// hourly pass and not on every run.
     /// </summary>
-    public bool TryBeginReadEnsure(string collectorName) => _readEnsureSpent.TryAdd(collectorName, true);
+    public bool TryBeginReadEnsure(string collectorName, DateTime utcNow)
+    {
+        var lastRow = _lastRowSequence.TryGetValue(collectorName, out var sequence) ? sequence : 0;
+        if (Interlocked.Read(ref _lastEnsureSequence) > lastRow)
+        {
+            return false;
+        }
+
+        if (_readStarts.TryGetValue(collectorName, out var starts) && starts.Count(start => utcNow - start < ReadStartWindow) >= MaxReadStartsPerWindow)
+        {
+            _stoppedAfterStart[collectorName] = true;
+            return false;
+        }
+
+        if (!_readEnsureSpent.TryAdd(collectorName, true))
+        {
+            if (_startedAtRead.ContainsKey(collectorName))
+            {
+                _stoppedAfterStart[collectorName] = true;
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>The run's ensure at its read started the stopped session and the second read succeeded: counted, and the row it writes keeps the streak.</summary>
+    public void NoteStartedAtRead(string collectorName, DateTime utcNow)
+    {
+        _rowFromReadStart[collectorName] = true;
+        _startedAtRead[collectorName] = true;
+        var earlier = _readStarts.TryGetValue(collectorName, out var starts) ? starts : Array.Empty<DateTime>();
+        _readStarts[collectorName] = earlier.Where(start => utcNow - start < ReadStartWindow).Append(utcNow).ToArray();
+    }
+
+    /// <summary>The collectors whose session a read started and that found it stopped again: the detail says the service started it and it stopped.</summary>
+    public IReadOnlyCollection<string> StoppedAfterStart() => _stoppedAfterStart.Keys.ToArray();
+
+    /// <summary>The newest run status written for each of the given collectors in this process.</summary>
+    public IReadOnlyDictionary<string, string> LastRowStatuses(IEnumerable<string> collectorNames)
+    {
+        var statuses = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var collectorName in collectorNames)
+        {
+            if (_lastRowStatus.TryGetValue(collectorName, out var status))
+            {
+                statuses[collectorName] = status;
+            }
+        }
+
+        return statuses;
+    }
 
     /// <summary>An ensure in the collector's own run completed and found nothing to start, and the read still found the session stopped.</summary>
     public void NoteCheckedAfterMissingRead(string collectorName) => _checkedAfterMissingRead[collectorName] = true;
@@ -154,7 +262,11 @@ internal sealed class CaptureSessionRestarts
     }
 
     /// <summary>An ensure has run, so no collector waits for a retry any more: what it found is on the outcome and in the marks.</summary>
-    public void EnsureRan() => _awaitingRetry.Clear();
+    public void EnsureRan()
+    {
+        _awaitingRetry.Clear();
+        Interlocked.Exchange(ref _lastEnsureSequence, Interlocked.Increment(ref _sequence));
+    }
 
     /// <summary>The collectors still awaiting their read at <paramref name="utcNow"/>: marked no longer ago than their bound.</summary>
     public IReadOnlyCollection<string> AwaitingRead(DateTime utcNow, Func<string, TimeSpan> boundOf) =>
