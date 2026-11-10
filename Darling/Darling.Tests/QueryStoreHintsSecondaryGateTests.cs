@@ -486,6 +486,54 @@ public sealed class QueryStoreHintsSecondaryGateLiveTests
     }
 
     [Fact]
+    public async Task AForwarder_WhoseCaptureHasAgedOutOfRetention_StaysStoodDown_OnItsOwnRunThatStoredNoRow_AndRunsAgainOnceThatRunIsAnHourOld()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* #8541: the daily purge removes a query_store_health capture past its retention whether or not its collector runs, so
+               the capture that called these servers secondaries is gone, and the role still reads PRIMARY. The collector's own
+               newest run is what is left: one that stored no row found no database to capture, and the gate stays closed for an
+               hour on it. A run that old lets one run through, and a run that stored marker rows is a server with databases to
+               read. With no capture the store holds nothing that says secondary, so the reads do not say it. */
+            const int agedOutId = 854_131;
+            const string agedOut = "qs-forwarder-no-capture";
+            const int probeId = 854_132;
+            const string probe = "qs-forwarder-no-capture-probe-due";
+            const int capturingId = 854_133;
+            const string capturing = "qs-primary-no-capture";
+            foreach (var (id, name) in new[] { (agedOutId, agedOut), (probeId, probe), (capturingId, capturing) })
+            {
+                await RegisterAsync(connection, id, name, ct);
+                await RoleAsync(connection, id, name, "PRIMARY", TimeSpan.FromMinutes(5), ct);
+                await DisableAsync(connection, id, QueryStoreHealthCollector.Instance.Name, ct);
+            }
+
+            await HintsRunAsync(connection, agedOutId, agedOut, 0, TimeSpan.FromMinutes(2), ct);
+            await HintsRunAsync(connection, probeId, probe, 0, TimeSpan.FromHours(2), ct);
+            await HintsRunAsync(connection, capturingId, capturing, 3, TimeSpan.FromMinutes(2), ct);
+
+            var worker = DailyRunKit.MakeWorker(new DailyRunLogger());
+            worker.StoreForTests = postgres;
+            worker.ScheduleOverridesForTest = new[]
+            {
+                new ScheduleOverride(agedOutId, QueryStoreHealthCollector.Instance.Name, null, null, false),
+                new ScheduleOverride(probeId, QueryStoreHealthCollector.Instance.Name, null, null, false),
+                new ScheduleOverride(capturingId, QueryStoreHealthCollector.Instance.Name, null, null, false),
+            };
+
+            var agedOutServer = DailyRunKit.MakeServer(agedOutId, Hints);
+            Assert.True(await worker.IsQueryStoreReadableSecondaryAsync(agedOutServer, agedOutServer.Runtime!, ct));
+            Assert.Null(await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, agedOutId, agedOut, ct));
+
+            var probeServer = DailyRunKit.MakeServer(probeId, Hints);
+            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(probeServer, probeServer.Runtime!, ct));
+
+            var capturingServer = DailyRunKit.MakeServer(capturingId, Hints);
+            Assert.False(await worker.IsQueryStoreReadableSecondaryAsync(capturingServer, capturingServer.Runtime!, ct));
+        });
+    }
+
+    [Fact]
     public async Task AReadOnlyQueryStore_WhoseReasonIsTheSecondaryReplica_IsNamedAsThat_AndIsNotToldToRaiseTheStorageCap()
     {
         await RunAsync(async (connection, postgres, ct) =>
