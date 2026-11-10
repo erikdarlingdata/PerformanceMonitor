@@ -1161,22 +1161,22 @@ public partial class MainWindow : Window
         SeatText.Text = ViewerSeatIndicator.Text(state);
         SeatText.ToolTip = ViewerSeatIndicator.ToolTip(state, _dataService?.StoreIsOnThisMachine ?? true);
 
-        /* TryFindResource rather than the hard FindResource the sibling status fields use, and the reason is
-           the call site rather than doubt about the keys: all three brushes exist in all three shipped
-           themes, but ApplySeatState is called from INSIDE the catch that handles an unreachable store. A
-           ResourceReferenceKeyNotFoundException thrown from a catch block is unhandled, so a missing key in
-           some future theme would turn "the service is down" into "the viewer crashed" - the one moment the
-           viewer most needs to stay up and explain itself. Falling back to the muted foreground costs a
-           colour and nothing else. */
-        SeatText.Foreground =
-            (state switch
-            {
-                ViewerSeatState.Unreachable => TryFindResource("ErrorBrush"),
-                ViewerSeatState.ReadOnly => TryFindResource("WarningBrush"),
-                _ => TryFindResource("ForegroundMutedBrush"),
-            } as System.Windows.Media.Brush)
-            ?? TryFindResource("ForegroundMutedBrush") as System.Windows.Media.Brush
-            ?? SeatText.Foreground;
+        /* A resource reference, so the colour follows a theme changed at run time (#8540): a brush looked up once keeps the
+           theme it was read under, and the Dark theme's warning colour is unreadable on the Light and Cool Breeze bars. The key is
+           checked with TryFindResource first and falls back to the muted foreground. All three keys exist in all three
+           shipped themes, but ApplySeatState is called from INSIDE the catch that handles an unreachable store, and a
+           ResourceReferenceKeyNotFoundException thrown from a catch block is unhandled, so a missing key in some future
+           theme would turn "the service is down" into "the viewer crashed" - the one moment the viewer most needs to stay
+           up and explain itself. Falling back costs a colour and nothing else. */
+        var key = state switch
+        {
+            ViewerSeatState.Unreachable => "ErrorBrush",
+            ViewerSeatState.ReadOnly => "WarningBrush",
+            _ => "ForegroundMutedBrush",
+        };
+        SeatText.SetResourceReference(
+            System.Windows.Controls.TextBlock.ForegroundProperty,
+            TryFindResource(key) is System.Windows.Media.Brush ? key : "ForegroundMutedBrush");
     }
 
     private async Task LoadServersAsync(bool preserveSelection = false)
