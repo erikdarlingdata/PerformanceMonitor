@@ -98,6 +98,7 @@ public sealed class ViewerWebAccessGroupsLiveTests
         var settings = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath };
         await using var owner = NpgsqlDataSource.Create(settings.ConnectionString);
         var rolesCreated = false;
+        var bodySucceeded = false;
         try
         {
             rolesCreated = true;
@@ -158,13 +159,17 @@ public sealed class ViewerWebAccessGroupsLiveTests
             await admin.DeleteWebAccessGroupAsync(group,ct);
             Assert.Null(await admin.GetWebAccessGroupAsync(group.GroupId,ct));
             Assert.Single(await admin.GetWebAccessGroupsAsync(ct));
+            bodySucceeded = true;
         }
         finally
         {
             if (rolesCreated)
             {
-                NpgsqlConnection.ClearAllPools();
-                await Exec(LiveCleanupBatch.DropOwnedByExistingProductRolesSql + " DROP ROLE IF EXISTS admin,viewer,web,mcp", CancellationToken.None);
+                await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
+                {
+                    NpgsqlConnection.ClearAllPools();
+                    await Exec(LiveCleanupBatch.DropOwnedByExistingProductRolesSql + " DROP ROLE IF EXISTS admin,viewer,web,mcp", CancellationToken.None);
+                });
             }
         }
         ViewerDataService Seat(string role,string password) => new(new NpgsqlConnectionStringBuilder(settings.ConnectionString) { Username=role, Password=password }.ConnectionString);

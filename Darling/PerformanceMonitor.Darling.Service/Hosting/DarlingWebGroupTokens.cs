@@ -158,7 +158,9 @@ internal sealed class DarlingWebGroupTokens : IDisposable
         var current = await _metadata.ReadEnabledGroupAsync(groupId, ct);
         if (current is not { } enabled)
             return null;
-        if (!Available) throw new InvalidOperationException("Managed access is temporarily unavailable.");
+        // No snapshot yet, an unhealthy sealing key or a changed key id: the cookie is not honoured, and the holder lands on the sign-in
+        // form, which refuses a managed token while the snapshot is unavailable. Only a store failure during the lookup answers 503.
+        if (!Available) return null;
         var group = enabled.Group;
         if (!group.Enabled || group.ActivationState != "active" || SessionGeneration(group.TokenGeneration, enabled.Epoch) != generation)
             return null;

@@ -32,7 +32,8 @@ using Xunit;
 
 namespace Darling.Tests;
 
-// #1776 own-store: an isolated database and a uniquely named metadata-only role.
+/* #1776 own-store: an isolated database and a uniquely named metadata-only role. */
+[Collection("pg-cluster-roles")] // the role is cluster-wide and the cleanup clears every pool
 public sealed class ManagedWebGroupLiveTests
 {
     private const string Shared="shared-managed-test-token-0123456789";
@@ -52,6 +53,7 @@ public sealed class ManagedWebGroupLiveTests
         var role="group_metadata_"+Guid.NewGuid().ToString("N")[..12];
         var password=DarlingManagedPostgres.GeneratePassword();
         await Exec("CREATE ROLE "+role+" LOGIN NOSUPERUSER PASSWORD '"+ScramSha256Verifier.Create(password)+"'");
+        var bodySucceeded=false;
         try
         {
             const string columns="group_id,name,scope_kind,enabled,token_generation,revision,activation_state,refusal_code,created_at,updated_at";
@@ -171,8 +173,15 @@ public sealed class ManagedWebGroupLiveTests
             Assert.Equal(200,(await Read("/api/read/get_cpu_utilization?server=uat-server",cookie)).Status);
             Assert.Equal(403,(await Read("/api/read/get_cpu_utilization?server=operations-server",cookie)).Status);
             Assert.Equal(403,(await Read("/api/admin/servers",cookie)).Status);
-            var urlToken=await Read("/?token="+token,null);
-            Assert.DoesNotContain("\"can_edit\"",urlToken.Body,StringComparison.Ordinal);
+            // A token riding the URL is never exchanged for a session: the answer sets no cookie.
+            var urlToken=await server.SendAsync(context=>
+            {
+                context.Request.Path="/";
+                context.Request.QueryString=new QueryString("?token="+Uri.EscapeDataString(token));
+                context.Request.Headers.Host=Host;
+                context.Connection.RemoteIpAddress=IPAddress.Parse("10.2.3.4");
+            });
+            Assert.Equal(0,urlToken.Response.Headers.SetCookie.Count);
             var crossOrigin=await DarlingWebHostGateLiveTests.PostSignIn(server,Host,IPAddress.Parse("10.2.3.200"),token,
                 configure:context=>context.Request.Headers.Origin="https://outside.invalid");
             Assert.Equal(403,crossOrigin.Response.StatusCode);
@@ -285,11 +294,15 @@ public sealed class ManagedWebGroupLiveTests
                 await store.CreateAsync(group,name,WebAccessGroupScope.AllServers,Array.Empty<int>(),gen,Seal(group,gen,value),true,"admin",ct);
                 return group;
             }
+            bodySucceeded=true;
         }
         finally
         {
-            NpgsqlConnection.ClearAllPools();
-            await Exec("DROP OWNED BY "+role+"; DROP ROLE "+role);
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded,async ()=>
+            {
+                NpgsqlConnection.ClearAllPools();
+                await Exec("DROP OWNED BY "+role+"; DROP ROLE "+role);
+            });
         }
 
         async Task Exec(string sql)

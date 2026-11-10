@@ -33,6 +33,7 @@ public sealed class WebAccessGroupStoreLiveTests
         await using (var check = owner.CreateCommand("SELECT count(*) FROM pg_roles WHERE rolname IN ('admin','viewer','web','mcp')"))
             Assert.Equal(0L, await check.ExecuteScalarAsync(ct));
         var rolesCreated = false;
+        var bodySucceeded = false;
         try
         {
             await using (var migration = await owner.OpenConnectionAsync(ct))
@@ -191,14 +192,18 @@ public sealed class WebAccessGroupStoreLiveTests
             await Exec(owner, WebAccessGroupSchema.CreateSql, ct);
             await Denied(() => new WebAccessGroupStore(viewer).CreateAsync(Guid.NewGuid(), "No", WebAccessGroupScope.AllServers,
                 Array.Empty<int>(), Guid.NewGuid(), newSeal, true, "viewer", ct));
+            bodySucceeded = true;
         }
         finally
         {
             if (rolesCreated)
             {
-                NpgsqlConnection.ClearAllPools();
-                await Exec(owner, LiveCleanupBatch.DropOwnedByExistingProductRolesSql
-                    + " DROP ROLE IF EXISTS admin,viewer,web,mcp", CancellationToken.None);
+                await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
+                {
+                    NpgsqlConnection.ClearAllPools();
+                    await Exec(owner, LiveCleanupBatch.DropOwnedByExistingProductRolesSql
+                        + " DROP ROLE IF EXISTS admin,viewer,web,mcp", CancellationToken.None);
+                });
             }
         }
 
@@ -217,6 +222,7 @@ public sealed class WebAccessGroupStoreLiveTests
         await using var owner = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString);
         var role = "web_group_defaults_" + Guid.NewGuid().ToString("N")[..12];
         await Exec(owner, "CREATE ROLE " + role + " NOLOGIN", ct);
+        var roleBodySucceeded = false;
         try
         {
             // ScratchPostgres normally clones a fully migrated template. Rewind this rung first:
@@ -253,10 +259,11 @@ public sealed class WebAccessGroupStoreLiveTests
             Assert.False(reader.GetBoolean(3));
             Assert.True(reader.GetBoolean(4)); // Custom grants on existing tables are preserved.
             Assert.False(reader.GetBoolean(5));
+            roleBodySucceeded = true;
         }
         finally
         {
-            await Exec(owner, "DROP OWNED BY " + role + "; DROP ROLE " + role, CancellationToken.None);
+            await LiveStoreCleanup.RunOwnedAsync(roleBodySucceeded, () => Exec(owner, "DROP OWNED BY " + role + "; DROP ROLE " + role, CancellationToken.None));
         }
     }
 

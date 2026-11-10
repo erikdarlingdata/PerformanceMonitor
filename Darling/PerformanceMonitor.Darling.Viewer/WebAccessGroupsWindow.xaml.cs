@@ -93,12 +93,12 @@ public partial class WebAccessGroupsWindow : Window
         UpdateScopeNote();
     }
 
-    private static string StateText(WebAccessGroup group) => !group.Enabled ? "Disabled — web access is refused."
+    private static string StateText(WebAccessGroup group) => !group.Enabled ? "Disabled. Web access is refused."
         : group.ActivationState switch
         {
-            "active" => "Active — read-only team access.",
-            "pending" => "Pending — waiting for the service to accept the token.",
-            _ => "Refused — " + (group.RefusalCode switch
+            "active" => "Active: read-only team access.",
+            "pending" => "Pending: waiting for the service to accept the token.",
+            _ => "Refused: " + (group.RefusalCode switch
             {
                 "duplicate_name" => "The name conflicts with a configured web token. Delete this group and create one with a different name.",
                 "duplicate_token" => "The token conflicts with another credential. Rotate it.",
@@ -130,7 +130,6 @@ public partial class WebAccessGroupsWindow : Window
             if (!_lifetime.IsCancellationRequested)
             {
                 StatusText.Text = ex.Message;
-                MessageBox.Show(this, ex.Message, "Web access group", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
         }
         catch (Exception) { if (!_lifetime.IsCancellationRequested) StatusText.Text = "The operation could not be completed. Refresh the group list before retrying."; }
@@ -142,13 +141,9 @@ public partial class WebAccessGroupsWindow : Window
         var result = await ViewerPasswordKey.GetSealKeyAsync(_data, this, _lifetime.Token);
         _lifetime.Token.ThrowIfCancellationRequested();
         if (result.Notice is { } notice)
-            MessageBox.Show(this, notice, "Web token", MessageBoxButton.OK, MessageBoxImage.Information);
+            StatusText.Text = notice;
         if (result.Sealer is null)
-        {
             StatusText.Text = result.Refusal ?? ViewerPasswordKey.NoKeyText;
-            MessageBox.Show(this, StatusText.Text, "Web token could not be created",
-                MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
         return result.Sealer;
     }
 
@@ -157,6 +152,14 @@ public partial class WebAccessGroupsWindow : Window
         // No plaintext is shown for a pending/refused/stale generation. A timeout leaves the stored
         // group intact; rotate it to obtain a new one-time credential if activation happens later.
         StatusText.Text = "Waiting for the service to accept the new token...";
+        if (await _data.GetServiceConfigAsync(_lifetime.Token) is { WebEnabled: false })
+        {
+            // A service with its dashboard off never polls the group, so the wait would only end in the timeout text below.
+            _selected = await _data.GetWebAccessGroupAsync(token.GroupId, _lifetime.Token);
+            await RefreshAsync();
+            StatusText.Text = "The web dashboard is off, so the service cannot accept the token. Enable the dashboard in Settings, then rotate the token to receive a new one.";
+            return;
+        }
         for (var attempt = 0; attempt < 30; attempt++)
         {
             var group = await _data.GetWebAccessGroupAsync(token.GroupId, _lifetime.Token);

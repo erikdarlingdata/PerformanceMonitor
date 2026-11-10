@@ -194,10 +194,17 @@ END $fn$;
 
 -- A tag deletion must remove grants even when issued by the tag editor's narrower role.
 -- The trigger runs as owner, so callers never need DML on the protected grant tables.
+-- A tag no group grants is the common case: no lock is taken, no journal row is written and the
+-- service's configuration version is left alone. A grant inserted after the check holds FOR KEY SHARE
+-- on the tag row, so the row delete behind this trigger fails on the foreign key rather than leaving
+-- a grant behind, and the next attempt sees it.
 CREATE OR REPLACE FUNCTION config.web_access_tag_deleted() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
-DECLARE g uuid; prior jsonb;
+DECLARE g uuid; prior jsonb; touched boolean := false;
 BEGIN
+    IF NOT EXISTS (SELECT 1 FROM config.web_access_group_tags WHERE tag_id=OLD.id) THEN
+        RETURN OLD;
+    END IF;
     PERFORM pg_catalog.pg_advisory_xact_lock(7988,1);
     FOR g IN SELECT group_id FROM config.web_access_group_tags WHERE tag_id=OLD.id ORDER BY group_id LOOP
         prior := config.web_access_snapshot(g);
@@ -205,8 +212,11 @@ BEGIN
         UPDATE config.web_access_groups SET revision=revision+1,updated_at=now() AT TIME ZONE 'UTC' WHERE group_id=g;
         INSERT INTO config.web_access_group_events(group_id,event,actor,before_state,after_state)
             VALUES(g,'tag_deleted','server tag deletion',prior,config.web_access_snapshot(g));
+        touched := true;
     END LOOP;
-    UPDATE config.config_service SET config_version=config_version+1 WHERE id=1;
+    IF touched THEN
+        UPDATE config.config_service SET config_version=config_version+1 WHERE id=1;
+    END IF;
     RETURN OLD;
 END $fn$;
 DROP TRIGGER IF EXISTS web_access_tag_deleted ON config.server_tags;

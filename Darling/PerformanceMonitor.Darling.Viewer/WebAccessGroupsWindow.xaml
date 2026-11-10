@@ -1,7 +1,7 @@
 <Window x:Class="PerformanceMonitor.Darling.Viewer.WebAccessGroupsWindow"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
- Title="Web access groups" Width="880" Height="690" MinWidth="720" MinHeight="550"
+ Title="Web Access Groups" Width="880" Height="690" MinWidth="720" MinHeight="550"
  WindowStartupLocation="CenterOwner" ShowInTaskbar="False" Background="{DynamicResource BackgroundDarkBrush}">
  <Grid Margin="16">
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
