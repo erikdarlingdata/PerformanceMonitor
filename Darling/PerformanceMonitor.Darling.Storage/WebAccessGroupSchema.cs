@@ -58,15 +58,18 @@ BEGIN
     END IF;
     RETURN NULL;
 END $fn$;
-DO $ddl$
-DECLARE t text;
-BEGIN
-    FOREACH t IN ARRAY ARRAY['web_access_groups','web_access_group_tags','web_access_group_events'] LOOP
-        EXECUTE pg_catalog.format('DROP TRIGGER IF EXISTS web_access_owner_guard ON config.%I',t);
-        EXECUTE pg_catalog.format('CREATE TRIGGER web_access_owner_guard BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON config.%I FOR EACH STATEMENT EXECUTE FUNCTION config.web_access_owner_guard()',t);
-        EXECUTE pg_catalog.format('ALTER TABLE config.%I ENABLE ALWAYS TRIGGER web_access_owner_guard',t);
-    END LOOP;
-END $ddl$;
+DROP TRIGGER IF EXISTS web_access_owner_guard ON config.web_access_groups;
+CREATE TRIGGER web_access_owner_guard BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON config.web_access_groups
+    FOR EACH STATEMENT EXECUTE FUNCTION config.web_access_owner_guard();
+ALTER TABLE config.web_access_groups ENABLE ALWAYS TRIGGER web_access_owner_guard;
+DROP TRIGGER IF EXISTS web_access_owner_guard ON config.web_access_group_tags;
+CREATE TRIGGER web_access_owner_guard BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON config.web_access_group_tags
+    FOR EACH STATEMENT EXECUTE FUNCTION config.web_access_owner_guard();
+ALTER TABLE config.web_access_group_tags ENABLE ALWAYS TRIGGER web_access_owner_guard;
+DROP TRIGGER IF EXISTS web_access_owner_guard ON config.web_access_group_events;
+CREATE TRIGGER web_access_owner_guard BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON config.web_access_group_events
+    FOR EACH STATEMENT EXECUTE FUNCTION config.web_access_owner_guard();
+ALTER TABLE config.web_access_group_events ENABLE ALWAYS TRIGGER web_access_owner_guard;
 
 -- Safe snapshots used only by owner functions to journal metadata, never the credential.
 CREATE OR REPLACE FUNCTION config.web_access_snapshot(p_id uuid) RETURNS jsonb

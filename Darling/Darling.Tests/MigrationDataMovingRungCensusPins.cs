@@ -445,6 +445,15 @@ public sealed class MigrationDataMovingRungCensusPins
             + "because a compressed chunk's B-tree holds only its uncompressed rows and the cost is the day or two of rows not yet compressed. "
             + "Not CONCURRENTLY (TimescaleDB refuses it on a hypertable), inside the ladder's transaction like V150. Does not move the "
             + "MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            258,
+            SetsTheFloor: false,
+            "#7988: the Viewer-managed web access groups. The three UPDATE statements the scan sees are all on the control-plane singleton "
+            + "config.config_service (id = 1, created V17), V62's and V137's shape, and each sits inside a function body (manage_web_access_group, "
+            + "activate_web_access_group and the web_access_tag_deleted trigger) that runs only when an administrator changes a group later; the "
+            + "rung itself executes none of them, so it reads and rewrites no row at migration time. What it does run is catalog work: three empty "
+            + "tables, their owner-guard triggers and functions, one trigger on config.server_tags, and the hardening function's grant and revoke "
+            + "statements, all under the lock_timeout the rung opens with. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
     ];
 
     /// <summary>
@@ -742,13 +751,20 @@ public sealed class MigrationDataMovingRungCensusPins
     /// that follows on the same start materializes it), everywhere else the plain fallback view, and the hypertable read goes
     /// through <c>EXECUTE</c> because <c>timescaledb_information</c> parses only where the extension exists. Both shapes are catalog-only: no
     /// row is read or rewritten, so there is no data-moving cost to declare, only the scan blind spot to name.</para>
+    ///
+    /// <para>V258 and V259 (#7988) define the web access groups' and the advanced web access switch's hardening functions, whose bodies revoke
+    /// from and grant to roles named at call time (PUBLIC, the four product logins and any grantee the catalog shows on the rung's own objects)
+    /// through <c>EXECUTE format()</c>, and each rung calls its function once. Both are catalog-only: grants on the tables and functions the
+    /// rung itself created, no row read or rewritten. V258's own data-moving cost, the control-plane version bumps inside its function bodies,
+    /// is declared in <see cref="s_declared"/> because the scan sees those statements literally.</para>
     /// </summary>
-    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204, 246, 255];
+    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204, 246, 255, 258, 259];
 
     /// <summary>
     /// The scan is textual, so dynamic SQL would hide a data-moving statement from it completely. The
-    /// ladder has four exempted rungs today (V152, V204, V246 and V255, named in <see cref="s_dynamicSqlExemptedRungs"/> because
-    /// each <c>DO $$ ... EXECUTE</c> drops a catalog index or constraint, or creates an empty aggregate or a view, rather than moving data) and
+    /// ladder has six exempted rungs today (V152, V204, V246, V255, V258 and V259, named in <see cref="s_dynamicSqlExemptedRungs"/> because
+    /// each <c>DO $$ ... EXECUTE</c> or <c>EXECUTE format()</c> drops a catalog index or constraint, creates an empty aggregate or a view, or grants
+    /// and revokes on the rung's own objects, rather than moving data) and
     /// otherwise none — the only other <c>EXECUTE</c> is <c>EXECUTE FUNCTION</c> in V17's trigger
     /// definitions. Pinned so the blind spot stays theoretical for every other rung: one that builds DDL
     /// with <c>format()</c> needs to be costed by hand, added either to this exemption list (if it moves

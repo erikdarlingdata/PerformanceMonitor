@@ -122,7 +122,7 @@ public sealed class ManagedWebGroupLiveTests
             var server=app.GetTestServer();
             var attempt=10;
             async Task<HttpContext> Login(string value) =>
-                await DarlingWebHostGateLiveTests.PostSignIn(server,Host,IPAddress.Parse("10.2.3."+(attempt++)),value);
+                await DarlingWebHostGateLiveTests.PostSignIn(server,Host,IPAddress.Parse("10.0.0."+(attempt++)),value);
             async Task<string> Cookie(string value)
             {
                 var response=await Login(value);
@@ -140,7 +140,7 @@ public sealed class ManagedWebGroupLiveTests
                     context.Request.Path=query<0?path:path[..query];
                     context.Request.QueryString=query<0?QueryString.Empty:new QueryString(path[query..]);
                     context.Request.Headers.Host=Host;
-                    context.Connection.RemoteIpAddress=IPAddress.Parse("10.2.3.4");
+                    context.Connection.RemoteIpAddress=IPAddress.Parse("10.0.0.4");
                     if(cookie is not null) context.Request.Headers.Cookie=cookie;
                 });
                 return(response.Response.StatusCode,await new StreamReader(response.Response.Body).ReadToEndAsync(ct));
@@ -179,10 +179,10 @@ public sealed class ManagedWebGroupLiveTests
                 context.Request.Path="/";
                 context.Request.QueryString=new QueryString("?token="+Uri.EscapeDataString(token));
                 context.Request.Headers.Host=Host;
-                context.Connection.RemoteIpAddress=IPAddress.Parse("10.2.3.4");
+                context.Connection.RemoteIpAddress=IPAddress.Parse("10.0.0.4");
             });
             Assert.Equal(0,urlToken.Response.Headers.SetCookie.Count);
-            var crossOrigin=await DarlingWebHostGateLiveTests.PostSignIn(server,Host,IPAddress.Parse("10.2.3.200"),token,
+            var crossOrigin=await DarlingWebHostGateLiveTests.PostSignIn(server,Host,IPAddress.Parse("10.0.0.200"),token,
                 configure:context=>context.Request.Headers.Origin="https://outside.invalid");
             Assert.Equal(403,crossOrigin.Response.StatusCode);
 
@@ -200,7 +200,7 @@ public sealed class ManagedWebGroupLiveTests
                 {
                     context.Request.Method="POST"; context.Request.Path="/api/compose/run";
                     context.Request.Headers.Host=Host;context.Request.Headers.Cookie=cookie;
-                    context.Connection.RemoteIpAddress=IPAddress.Parse("10.2.3.4");
+                    context.Connection.RemoteIpAddress=IPAddress.Parse("10.0.0.4");
                     context.Request.ContentType="application/json";context.Request.ContentLength=body.Length;context.Request.Body=body;
                 });
                 Assert.Equal(200,response.Response.StatusCode);
