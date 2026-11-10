@@ -88,9 +88,14 @@
     <SolidColorBrush x:Key="BorderLightBrush" Color="{StaticResource BorderLightColor}"/>
     <!-- #7218: the Availability Groups cards draw their outline from this key. Same definition as the Darling Viewer light theme. -->
     <SolidColorBrush x:Key="CardBorderBrush" Color="{StaticResource BorderLightColor}"/>
-    <!-- #8221: the outline of a button, a text box, a combo box, a check box and a radio button, and the track a bar sits on. 3:1 or better against the page and the card
+    <!-- #8221: the outline of a button, a text box and a combo box, and the track a bar sits on. 3:1 or better against the page and the card
          on the two light themes, where the pale BorderBrush (a grid line) left them looking like no control at all. -->
     <SolidColorBrush x:Key="ControlBorderBrush" Color="#7C8794"/>
+    <!-- #8540: the outline of a check box and a radio button. The colour of ControlBorderBrush on this theme, so a box is outlined like the text box beside it. -->
+    <SolidColorBrush x:Key="BoxBorderBrush" Color="#7C8794"/>
+    <!-- #8540: the outline of a disabled check box and radio button. 3:1 against the page and the card, so an unchecked box that cannot be changed
+         still shows as a box, and weaker than the outline of an enabled one. -->
+    <SolidColorBrush x:Key="DisabledBoxBorderBrush" Color="#858F9C"/>
     <SolidColorBrush x:Key="BarTrackBrush" Color="#DDE2E8"/>
 
     <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}"/>
@@ -1632,13 +1637,13 @@
     <!-- ============================================ -->
     <!-- CheckBox Style                               -->
     <!-- ============================================ -->
-    <!-- #8540: the box is outlined like a text box (ControlBorderBrush), so an unchecked box shows against the page and the card. -->
-    <!-- A disabled box takes the pale BorderBrush and a muted mark, so it never reads stronger than an enabled one. The mark and the hover outline take InfoTextBrush:
+    <!-- #8540: the box takes BoxBorderBrush, the colour of a text box's outline on this theme, so an unchecked box shows against the page and the card. -->
+    <!-- A disabled box takes DisabledBoxBorderBrush and a muted mark: weaker than an enabled one, and still 3:1 against the page and the card. The mark and the hover outline take InfoTextBrush:
          the accent is 2.5:1 on the checked fill and weaker than the resting outline. -->
     <Style TargetType="CheckBox">
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource BoxBorderBrush}"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="CheckBox">
@@ -1646,7 +1651,7 @@
                         <BulletDecorator.Bullet>
                             <Border x:Name="Border" Width="16" Height="16"
                                     Background="{StaticResource BackgroundDarkBrush}"
-                                    BorderBrush="{StaticResource ControlBorderBrush}"
+                                    BorderBrush="{StaticResource BoxBorderBrush}"
                                     BorderThickness="1" CornerRadius="2">
                                 <Path x:Name="CheckMark" Width="10" Height="10" Stretch="Fill"
                                       Stroke="{StaticResource InfoTextBrush}" StrokeThickness="2"
@@ -1669,7 +1674,7 @@
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="Border" Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
-                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+                            <Setter TargetName="Border" Property="BorderBrush" Value="{StaticResource DisabledBoxBorderBrush}"/>
                             <Setter TargetName="CheckMark" Property="Stroke" Value="{StaticResource ForegroundMutedBrush}"/>
                             <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
                         </Trigger>
@@ -1686,7 +1691,7 @@
     <Style TargetType="RadioButton">
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
-        <Setter Property="BorderBrush" Value="{StaticResource ControlBorderBrush}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource BoxBorderBrush}"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="RadioButton">
@@ -1695,7 +1700,7 @@
                             <Grid Width="16" Height="16">
                                 <Ellipse x:Name="Border"
                                          Fill="{StaticResource BackgroundDarkBrush}"
-                                         Stroke="{StaticResource ControlBorderBrush}"
+                                         Stroke="{StaticResource BoxBorderBrush}"
                                          StrokeThickness="1"/>
                                 <Ellipse x:Name="CheckMark" Width="8" Height="8"
                                          Fill="{StaticResource InfoTextBrush}" Visibility="Collapsed"
@@ -1717,7 +1722,7 @@
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="Border" Property="Fill" Value="{StaticResource BackgroundDarkBrush}"/>
-                            <Setter TargetName="Border" Property="Stroke" Value="{StaticResource BorderBrush}"/>
+                            <Setter TargetName="Border" Property="Stroke" Value="{StaticResource DisabledBoxBorderBrush}"/>
                             <Setter TargetName="CheckMark" Property="Fill" Value="{StaticResource ForegroundMutedBrush}"/>
                             <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>
                         </Trigger>
@@ -1840,6 +1845,11 @@
     <!-- Plan Viewer Resources                        -->
     <!-- ============================================ -->
     <SolidColorBrush x:Key="PlanTooltipBgBrush" Color="#FFFFFF"/>
+    <!-- #8540: the text colour of a plan warning by severity, in an operator's tooltip and in the Properties panel's warning headers.
+         4.5:1 or better on PlanTooltipBgBrush and on BackgroundLighterBrush, which a Properties section fills its body with. -->
+    <SolidColorBrush x:Key="PlanWarningCriticalTextBrush" Color="#C62828"/>
+    <SolidColorBrush x:Key="PlanWarningTextBrush" Color="#92400E"/>
+    <SolidColorBrush x:Key="PlanWarningInfoTextBrush" Color="#0369A1"/>
     <SolidColorBrush x:Key="PlanTooltipBorderBrush" Color="{StaticResource BorderColor}"/>
     <SolidColorBrush x:Key="PlanPanelTextBrush" Color="{StaticResource ForegroundColor}"/>
     <SolidColorBrush x:Key="PlanPanelMutedBrush" Color="{StaticResource ForegroundMutedColor}"/>

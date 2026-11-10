@@ -1147,7 +1147,7 @@ public partial class MainWindow : Window
     ///
     /// <para>The colours are the existing status-bar vocabulary, not a new one:
     /// <c>ErrorBrush</c> for a store that cannot be reached (the same severity <c>CollectorHealthText</c>
-    /// gives an erroring collector), <c>WarningTextBrush</c> (the theme's warning colour for text) for a read-only seat — visible, because a tester
+    /// gives an erroring collector), <c>WarningBrush</c> for a read-only seat — visible, because a tester
     /// who does not notice it is back to discovering the seat one refusal at a time, but not alarming,
     /// because on a remote seat it is the correct and expected default — and the muted foreground for
     /// read-write and for not-yet-probed, which are the unremarkable states.</para>
@@ -1162,7 +1162,7 @@ public partial class MainWindow : Window
         SeatText.ToolTip = ViewerSeatIndicator.ToolTip(state, _dataService?.StoreIsOnThisMachine ?? true);
 
         /* A resource reference, so the colour follows a theme changed at run time (#8540): a brush looked up once keeps the
-           theme it was read under, and the Dark theme's amber is unreadable on the Light and Cool Breeze bars. The key is
+           theme it was read under, and the Dark theme's warning colour is unreadable on the Light and Cool Breeze bars. The key is
            checked with TryFindResource first and falls back to the muted foreground. All three keys exist in all three
            shipped themes, but ApplySeatState is called from INSIDE the catch that handles an unreachable store, and a
            ResourceReferenceKeyNotFoundException thrown from a catch block is unhandled, so a missing key in some future
@@ -1171,7 +1171,7 @@ public partial class MainWindow : Window
         var key = state switch
         {
             ViewerSeatState.Unreachable => "ErrorBrush",
-            ViewerSeatState.ReadOnly => "WarningTextBrush",
+            ViewerSeatState.ReadOnly => "WarningBrush",
             _ => "ForegroundMutedBrush",
         };
         SeatText.SetResourceReference(

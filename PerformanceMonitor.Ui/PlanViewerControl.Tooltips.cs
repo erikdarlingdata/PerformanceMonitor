@@ -21,14 +21,16 @@ public partial class PlanViewerControl
     #region Tooltips
 
     /// <summary>
-    /// The text colour of a plan warning by its severity, from the theme: <c>ErrorBrush</c>, <c>WarningTextBrush</c> and
-    /// <c>InfoTextBrush</c>, each 4.5:1 or better on the tooltip and panel backgrounds of the three themes (#8540). The fixed colours
-    /// of <see cref="PlanWarningDisplay.WarningSeverityColorHex"/> are the fallback for a host whose theme has no such key.
+    /// The text colour of a plan warning by its severity, from the theme: <c>PlanWarningCriticalTextBrush</c>, <c>PlanWarningTextBrush</c>
+    /// and <c>PlanWarningInfoTextBrush</c>. Each of the three themes sets them to 4.5:1 or better on the two backgrounds a warning is
+    /// painted on: the tooltip's <c>PlanTooltipBgBrush</c>, and <c>BackgroundLighterBrush</c>, which a Properties section fills its body
+    /// with (#8540). The fixed colours of <see cref="PlanWarningDisplay.WarningSeverityColorHex"/> are the fallback for a host whose
+    /// theme has no such key.
     /// </summary>
     private SolidColorBrush WarningSeverityBrush(PlanWarningSeverity severity)
     {
-        var key = severity == PlanWarningSeverity.Critical ? "ErrorBrush"
-            : severity == PlanWarningSeverity.Warning ? "WarningTextBrush" : "InfoTextBrush";
+        var key = severity == PlanWarningSeverity.Critical ? "PlanWarningCriticalTextBrush"
+            : severity == PlanWarningSeverity.Warning ? "PlanWarningTextBrush" : "PlanWarningInfoTextBrush";
         return (TryFindResource(key) as SolidColorBrush)
             ?? new SolidColorBrush((Color)ColorConverter.ConvertFromString(PlanWarningDisplay.WarningSeverityColorHex(severity)));
     }
