@@ -67,7 +67,7 @@ import { renderManageQueryTags } from "./pages/manage-query-tags.js";
 import { renderQueryTagUsage } from "./pages/query-tag-usage.js";
 import { renderJobHistory } from "./pages/job-history.js";
 import { refreshAttention, clearViewGroups, onChange as onLocalChange } from "./viewer-local.js";
-import { initSidebarCollapse, initSeverityColorSettings } from "./viewer-local-ui.js";
+import { initSidebarCollapse, initNavCollapse, initSeverityColorSettings } from "./viewer-local-ui.js";
 import { initSidebarSearch, paintServerList, paintStoreServerLists } from "./sidebar.js";
 import { initNarrowNav } from "./narrow-nav.js";
 
@@ -957,6 +957,7 @@ function start() {
   initAutoRefreshToggle();
   initPageRefreshControl();
   initSidebarCollapse(document.getElementById("app"), document.getElementById("sidebar-collapse"));
+  initNavCollapse(document.getElementById("nav-collapse"), document.getElementById("nav-links"));
   initNarrowNav(document.getElementById("app"), document.getElementById("nav-toggle"), document.getElementById("sidebar"));
   initSidebarSearch(document.getElementById("server-search"), paintSidebar);
   initSeverityColorSettings(document.getElementById("viewer-settings"));

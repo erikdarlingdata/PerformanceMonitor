@@ -144,6 +144,22 @@ public sealed class ViewerLocalStateBehaviourTests
     }
 
     [Fact]
+    public void ThePageLinksFold_IsRemembered_PerBrowser_AndSurvivesBrokenStorage()
+    {
+        if (!TryRun("navCollapsed", out var r)) return;
+
+        Assert.False(r.GetProperty("initial").GetBoolean());
+        Assert.True(r.GetProperty("afterReload").GetBoolean());
+        Assert.False(r.GetProperty("railUntouched").GetBoolean());
+        Assert.True(r.GetProperty("navKeptWhenRailChanges").GetBoolean());
+        Assert.False(r.GetProperty("afterExpand").GetBoolean());
+        Assert.True(r.GetProperty("railKeptWhenNavChanges").GetBoolean());
+        Assert.False(r.GetProperty("unreadable").GetBoolean());
+        Assert.True(r.GetProperty("unwritableStillWorksInSession").GetBoolean());
+        Assert.False(r.GetProperty("handEdited").GetBoolean());
+    }
+
+    [Fact]
     public void TheBadgeCounts_ShareOneFleetWideAlertRead_AndKeepTheLastCountsWhenARefreshFails()
     {
         if (!TryRun("oneRead", out var r)) return;
