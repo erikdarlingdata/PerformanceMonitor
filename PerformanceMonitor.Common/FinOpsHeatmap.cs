@@ -22,7 +22,8 @@ namespace PerformanceMonitor.Common
     /// <summary>
     /// A long-form series pivoted into the dense matrix the heatmap renderer consumes. Row index 0 is the
     /// BOTTOM row (matching the query-heatmap renderer's <c>FlipVertically = true</c>), so callers pass row
-    /// keys bottom-to-top. Columns are the distinct sample days, ascending left-to-right.
+    /// keys bottom-to-top. Columns are days, ascending left-to-right: the distinct sample days as <see cref="FinOpsHeatmapBuilder.BuildMatrix"/>
+    /// pivots them, or every calendar day between the first and the last after <see cref="FinOpsHeatmapBuilder.WithEveryCalendarDay"/>.
     /// </summary>
     public sealed class FinOpsHeatmapMatrix
     {

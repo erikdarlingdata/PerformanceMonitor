@@ -66,7 +66,24 @@ public static class ServerTimeHelper
     /// <summary>
     /// The current display mode preference. Read from App settings at startup.
     /// </summary>
-    public static TimeDisplayMode CurrentDisplayMode { get; set; } = TimeDisplayMode.ServerTime;
+    public static TimeDisplayMode CurrentDisplayMode
+    {
+        get => _currentDisplayMode;
+        set
+        {
+            if (_currentDisplayMode == value) return;
+            _currentDisplayMode = value;
+            DisplayModeChanged?.Invoke(null, EventArgs.Empty);
+        }
+    }
+
+    private static TimeDisplayMode _currentDisplayMode = TimeDisplayMode.ServerTime;
+
+    /// <summary>
+    /// Raised after <see cref="CurrentDisplayMode"/> changes, on the thread that set it. A grid whose rows word their own times
+    /// (computed text with no change notification) listens and refreshes, so its cells follow the setting at once.
+    /// </summary>
+    public static event EventHandler? DisplayModeChanged;
 
     /// <summary>
     /// Converts a server DateTime for display based on the selected display mode.

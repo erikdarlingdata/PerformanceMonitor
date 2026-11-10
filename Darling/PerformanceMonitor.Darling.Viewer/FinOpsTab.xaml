@@ -415,7 +415,7 @@
                         <TextBlock x:Name="FinOpsClassificationExplanation" Margin="12,8,10,4" VerticalAlignment="Top"
                                    TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
-                        <ui:ChartPanel x:Name="FinOpsProvisioningTrendCard" Title="7-Day Provisioning Trend" Subtitle="The badge above covers the last 24 hours; each row is one whole day, judged on its CPU, memory grants and stolen memory" Margin="10,8,10,0">
+                        <ui:ChartPanel x:Name="FinOpsProvisioningTrendCard" Title="7-Day Provisioning Trend" Subtitle="The badge above covers the last 24 hours; each row is one calendar day of the last 7 days, judged on its CPU, memory grants and stolen memory. The first and last rows are part days" Margin="10,8,10,0">
                             <DataGrid x:Name="FinOpsProvisioningTrendGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}"
                                       CanUserSortColumns="False">
                                 <DataGrid.Columns>

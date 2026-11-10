@@ -408,6 +408,10 @@ public class ServerPropertyRow
     /// </summary>
     public ServerClock? Clock { get; set; }
 
+    /// <summary>The server's id in the store (the hash of its storage name), set by the inventory build. A re-read of the collected
+    /// overlay finds the row's metrics by it. Not shown in the grid.</summary>
+    public int StorageServerId { get; set; }
+
     /// <summary><see cref="LastUpdated"/> on the clock of the selected display mode: UTC as stored, this machine's zone, or the
     /// row's server's own clock (<see cref="Clock"/>). The Last Updated column filters on it, so a filter reads the times the
     /// cells show.</summary>
@@ -419,13 +423,22 @@ public class ServerPropertyRow
 
     /// <summary>The Last Updated cell: the time a live row was read, or "last known, " and the collection time of a row built from the
     /// store, as <see cref="ServerTimeHelper.FormatInstant"/> words <see cref="LastUpdated"/> on the selected display mode's clock, so
-    /// in the repeated autumn hour it carries its UTC offset. The column sorts on <see cref="LastUpdated"/>.</summary>
+    /// in the repeated autumn hour it carries its UTC offset. In Server Time every row is on its own server's clock, so the text
+    /// ends with that clock's offset, "2026-11-10 09:30 (UTC-08:00)"; UTC and Local Time are one zone for every row and carry
+    /// none. The column sorts on <see cref="LastUpdated"/>.</summary>
     public string LastUpdatedDisplay
     {
         get
         {
             if (LastUpdated is not { } utc) return "";
-            var text = ServerTimeHelper.FormatInstant(utc, DisplayZoneNow, "yyyy-MM-dd HH:mm");
+            var mode = ServerTimeHelper.CurrentDisplayMode;
+            var clock = Clock ?? ServerTimeHelper.ActiveServerClock;
+            var text = ServerTimeHelper.FormatInstant(utc, ServerTimeHelper.DisplayZoneFor(mode, clock), "yyyy-MM-dd HH:mm");
+            if (mode == TimeDisplayMode.ServerTime)
+            {
+                text += " (" + ServerTimeHelper.GetTimezoneLabel(mode, clock, utc) + ")";
+            }
+
             return IsLastKnown ? "last known, " + text : text;
         }
     }
@@ -474,6 +487,9 @@ public class ServerPropertyRow
     /// <summary>The Status cell: the verdict's words, or <see cref="ProvisioningVerdict.NotCollectedLabel"/> for a server with no
     /// verdict (the last 24 hours hold no CPU sample to judge it by), never an empty cell.</summary>
     public string ProvisioningDisplay => string.IsNullOrEmpty(ProvisioningStatus) ? ProvisioningVerdict.NotCollectedLabel : ProvisioningVerdict.StatusLabel(ProvisioningStatus);
+
+    /// <summary>The tooltip on a Status cell that reads <see cref="ProvisioningVerdict.NotCollectedLabel"/>; null when there is a verdict.</summary>
+    public string? ProvisioningNote => string.IsNullOrEmpty(ProvisioningStatus) ? ProvisioningVerdict.NoStatusNote : null;
 
     // FinOps cost — from server config
     public decimal MonthlyCost { get; set; }

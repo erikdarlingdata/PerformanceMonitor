@@ -494,7 +494,7 @@
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
                 <!-- Provisioning Trend (7-day) -->
-                <ui:ChartPanel x:Name="ProvisioningTrendCard" Title="7-Day Provisioning Trend" Subtitle="The badge above covers the last 24 hours; each row is one whole day, judged on its CPU, memory grants and stolen memory" Margin="10,8,10,0">
+                <ui:ChartPanel x:Name="ProvisioningTrendCard" Title="7-Day Provisioning Trend" Subtitle="The badge above covers the last 24 hours; each row is one calendar day of the last 7 days, judged on its CPU, memory grants and stolen memory. The first and last rows are part days" Margin="10,8,10,0">
                     <DataGrid x:Name="ProvisioningTrendGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                               AutoGenerateColumns="False" IsReadOnly="True"
                               CanUserSortColumns="False" HeadersVisibility="Column"
@@ -3183,6 +3183,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
+                                        <Setter Property="ToolTip" Value="{Binding ProvisioningNote}"/>
                                         <Style.Triggers>
                                             <DataTrigger Binding="{Binding ProvisioningStatus}" Value="RIGHT_SIZED">
                                                 <Setter Property="Foreground" Value="#27AE60"/>
@@ -3246,7 +3247,7 @@
                             <!-- The time a live row was read, or "last known, <collection time>" for a row built from the store because
                                  the server could not be reached, on the selected time display (the row's own server's clock in Server
                                  Time). Sorted on the instant behind the text, and filtered on that instant on the same clock. -->
-                            <DataGridTextColumn Binding="{Binding LastUpdatedDisplay}" SortMemberPath="LastUpdated" Width="200">
+                            <DataGridTextColumn Binding="{Binding LastUpdatedDisplay}" SortMemberPath="LastUpdated" Width="Auto" MinWidth="200">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastUpdatedLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>

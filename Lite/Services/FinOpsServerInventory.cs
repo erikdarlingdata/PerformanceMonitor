@@ -105,6 +105,7 @@ internal static class FinOpsServerInventory
 
             item.ServerName = server.DisplayName;
             item.MonthlyCost = server.MonthlyCostUsd;
+            item.StorageServerId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
 
             /* The row's own server's clock, guarded on its own (see StampClockAsync), so a failed read costs the row nothing else. */
             if (readClock != null) await StampClockAsync(item, server, readClock);
@@ -218,6 +219,27 @@ internal static class FinOpsServerInventory
         {
             AppLogger.Error("FinOps", $"Failed to read collected server metrics; the Server Inventory overlay stays blank: {ex.Message}", ex);
             return new Dictionary<int, LocalDataService.ServerMetricsRow>();
+        }
+    }
+
+    /// <summary>
+    /// Lays a newer fleet overlay onto rows already built, each found by its <see cref="ServerPropertyRow.StorageServerId"/>. A row
+    /// with no entry, or a value the overlay does not have, keeps what it shows. It reads nothing itself: the caller passes the
+    /// one store read, so the rows' live properties are not read again.
+    /// </summary>
+    internal static void ReapplyCollectedMetrics(
+        IEnumerable<ServerPropertyRow> rows,
+        IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow> fleetMetrics)
+    {
+        foreach (var item in rows)
+        {
+            if (!fleetMetrics.TryGetValue(item.StorageServerId, out var row)) continue;
+
+            if (row.AvgCpuPct.HasValue) item.AvgCpuPct = row.AvgCpuPct;
+            if (row.StorageTotalGb.HasValue) item.StorageTotalGb = row.StorageTotalGb;
+            if (row.IdleDbCount.HasValue) item.IdleDbCount = row.IdleDbCount;
+            if (row.ProvisioningStatus != null) item.ProvisioningStatus = row.ProvisioningStatus;
+            if (row.HealthScore.HasValue) item.HealthScore = row.HealthScore;
         }
     }
 

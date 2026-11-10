@@ -40,15 +40,20 @@ public partial class FinOpsTab : UserControl
     private List<ServerPropertyRow>? _serverInventoryCache;
     private DateTime _serverInventoryCacheTime;
 
-    /* True until the tab's first show after start-up has re-read the Server Inventory (see ReloadUnfinishedSizeGridsOnShow). */
+    /* True until the tab's first show after start-up has re-read the Server Inventory's collected overlay (see
+       ReloadUnfinishedSizeGridsOnShow). */
     private bool _inventoryFirstShowPending = true;
+
+    /* When the last read of that overlay began (UTC), by a whole inventory load or by a re-read. The re-read is gated on the
+       start, as the per-server reload is, so a read still running is never taken for a stale one. */
+    private DateTime? _inventoryOverlayReadStartedUtc;
 
     /// <summary>True while the Server Inventory rows of the last load are under five minutes old.</summary>
     private bool ServerInventoryCacheIsFresh =>
         _serverInventoryCache != null && (DateTime.Now - _serverInventoryCacheTime).TotalMinutes < 5;
 
-    /// <summary>The Server Inventory load the tab's last show or collection notice started, or a completed task when
-    /// neither has started one. A test awaits it.</summary>
+    /// <summary>The re-read of the Server Inventory's collected overlay the tab's last show or collection notice started, or a
+    /// completed task when neither has started one. A new one does not start while it runs. A test awaits it.</summary>
     internal System.Threading.Tasks.Task ServerInventoryReload { get; private set; } = System.Threading.Tasks.Task.CompletedTask;
 
     private readonly Dictionary<DataGrid, IDataGridFilterManager> _filterManagers = new();
@@ -129,6 +134,12 @@ public partial class FinOpsTab : UserControl
         ObjectHeatmapWindowPicker.Value = TimeRangePresets.FromLegacyHours(720)!;
         InitializeFilterManagers();
         IsVisibleChanged += (_, _) => ReloadUnfinishedSizeGridsOnShow();
+        Loaded += (_, _) =>
+        {
+            ServerTimeHelper.DisplayModeChanged -= OnDisplayModeChanged;
+            ServerTimeHelper.DisplayModeChanged += OnDisplayModeChanged;
+        };
+        Unloaded += (_, _) => ServerTimeHelper.DisplayModeChanged -= OnDisplayModeChanged;
     }
 
     /// <summary>
@@ -791,14 +802,12 @@ public partial class FinOpsTab : UserControl
 
         /* The Server Inventory lists every server, so it does not wait for a selected one. Its start-up load read the collected
            overlay (Status, Health, Avg CPU, Storage, Idle DBs) before any collection, against a store whose newest CPU sample
-           may be days old, and nothing else re-runs it. The first show reads it again whatever its age, and a later show once
-           its rows are five minutes old. */
+           may be days old. The first show reads that overlay again whatever its age, and a later show once the last read is
+           old enough (FinOpsShowReloadPolicy). Only the overlay: the live read of every server stays with start-up and the
+           Refresh button. */
         var firstInventoryShow = _inventoryFirstShowPending;
         _inventoryFirstShowPending = false;
-        if (firstInventoryShow || !ServerInventoryCacheIsFresh)
-        {
-            ServerInventoryReload = LoadServerInventoryAsync(forceRefresh: true);
-        }
+        ReReadServerInventoryOverlay(firstInventoryShow);
 
         var serverId = GetSelectedServerId();
         if (serverId == 0) return;
@@ -835,11 +844,8 @@ public partial class FinOpsTab : UserControl
         {
             _ = LoadPerServerDataAsync();
 
-            /* A tab left open since before the first collection: the Server Inventory re-reads once its rows are five minutes old. */
-            if (!ServerInventoryCacheIsFresh)
-            {
-                ServerInventoryReload = LoadServerInventoryAsync(forceRefresh: true);
-            }
+            /* A tab left open since before the first collection: the Server Inventory's overlay follows the collection too. */
+            ReReadServerInventoryOverlay(firstShow: false);
         }
     }
 
@@ -1004,12 +1010,53 @@ public partial class FinOpsTab : UserControl
         ServerTab.MarkAllZero(PvsTrendChart); // #8144: "0 throughout" in the card header
     }
 
+    /// <summary>
+    /// Starts a re-read of the Server Inventory's collected overlay onto the rows already loaded, unless one is still running or
+    /// the last read of it began too recently (<see cref="FinOpsShowReloadPolicy.ShouldReloadOnShow"/>; a first show skips the
+    /// age check). With no rows loaded yet there is nothing to lay it on: the load in flight binds its own.
+    /// </summary>
+    private void ReReadServerInventoryOverlay(bool firstShow)
+    {
+        if (!ServerInventoryReload.IsCompleted) return;
+        if (!FinOpsShowReloadPolicy.ShouldReloadOnShow(_inventoryOverlayReadStartedUtc, DateTime.UtcNow, firstShow)) return;
+        ServerInventoryReload = ReReadServerInventoryOverlayAsync();
+    }
+
+    /// <summary>One store read (the fleet overlay), laid onto the cached rows, and the grid redrawn. A failed read is logged by
+    /// <see cref="FinOpsServerInventory.ReadCollectedMetricsAsync"/> and leaves the rows as they are. Rows a whole load replaced
+    /// while the read ran are left to that load.</summary>
+    private async System.Threading.Tasks.Task ReReadServerInventoryOverlayAsync()
+    {
+        var rows = _serverInventoryCache;
+        var dataService = _dataService;
+        if (rows == null || dataService == null) return;
+
+        _inventoryOverlayReadStartedUtc = DateTime.UtcNow;
+        var overlay = await FinOpsServerInventory.ReadCollectedMetricsAsync(async () => await Task.Run(() => dataService.GetServerMetricsAsync()));
+        if (!ReferenceEquals(rows, _serverInventoryCache)) return;
+
+        FinOpsServerInventory.ReapplyCollectedMetrics(rows, overlay);
+        ServerInventoryDataGrid.Items.Refresh();
+    }
+
+    /// <summary>The time display changed: the Server Inventory's Last Updated cells are computed text, so the grid is redrawn
+    /// and the cells and the column's filter read the new mode together.</summary>
+    private void OnDisplayModeChanged(object? sender, EventArgs e)
+    {
+        if (Dispatcher.CheckAccess())
+        {
+            ServerInventoryDataGrid.Items.Refresh();
+        }
+        else
+        {
+            Dispatcher.BeginInvoke(new Action(() => ServerInventoryDataGrid.Items.Refresh()));
+        }
+    }
+
     private async System.Threading.Tasks.Task LoadServerInventoryAsync(bool forceRefresh = false)
     {
         using var _profiler = Helpers.MethodProfiler.StartTiming("FinOps-ServerInventory");
         if (_dataService == null || _serverManager == null || _credentialResolver == null) return;
-
-        var gen = _loads.Claim(nameof(LoadServerInventoryAsync));
 
         // Use cache if available and less than 5 minutes old
         if (!forceRefresh && _serverInventoryCache != null && ServerInventoryCacheIsFresh)
@@ -1019,6 +1066,10 @@ public partial class FinOpsTab : UserControl
             ServerInventoryCountIndicator.Text = _serverInventoryCache.Count > 0 ? CountText.Plural(_serverInventoryCache.Count, "server") : "";
             return;
         }
+
+        /* Claimed after the cached repaint: a repaint reads nothing, so it must not supersede a load in flight. */
+        var gen = _loads.Claim(nameof(LoadServerInventoryAsync));
+        _inventoryOverlayReadStartedUtc = DateTime.UtcNow;
 
         try
         {

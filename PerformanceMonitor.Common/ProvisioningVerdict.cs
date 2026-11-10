@@ -92,6 +92,9 @@ public static class ProvisioningVerdict
     /// to judge it by. The Viewer and Lite both show it, so the cell is never empty.</summary>
     public const string NotCollectedLabel = "Not collected";
 
+    /// <summary>The tooltip on a Status cell that reads <see cref="NotCollectedLabel"/>: what was not collected, and over what window.</summary>
+    public const string NoStatusNote = "No CPU sample in the last 24 hours";
+
     /// <summary>What the verdict badge shows for <see cref="NotEnoughData"/>: "not enough data yet (6 samples)".</summary>
     public static string NotEnoughDataLabel(long samples) =>
         string.Create(System.Globalization.CultureInfo.CurrentCulture, $"{NotEnoughDataShortLabel} ({samples:N0} {(samples == 1 ? "sample" : "samples")})");
