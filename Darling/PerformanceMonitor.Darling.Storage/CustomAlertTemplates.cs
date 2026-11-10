@@ -67,10 +67,12 @@ public static class CustomAlertTemplates
         new CustomAlertTemplate(
             "pg-connection-saturation",
             "PostgreSQL: connection count high",
-            "Fires when the total session count stays high: approaching max_connections means new connections "
-            + "start failing. Starter: warn at 200 sessions, critical at 500 (absolute, since the catalog does "
-            + "not carry max_connections); set both to a fraction of your configured max_connections.",
-            "{\"metric\":{\"source\":\"pg_session_states\",\"measure\":\"pg_sess_total_sessions\",\"aggregate\":\"max\",\"unit\":\"count\",\"hours\":0.25}," +
+            "Fires when the connected backend count stays high: approaching max_connections means new connections "
+            + "start failing. It adds up the backends connected to every database at each capture, so it reads on "
+            + "every capture, not only when a session holds an old transaction. Starter: warn at 200 backends, "
+            + "critical at 500 (absolute, since the catalog does not carry max_connections); set both to a "
+            + "fraction of your configured max_connections.",
+            "{\"metric\":{\"source\":\"pg_database_stats\",\"measure\":\"pg_db_connected_backends\",\"aggregate\":\"max\",\"unit\":\"count\",\"hours\":0.25}," +
             "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":200,\"criticalThreshold\":500}," +
             "\"hysteresis\":{\"breachSamples\":3,\"clearSamples\":2}}"),
 
