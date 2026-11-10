@@ -526,7 +526,7 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
             return (objects, samples);
         }
 
-        days = DaysThrough(days, latest);
+        days = DarlingFinOpsUtilizationReader.DaysThrough(days, latest);
 
         await using (var command = dataSource.CreateCommand(ObjectGrowthSummarySql))
         {
@@ -579,29 +579,6 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
         }
 
         return (objects, samples);
-    }
-
-    /// <summary>
-    /// <paramref name="days"/>, with days appended until the last one ends after <paramref name="latest"/>, the window's newest
-    /// sample. The caller builds its days through its own clock, and a sample stamped at or after the last day's end, which the
-    /// store's host writes when the caller's clock trails it, would otherwise match no day and leave the series while the bounds
-    /// read already counts it. Each appended day starts where the last one ends and runs a day; one with no sample adds no column,
-    /// since the matrix takes its columns from the samples.
-    /// </summary>
-    internal static IReadOnlyList<DayBucket> DaysThrough(IReadOnlyList<DayBucket> days, DateTime latest)
-    {
-        if (days.Count == 0 || days[^1].EndUtc > latest)
-        {
-            return days;
-        }
-
-        var covered = new List<DayBucket>(days);
-        while (covered[^1].EndUtc <= latest)
-        {
-            var last = covered[^1];
-            covered.Add(new DayBucket(last.Day.AddDays(1), last.EndUtc, last.EndUtc.AddDays(1)));
-        }
-        return covered;
     }
 
     /// <summary>Per-index size + usage for one object at its database's latest snapshot (Storage Growth index drill).

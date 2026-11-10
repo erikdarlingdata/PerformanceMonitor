@@ -185,8 +185,11 @@ public sealed class DarlingMcpInvestigationToolsTests
     [Fact]
     public void Instructions_NameTheInvestigationSwitch_AndTheWritesOffCondition()
     {
+        /* #8463: the parenthetical lists every tool in InvestigationTools, in ordinal order, so a tool added to the set
+           appears here without an edit to the text. */
+        var names = string.Join(", ", DarlingMcpWritePolicy.InvestigationTools.OrderBy(n => n, StringComparer.Ordinal));
         Assert.Contains(
-            "Investigation tools (claim_investigation_request, submit_investigation_report) write only investigation state and are " +
+            "Investigation tools (" + names + ") write only investigation state and are " +
             "served when darling.json sets mcp.allowInvestigations with a token and mcp.allowWrites is off.",
             DarlingMcpInstructions.Text, StringComparison.Ordinal);
     }
