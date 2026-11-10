@@ -37,12 +37,14 @@ public sealed class ServerTimeHelperCollectionTests
     /// <c>ActiveServerClock</c> and <c>UtcOffsetMinutes</c> are the server clock itself, read and written.
     /// The conversion <c>ConvertForDisplay</c> and <c>GetTimezoneLabel</c> read it, in the modes that use it, and
     /// <c>FormatServerTime</c> and <c>FormatServerClock</c> read the display mode as well.
+    /// <c>DisplayModeChanged</c> is raised by a write of the display mode, and <c>WithServerZoneLabel</c> words a clock's
+    /// offset through <c>GetTimezoneLabel</c>.
     /// The pattern cannot tell an overload that takes a <c>ServerClock</c> as an argument (<c>ConvertForDisplay</c>)
     /// from the one that reads the shared clock: the explicit overload reads no setting, so a file that calls only
     /// that goes in <c>NamesWithoutReading</c>.
     /// </summary>
     private static readonly Regex ReadsTheSettings = new(
-        @"ServerTimeHelper\s*\.\s*(ActiveServerClock|UtcOffsetMinutes|CurrentDisplayMode|ConvertForDisplay|GetTimezoneLabel|FormatServerTime|FormatServerClock)\b",
+        @"ServerTimeHelper\s*\.\s*(ActiveServerClock|UtcOffsetMinutes|CurrentDisplayMode|DisplayModeChanged|ConvertForDisplay|GetTimezoneLabel|WithServerZoneLabel|FormatServerTime|FormatServerClock)\b",
         RegexOptions.CultureInvariant);
 
     private static readonly Regex Comments = new(
