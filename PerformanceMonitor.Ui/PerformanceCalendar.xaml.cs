@@ -14,6 +14,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Ui
@@ -61,7 +62,7 @@ namespace PerformanceMonitor.Ui
         /// <summary>The currently selected/drilled day, framed with an accent ring. Null when none.</summary>
         public static readonly DependencyProperty SelectedDateProperty = DependencyProperty.Register(
             nameof(SelectedDate), typeof(DateTime?), typeof(PerformanceCalendar),
-            new PropertyMetadata(null, OnVisualInputChanged));
+            new PropertyMetadata(null, OnSelectedDateChanged));
         public DateTime? SelectedDate
         {
             get => (DateTime?)GetValue(SelectedDateProperty);
@@ -94,6 +95,54 @@ namespace PerformanceMonitor.Ui
         private static void OnVisualInputChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
         {
             ((PerformanceCalendar)d).RebuildCells();
+        }
+
+        private static void OnSelectedDateChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+        {
+            var calendar = (PerformanceCalendar)d;
+            calendar.RebuildCells();
+            calendar.ScrollDayDetailIntoView();
+        }
+
+        /// <summary>
+        /// Scrolls the calendar so the day-detail panel of the selected day is in view (#8532): the whole panel when
+        /// the view can hold it, otherwise the view starts at the panel's top edge. It runs when the selected day
+        /// changes and not when the host hands over a refreshed <see cref="Days"/>, so a refresh leaves the scroll
+        /// position where the user put it.
+        /// </summary>
+        private void ScrollDayDetailIntoView()
+        {
+            if (CalendarScroll == null || DayDetailPanel == null || DayDetailPanel.Visibility != Visibility.Visible)
+            {
+                return;
+            }
+
+            // The panel's place is known only once the rows above it are laid out.
+            UpdateLayout();
+            var viewHeight = CalendarScroll.ViewportHeight;
+            if (viewHeight <= 0 || !DayDetailPanel.IsDescendantOf(CalendarScroll))
+            {
+                return;
+            }
+
+            var view = CalendarScroll.Template?.FindName("PART_ScrollContentPresenter", CalendarScroll) as Visual ?? CalendarScroll;
+            var panel = DayDetailPanel.TransformToAncestor(view).TransformBounds(new Rect(DayDetailPanel.RenderSize));
+            double shift;
+            if (panel.Height > viewHeight || panel.Top < 0)
+            {
+                shift = panel.Top;
+            }
+            else if (panel.Bottom > viewHeight)
+            {
+                shift = panel.Bottom - viewHeight;
+            }
+            else
+            {
+                return;
+            }
+
+            CalendarScroll.ScrollToVerticalOffset(CalendarScroll.VerticalOffset + shift);
+            UpdateLayout();
         }
 
         private void BuildWeekdayHeaders()

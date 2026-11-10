@@ -1324,7 +1324,7 @@ public static class FactAdvice
 
         var inv = new StringBuilder($"{Plural(count.Value, "blocking event")} this window");
         if (perHour is > 0)
-            inv.Append($", about {perHour.Value:0.#} per hour");
+            inv.Append($", about {PerformanceMonitor.Common.DailyHealthBandCalculator.RatePerHourText(perHour.Value, "0.#")} per hour");
         inv.Append('.');
         // #7537: say what is counted. A blocked process report row is not a wait; the spike anomaly counts rows.
         inv.Append(" Each is one wait: a blocked session waiting on one blocker counts once, however many blocked process reports it produced.");
@@ -1372,7 +1372,7 @@ public static class FactAdvice
         var peakHour = FactMeta(facts, "DEADLOCKS", "peak_1h_deadlock_count");
         var inv = new StringBuilder($"{Plural(count.Value, "deadlock")} this window");
         if (perHour is > 0)
-            inv.Append($", about {perHour.Value:0.#} per hour");
+            inv.Append($", about {PerformanceMonitor.Common.DailyHealthBandCalculator.RatePerHourText(perHour.Value, "0.#")} per hour");
         /* The busiest hour is what the fact grades, so it is named whenever it stands above the average (by more than
            the average's one-decimal rounding); a steady rate would only repeat the figure before it. */
         if (peakHour is > 0 && peakHour.Value > (perHour ?? 0) + 0.05)

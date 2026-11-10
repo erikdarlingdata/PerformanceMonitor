@@ -10,7 +10,7 @@
       and navigate. All colors are theme DynamicResources resolved from the host app — this control
       ships no theme of its own.
     -->
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #8532: scrolls when the day cells and the day-detail panel cannot both keep their height -->
+    <ScrollViewer x:Name="CalendarScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #8532: scrolls when the day cells and the day-detail panel cannot both keep their height -->
     <Grid Margin="4">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -114,7 +114,9 @@
                             </Style>
                         </Border.Style>
 
-                        <Grid MinHeight="44" MinWidth="44">
+                        <!-- #8532: 36 px holds the day number and the band label in their corners, and lets six
+                             week rows fit a 900 x 600 window with no day selected. -->
+                        <Grid MinHeight="36" MinWidth="44">
                             <!-- Band wash. Fill is the band brush; opacity conveys presence/severity. -->
                             <Rectangle RadiusX="3" RadiusY="3" Opacity="{Binding WashOpacity}">
                                 <Rectangle.Style>

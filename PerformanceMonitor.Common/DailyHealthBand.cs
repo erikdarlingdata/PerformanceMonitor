@@ -685,11 +685,12 @@ namespace PerformanceMonitor.Common
 
         /// <summary>A per-hour rate to one decimal place, in the invariant convention of the "N0" count it is
         /// printed beside. A positive rate too small for one decimal place to show prints "&lt;0.1" (#8532):
-        /// the count beside it says something happened, and "0.0" would say nothing did.</summary>
-        internal static string RatePerHourText(double ratePerHour)
+        /// the count beside it says something happened, and "0.0" would say nothing did. A sentence that drops a
+        /// whole rate's ".0" passes its own <paramref name="format"/> ("0.#") and gets the same rule.</summary>
+        public static string RatePerHourText(double ratePerHour, string format = "0.0")
         {
-            var text = ratePerHour.ToString("0.0", CultureInfo.InvariantCulture);
-            return ratePerHour > 0 && text == "0.0" ? "<0.1" : text;
+            var text = ratePerHour.ToString(format, CultureInfo.InvariantCulture);
+            return ratePerHour > 0 && text == 0d.ToString(format, CultureInfo.InvariantCulture) ? "<0.1" : text;
         }
 
         /// <summary>Formats a millisecond duration compactly ("800 ms" / "12.5 s" / "3.2 min").</summary>
