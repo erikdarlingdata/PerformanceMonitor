@@ -269,7 +269,7 @@ public sealed class EmailSendCore
                    asks that SOME enabled route names recipients, so the fall-through to the parent's list can now
                    be blank — a firing no route covers, with no default list, has nobody to send to. */
                 emailRoute = NotificationRouter.Resolve(metricName, _settings.NotificationRoutes, _settings, NotificationRouter.ParseServerId(serverId),
-                    AlertSeverity.RouteLevelOf(metricName, context?.SeverityOverride));
+                    AlertSeverity.RouteTierOf(metricName, context));
                 /* #8246: a route that turns email off for this firing means no email, not the default list, as the webhook
                    fan-out reads an off channel. No route store writes Email into OffChannels today (a recipient list is not
                    a secret that can fail to be read), so this arm is the fallback's safety, not a path an operator can set. */
