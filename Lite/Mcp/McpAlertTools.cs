@@ -600,7 +600,7 @@ public sealed class McpAlertTools
                     .OrderBy(m => m, StringComparer.Ordinal),
                 metric_prefixes = AlertFamily.PrefixFamilies.Where(p => p.Family == family).Select(p => p.Prefix + "*"),
             }),
-            recoveries_route_as_their_firing = AlertFamily.RecoveryPairs.Select(kv => new { recovery = kv.Key, firing = kv.Value }),
+            recoveries_route_as_their_firing = AlertFamily.RecoveryPairs.Select(kv => new { recovery = kv.Key, firing = kv.Value, tier = "not read: a Lite route has no severity filter" }),
             unclassified_metrics_route_as = AlertFamily.Performance,
             resolution_order = new[] { "server-scoped route", "tag-scoped route (deeper tag first)", "fleet-wide route", "parent channel (Settings > Notifications)" },
             resolution_within_a_scope = new[] { "exact metric", "family", "* (scoped routes only)" },

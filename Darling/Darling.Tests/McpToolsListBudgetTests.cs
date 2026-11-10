@@ -42,7 +42,7 @@ namespace Darling.Tests;
 public sealed class McpToolsListBudgetTests
 {
     private const int ConvertedHeadCap = 1_000;
-    private const int ConvertedParameterCap = 230; // longest served parameter description is 200 (Darling) and 195 (Lite); current plus about 15%
+    private const int ConvertedParameterCap = 230; // longest served parameter description is 227 (Darling, create_notification_route.severities) and 195 (Lite)
 
     [Fact]
     public void ConvertedTools_HonorD2sAbsoluteCaps_AndNoMarkerReachesTheWire()
