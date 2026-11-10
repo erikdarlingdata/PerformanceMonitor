@@ -200,34 +200,9 @@ public sealed class DarlingMcpTools
 
             /* #3691: collection.Attach returns this very object on a clean pass — same object, same
                serializer call, same bytes — and a JsonObject with collection_caveats appended last otherwise. */
-            /* #8081: the findings ride severity-first (InferenceEngine's order), so the reply is cut to the shared
-               response budget from the tail: the most severe stay, and truncated / findings_returned /
-               truncation_note say what was left off and where it is read. finding_count still counts every
-               finding, and an unanchored run persisted them all before this cut. */
-            return McpResponseBudget.FitPrefix(findings.Count, returned => JsonSerializer.Serialize(collection.Attach(new
-            {
-                server = resolved.DisplayName,
-                status = "findings",
-                finding_count = findings.Count,
-                findings_returned = returned,
-                truncated = returned < findings.Count,
-                truncation_note = AnalysisFindingsBudget.TruncationNote(findings.Count, returned, persisted: anchor is null),
-                analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
-                persisted = anchor is null,
-                /* Null on the ordinary unanchored run — nothing needs saying when the answer is the
-                   one every caller already assumed. */
-                persistence_note = persistenceNote,
-                /* Null at full coverage (#3538 A2) — same rule; the collection caveat (#3691) joins it
-                   only when a family failed, so a clean full-coverage pass keeps its null. */
-                caveat = CollectionCaveats.Compose(coverageCaveat, collectionCaveat),
-                secondary_replica_note = secondaryReplicaNote,
-                coverage = coverage?.ToPayload(),
-                time_range = new
-                {
-                    start = findings[0].TimeRangeStart?.ToString("o"),
-                    end = findings[0].TimeRangeEnd?.ToString("o")
-                },
-                findings = findings.Take(returned).Select(f =>
+            /* #8569: each finding is serialized once, here, so the packer below can measure it and keep going past one that
+               does not fit. */
+            var findingNodes = findings.Select(f =>
                 {
                     /* #8542: the advice T-SQL is built over the same read-time state as structured_remediation. */
                     var advice = FactAdvice.GetForFinding(f, forcePlanStates, forcePlanStateNote);
@@ -237,7 +212,7 @@ public sealed class DarlingMcpTools
                        chain); now the walk consumes them and the root's investigation carries the sentence that
                        points here. Attach returns THIS object untouched when there is no lever, so a finding this
                        does not concern is byte-for-byte what it was. */
-                    return StorySideLeaves.Attach(new
+                    return JsonSerializer.SerializeToNode(StorySideLeaves.Attach(new
                     {
                         severity = Math.Round(f.Severity, 2),
                         confidence = Math.Round(f.Confidence, 2),
@@ -308,9 +283,40 @@ public sealed class DarlingMcpTools
                             risks_of_changing = advice.Risks.RisksOfChanging.Select(r => r.Text).ToArray(),
                             risks_of_not_changing = advice.Risks.RisksOfNotChanging.Select(r => r.Text).ToArray()
                         }
-                    }, f.SideLeafKeys, McpHelpers.JsonOptions);
-                })
-            }, McpHelpers.JsonOptions), McpHelpers.JsonOptions)).Json;
+                    }, f.SideLeafKeys, McpHelpers.JsonOptions), McpHelpers.JsonOptions)!;
+                }).ToList();
+            var findingLabels = findings.Select(f => new FindingLabel(f.Category, FactAdvice.GetForFinding(f)?.Headline ?? f.RootFactKey)).ToList();
+
+            /* #8081, #8569: the findings ride severity-first, and the reply is packed to the shared response budget in that
+               order. A finding that does not fit the room left is trimmed to it and flagged (left out and listed only when even
+               the trimmed form does not fit), and the smaller findings behind it are still tried. truncated / findings_returned / findings_left_out /
+               truncation_note say what was left off and where it is read. finding_count still counts every finding, and an
+               unanchored run persisted them all before this cut. */
+            return AnalysisFindingsBudget.Pack(findingNodes, findingLabels, packed => JsonSerializer.Serialize(packed.Annotate(JsonSerializer.SerializeToNode(collection.Attach(new
+            {
+                server = resolved.DisplayName,
+                status = "findings",
+                finding_count = findings.Count,
+                findings_returned = packed.KeptCount,
+                truncated = packed.LeftOut.Count > 0 || packed.TrimmedCount > 0,
+                truncation_note = AnalysisFindingsBudget.TruncationNote(findings.Count, packed, persisted: anchor is null),
+                analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
+                persisted = anchor is null,
+                /* Null on the ordinary unanchored run — nothing needs saying when the answer is the
+                   one every caller already assumed. */
+                persistence_note = persistenceNote,
+                /* Null at full coverage (#3538 A2) — same rule; the collection caveat (#3691) joins it
+                   only when a family failed, so a clean full-coverage pass keeps its null. */
+                caveat = CollectionCaveats.Compose(coverageCaveat, collectionCaveat),
+                secondary_replica_note = secondaryReplicaNote,
+                coverage = coverage?.ToPayload(),
+                time_range = new
+                {
+                    start = findings[0].TimeRangeStart?.ToString("o"),
+                    end = findings[0].TimeRangeEnd?.ToString("o")
+                },
+                findings = packed.FindingsArray()
+            }, McpHelpers.JsonOptions), McpHelpers.JsonOptions)!.AsObject()), McpHelpers.JsonOptions)).Json;
         }
         catch (Exception ex)
         {
