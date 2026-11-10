@@ -343,6 +343,28 @@ public sealed class WebDatabaseFilterPickerBehaviourTests
         Assert.Equal("Databases: 1", r.GetProperty("label").GetString());
     }
 
+    /// <summary>
+    /// #8550: a server id is a 32-bit hash of the server's name, negative for about half the servers. A database ticked and
+    /// applied on such a server is stored under its id, counted on the button, and is the filter the tab's panels are built under.
+    /// </summary>
+    [Fact]
+    public void ADatabaseAppliedOnAServerWithANegativeId_IsStored_Counted_AndIsTheFilterThePanelsAreBuiltUnder()
+    {
+        var r = Run("negativeServerId");
+
+        Assert.Equal("Databases: All", r.GetProperty("labelAtStart").GetString());
+        Assert.Equal("", r.GetProperty("message").GetString());
+        Assert.Equal(new[] { "-1563402511" }, Strings(r.GetProperty("storedKeys")));
+        Assert.Equal(new[] { "db02" }, Strings(r.GetProperty("stored")));
+        Assert.Equal("Databases: 1 of 6", r.GetProperty("labelAfterApply").GetString());
+        Assert.True(r.GetProperty("popoverClosed").GetBoolean());
+        Assert.Equal(1, r.GetProperty("redraws").GetInt32());
+        Assert.Equal("SRV1", r.GetProperty("filterAfterApply").GetProperty("server").GetString());
+        Assert.Equal(new[] { "db02" }, Strings(r.GetProperty("filterAfterApply").GetProperty("databases")));
+        Assert.Equal(new[] { "db02" }, Strings(r.GetProperty("filterAfterRedraw").GetProperty("databases")));
+        Assert.Equal("Databases: 1 of 6", r.GetProperty("labelAfterRedraw").GetString());
+    }
+
     [Fact]
     public void TheSource_SetsNamesAsTextOnly_AndLeavesTheWaitPickersAlone()
     {

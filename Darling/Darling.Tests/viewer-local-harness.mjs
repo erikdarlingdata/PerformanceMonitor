@@ -173,11 +173,65 @@ if (scenario === "favorites") {
     load(raw({ x: ["A"], 0: ["A"], "-1": ["A"] })).getDatabaseFilter(1),
     load(makeStorage({ [a.KEY_DB_FILTER]: JSON.stringify({ v: 1, servers: ["A"] }) })).getDatabaseFilter(3),
   ];
-  out.badId = [a.setDatabaseFilter(0, ["A"]), a.setDatabaseFilter("3", ["A"]), a.setDatabaseFilter(-1, ["A"])];
+  out.badId = [a.setDatabaseFilter(0, ["A"]), a.setDatabaseFilter("3", ["A"]), a.setDatabaseFilter(-1.5, ["A"])];
   // Private mode: the choice holds for this page load only.
   const t = load(makeStorage({}, { throwOnWrite: true }));
   out.setNoStorage = t.setDatabaseFilter(3, ["A"]);
   out.heldNoStorage = t.getDatabaseFilter(3);
+} else if (scenario === "signedIds") {
+  /* #8550: a server id is a 32-bit hash of the server's name, so it is negative for about half the servers and ten digits
+     long for most. The four ids are a negative one, a ten-digit positive one, and the two ends of the 32-bit range. */
+  const NEG = -1563402511, POS = 1730000001, MIN = -2147483648, MAX = 2147483647;
+  const ids = [NEG, POS, MIN, MAX];
+  const t0 = "2026-01-01T10:00:00";
+  const rows = () => [...ids.map((id) => row(id, t0)), row(NEG, "2026-01-01T10:05:00", { severity: "critical" }), row(0, t0)];
+  const st = makeStorage();
+  const a = load(st);
+  // The badge: an actionable alert counts on every id. server_id 0 (the store's own alerts, an external source) gets none.
+  a.updateAttention(rows());
+  out.badges = ids.map((id) => a.attentionFor(id));
+  out.zeroBadge = a.attentionFor(0);
+  // The star.
+  out.starOn = ids.map((id) => a.toggleFavorite(id));
+  out.storedFavorites = (JSON.parse(st.data[a.KEY_FAVORITES] || "{}").ids || []).slice().sort((x, y) => x - y);
+  const starred = load(st); // rebuilt
+  out.starAfterReload = ids.map((id) => starred.isFavorite(id));
+  const cards = [{ server_id: 5, display_name: "a" }, { server_id: NEG, display_name: "b" }];
+  out.starSortsFirst = cards.slice().sort(starred.favoritesFirst((x, y) => x.display_name.localeCompare(y.display_name))).map((c) => c.server_id);
+  out.starOff = starred.toggleFavorite(NEG);
+  out.starOffAfterReload = load(st).isFavorite(NEG);
+  // An acknowledgement (a click on the badge).
+  for (const id of ids) a.acknowledge(id, Date.parse("2026-01-01T10:10:00Z"));
+  out.shownWhileAcked = ids.map((id) => a.attentionFor(id).show);
+  out.storedAckKeys = Object.keys(JSON.parse(st.data[a.KEY_ACKS] || "{}").acks || {}).sort();
+  const acked = load(st); // rebuilt
+  acked.updateAttention(rows());
+  out.ackedAfterReload = ids.map((id) => acked.isAcknowledged(id));
+  out.shownAfterReload = ids.map((id) => acked.attentionFor(id).show);
+  // The database filter.
+  out.filterSet = ids.map((id) => a.setDatabaseFilter(id, ["Db" + id]));
+  out.filterHeld = ids.map((id) => a.getDatabaseFilter(id));
+  out.storedFilterKeys = Object.keys(JSON.parse(st.data[a.KEY_DB_FILTER] || "{}").servers || {}).sort();
+  const filtered = load(st); // rebuilt
+  out.filterAfterReload = ids.map((id) => filtered.getDatabaseFilter(id));
+  // What is not a server id is refused: zero, a fraction, text, nothing, and a whole number outside 32 bits.
+  const notIds = [0, -0, 1.5, -1.5, 2147483648, -2147483649, "5", "-5", null, NaN];
+  const n = load(makeStorage());
+  n.updateAttention(notIds.map((id) => row(id, t0)));
+  out.notIds = notIds.map((id) => ({ star: n.toggleFavorite(id), filter: n.setDatabaseFilter(id, ["A"]), badge: n.attentionFor(id).count }));
+  // A hand-edited stored value keeps only its server ids.
+  const keys = ["0", "-0", "2147483648", "-2147483649", "--5", "-", "1e3", "-5.0", " -5", "+5", String(NEG)];
+  const probe = [0, 5, -5, 1000, 2147483648, -2147483649, NEG];
+  const hand = load(makeStorage({
+    [a.KEY_FAVORITES]: JSON.stringify({ v: 1, ids: [0, 1.5, 2147483648, -2147483649, "-5", NEG] }),
+    [a.KEY_ACKS]: JSON.stringify({ v: 1, acks: Object.fromEntries(keys.map((k) => [k, 5])) }),
+    [a.KEY_DB_FILTER]: JSON.stringify({ v: 1, servers: Object.fromEntries(keys.map((k) => [k, ["A"]])) }),
+  }));
+  out.handEdited = {
+    favorites: probe.filter(hand.isFavorite),
+    acks: probe.filter(hand.isAcknowledged),
+    filters: probe.filter((id) => hand.getDatabaseFilter(id).length > 0),
+  };
 } else {
   throw new Error("unknown scenario " + scenario);
 }
