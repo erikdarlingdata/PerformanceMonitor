@@ -303,6 +303,14 @@ export const ROUTE_RENDERERS = {
 const scopedRoutes = new Set(["fleet", "server", "alerts", "sweeps", "finops", "jobHistory", "investigations"]);
 const scopedNav = new Set(["fleet", "alerts", "sweeps", "finops", "job-history", "investigations"]);
 
+/* The shell's scope verdict for one route. Only a session that says scoped gates anything: it hides every nav link outside
+   scopedNav and blocks every route outside scopedRoutes. No session yet, or a failed probe, is an unknown seat: the page renders
+   as before, the seat label says "not connected" (#7928), and the server answers whatever the seat may not read. */
+export function scopeVerdict(session, routeName) {
+  const scoped = session?.scoped === true;
+  return { scoped, blocked: scoped && !scopedRoutes.has(routeName), hidesNav: (route) => scoped && !scopedNav.has(route) };
+}
+
 function route(opts) {
   /* The session-expired takeover owns the DOM from the moment it fires until the operator signs in again —
      see showSignedOutState/onSessionExpired below (#4187). hashchange keeps calling this (a stray click, the
@@ -318,17 +326,13 @@ function route(opts) {
 
   if (frontDoor() && gateStore(opts)) return;
 
-  const session = peekSession();
-  if (session?.probe_failed) {
-    mount(main, el("div", { class: "card muted", text: "Dashboard access could not be checked. Refresh to retry." }));
-    return;
-  }
+  const r = currentRoute();
+  const verdict = scopeVerdict(peekSession(), r.name);
   for (const link of document.querySelectorAll(".nav a")) {
-    if (session?.scoped) link.hidden = !scopedNav.has(link.dataset.route);
+    if (verdict.scoped) link.hidden = verdict.hidesNav(link.dataset.route);
     else if (link.dataset.route !== "ag") link.hidden = false;
   }
-  const r = currentRoute();
-  if (session?.scoped && !scopedRoutes.has(r.name)) {
+  if (verdict.blocked) {
     mount(main, el("div", { class: "card muted", text: "This page requires an unrestricted dashboard session." }));
     return;
   }

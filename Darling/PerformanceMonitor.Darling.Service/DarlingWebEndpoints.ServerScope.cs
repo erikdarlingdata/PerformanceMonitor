@@ -220,6 +220,13 @@ public static partial class DarlingWebEndpoints
     }
 
     internal static async Task<int?> AuthorizedWebServerAsync(
+        NpgsqlDataSource postgres, HttpContext context, IReadOnlyList<int> allowedTagIds, int[]? allowedServerIds = null) =>
+        (await AuthorizedWebServerRowAsync(postgres, context, allowedTagIds, allowedServerIds))?.ServerId;
+
+    /// <summary>The registry row a scoped reader's request selects, or null when the request names no server it may read. One registry
+    /// read: the row is the resolution the caller uses, so no later read resolves the name again. The alert-details form authorizes by
+    /// server_id alone and carries no name.</summary>
+    internal static async Task<(int ServerId, string ServerName, string DisplayName)?> AuthorizedWebServerRowAsync(
         NpgsqlDataSource postgres, HttpContext context, IReadOnlyList<int> allowedTagIds, int[]? allowedServerIds = null)
     {
         var query = context.Request.Query;
@@ -233,7 +240,7 @@ public static partial class DarlingWebEndpoints
             }
 
             var ids = allowedServerIds ?? await AllowedWebServerIdsAsync(postgres, allowedTagIds, context.RequestAborted);
-            return Array.IndexOf(ids, id) >= 0 ? id : null;
+            return Array.IndexOf(ids, id) >= 0 ? (id, string.Empty, string.Empty) : null;
         }
 
         if (query.ContainsKey("server_id") ||
@@ -272,6 +279,6 @@ public static partial class DarlingWebEndpoints
 
         canonical.Add(new KeyValuePair<string, string?>("server", resolved.ServerName));
         context.Request.QueryString = QueryString.Create(canonical);
-        return resolved.ServerId;
+        return resolved;
     }
 }

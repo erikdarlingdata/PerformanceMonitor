@@ -30,7 +30,7 @@
  * R4 (XSS): every value, the fix script included, reaches the DOM through el()'s text path.
  */
 
-import { getSession } from "../views-api.js";
+import { getSession, peekSession } from "../views-api.js";
 import { el, apiGet, apiWrite, listOnlyNote, readToolWithinKeptHistory, keptWindowStrip, noticeStrip, readErrorStrip, emptyStrip, loadingStrip, localTime, bandClass, dbScopeChip, storeHash } from "../util.js";
 
 /** The desktop's severity cutoffs: >= 1.5 Critical, >= 0.75 Warning, else Info. */
@@ -442,7 +442,8 @@ function generateBar(server, signal) {
   (async () => {
     const session = await getSession();
     if (!session || !session.can_edit) return;
-    const avail = await apiGet("/api/analyze-now/available", signal);
+    /* A scoped seat cannot queue an analysis: the probe is answered here as unavailable instead of asked for and refused at the gate. */
+    const avail = peekSession()?.scoped ? { available: false } : await apiGet("/api/analyze-now/available", signal);
     if (avail.kind !== "data" || !avail.data) return;
     if (avail.data.can_queue !== true) {
       slot.appendChild(noticeStrip(generateUnavailableNote(avail.data.managed_store === true)));

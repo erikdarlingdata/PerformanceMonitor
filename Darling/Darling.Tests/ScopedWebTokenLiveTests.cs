@@ -309,6 +309,20 @@ public sealed class ScopedWebTokenLiveTests
 
         var sharedCookie = await SignIn(server, SharedToken);
         var prodCookie = await SignIn(server, ParentReaderToken);
+
+        // A read that writes no field the scope strips answers the scoped reader the unscoped bytes, the data-start note included.
+        // The window end is sent, so the two answers describe one window and differ only if the scope reshapes the bytes.
+        var sevenDayWaits = "/api/read/get_wait_stats?server=finance-server&hours=168&as_of="
+            + Uri.EscapeDataString(DateTime.SpecifyKind(sampledAt.AddMinutes(1), DateTimeKind.Utc).ToString("o"));
+        var (scopedWaits, scopedWaitsBody) = await Send(server, HttpMethods.Get, sevenDayWaits, financeCookie);
+        var (sharedWaits, sharedWaitsBody) = await Send(server, HttpMethods.Get, sevenDayWaits, sharedCookie);
+        Assert.Equal(StatusCodes.Status200OK, scopedWaits.Response.StatusCode);
+        Assert.Equal(StatusCodes.Status200OK, sharedWaits.Response.StatusCode);
+        Assert.Contains("FINANCE_WAIT", sharedWaitsBody, StringComparison.Ordinal);
+        if (scopedWaitsBody != sharedWaitsBody)
+        {
+            problems.Add("the scoped seven-day wait_stats answer differs from the unscoped one for the same permitted server:\n" + scopedWaitsBody + "\n---\n" + sharedWaitsBody);
+        }
         foreach (var read in new[] { "get_cpu_utilization", "get_memory_stats", "get_wait_stats" })
         {
             var path = "/api/read/" + read;

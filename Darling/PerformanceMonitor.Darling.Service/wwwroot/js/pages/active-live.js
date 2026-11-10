@@ -15,7 +15,7 @@
  */
 
 import { el, mount, apiGet, apiWrite, listOnlyNote, noticeStrip } from "../util.js";
-import { getSession } from "../views-api.js";
+import { getSession, peekSession } from "../views-api.js";
 import { VIZ, getPanelSignal } from "../panels.js";
 
 const POLL_MS = 1000;
@@ -154,7 +154,8 @@ export function activeQueriesLiveBar(server, columns, includeMonitor = false) {
       slot.dataset.status = "read-only";
       return;
     }
-    const avail = await apiGet("/api/active-queries/live/available", signal);
+    /* A scoped seat has no live queue: the probe is answered here as unavailable instead of asked for and refused at the gate. */
+    const avail = peekSession()?.scoped ? { available: false } : await apiGet("/api/active-queries/live/available", signal);
     if (avail.kind !== "data" || !avail.data) return;
     if (avail.data.can_queue !== true) {
       mount(slot, [noticeStrip(liveUnavailableNote(avail.data.managed_store === true))]);
