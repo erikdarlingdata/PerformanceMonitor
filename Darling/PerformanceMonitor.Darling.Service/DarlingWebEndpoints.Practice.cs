@@ -278,9 +278,11 @@ public static partial class DarlingWebEndpoints
             int? serverId = null;
             if (body["server_id"] is { } serverNode)
             {
-                if (serverNode is not JsonValue serverValue || !serverValue.TryGetValue<int>(out var id) || id < 1)
+                /* A server id is a 32-bit hash of the server's name, negative for about half the servers. 0 is no server;
+                   an id that is not registered is answered 404 below. */
+                if (serverNode is not JsonValue serverValue || !serverValue.TryGetValue<int>(out var id) || id == 0)
                 {
-                    return ErrorResult("server_id must be a whole number, or left out for a fleet note.", StatusCodes.Status400BadRequest);
+                    return ErrorResult("server_id must be a whole number other than 0, or left out for a fleet note.", StatusCodes.Status400BadRequest);
                 }
 
                 serverId = id;

@@ -55,6 +55,22 @@ public class FactScorer
         "queries", "sessions", "tempdb", "waits",
     };
 
+    /// <summary>The sources emitted for context and never scored (see <see cref="KnownSources"/>): base severity is 0 by design.</summary>
+    private static readonly HashSet<string> ContextOnlySources = new(StringComparer.Ordinal) { "coverage", "sessions" };
+
+    /// <summary>
+    /// #8574: whether the scorer ever grades this fact. A graded fact at severity 0 was judged negligible; a fact the
+    /// scorer never grades (<c>SESSION_STATS</c>, <c>PG_TPS</c>, <c>PG_WAL_VOLUME_SHIFT</c>) is at severity 0 because it is
+    /// context, which says nothing about how much it moved. <c>compare_analysis</c> reads the difference.
+    /// </summary>
+    public static bool IsGraded(Fact fact)
+    {
+        ArgumentNullException.ThrowIfNull(fact);
+        return PgTargetSources.IsPgSource(fact.Source)
+            ? PgTargetScorer.IsGraded(fact)
+            : !ContextOnlySources.Contains(fact.Source);
+    }
+
     /// <summary>
     /// Scores all facts: Layer 1 (base severity), then Layer 2 (amplifiers).
     /// </summary>

@@ -491,6 +491,42 @@ public sealed class DarlingMcpServerTagToolsTests
         Assert.Equal(0, store.Writes);
     }
 
+    /// <summary>#8550: a server id is a 32-bit hash of the server's name, negative for about half the servers. A registered
+    /// server with a negative id is assigned and unassigned like any other, beside a positive one in the same call. 0 is no
+    /// server and is refused, and a negative id that is not registered is answered as an unknown server.</summary>
+    [Fact]
+    public async Task AssignAndUnassign_TakeAServerWithANegativeId_AndRefuseOnlyZero()
+    {
+        const int negative = -1563402511;
+        var store = Store();
+        store.Servers.Add(negative);
+        var tag = store.Seed("Prod");
+
+        var assigned = Parse(await DarlingMcpServerTagTools.AssignServerTagCore(store, tag, new[] { 1, negative }));
+        Assert.Equal("assigned", (string?)assigned["status"]);
+        Assert.Equal(new[] { negative, 1 }, assigned["added_server_ids"]!.AsArray().Select(n => (int)n!).ToArray());
+        Assert.Contains(store.Assignments, a => a.TagId == tag && a.ServerId == negative);
+        Assert.Contains(store.Assignments, a => a.TagId == tag && a.ServerId == 1);
+
+        var unassigned = Parse(await DarlingMcpServerTagTools.UnassignServerTagCore(store, tag, new[] { negative }));
+        Assert.Equal("unassigned", (string?)unassigned["status"]);
+        Assert.Equal(new[] { negative }, unassigned["removed_server_ids"]!.AsArray().Select(n => (int)n!).ToArray());
+        Assert.DoesNotContain(store.Assignments, a => a.ServerId == negative);
+
+        // A negative id that is not a monitored server is an unknown server, as a positive one is.
+        var writes = store.Writes;
+        var unknown = Parse(await DarlingMcpServerTagTools.AssignServerTagCore(store, tag, new[] { -77 }));
+        Assert.Equal("not_found", (string?)unknown["status"]);
+        Assert.Equal("unknown_server", (string?)unknown["refusal"]);
+        Assert.Equal(-77, (int)unknown["unknown_server_ids"]![0]!);
+
+        // 0 is no server: the list is refused whole, on both paths.
+        Assert.Equal("invalid", (string?)Parse(await DarlingMcpServerTagTools.AssignServerTagCore(store, tag, new[] { 0, 2 }))["status"]);
+        Assert.Equal("invalid", (string?)Parse(await DarlingMcpServerTagTools.UnassignServerTagCore(store, tag, new[] { 0, 1 }))["status"]);
+        Assert.Equal(writes, store.Writes);
+        Assert.Contains(store.Assignments, a => a.TagId == tag && a.ServerId == 1);
+    }
+
     [Fact]
     public async Task ATagDeletedBetweenWriteAndReadBack_IsReportedAsDeletedConcurrently()
     {

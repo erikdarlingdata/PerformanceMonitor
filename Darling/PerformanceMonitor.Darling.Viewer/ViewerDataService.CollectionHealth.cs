@@ -488,7 +488,8 @@ public sealed partial class ViewerDataService
 
         /* #4999: read before the health statement's reader opens, so one call never holds two. */
         var scheduleOverrides = await ReadScheduleOverridesForHealthAsync(cancellationToken);
-        var windowStart = DateTime.UtcNow.AddDays(-7);
+        /* #8533: the Collection Health window, shared by every read of these rows and by the sentence that words it. */
+        var windowStart = DateTime.UtcNow.AddDays(-CollectionHealthWindow.Days);
         await using (var command = _dataSource.CreateCommand(CollectionHealthSql))
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -514,6 +515,11 @@ public sealed partial class ViewerDataService
         return items;
     }
 
+    /* #8533: the Sweep Pressure tab captions the two panels GetSweepPressureAsync feeds in literals, "Sweep Pressure (trailing 7
+       days)" and "Heaviest Collectors (trailing 7 days)", and that read takes its window from CollectionHealthWindow.Days. This
+       constant compiles only while the window is seven days, so the window cannot change under a caption that says otherwise. */
+    internal const byte SweepPressureCaptionDays = CollectionHealthWindow.Days == 7 ? 7 : -1;
+
     /// <summary>
     /// #6384: the Sweep Pressure and Heaviest Collectors panels' data, the same trailing 7 days <c>get_collection_health</c> reads on the web.
     /// It runs the web's own statement (<see cref="CollectionHealthStatements.ComposedSql"/>, which the service's reader points at too) and
@@ -535,7 +541,8 @@ public sealed partial class ViewerDataService
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<DateTime>
             {
-                TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified),
+                /* #8533: the Collection Health window, so this covers the same days as the rows beside it. */
+                TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-CollectionHealthWindow.Days), DateTimeKind.Unspecified),
             });
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -608,7 +615,8 @@ LIMIT 1";
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<DateTime>
             {
-                TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified),
+                /* #8533: the Collection Health window, shared by every read of these rows and by the sentence that words it. */
+                TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-CollectionHealthWindow.Days), DateTimeKind.Unspecified),
             });
             var value = await command.ExecuteScalarAsync(cancellationToken);
             ApplyReadSource(rows, value as string);
@@ -783,7 +791,8 @@ LIMIT 1";
            stay in the window, so the rows are stamped as not collected and the card and the status bar do not count them as failing. */
         var engineGatedServers = await FleetEngineGatedCollectors.ReadAsync(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, CancellationToken.None);
         var now = DateTime.UtcNow;
-        var windowStart = DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified);
+        /* #8533: the Collection Health window, so this covers the same days as the rows beside it. */
+        var windowStart = DateTime.SpecifyKind(now.AddDays(-CollectionHealthWindow.Days), DateTimeKind.Unspecified);
         var headEnd = CollectionHealthRollupSupport.CeilingHour(windowStart);
         var plan = await CollectionHealthRollupSupport.RollupPlanAsync(_dataSource, headEnd, CancellationToken.None);
 

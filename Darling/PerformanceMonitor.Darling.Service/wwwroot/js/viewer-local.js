@@ -102,15 +102,31 @@ function writeJson(key, value, store = storage) {
   }
 }
 
+/** A server id is a 32-bit hash of the server's name (ServerIdHelper.GetDeterministicHashCode): any whole number from
+ *  -2,147,483,648 to 2,147,483,647 except 0, negative for about half the servers. 0 is no server: the store's own alerts and
+ *  an external source's alert that names no registered server carry server_id 0, and they get no badge, star or filter. */
+const MIN_SERVER_ID = -2147483648;
+const MAX_SERVER_ID = 2147483647;
+
 function isServerId(n) {
-  return Number.isSafeInteger(n) && n > 0;
+  return Number.isInteger(n) && n !== 0 && n >= MIN_SERVER_ID && n <= MAX_SERVER_ID;
+}
+
+/** A stored object key as a server id, or NaN: an optional minus sign and up to ten digits, which isServerId then bounds. */
+function serverIdFromKey(k) {
+  return /^-?\d{1,10}$/.test(k) ? Number(k) : NaN;
+}
+
+/** A tag id is handed out by the store, counting up from 1. */
+function isTagId(g) {
+  return Number.isSafeInteger(g) && g > 0;
 }
 
 /** The fixed sidebar group ids that are not tags. */
 const FIXED_GROUPS = ["favourites", "untagged"];
 
 function isGroupId(g) {
-  return isServerId(g) || FIXED_GROUPS.includes(g);
+  return isTagId(g) || FIXED_GROUPS.includes(g);
 }
 
 /** The Custom Views sidebar's group ids (#6214): the fixed "my" group, or "folder:" + a folder name (a name the store holds to 100
@@ -133,7 +149,7 @@ export function reload() {
   const a = readJson(KEY_ACKS);
   if (a && a.acks && typeof a.acks === "object" && !Array.isArray(a.acks)) {
     for (const [k, t] of Object.entries(a.acks)) {
-      const id = /^\d{1,9}$/.test(k) ? Number(k) : NaN;
+      const id = serverIdFromKey(k);
       if (isServerId(id) && typeof t === "number" && Number.isFinite(t) && t > 0 && acks.size < MAX_IDS) acks.set(id, t);
     }
   }
@@ -151,7 +167,7 @@ export function reload() {
   const d = readJson(KEY_DB_FILTER);
   if (d && d.servers && typeof d.servers === "object" && !Array.isArray(d.servers)) {
     for (const [k, names] of Object.entries(d.servers)) {
-      const id = /^\d{1,9}$/.test(k) ? Number(k) : NaN;
+      const id = serverIdFromKey(k);
       const kept = isServerId(id) && dbFilters.size < MAX_IDS ? cleanDatabaseNames(names) : null;
       if (kept) dbFilters.set(id, kept);
     }
