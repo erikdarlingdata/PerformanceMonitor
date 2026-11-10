@@ -2119,6 +2119,43 @@ LIMIT 1";
            failure in some leaves a partial note on the run instead. Written on the pool thread only (INV-2). */
         public DarlingXeSessions.CaptureEnsureOutcome CaptureEnsure { get; set; } = new();
 
+        /* #8528: the capture collectors whose session the last ensure found stopped or absent and started, until each one's next run
+           writes its row (LogRunAsync clears it). A restart or a failover leaves the sessions stopped, and a run that read one before
+           the ensure recorded SESSION_MISSING; that row is from before the start, and the Capture Down self-alert, handed
+           CaptureSessionReport(), holds its verdict for the collector until it reads again. Written on the pool thread, read by the
+           fleet self-alert pass. */
+        public CaptureSessionRestarts CaptureSessionRestarts { get; } = new();
+
+        /// <summary>
+        /// #8528: what the service's own ensure of the capture sessions knows for this server, as the fleet self-alert pass hands it to
+        /// the Capture Down self-alert: the collectors whose started session awaits its read, and the last ensure failure per collector.
+        /// </summary>
+        internal CaptureSessionEnsureReport CaptureSessionReport()
+        {
+            var failures = new Dictionary<string, DarlingXeSessions.XeEnsureFailure>(StringComparer.OrdinalIgnoreCase);
+            var ensure = CaptureEnsure;
+            if (ensure.Deadlock is { } deadlock)
+            {
+                failures[DeadlocksCollector.Instance.Name] = deadlock;
+            }
+
+            if (ensure.BlockedProcess is { } blockedProcess)
+            {
+                failures[BlockedProcessReportCollector.Instance.Name] = blockedProcess;
+            }
+
+            if (ensure.Attention is { } attention)
+            {
+                failures[AttentionCollector.Instance.Name] = attention;
+            }
+            else if (AttentionXePermissionFault is { } attentionPermission)
+            {
+                failures[AttentionCollector.Instance.Name] = new DarlingXeSessions.XeEnsureFailure(attentionPermission, IsPermission: true);
+            }
+
+            return new CaptureSessionEnsureReport(CaptureSessionRestarts.Snapshot(), failures);
+        }
+
         /* #5640 (L5): whether the last ensure ran with the attention collector enabled. An ensure that skipped the client-timeout
            session because the collector was off leaves this false, so turning the collector on makes the next sweep ensure it at
            once and not after the hour. Reset on every (re)connect. */
@@ -2176,6 +2213,13 @@ LIMIT 1";
         captureOutcome.CarryForwardTransient(server.CaptureEnsure);
         server.CaptureEnsure = captureOutcome;
         ApplyTransientEnsureRetry(server, captureOutcome, utcNow);
+
+        /* #8528: a session this ensure started was stopped when its collector last read it, so that run's SESSION_MISSING row is stale
+           until the collector reads again. The mark holds the Capture Down verdict for the collector until its next row. */
+        foreach (var collectorName in captureOutcome.Started)
+        {
+            server.CaptureSessionRestarts.Mark(collectorName);
+        }
     }
 
     /// <summary>

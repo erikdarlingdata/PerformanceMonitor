@@ -2779,6 +2779,10 @@ LIMIT 1";
             _postgres!, runtime, collectorName, status, rowsCollected, sqlMs, storageMs, errorMessage, fanout, phases, drain,
             fetchPhases, sweepPeerMaxMs, logger, cancellationToken, readSource);
         RecordRunForBackoff(server, runtime, collectorName, status, errorMessage);
+
+        /* #8528: the row just written is the collector's own reading after any session start the ensure made, so a capture session
+           marked as started and awaiting its read has been read: the Capture Down self-alert judges this collector's newest row as it stands. */
+        server.CaptureSessionRestarts.Clear(collectorName);
     }
 
     /// <summary>
@@ -3002,6 +3006,18 @@ LIMIT 1";
 
         try
         {
+            /* #8528: the instance's identity moved since the capture sessions were last ensured: an earlier run of this sweep saw it
+               (wait_stats and cpu_utilization observe the identity and run before the three capture collectors) and cleared the ensure
+               stamp (ForgetLongQueryTraceLatch), after the sweep body's own ensure had already passed as not due. A restart or a failover
+               leaves the sessions stopped, and the read of a stopped session records SESSION_MISSING, which the Capture Down self-alert
+               fires on, although the next sweep's ensure starts it. So the ensure runs here, before the read, and the read sees the
+               started session; the stamp it sets keeps the other capture collectors of this sweep from ensuring again. */
+            if (IsCaptureSessionCollector(collectorName) && server.XeSessionsEnsuredAtUtc is null)
+            {
+                await EnsureAlwaysOnXeSessionsAsync(
+                    server, runner, DateTime.UtcNow, _logger, cancellationToken, attentionEnabled: AttentionCollectorEnabled(server));
+            }
+
             /* #3754: the long-query completion session is ensured by the per-sweep reconcile, not by this
                run, and until now nothing carried the reconcile's failure here. So on a target where the
                CREATE was refused in every database the collector still ran, its tolerant ring-buffer read

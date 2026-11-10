@@ -88,6 +88,28 @@ public static class DarlingXeSessions
         public string? AttentionPartialNote { get; set; }
 
         /// <summary>
+        /// #8528: the client-timeout session's ensure failure, a permission denial or any other, with what the server said. Read only by
+        /// the Capture Down self-alert's detail: the run's own gate stays the permission fault alone (<see cref="AttentionEnsureFault"/>),
+        /// so a session that failed for another reason is still read, and the read records what it finds.
+        /// </summary>
+        public XeEnsureFailure? Attention { get; set; }
+
+        /// <summary>
+        /// #8528: the collectors (by collector name) whose session this ensure found stopped or absent and started, or created. A restart
+        /// or a failover leaves the sessions stopped, and a run that read one before this ensure recorded SESSION_MISSING: that row is
+        /// from before the start, so the Capture Down self-alert holds its verdict for these collectors until each reads again.
+        /// </summary>
+        public HashSet<string> Started { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>#8528: the collector whose session a capture kind is read by.</summary>
+        public static string CollectorNameOf(AlwaysOnXeSessionKind kind) => kind switch
+        {
+            AlwaysOnXeSessionKind.Deadlock => DeadlocksCollector.Instance.Name,
+            AlwaysOnXeSessionKind.BlockedProcess => BlockedProcessReportCollector.Instance.Name,
+            _ => AttentionCollector.Instance.Name,
+        };
+
+        /// <summary>
         /// True when the deadlock ensure of an on-premises, Managed Instance or RDS server failed with a transient error (a timeout, a
         /// dropped connection). That is not a fault for the run: the session may well be running, so the run reads it as it did before
         /// #6893, and the worker asks again after <see cref="TransientRetryInterval"/> instead of waiting out the hour. Per capture,
@@ -267,7 +289,13 @@ public static class DarlingXeSessions
                batch, silently skipping the blocked-process ensure until the next reconnect. */
             try
             {
-                await EnsureDeadlockOnPremAsync(connection, server, runner.RingBufferMaxEvents, logger, cancellationToken);
+                /* #8528: a session this pass started or created was stopped when its collector last read it, so that run's row is from
+                   before the start; the Capture Down self-alert holds its verdict for the collector until it reads again. */
+                var deadlockStarted = await EnsureDeadlockOnPremAsync(connection, server, runner.RingBufferMaxEvents, logger, cancellationToken);
+                if (deadlockStarted)
+                {
+                    outcome?.Started.Add(DeadlocksCollector.Instance.Name);
+                }
             }
             catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
             {
@@ -290,7 +318,11 @@ public static class DarlingXeSessions
 
             try
             {
-                await EnsureBlockedProcessOnPremAsync(connection, server, runner.RingBufferMaxEvents, logger, cancellationToken);
+                var blockedProcessStarted = await EnsureBlockedProcessOnPremAsync(connection, server, runner.RingBufferMaxEvents, logger, cancellationToken);
+                if (blockedProcessStarted)
+                {
+                    outcome?.Started.Add(BlockedProcessReportCollector.Instance.Name);
+                }
             }
             catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
             {
@@ -316,7 +348,11 @@ public static class DarlingXeSessions
             {
                 try
                 {
-                    await EnsureAttentionOnPremAsync(connection, server, logger, cancellationToken);
+                    var attentionStarted = await EnsureAttentionOnPremAsync(connection, server, logger, cancellationToken);
+                    if (attentionStarted)
+                    {
+                        outcome?.Started.Add(AttentionCollector.Instance.Name);
+                    }
                 }
                 catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))
                 {
@@ -327,6 +363,14 @@ public static class DarlingXeSessions
                     /* #5640 (H2): a denied create is a permission state, recorded as PERMISSIONS by the run, so it is a Warning and not
                        the error of a capture that broke. Any other failure leaves the session absent and the read records SESSION_MISSING. */
                     attentionFault = AttentionFaultFor(ex);
+                    /* #8528: either way the Capture Down detail quotes what the server said. */
+                    if (outcome is not null)
+                    {
+                        outcome.Attention = attentionFault is not null
+                            ? new XeEnsureFailure(attentionFault.Message, IsPermission: true)
+                            : new XeEnsureFailure(AlwaysOnXeSessions.DescribeFailure(ex), IsPermission: false);
+                    }
+
                     if (attentionFault is not null)
                     {
                         logger?.LogWarning("[{Server}] Could not ensure the attention XE session: {Message} — client-timeout collection will record PERMISSIONS until the login is granted ALTER ANY EVENT SESSION",
@@ -462,14 +506,14 @@ public static class DarlingXeSessions
 
                 /* #4961: the shared session when it is usable, this install's own when it is not, and back again. */
                 deadlockTally.Record(databaseName, await DarlingAlwaysOnXeSessions.EnsureAsync(
-                    database, runner, server, databaseName, AlwaysOnXeSessionKind.Deadlock, "deadlock", logger, cancellationToken));
+                    database, runner, server, databaseName, AlwaysOnXeSessionKind.Deadlock, "deadlock", logger, cancellationToken, outcome));
                 blockedTally.Record(databaseName, await DarlingAlwaysOnXeSessions.EnsureAsync(
-                    database, runner, server, databaseName, AlwaysOnXeSessionKind.BlockedProcess, "blocked process", logger, cancellationToken));
+                    database, runner, server, databaseName, AlwaysOnXeSessionKind.BlockedProcess, "blocked process", logger, cancellationToken, outcome));
                 if (attentionEnabled)
                 {
                     attentionTried++;
                     var denied = await DarlingAlwaysOnXeSessions.EnsureAsync(
-                        database, runner, server, databaseName, AlwaysOnXeSessionKind.Attention, "client timeout", logger, cancellationToken);
+                        database, runner, server, databaseName, AlwaysOnXeSessionKind.Attention, "client timeout", logger, cancellationToken, outcome);
                     attentionTally.Record(databaseName, denied);
                     if (denied is { IsPermission: true })
                     {
@@ -504,8 +548,9 @@ public static class DarlingXeSessions
             (outcome.Deadlock, outcome.DeadlockPartialNote) = deadlockTally.Result();
             (outcome.BlockedProcess, outcome.BlockedProcessPartialNote) = blockedTally.Result();
 
-            /* Only the note is kept: a client-timeout create refused everywhere is the PERMISSIONS fault returned below, or no fault at all. */
-            outcome.AttentionPartialNote = attentionTally.Result().PartialNote;
+            /* The note is the run's: a client-timeout create refused everywhere is the PERMISSIONS fault returned below, or no fault at all.
+               #8528: the whole-server failure, permission or not, is kept for the Capture Down detail alone. */
+            (outcome.Attention, outcome.AttentionPartialNote) = attentionTally.Result();
 
             /* A list that names no database the server has attempts nothing and refuses nothing, so the tallies are empty. The two
                runs say so in their note instead of recording SUCCESS with no rows and no reason. */
@@ -580,7 +625,9 @@ WITH
 
 ALTER EVENT SESSION [{DeadlocksCollector.XeSessionName}] ON SERVER STATE = START;";
 
-    private static async Task EnsureDeadlockOnPremAsync(SqlConnection connection, ServerRuntime server, int ringBufferMaxEvents, ILogger? logger, CancellationToken cancellationToken)
+    /// <summary>Ensures the deadlock session. Returns true when it started a stopped session or created a missing one (#8528), false when the session was running.</summary>
+    private static async Task<bool> EnsureDeadlockOnPremAsync(
+        SqlConnection connection, ServerRuntime server, int ringBufferMaxEvents, ILogger? logger, CancellationToken cancellationToken)
     {
         using (var cmd = new SqlCommand(@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -605,8 +652,9 @@ WHERE ses.name = @session_name;", connection))
                     startCmd.CommandTimeout = 60;
                     await startCmd.ExecuteNonQueryAsync(cancellationToken);
                     logger?.LogInformation("[{Server}] Started deadlock XE session", server.Config.DisplayName);
+                    return true;
                 }
-                return;
+                return false;
             }
         }
 
@@ -615,6 +663,7 @@ WHERE ses.name = @session_name;", connection))
         createCmd.CommandTimeout = 60;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
         logger?.LogInformation("[{Server}] Created and started deadlock XE session", server.Config.DisplayName);
+        return true;
     }
 
     /// <summary>The blocked-process session's create and start (#8146): the ring_buffer clause carries <c>max_events_limit</c> through <see cref="RingBufferTarget.Sql"/>.</summary>
@@ -631,7 +680,9 @@ WITH
 
 ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER STATE = START;";
 
-    private static async Task EnsureBlockedProcessOnPremAsync(SqlConnection connection, ServerRuntime server, int ringBufferMaxEvents, ILogger? logger, CancellationToken cancellationToken)
+    /// <summary>Ensures the blocked-process session. Returns true when it started a stopped session or created a missing one (#8528), false when the session was running.</summary>
+    private static async Task<bool> EnsureBlockedProcessOnPremAsync(
+        SqlConnection connection, ServerRuntime server, int ringBufferMaxEvents, ILogger? logger, CancellationToken cancellationToken)
     {
         /* Blocked process threshold bootstrap — sp_configure is unavailable on AWS RDS
            (parameter groups there), hence the tolerant catch (mirrors Lite). */
@@ -700,8 +751,9 @@ WHERE ses.name = @session_name;", connection))
                     startCmd.CommandTimeout = 60;
                     await startCmd.ExecuteNonQueryAsync(cancellationToken);
                     logger?.LogInformation("[{Server}] Started blocked process XE session", server.Config.DisplayName);
+                    return true;
                 }
-                return;
+                return false;
             }
         }
 
@@ -709,6 +761,7 @@ WHERE ses.name = @session_name;", connection))
         createCmd.CommandTimeout = 60;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
         logger?.LogInformation("[{Server}] Created and started blocked process XE session", server.Config.DisplayName);
+        return true;
     }
 
     /// <summary>
@@ -718,7 +771,8 @@ WHERE ses.name = @session_name;", connection))
     /// (<see cref="EnsureAllAsync"/>): the session captures statement text, so it is not brought back for a server that does not
     /// read it. Turning the collector on again ensures it at the next sweep.
     /// </summary>
-    private static async Task EnsureAttentionOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
+    /// <returns>True when it started a stopped session or created one (#8528); false when the session was running, or was left with another definition.</returns>
+    private static async Task<bool> EnsureAttentionOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
     {
         using (var cmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerProbeSql("PerformanceMonitorDarling"), connection))
         {
@@ -737,7 +791,7 @@ WHERE ses.name = @session_name;", connection))
                     if (server.AttentionXeDefinitionReplaced)
                     {
                         logger?.LogDebug("[{Server}] The attention XE session still has another definition after it was replaced on this connection; left as it is", server.Config.DisplayName);
-                        return;
+                        return false;
                     }
 
                     server.AttentionXeDefinitionReplaced = true;
@@ -754,8 +808,9 @@ WHERE ses.name = @session_name;", connection))
                         startCmd.CommandTimeout = 60;
                         await startCmd.ExecuteNonQueryAsync(cancellationToken);
                         logger?.LogInformation("[{Server}] Started attention XE session", server.Config.DisplayName);
+                        return true;
                     }
-                    return;
+                    return false;
                 }
             }
         }
@@ -764,6 +819,7 @@ WHERE ses.name = @session_name;", connection))
         createCmd.CommandTimeout = 60;
         await createCmd.ExecuteNonQueryAsync(cancellationToken);
         logger?.LogInformation("[{Server}] Created and started attention XE session", server.Config.DisplayName);
+        return true;
     }
 
     /// <summary>
