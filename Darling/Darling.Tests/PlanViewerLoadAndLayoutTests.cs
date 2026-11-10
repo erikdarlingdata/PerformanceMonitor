@@ -554,8 +554,11 @@ public sealed class PlanViewerLoadAndLayoutTests
                 var properties = (FrameworkElement)control.FindName("PropertiesPanel");
                 var scroller = (ScrollViewer)control.FindName("PlanScrollViewer");
                 var statementsButton = (Button)control.FindName("StatementsButton");
+                var propertiesHeader = (TextBlock)control.FindName("PropertiesHeader");
                 Assert.Equal(Visibility.Visible, statements.Visibility);
                 Assert.Equal(Visibility.Visible, properties.Visibility);
+                var selected = propertiesHeader.Text;
+                Assert.False(string.IsNullOrEmpty(selected), "the Properties panel names no operator after a click on one");
 
                 StaTestThread.Step("narrowing the viewer from 1600 px to 600 px, the Properties panel opened last");
                 host.Width = 600;
@@ -594,8 +597,8 @@ public sealed class PlanViewerLoadAndLayoutTests
                 LayOut(host);
                 if (properties.Visibility != Visibility.Visible)
                     problems.Add("the Properties panel stays closed in a viewer widened back to 1600 px: the narrowing closed it, not the person, so the widening brings it back");
-                else if (((TextBlock)control.FindName("PropertiesHeader")).Text != "Table Scan")
-                    problems.Add($"the Properties panel comes back headed \"{((TextBlock)control.FindName("PropertiesHeader")).Text}\", not with the operator that was selected");
+                else if (propertiesHeader.Text != selected)
+                    problems.Add($"the Properties panel comes back headed \"{propertiesHeader.Text}\", not \"{selected}\", the operator that was selected");
                 if (statements.Visibility != Visibility.Visible)
                     problems.Add("the Statements panel closed when the viewer widened back to 1600 px");
 
