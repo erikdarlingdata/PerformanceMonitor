@@ -190,8 +190,10 @@ public class SystemTrayService : IDisposable
         if (_trayIcon == null)
             return;
 
+        var trayIcon = _trayIcon;
         var balloon = new StyledBalloon(title, message, severity);
-        _trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, 10000);
+        trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, StyledToastTimeoutMs);
+        HoldWhileRead(balloon, trayIcon, StyledToastTimeoutMs);
     }
 
     /// <summary>
@@ -212,8 +214,20 @@ public class SystemTrayService : IDisposable
 
         var trayIcon = _trayIcon;
         var balloon = new SnoozeBalloon(title, message, icon, serverName, metricName, muteRuleService, () => trayIcon.CloseBalloon());
-        _trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, 15000);
+        trayIcon.ShowCustomBalloon(balloon, System.Windows.Controls.Primitives.PopupAnimation.Slide, SnoozeToastTimeoutMs);
+        HoldWhileRead(balloon, trayIcon, SnoozeToastTimeoutMs);
     }
+
+    /// <summary>How long a plain (cleared or resolved) card stays, and how long a snoozable one stays, without a reader on it.</summary>
+    private const int StyledToastTimeoutMs = 10000;
+    private const int SnoozeToastTimeoutMs = 15000;
+
+    /// <summary>
+    /// #8475: a card stays while the pointer is on it or keyboard focus is inside it, and its timeout runs again from the
+    /// moment the reader leaves, so a message long enough to scroll is not closed under the reader.
+    /// </summary>
+    private static void HoldWhileRead(FrameworkElement balloon, TaskbarIcon trayIcon, int timeoutMs) =>
+        BalloonHoverHold.Attach(balloon, TimeSpan.FromMilliseconds(timeoutMs), trayIcon.ResetBalloonCloseTimer, trayIcon.CloseBalloon);
 
     public void Dispose()
     {

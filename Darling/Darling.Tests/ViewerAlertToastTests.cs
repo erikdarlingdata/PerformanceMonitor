@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using Hardcodet.Wpf.TaskbarNotification;
 using PerformanceMonitor.Darling.Viewer;
@@ -24,8 +25,9 @@ namespace Darling.Tests;
 /// <summary>
 /// #8475: an alert toast carries the alert's whole message, which can run to twenty lines. The card stays the height of a toast and
 /// scrolls the rest of the message, so the end of it can be read from the toast. The toast sits in a popup with no window above it, so
-/// a theme change, which repaints every window, has to reach it too: a toast raised under Dark follows a switch to Cool Breeze. Both
-/// cards are built on the shared STA thread and laid out at their own width, as the tray shows them.
+/// a theme change, which repaints every window, has to reach it too: a toast raised under Dark follows a switch to Cool Breeze. A card
+/// the reader is on stays open, and its timeout runs again from the moment the pointer leaves. Both cards are built on the shared STA
+/// thread and laid out at their own width, as the tray shows them.
 /// </summary>
 [Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class ViewerAlertToastTests
@@ -108,6 +110,54 @@ public sealed class ViewerAlertToastTests
                 foreach (var dictionary in previousDictionaries) app.Resources.MergedDictionaries.Add(dictionary);
             }
         });
+    }
+
+    [Fact]
+    public void ACardUnderThePointer_StaysOpen_AndClosesItsTimeoutAfterThePointerLeaves()
+    {
+        StaTestThread.Run(() =>
+        {
+            var card = new SnoozeBalloon(Title, LongMessage, BalloonIcon.Warning, _ => Task.CompletedTask, () => { });
+            WithOwnTheme(card, "Dark");
+            Layout(card);
+            var holds = 0;
+            var closes = 0;
+            var timers = new List<FakeTimer>();
+            BalloonHoverHold.Attach(card, TimeSpan.FromSeconds(15), () => holds++, () => closes++, (after, fire) => { var timer = new FakeTimer(after, fire); timers.Add(timer); return timer; });
+
+            Pointer(card, Mouse.MouseEnterEvent);
+            Assert.Equal(1, holds);
+            Assert.Empty(timers);
+
+            Pointer(card, Mouse.MouseLeaveEvent);
+            var first = Assert.Single(timers);
+            Assert.Equal(TimeSpan.FromSeconds(15), first.After);
+            Assert.Equal(0, closes);
+
+            // The reader comes back before the time is up: the pending close is dropped, and firing it closes nothing.
+            Pointer(card, Mouse.MouseEnterEvent);
+            Assert.True(first.Disposed, "the pending close was not dropped when the pointer came back");
+            first.Fire();
+            Assert.Equal(0, closes);
+            Assert.Equal(2, holds);
+
+            Pointer(card, Mouse.MouseLeaveEvent);
+            Assert.Equal(2, timers.Count);
+            timers[1].Fire();
+            Assert.Equal(1, closes);
+        });
+    }
+
+    private static void Pointer(UIElement card, RoutedEvent routedEvent) =>
+        card.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = routedEvent });
+
+    /// <summary>The close timer the hold starts after the pointer leaves: the test fires it, and a disposed one fires nothing.</summary>
+    private sealed class FakeTimer(TimeSpan after, Action fire) : IDisposable
+    {
+        public TimeSpan After { get; } = after;
+        public bool Disposed { get; private set; }
+        public void Fire() { if (!Disposed) fire(); }
+        public void Dispose() => Disposed = true;
     }
 
     /// <summary>The message block is taller than the card allows, the card stays under its cap, and the viewer reaches the end of the text.</summary>
