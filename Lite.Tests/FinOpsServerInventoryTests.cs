@@ -116,6 +116,8 @@ public sealed class FinOpsServerInventoryTests : IDisposable
 
         Assert.Equal(new[] { first.DisplayName, second.DisplayName }, rows.Select(r => r.ServerName));
         Assert.All(rows, AssertOverlayBlank);
+        /* The read failed, so the cell cannot say the server was not collected: the store may hold a verdict. */
+        Assert.All(rows, r => Assert.Equal("Could not read", r.ProvisioningDisplay));
         Assert.All(rows, r => Assert.Equal(100m, r.MonthlyCost));
         Assert.Contains(log, l => l.Contains("[FinOps]", StringComparison.Ordinal)
             && l.Contains("planted overlay read failure", StringComparison.Ordinal)
@@ -141,6 +143,7 @@ public sealed class FinOpsServerInventoryTests : IDisposable
 
         Assert.Equal(new[] { first.DisplayName, second.DisplayName }, rows.Select(r => r.ServerName));
         Assert.All(rows, AssertOverlayBlank);
+        Assert.All(rows, r => Assert.Equal("Could not read", r.ProvisioningDisplay));
         Assert.All(rows, r => Assert.Equal("Enterprise Edition", r.Edition));
         Assert.Contains(log, l => l.Contains("Failed to overlay collected metrics for " + first.DisplayName, StringComparison.Ordinal)
             && l.Contains("planted merge failure", StringComparison.Ordinal));

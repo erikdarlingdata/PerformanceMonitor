@@ -80,7 +80,8 @@
       "MemoryRatio": 0.80000000000000000000,
       "Status": "RIGHT_SIZED",
       "StolenMemoryPct": 31.25,
-      "StatusReason": null
+      "StatusReason": null,
+      "IsPartial": false
     },
     {
       "Day": "anchor-5d",
@@ -90,7 +91,8 @@
       "MemoryRatio": 0.62500000000000000000,
       "Status": "OVER_PROVISIONED",
       "StolenMemoryPct": 40,
-      "StatusReason": null
+      "StatusReason": null,
+      "IsPartial": false
     },
     {
       "Day": "anchor-4d",
@@ -100,7 +102,8 @@
       "MemoryRatio": 0.75000000000000000000,
       "Status": "UNDER_PROVISIONED",
       "StolenMemoryPct": 33.3333333333333,
-      "StatusReason": "Queries could not get the workspace memory they asked for: peak 0 grant waiters, 1 grant timeout, 1 forced grant. This server may need more memory."
+      "StatusReason": "Queries could not get the workspace memory they asked for: peak 0 grant waiters, 1 grant timeout, 1 forced grant. This server may need more memory.",
+      "IsPartial": false
     },
     {
       "Day": "anchor-3d",
@@ -110,7 +113,8 @@
       "MemoryRatio": 0.85000000000000000000,
       "Status": "UNDER_PROVISIONED",
       "StolenMemoryPct": 41.1764705882353,
-      "StatusReason": "Queries could not get the workspace memory they asked for: peak 1 grant waiter, 1 grant timeout, 3 forced grants. This server may need more memory."
+      "StatusReason": "Queries could not get the workspace memory they asked for: peak 1 grant waiter, 1 grant timeout, 3 forced grants. This server may need more memory.",
+      "IsPartial": false
     },
     {
       "Day": "anchor-2d",
@@ -120,7 +124,8 @@
       "MemoryRatio": 0.95000000000000000000,
       "Status": "UNDER_PROVISIONED",
       "StolenMemoryPct": 47.3684210526316,
-      "StatusReason": "Queries could not get the workspace memory they asked for: peak 2 grant waiters, 0 grant timeouts, 5 forced grants. This server may need more memory."
+      "StatusReason": "Queries could not get the workspace memory they asked for: peak 2 grant waiters, 0 grant timeouts, 5 forced grants. This server may need more memory.",
+      "IsPartial": false
     },
     {
       "Day": "anchor-1d",
@@ -130,7 +135,8 @@
       "MemoryRatio": 1.05000000000000000000,
       "Status": "UNDER_PROVISIONED",
       "StolenMemoryPct": 52.3809523809524,
-      "StatusReason": "CPU p95 is 87.0% (threshold: 85%). This server may need more CPU capacity."
+      "StatusReason": "CPU p95 is 87.0% (threshold: 85%). This server may need more CPU capacity.",
+      "IsPartial": false
     }
   ],
   "memoryGrantEfficiency": [

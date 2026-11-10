@@ -209,7 +209,7 @@ VALUES ($1, $2, $3, $4, 'Db', NULL, $5, 'ROWS', $6, NULL, $7, $8)",
         using var doc = await CallAsync(ds, FinOpsUtilizationGoldenLiveTests.ServerNameB, ct: ct);
         var trend = doc.RootElement.GetProperty("provisioning_trend")[0];
         Assert.Equal(
-            new[] { "avg_cpu_pct", "day", "max_cpu_pct", "memory_ratio", "p95_cpu_pct", "verdict" },
+            new[] { "avg_cpu_pct", "day", "max_cpu_pct", "memory_ratio", "p95_cpu_pct", "partial", "verdict" },
             trend.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray());
         Assert.Equal(
             new[]

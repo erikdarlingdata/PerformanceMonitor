@@ -72,6 +72,14 @@ public sealed class ViewerFinOpsServerInventoryCellsTests
                     }
                 }
 
+                /* Pointing at the Status words says what was not collected, and over what window. */
+                CellText(grid, unsampled, "Status");
+                var statusNote = grid.Columns.First(c => HeaderText(c) == "Status").GetCellContent(unsampled) is TextBlock statusCell ? statusCell.ToolTip as string : null;
+                if (statusNote != "No CPU sample in the last 24 hours")
+                {
+                    found.Add($"the unsampled server's Status cell has the tooltip \"{statusNote}\", not what was not collected");
+                }
+
                 return found;
             }
             finally

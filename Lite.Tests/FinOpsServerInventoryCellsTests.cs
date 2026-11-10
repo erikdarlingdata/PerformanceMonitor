@@ -265,6 +265,109 @@ public sealed class FinOpsServerInventoryCellsTests : IDisposable
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
+    /// <summary>A re-read of the collected overlay, and a change of the time display, change the cells of the rows on screen. The
+    /// selected row stays selected and current, the grid keeps the rows it has drawn (rebuilding them drops the keyboard's place
+    /// and the scroll position), and the horizontal scroll stays where the user left it.</summary>
+    [Fact]
+    public async Task AnOverlayReRead_AndATimeDisplayChange_KeepTheSelectedRowAndTheScrollPosition()
+    {
+        var first = Unreachable("inv-cells-selected-a", 1);
+        var second = Unreachable("inv-cells-selected-b", 2);
+        var initializer = await StoreAsync((first, 345), (second, -480));
+        ServerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(60);
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+
+        var problems = OnTheInventory(new LocalDataService(initializer), new[] { first, second }, async (tab, window, grid) =>
+        {
+            var found = new List<string>();
+            var row = grid.Items.OfType<ServerPropertyRow>().FirstOrDefault(r => r.ServerName == second.DisplayName);
+            var status = grid.Columns.FirstOrDefault(c => HeaderText(c) == "Status");
+            var lastUpdated = grid.Columns.FirstOrDefault(c => HeaderText(c) == "Last Updated");
+            if (row is null || status is null || lastUpdated is null)
+            {
+                found.Add("the inventory does not list the second server with a Status and a Last Updated column");
+                return found;
+            }
+
+            grid.SelectedItem = row;
+            grid.CurrentCell = new DataGridCellInfo(row, status);
+            grid.ScrollIntoView(row, grid.Columns[grid.Columns.Count - 1]);
+            Settle(window);
+
+            var drawn = grid.ItemContainerGenerator.ContainerFromItem(row);
+            var scroller = Descendants(grid).OfType<ScrollViewer>().FirstOrDefault();
+            if (drawn is null || scroller is null)
+            {
+                found.Add("the selected row is not drawn, or the grid has no scroll viewer");
+                return found;
+            }
+
+            var offset = scroller.HorizontalOffset;
+            if (offset <= 0)
+            {
+                found.Add("the grid is not scrolled sideways at this width, so the test cannot read a kept scroll position");
+            }
+
+            /* A grid that redraws itself prepares its rows again, which is what takes the keyboard's place with it. */
+            var rowsPrepared = 0;
+            grid.LoadingRow += (_, _) => rowsPrepared++;
+
+            void ExpectKept(string after)
+            {
+                Settle(window);
+                if (rowsPrepared != 0)
+                {
+                    found.Add($"after {after} the grid prepared {rowsPrepared} of its rows again instead of changing the cells in place");
+                    rowsPrepared = 0;
+                }
+
+                if (!ReferenceEquals(grid.SelectedItem, row))
+                {
+                    found.Add($"after {after} the selected server is {(grid.SelectedItem as ServerPropertyRow)?.ServerName ?? "none"}, not {row.ServerName}");
+                }
+
+                if (!ReferenceEquals(grid.CurrentCell.Item, row) || !ReferenceEquals(grid.CurrentCell.Column, status))
+                {
+                    found.Add($"after {after} the current cell is no longer the selected row's Status cell");
+                }
+
+                if (!ReferenceEquals(grid.ItemContainerGenerator.ContainerFromItem(row), drawn))
+                {
+                    found.Add($"after {after} the grid built its rows again; the selected row's place under the keyboard and the scroll position go with them");
+                }
+
+                if (Math.Abs(scroller.HorizontalOffset - offset) > 0.5)
+                {
+                    found.Add($"after {after} the grid is scrolled to {scroller.HorizontalOffset:0.#} px, not the {offset:0.#} px it was left at");
+                }
+            }
+
+            /* The collection brings the second server's first samples, and the overlay is read again. */
+            await SeedCpuAndMemoryAsync(second);
+            await (Task)typeof(FinOpsTab).GetMethod("ReReadServerInventoryOverlayAsync", Instance)!.Invoke(tab, null)!;
+            ExpectKept("an overlay re-read");
+
+            var statusText = status.GetCellContent(row) is TextBlock statusCell ? statusCell.Text : "(the cell is not realized)";
+            if (string.IsNullOrEmpty(row.ProvisioningStatus) || statusText != ProvisioningVerdict.StatusLabel(row.ProvisioningStatus))
+            {
+                found.Add($"after an overlay re-read the Status cell reads \"{statusText}\" for the verdict \"{row.ProvisioningStatus}\"");
+            }
+
+            ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+            ExpectKept("a time display change");
+
+            var updatedText = lastUpdated.GetCellContent(row) is TextBlock updatedCell ? updatedCell.Text : "(the cell is not realized)";
+            if (updatedText != "last known, 2026-11-07 01:30 (UTC-08:00)")
+            {
+                found.Add($"after a time display change the Last Updated cell reads \"{updatedText}\", not the server's own clock");
+            }
+
+            return found;
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
     /// <summary>A row's Last Updated is an instant in UTC. With no clock of its own (a row nothing stamped) it reads the active
     /// tab's clock in Server Time and UTC in UTC, as the other FinOps rows that word their own times do.</summary>
     [Fact]
@@ -437,6 +540,19 @@ public sealed class FinOpsServerInventoryCellsTests : IDisposable
         Panel panel => panel.Children.OfType<TextBlock>().FirstOrDefault()?.Text ?? "",
         _ => "",
     };
+
+    private static IEnumerable<DependencyObject> Descendants(DependencyObject root)
+    {
+        for (var i = 0; i < System.Windows.Media.VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = System.Windows.Media.VisualTreeHelper.GetChild(root, i);
+            yield return child;
+            foreach (var below in Descendants(child))
+            {
+                yield return below;
+            }
+        }
+    }
 
     private static void Settle(Window window)
     {

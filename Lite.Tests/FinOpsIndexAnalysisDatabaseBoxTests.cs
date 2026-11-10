@@ -59,6 +59,26 @@ public sealed class FinOpsIndexAnalysisDatabaseBoxTests : IDisposable
 
         Assert.Equal(new[] { "HrDb", "SalesDb", "WarehouseDb" }, listed.Items);
         Assert.Equal("SalesDb", listed.Text);
+
+        /* The list is a day old and may name a database dropped since, so the box says when it is from. */
+        Assert.NotNull(listed.Note);
+        Assert.StartsWith("Databases as of ", listed.Note, StringComparison.Ordinal);
+        Assert.Contains("no recent database list", listed.Note, StringComparison.Ordinal);
+    }
+
+    /// <summary>A size snapshot older than a week says too little about what the server holds now: the box lists nothing from it
+    /// and still takes a typed name.</summary>
+    [Fact]
+    public async Task WithOnlyASizeSnapshotOlderThanAWeek_TheBoxListsNothing_AndKeepsTheTypedName()
+    {
+        var initializer = await StoreAsync();
+        await SizeSnapshotAsync(TimeSpan.FromDays(21), "HrDb", "RetiredDb", "SalesDb");
+
+        var listed = OnTheBox(new LocalDataService(initializer), typed: "SalesDb");
+
+        Assert.Empty(listed.Items);
+        Assert.Equal("SalesDb", listed.Text);
+        Assert.Null(listed.Note);
     }
 
     [Fact]
@@ -72,6 +92,8 @@ public sealed class FinOpsIndexAnalysisDatabaseBoxTests : IDisposable
 
         Assert.Equal(new[] { "HrDb", "SalesDb" }, listed.Items);
         Assert.Equal("", listed.Text);
+        /* A current list needs no date. */
+        Assert.Null(listed.Note);
     }
 
     private async Task<DuckDbInitializer> StoreAsync()
@@ -130,9 +152,9 @@ public sealed class FinOpsIndexAnalysisDatabaseBoxTests : IDisposable
     /// Opens the FinOps tab over <paramref name="dataService"/> on the STA thread, types <paramref name="typed"/> in the Index Analysis
     /// Database box, runs the tab's own fill of that box once, and returns what the box then lists (in ordinal order) and holds.
     /// </summary>
-    private static (string[] Items, string Text) OnTheBox(LocalDataService dataService, string typed)
+    private static (string[] Items, string Text, string? Note) OnTheBox(LocalDataService dataService, string typed)
     {
-        (string[] Items, string Text) result = (Array.Empty<string>(), "");
+        (string[] Items, string Text, string? Note) result = (Array.Empty<string>(), "", null);
         StaTestThread.Run(async () =>
         {
             var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
@@ -172,7 +194,7 @@ public sealed class FinOpsIndexAnalysisDatabaseBoxTests : IDisposable
                     await (Task)typeof(FinOpsTab).GetMethod("PopulateIndexAnalysisDatabasesAsync", Instance)!.Invoke(tab, new object[] { ServerId })!;
                     window.UpdateLayout();
 
-                    result = (box.Items.OfType<string>().OrderBy(name => name, StringComparer.Ordinal).ToArray(), box.Text);
+                    result = (box.Items.OfType<string>().OrderBy(name => name, StringComparer.Ordinal).ToArray(), box.Text, box.ToolTip as string);
                 }
                 finally
                 {
