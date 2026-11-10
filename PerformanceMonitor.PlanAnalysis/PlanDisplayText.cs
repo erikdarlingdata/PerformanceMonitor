@@ -30,6 +30,12 @@ public static class PlanDisplayText
         plan.ParseError == null ? null : $"This plan couldn't be parsed: {plan.ParseError}";
 
     /// <summary>
+    /// <summary>The Wait Stats card's header text: the total wait time.</summary>
+    public static string WaitStatsHeaderText(long totalWaitMs) => string.Create(CultureInfo.InvariantCulture, $"Wait Stats \u2014 {totalWaitMs:N0}ms total");
+
+    /// <summary>One wait row: its time and how many times it was waited on.</summary>
+    public static string WaitRowText(long waitTimeMs, long waitCount) => string.Create(CultureInfo.InvariantCulture, $"{waitTimeMs:N0} ms ({CountText.Plural(waitCount, "wait")})");
+
     /// The Wait Stats card's header tooltip, matching erikdarlingdata/PerformanceStudio's desktop viewer:
     /// shown only when there are waits to describe.
     /// </summary>

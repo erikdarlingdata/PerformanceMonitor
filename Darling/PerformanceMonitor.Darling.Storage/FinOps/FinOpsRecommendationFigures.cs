@@ -9,6 +9,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using PerformanceMonitor.Common;
 
@@ -493,7 +494,7 @@ public static class FinOpsRecommendationFigures
                 Category = "Databases",
                 Severity = idleDbs.Count >= 3 ? "High" : "Medium",
                 Confidence = "High",
-                Finding = $"{CountText.Plural(idleDbs.Count, "idle database")} consuming {totalSizeGb:N1}GB",
+                Finding = string.Create(CultureInfo.InvariantCulture, $"{CountText.Plural(idleDbs.Count, "idle database")} consuming {totalSizeGb:N1}GB"),
                 Detail = $"No query activity in 7 days: {dbNames}" +
                          (idleDbs.Count > 5 ? $" and {idleDbs.Count - 5} more" : "") +
                          ". Consider archiving or removing these databases.",
