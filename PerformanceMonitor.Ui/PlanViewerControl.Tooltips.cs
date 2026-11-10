@@ -20,6 +20,19 @@ public partial class PlanViewerControl
 {
     #region Tooltips
 
+    /// <summary>
+    /// The text colour of a plan warning by its severity, from the theme: <c>ErrorBrush</c>, <c>WarningTextBrush</c> and
+    /// <c>InfoTextBrush</c>, each 4.5:1 or better on the tooltip and panel backgrounds of the three themes (#8540). The fixed colours
+    /// of <see cref="PlanWarningDisplay.WarningSeverityColorHex"/> are the fallback for a host whose theme has no such key.
+    /// </summary>
+    private SolidColorBrush WarningSeverityBrush(PlanWarningSeverity severity)
+    {
+        var key = severity == PlanWarningSeverity.Critical ? "ErrorBrush"
+            : severity == PlanWarningSeverity.Warning ? "WarningTextBrush" : "InfoTextBrush";
+        return (TryFindResource(key) as SolidColorBrush)
+            ?? new SolidColorBrush((Color)ColorConverter.ConvertFromString(PlanWarningDisplay.WarningSeverityColorHex(severity)));
+    }
+
     private ToolTip BuildNodeTooltip(PlanNode node, List<PlanWarning>? allWarnings = null)
     {
         var tip = new ToolTip
@@ -181,12 +194,12 @@ public partial class PlanViewerControl
 
                 foreach (var (type, severity, count) in distinct)
                 {
-                    var warnColor = PlanWarningDisplay.WarningSeverityColorHex(severity);
+                    var warnBrush = WarningSeverityBrush(severity);
                     var label = count > 1 ? $"\u26A0 {type} ({count})" : $"\u26A0 {type}";
                     stack.Children.Add(new TextBlock
                     {
                         Text = label,
-                        Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor)),
+                        Foreground = warnBrush,
                         FontSize = 11,
                         Margin = new Thickness(0, 2, 0, 0)
                     });
@@ -197,11 +210,11 @@ public partial class PlanViewerControl
                 // Individual node: show full warning messages
                 foreach (var w in warnings)
                 {
-                    var warnColor = PlanWarningDisplay.WarningSeverityColorHex(w.Severity);
+                    var warnBrush = WarningSeverityBrush(w.Severity);
                     stack.Children.Add(new TextBlock
                     {
                         Text = $"\u26A0 {w.WarningType}: {w.Message}",
-                        Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor)),
+                        Foreground = warnBrush,
                         FontSize = 11,
                         TextWrapping = TextWrapping.Wrap,
                         Margin = new Thickness(0, 2, 0, 0)

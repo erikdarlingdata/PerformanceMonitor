@@ -62,10 +62,9 @@ public static class PlanWarningDisplay
         pct >= 100 ? $"{pct:N0}" : $"{pct:N1}";
 
     /// <summary>
-    /// #4572: the one place a warning's severity becomes a colour. Mirrors PerformanceStudio's
-    /// <c>WarningSeverityBrush</c> (one helper instead of the same ternary repeated at every
-    /// warning-rendering site), but keeps PM's existing literal hex values rather than PS's theme
-    /// tokens, so this change carries no visual difference.
+    /// #4572: a warning's severity as a fixed colour, tuned for a dark background. The plan viewer paints warning text with
+    /// theme brushes per severity (<c>PlanViewerControl.WarningSeverityBrush</c>, as PerformanceStudio's helper of that name
+    /// does) and falls back to these values only when a host's theme lacks the key.
     /// </summary>
     public static string WarningSeverityColorHex(PlanWarningSeverity severity) =>
         severity == PlanWarningSeverity.Critical ? "#E57373"
