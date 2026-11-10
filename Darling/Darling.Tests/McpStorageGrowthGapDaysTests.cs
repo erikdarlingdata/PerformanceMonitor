@@ -49,4 +49,23 @@ public sealed class McpStorageGrowthGapDaysTests
 
         Assert.Equal(JsonValueKind.Number, cells[4][0].ValueKind);
     }
+
+    /// <summary>The hover's rule for a blank cell: a day no object has a sample on is a gap day, and one object's blank day is not.</summary>
+    [Fact]
+    public void ADayNoObjectHasASampleOn_IsAGapDay_AndOneObjectsBlankDayIsNot()
+    {
+        var matrix = FinOpsHeatmapBuilder.WithEveryCalendarDay(FinOpsHeatmapBuilder.BuildMatrix(new[] { "a", "b" }, new[]
+        {
+            new FinOpsObjectDaySample("a", new DateTime(2026, 10, 30), 5),
+            new FinOpsObjectDaySample("b", new DateTime(2026, 10, 31), 7),
+            new FinOpsObjectDaySample("a", new DateTime(2026, 11, 2), 6),
+        }));
+
+        Assert.Equal(4, matrix.Days.Length);
+        Assert.False(FinOpsHeatmapBuilder.IsGapDay(matrix, 0));
+        Assert.False(FinOpsHeatmapBuilder.IsGapDay(matrix, 1));
+        Assert.True(FinOpsHeatmapBuilder.IsGapDay(matrix, 2));
+        Assert.False(FinOpsHeatmapBuilder.IsGapDay(matrix, 3));
+        Assert.False(FinOpsHeatmapBuilder.IsGapDay(matrix, 9));
+    }
 }

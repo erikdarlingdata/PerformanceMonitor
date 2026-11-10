@@ -141,6 +141,21 @@ namespace PerformanceMonitor.Common
             };
         }
 
+        /// <summary>True when column <paramref name="column"/> of <paramref name="matrix"/> holds no value in any row: a day no object
+        /// had a sample on, which is a collection gap and not one object's missing day.</summary>
+        public static bool IsGapDay(FinOpsHeatmapMatrix matrix, int column)
+        {
+            if (matrix == null) throw new ArgumentNullException(nameof(matrix));
+            if (column < 0 || column >= matrix.Intensities.GetLength(1)) return false;
+
+            for (int r = 0; r < matrix.Intensities.GetLength(0); r++)
+            {
+                if (matrix.Intensities[r, column] > 0) return false;
+            }
+
+            return true;
+        }
+
         /// <summary>
         /// Puts every cell of a heatmap matrix into one of <paramref name="bandCount"/> discrete bands, the discrete form of
         /// the desktop's single colour scale. Each cell above 0 is placed by <c>log1p(value)</c>, normalised across the
