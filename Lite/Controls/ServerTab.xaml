@@ -2911,8 +2911,9 @@
                             </Grid.RowDefinitions>
                             <!-- #8226: the two cycle summaries share one card over the grid, with a semibold title and a muted subtitle. #8307: the card
                                  sits on the Health Summary sub-tab, the one that opens first, so the Collection Log and Duration Trends sub-tabs keep the
-                                 page's whole height. -->
-                            <ui:ChartPanel Grid.Row="0" x:Name="CollectionHealthCard" Title="Collection Cycles" Subtitle="Skipped slots and connection failures in the last 24 hours" Margin="0,0,0,8">
+                                 page's whole height. #8533: the subtitle gives each line its own window, since neither follows the range picker: the
+                                 skipped-cycles line is a 24 h read, and the connection-failure line reads the grid's rows, which hold the trailing 7 days. -->
+                            <ui:ChartPanel Grid.Row="0" x:Name="CollectionHealthCard" Title="Collection Cycles" Subtitle="Skipped slots in the last 24 hours, connection failures in the last 7 days" Margin="0,0,0,8">
                                 <StackPanel>
                                     <!-- #5643: the late collection cycles of the last 24 h. Always shown, above the grid, so a reader sees at once whether
                                          the loop has been skipping slots; the all-clear says so plainly. -->
