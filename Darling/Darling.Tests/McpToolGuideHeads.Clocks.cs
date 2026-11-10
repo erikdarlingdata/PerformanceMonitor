@@ -48,15 +48,19 @@ public sealed class McpToolGuideHeadsClocksTests
         "get_procedure_duration_trend",
         "get_query_store_duration_trend",
         "get_query_heatmap",
+        "get_blocking_stats",
         "get_server_trend",
     ];
 
+    /// <summary>Every PostgreSQL time series: the four collection_time trends and the Performance Insights CPU
+    /// series, whose points are stamped sample_time.</summary>
     private static readonly string[] PostgresTrends =
     [
         "get_pg_wait_trend",
         "get_pg_query_duration_trend",
         "get_pg_io_trend",
         "get_pg_database_trend",
+        "get_pg_cpu_utilization",
     ];
 
     /// <summary>The text that explains a tool's fields: the guide tail when the description is split, else the
@@ -96,15 +100,18 @@ public sealed class McpToolGuideHeadsClocksTests
         Assert.Contains(OffsetPointer, text, StringComparison.Ordinal);
     }
 
-    /// <summary>A PostgreSQL target has no get_server_properties offset to point at, so its trends name the clock
-    /// without the pointer.</summary>
+    /// <summary>A PostgreSQL target has no get_server_properties offset to point at, so its series name the clock
+    /// without the pointer, each by its own stamp key (collection_time on the trends, sample_time on the CPU
+    /// series).</summary>
     [Fact]
-    public void EveryPostgresTrend_NamesCollectionTimeAsUtc()
+    public void EveryPostgresTimeSeries_NamesItsStampAsUtc()
     {
         var missing = PostgresTrends
-            .Where(tool => !FieldText(McpToolGuideTests.Served(tool)).Contains("collection_time is UTC, not the monitored server's clock", StringComparison.Ordinal))
+            .Where(tool => !FieldText(McpToolGuideTests.Served(tool)).Contains("is UTC, not the monitored server's clock", StringComparison.Ordinal))
             .ToList();
-        Assert.True(missing.Count == 0, "PostgreSQL trends whose text does not say collection_time is UTC: " + string.Join(", ", missing));
+        Assert.True(missing.Count == 0, "PostgreSQL series whose text does not say their stamp is UTC: " + string.Join(", ", missing));
+        Assert.Contains("collection_time is UTC", FieldText(McpToolGuideTests.Served("get_pg_wait_trend")), StringComparison.Ordinal);
+        Assert.Contains("sample_time is UTC", FieldText(McpToolGuideTests.Served("get_pg_cpu_utilization")), StringComparison.Ordinal);
     }
 
     /// <summary>The store's own slow-read log is stamped on the store's clock, and its guide says so. get_read_latency

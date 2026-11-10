@@ -47,6 +47,7 @@ public sealed class McpToolGuideHeadsClocksTests
         "get_procedure_duration_trend",
         "get_query_store_duration_trend",
         "get_query_heatmap",
+        "get_blocking_stats",
     ];
 
     /// <summary>The text that explains a tool's fields: the guide tail when the description is split, else the

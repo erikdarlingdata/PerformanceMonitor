@@ -605,6 +605,11 @@ internal static class McpHelpers
     public const string UtcCollectionTimeDescription =
         " collection_time is UTC, not the monitored server's clock.";
 
+    /// <summary>The clock sentence of a PostgreSQL target's series whose points are stamped <c>sample_time</c>
+    /// (get_pg_cpu_utilization's Performance Insights buckets).</summary>
+    public const string UtcSampleTimeDescription =
+        " sample_time is UTC, not the monitored server's clock.";
+
     /// <summary>
     /// #4966: <c>effective_start</c> as every window-floor payload prints it, always as UTC with the trailing Z, on
     /// both SKUs. The served start is either the start that was asked for (already UTC, so a plain "o" printed the Z)
