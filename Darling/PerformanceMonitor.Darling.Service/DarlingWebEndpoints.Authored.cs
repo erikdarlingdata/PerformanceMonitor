@@ -89,6 +89,16 @@ public static partial class DarlingWebEndpoints
 
             using var run = new WebRouteRun(readLatencyRecorder, CatalogRoute, ReadWindowBand.None, context, readScope.Scope);
             var serverName = context.Request.Query["server"].ToString();
+
+            /* The registry could not be read: a fault of the store, for a scoped reader and for one with no scope. The run completes
+               with the sentence's outcome, the sentence is logged once, and the answer is the fixed failure body. */
+            IResult RegistryFault(string sentence)
+            {
+                run.Complete(ToolResultOutcome(sentence, context.RequestAborted));
+                ThrowIfCallerGone(sentence, context.RequestAborted);
+                return ToHttpResult(sentence, DarlingWebFailureLog.RouteOf(context.Request), logger, run.ElapsedMilliseconds, context.RequestAborted);
+            }
+
             if (DarlingWebSeat.FromContext(context).AllowedTagIds is { } catalogTags)
             {
                 if (string.IsNullOrWhiteSpace(serverName))
@@ -106,10 +116,7 @@ public static partial class DarlingWebEndpoints
                 var authorized = await AuthorizedWebServerRowAsync(postgres, context, catalogTags);
                 if (authorized.StoreFault is { } registryFault)
                 {
-                    /* The registry could not be read: a fault of the store, logged once and answered with the fixed failure body. */
-                    run.Complete(ToolResultOutcome(registryFault, context.RequestAborted));
-                    ThrowIfCallerGone(registryFault, context.RequestAborted);
-                    return ToHttpResult(registryFault, DarlingWebFailureLog.RouteOf(context.Request), logger, run.ElapsedMilliseconds, context.RequestAborted);
+                    return RegistryFault(registryFault);
                 }
 
                 if (authorized.Row is not { } authorizedServer)
@@ -133,6 +140,12 @@ public static partial class DarlingWebEndpoints
             var (resolved, resolveError) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, context.RequestAborted);
             if (resolveError != null)
             {
+                /* The registry-read sentence is not a refusal envelope: it is the store's fault, not an answer about the name. */
+                if (resolveError.StartsWith(DarlingServerResolver.RegistryReadFaultPrefix, StringComparison.Ordinal))
+                {
+                    return RegistryFault(resolveError);
+                }
+
                 run.Complete(ReadOutcome.Ok);
                 return JsonNodeResult(JsonNode.Parse(resolveError)!.AsObject());
             }
