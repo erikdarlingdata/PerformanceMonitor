@@ -26,7 +26,7 @@ namespace PerformanceMonitorLite.Tests;
 /// </summary>
 public sealed class AnalyzeServerFindingsPackingTests
 {
-    private static JsonObject Finding(double severity, string category, string headline, int drillDownBytes, int remediationBytes = 200, int storyBytes = 300) => new()
+    private static JsonObject Finding(double severity, string category, string headline, int drillDownBytes, int remediationBytes = 200, int storyBytes = 300, int disclosureBytes = 0) => new()
     {
         ["severity"] = severity,
         ["category"] = category,
@@ -35,6 +35,7 @@ public sealed class AnalyzeServerFindingsPackingTests
         ["advice"] = new JsonObject { ["headline"] = headline, ["investigation"] = "look at it", ["remediation"] = "fix it" },
         ["suggested_remediation_sql"] = null,
         ["remediation_command"] = new string('r', remediationBytes),
+        ["destructive_risk_disclosure"] = disclosureBytes == 0 ? null : new string('x', disclosureBytes),
     };
 
     private static (PackedFindings Packed, string Json, JsonObject Root) Pack(params JsonObject[] findings)
@@ -55,36 +56,43 @@ public sealed class AnalyzeServerFindingsPackingTests
         root["findings"]!.AsArray().Select(f => f!["advice"]!["headline"]!.GetValue<string>()).ToArray();
 
     [Fact]
-    public void ALargeSecondFinding_DoesNotCostTheSmallThirdItsPlace_AndTheNoteNamesTheSecond()
+    public void ALargeSecondFinding_IsTrimmedToTheRoomLeft_AndTheSmallThirdStillRides()
     {
-        /* The second is 30 KB: it fits a reply of its own, but not beside a 6 KB first. The third is small. */
-        var (_, json, root) = Pack(
+        /* The second is 30 KB: it fits a reply of its own, but not beside a 6 KB first. It is trimmed to the room left
+           (its drill-down rows are cut), not skipped, because an as_of run persisted nothing to read it from. */
+        var (packed, json, root) = Pack(
             Finding(0.9, "waits", "first", 6_000),
             Finding(0.8, "memory", "second", 30_000),
             Finding(0.7, "config", "third", 1_000));
 
         Assert.True(Encoding.UTF8.GetByteCount(json) <= McpResponseBudget.DefaultBytes);
-        Assert.Equal(["first", "third"], Headlines(root));
-        Assert.Equal(2, root["findings_returned"]!.GetValue<int>());
+        Assert.Equal(["first", "second", "third"], Headlines(root));
+        Assert.Equal(3, root["findings_returned"]!.GetValue<int>());
         Assert.Equal(3, root["finding_count"]!.GetValue<int>());
+        Assert.Equal(1, packed.TrimmedCount);
+        Assert.Empty(packed.LeftOut);
+        Assert.Null(root["findings_left_out"]);
         Assert.True(root["truncated"]!.GetValue<bool>());
 
-        var leftOut = root["findings_left_out"]!.AsArray();
-        var entry = Assert.Single(leftOut);
-        Assert.Equal("memory", entry!["category"]!.GetValue<string>());
-        Assert.Equal("second", entry["headline"]!.GetValue<string>());
+        var second = root["findings"]![1]!.AsObject();
+        Assert.Null(second["drill_down"]);
+        Assert.Equal(200, second["remediation_command"]!.GetValue<string>().Length);
+        var cut = second["trimmed"]!["fields"]!.AsArray();
+        Assert.Equal("drill_down", Assert.Single(cut)!["field"]!.GetValue<string>());
+        Assert.Equal(30_002, cut[0]!["bytes"]!.GetValue<int>());
+        Assert.Null(root["findings"]![0]!["trimmed"]);
+        Assert.Null(root["findings"]![2]!["trimmed"]);
 
         var note = root["truncation_note"]!.GetValue<string>();
-        Assert.Contains("1 did not fit", note, StringComparison.Ordinal);
-        Assert.Contains("findings_left_out", note, StringComparison.Ordinal);
+        Assert.Contains("1 did not fit in full and was trimmed", note, StringComparison.Ordinal);
         Assert.DoesNotContain("only", note, StringComparison.Ordinal);
         Assert.Contains("get_analysis_findings", note, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void EverySmallerFindingThatFits_IsReturnedInSeverityOrder_PastSeveralThatDoNot()
+    public void EverySmallerFindingThatFits_IsReturnedInSeverityOrder_AndTheLargeOnesRideTrimmed()
     {
-        var (_, _, root) = Pack(
+        var (packed, _, root) = Pack(
             Finding(0.95, "a", "a1", 10_000),
             Finding(0.90, "b", "b1", 28_000),
             Finding(0.85, "c", "c1", 5_000),
@@ -92,8 +100,11 @@ public sealed class AnalyzeServerFindingsPackingTests
             Finding(0.75, "e", "e1", 4_000),
             Finding(0.70, "f", "f1", 500));
 
-        Assert.Equal(["a1", "c1", "e1", "f1"], Headlines(root));
-        Assert.Equal(["b1", "d1"], root["findings_left_out"]!.AsArray().Select(e => e!["headline"]!.GetValue<string>()).ToArray());
+        Assert.Equal(["a1", "b1", "c1", "d1", "e1", "f1"], Headlines(root));
+        Assert.Equal(2, packed.TrimmedCount);
+        Assert.Empty(packed.LeftOut);
+        Assert.NotNull(root["findings"]![1]!["trimmed"]);
+        Assert.NotNull(root["findings"]![3]!["trimmed"]);
     }
 
     [Fact]
@@ -123,16 +134,68 @@ public sealed class AnalyzeServerFindingsPackingTests
     }
 
     [Fact]
-    public void AFindingTooLargeEvenTrimmed_IsDropped_AndListedWithTheOthers()
+    public void ASecondFindingTooLargeEvenTrimmed_IsLeftOutAndNamed_AndTheThirdStillRides()
     {
-        /* story_text is not a trimmable field, so this one cannot be cut down to fit. */
-        var (_, json, root) = Pack(
-            Finding(0.9, "plan", "untrimmable", drillDownBytes: 10_000, storyBytes: 40_000),
-            Finding(0.8, "waits", "small", 1_000));
+        /* story_text is not a trimmable field, so the second cannot be cut down to fit. */
+        var (packed, json, root) = Pack(
+            Finding(0.9, "waits", "first", 6_000),
+            Finding(0.8, "plan", "untrimmable", drillDownBytes: 10_000, storyBytes: 40_000),
+            Finding(0.7, "config", "third", 1_000));
 
         Assert.True(Encoding.UTF8.GetByteCount(json) <= McpResponseBudget.DefaultBytes);
-        Assert.Equal(["small"], Headlines(root));
-        Assert.Equal("untrimmable", Assert.Single(root["findings_left_out"]!.AsArray())!["headline"]!.GetValue<string>());
+        Assert.Equal(["first", "third"], Headlines(root));
+        Assert.Equal(0, packed.TrimmedCount);
+        var entry = Assert.Single(root["findings_left_out"]!.AsArray());
+        Assert.Equal("plan", entry!["category"]!.GetValue<string>());
+        Assert.Equal("untrimmable", entry["headline"]!.GetValue<string>());
+
+        var note = root["truncation_note"]!.GetValue<string>();
+        Assert.Contains("1 did not fit", note, StringComparison.Ordinal);
+        Assert.Contains("findings_left_out", note, StringComparison.Ordinal);
+        Assert.Contains("get_analysis_findings", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARemediationCommand_NeverRidesWithoutItsRiskDisclosure_WhenTheRemediationUnitIsTrimmed()
+    {
+        /* The second finding's disclosure (14 KB) is larger than its command (1.5 KB) and it has no drill-down rows, so only
+           the remediation unit can be cut. Cutting the largest field first would drop the disclosure and keep the command. */
+        var (packed, json, root) = Pack(
+            Finding(0.9, "waits", "first", 20_000, disclosureBytes: 50),
+            Finding(0.8, "config", "second", drillDownBytes: 0, remediationBytes: 1_500, disclosureBytes: 14_000),
+            Finding(0.7, "memory", "third", 1_000, disclosureBytes: 50));
+
+        Assert.True(Encoding.UTF8.GetByteCount(json) <= McpResponseBudget.DefaultBytes);
+        Assert.Equal(["first", "second", "third"], Headlines(root));
+        Assert.Equal(1, packed.TrimmedCount);
+
+        var second = root["findings"]![1]!.AsObject();
+        Assert.Null(second["remediation_command"]);
+        Assert.Null(second["destructive_risk_disclosure"]);
+        var fields = second["trimmed"]!["fields"]!.AsArray().Select(c => c!["field"]!.GetValue<string>()).ToArray();
+        Assert.Contains("remediation_command", fields);
+        Assert.Contains("destructive_risk_disclosure", fields);
+
+        foreach (var finding in root["findings"]!.AsArray())
+        {
+            Assert.False(
+                finding!["remediation_command"] is not null && finding["destructive_risk_disclosure"] is null,
+                "a finding carried its remediation command without its risk disclosure");
+        }
+    }
+
+    [Fact]
+    public void WhenCuttingTheDrillDownIsEnough_TheRemediationAndItsDisclosureStay()
+    {
+        var (_, _, root) = Pack(
+            Finding(0.9, "waits", "first", 6_000),
+            Finding(0.8, "config", "second", drillDownBytes: 30_000, remediationBytes: 1_500, disclosureBytes: 2_000));
+
+        var second = root["findings"]![1]!.AsObject();
+        Assert.Null(second["drill_down"]);
+        Assert.Equal(1_500, second["remediation_command"]!.GetValue<string>().Length);
+        Assert.Equal(2_000, second["destructive_risk_disclosure"]!.GetValue<string>().Length);
+        Assert.Equal("drill_down", Assert.Single(second["trimmed"]!["fields"]!.AsArray())!["field"]!.GetValue<string>());
     }
 
     [Fact]

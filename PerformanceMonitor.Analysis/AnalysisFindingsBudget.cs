@@ -76,20 +76,26 @@ public sealed class PackedFindings
 /// all fit <see cref="McpResponseBudget.DefaultBytes"/>. The findings ride severity-first. #8081 cut the reply at the first
 /// finding that did not fit, so one large second finding left out every smaller one behind it, however much room was
 /// left (one reply of 7,892 bytes said only 1 of 7 findings fit the 32,768-byte budget). The packer now keeps going past a
-/// finding that does not fit, so every smaller finding that fits is returned, still in severity order. A finding that is
-/// bigger than the whole budget on its own is trimmed rather than dropped: its largest parts (drill-down rows, remediation
-/// SQL) are set to null, largest first, until it fits what is left, and the finding carries <c>trimmed</c> naming what was
-/// cut. Only a finding that does not fit even trimmed is dropped. Every finding left out is listed, by category and
-/// headline, in <c>findings_left_out</c>. Shared so the two tools cannot drift on the wording or the order.
+/// finding that does not fit, so every smaller finding that fits is returned, still in severity order. A finding that does
+/// not fit the room left is trimmed to fit that room rather than dropped, because a run anchored with as_of persists
+/// nothing and a headline alone would leave the reader no way to see the finding: its bulky parts are set to null, the
+/// drill-down rows and side cards first and largest first, then the remediation commands together with the risk text
+/// that goes with them, and the finding carries <c>trimmed</c> naming what was cut. Only a finding that does not fit even
+/// fully trimmed is left out, and every finding left out is listed, by category and headline, in
+/// <c>findings_left_out</c>. Shared so the two tools cannot drift on the wording or the order.
 /// </summary>
 public static class AnalysisFindingsBudget
 {
-    /// <summary>The finding fields that carry bulk and can be cut without losing what the finding is: the drill-down rows, the
-    /// remediation commands and their projections, the risk disclosure and the side-lever cards. Cut largest first.</summary>
-    private static readonly string[] TrimmableFields =
+    /// <summary>The bulky finding fields that can be cut one at a time, largest first, without losing what the finding is or
+    /// leaving a command bare: the drill-down rows, the side-lever cards and the next-tool hints.</summary>
+    private static readonly string[] IndependentTrimmableFields = ["drill_down", "side_leaves", "next_tools"];
+
+    /// <summary>The remediation commands, their projection and the risk text that warns about them. They go together or not at
+    /// all: a reply must never carry a command without the disclosure that says what it does, so these are cut as one unit,
+    /// and only after every independent field has been tried.</summary>
+    private static readonly string[] RemediationUnitFields =
     [
-        "drill_down", "suggested_remediation_sql", "remediation_command", "structured_remediation",
-        "destructive_risk_disclosure", "side_leaves", "next_tools",
+        "suggested_remediation_sql", "remediation_command", "structured_remediation", "destructive_risk_disclosure",
     ];
 
     /// <summary>
@@ -146,13 +152,9 @@ public static class AnalysisFindingsBudget
                 continue;
             }
 
-            /* Does not fit beside what is already kept. One that would fit a reply of its own is left out (and listed): a
-               smaller finding behind it may still fit. One that is over the whole budget even alone is trimmed to what is left. */
-            if (Fits(Candidate([findings[i]], new HashSet<int> { i }, 0)))
-            {
-                continue;
-            }
-
+            /* Does not fit beside what is already kept: trim it to the room left, whether or not it would fit a reply of its
+               own (a run anchored with as_of persisted nothing, so a headline alone leaves no way to read it). It is left out
+               and listed only when even the fully trimmed form does not fit. The smaller findings behind it are tried next. */
             var trimmed = TrimToFit(findings[i], node =>
             {
                 var attempt = new List<JsonNode>(kept) { node };
@@ -170,8 +172,10 @@ public static class AnalysisFindingsBudget
         return (packed, build(packed));
     }
 
-    /// <summary>Cuts the finding's bulky fields, largest first, until <paramref name="fits"/> says the reply holds; null when even
-    /// every cut does not make it fit. Works on a copy and flags the copy with <c>trimmed</c>.</summary>
+    /// <summary>Cuts the finding's bulky fields until <paramref name="fits"/> says the reply holds, and returns null when even
+    /// every cut does not make it fit. The independent fields (drill-down rows, side cards, next-tool hints) go largest first.
+    /// If that is not enough, the remediation fields and the risk disclosure go together as one unit. Works on a copy and flags
+    /// the copy with <c>trimmed</c>.</summary>
     private static JsonObject? TrimToFit(JsonNode finding, Func<JsonNode, bool> fits)
     {
         if (finding is not JsonObject original)
@@ -180,28 +184,35 @@ public static class AnalysisFindingsBudget
         }
 
         var copy = (JsonObject)original.DeepClone();
-        var candidates = new List<(string Field, int Bytes)>();
-        foreach (var field in TrimmableFields)
+        var cut = new List<(string Field, int Bytes)>();
+
+        bool CutAndCheck(IEnumerable<(string Field, int Bytes)> fields)
         {
-            if (copy[field] is { } value)
+            foreach (var (field, bytes) in fields)
             {
-                candidates.Add((field, Encoding.UTF8.GetByteCount(value.ToJsonString())));
+                copy[field] = null;
+                cut.Add((field, bytes));
             }
+
+            Flag(copy, cut);
+            return fits(copy);
         }
 
-        var cut = new List<(string Field, int Bytes)>();
-        foreach (var (field, bytes) in candidates.OrderByDescending(c => c.Bytes))
+        List<(string Field, int Bytes)> Present(string[] names) =>
+            names.Where(n => copy[n] is not null)
+                .Select(n => (n, Encoding.UTF8.GetByteCount(copy[n]!.ToJsonString())))
+                .ToList();
+
+        foreach (var candidate in Present(IndependentTrimmableFields).OrderByDescending(c => c.Bytes))
         {
-            copy[field] = null;
-            cut.Add((field, bytes));
-            Flag(copy, cut);
-            if (fits(copy))
+            if (CutAndCheck([candidate]))
             {
                 return copy;
             }
         }
 
-        return null;
+        var unit = Present(RemediationUnitFields);
+        return unit.Count > 0 && CutAndCheck(unit) ? copy : null;
     }
 
     private static void Flag(JsonObject finding, List<(string Field, int Bytes)> cut)
@@ -215,7 +226,7 @@ public static class AnalysisFindingsBudget
         finding["trimmed"] = new JsonObject
         {
             ["fields"] = fields,
-            ["note"] = "This finding alone was larger than the " + McpResponseBudget.DefaultBytes.ToString("#,0", CultureInfo.InvariantCulture)
+            ["note"] = "This finding did not fit in the room left under the " + McpResponseBudget.DefaultBytes.ToString("#,0", CultureInfo.InvariantCulture)
                 + "-byte response budget, so the listed fields (with the bytes each held) were set to null. Everything else on it is as analyzed.",
         };
     }
@@ -239,13 +250,16 @@ public static class AnalysisFindingsBudget
 
         if (packed.TrimmedCount > 0)
         {
-            note.Append(CultureInfo.InvariantCulture, $"; {packed.TrimmedCount} {(packed.TrimmedCount == 1 ? "was" : "were")} larger than the whole budget and {(packed.TrimmedCount == 1 ? "was" : "were")} trimmed (the finding's trimmed field names what was cut)");
+            note.Append(CultureInfo.InvariantCulture, $"; {packed.TrimmedCount} did not fit in full and {(packed.TrimmedCount == 1 ? "was" : "were")} trimmed to fit the room left (the finding's trimmed field names what was cut)");
         }
 
         note.Append(". A smaller finding behind a larger one is still returned. finding_count counts every finding.");
         if (packed.LeftOut.Count == 0)
         {
-            return note.ToString();
+            /* Trimmed only: every finding is here, but its cut parts are not. Say where to read them. */
+            return persisted
+                ? note + " This run persisted them all: get_analysis_findings returns each finding's drill-down rows (include_drilldown true), or narrow hours_back so fewer findings share the budget."
+                : note + " This run was anchored with as_of, so its findings were not persisted and the cut parts are not in the store: narrow hours_back (as_of still ends the window) so fewer findings share the budget, or run without as_of to analyze and persist the present.";
         }
 
         return persisted

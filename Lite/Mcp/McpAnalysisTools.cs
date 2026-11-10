@@ -252,8 +252,8 @@ public sealed class McpAnalysisTools
             var findingLabels = findings.Select(f => new FindingLabel(f.Category, FactAdvice.GetForFinding(f)?.Headline ?? f.RootFactKey)).ToList();
 
             /* #8081, #8569: the findings ride severity-first, and the reply is packed to the shared response budget in that
-               order, skipping a finding that does not fit so every smaller one that does is still returned. A finding larger
-               than the whole budget comes back trimmed and flagged. truncated / findings_returned / findings_left_out /
+               order. A finding that does not fit the room left is trimmed to it and flagged (left out and listed only when even
+               the trimmed form does not fit), and the smaller findings behind it are still tried. truncated / findings_returned / findings_left_out /
                truncation_note say what was left off and where it is read. finding_count still counts every finding, and an
                unanchored run persisted them all before this cut. */
             return AnalysisFindingsBudget.Pack(findingNodes, findingLabels, packed => JsonSerializer.Serialize(packed.Annotate(JsonSerializer.SerializeToNode(collection.Attach(new
