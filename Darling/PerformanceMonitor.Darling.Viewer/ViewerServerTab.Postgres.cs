@@ -815,13 +815,13 @@ public partial class ViewerServerTab
         if (queuedCount == 0)
         {
             return new PanelNoteText(
-                $"No lock was waiting in any of {totalCaptures:N0} captures. Every lock held in this window was granted.",
-                $"No lock was waiting in any of {totalCaptures:N0} captures — every lock held in this "
+                $"No lock was waiting in any of {CountText.Plural(totalCaptures, "capture")}. Every lock held in this window was granted.",
+                $"No lock was waiting in any of {CountText.Plural(totalCaptures, "capture")} — every lock held in this "
                 + "window was granted, which is the healthy answer rather than a missing read.");
         }
 
         return new PanelNoteText(
-            $"{queuedCount:N0} lock {(queuedCount == 1 ? "queue" : "queues")} across {totalCaptures:N0} captures.",
+            $"{CountText.Plural(queuedCount, "lock queue")} across {CountText.Plural(totalCaptures, "capture")}.",
             $"{CountText.Plural(queuedCount, "lock queue")} across {CountText.Plural(totalCaptures, "capture")}. These are SAMPLES, "
             + "so the capture columns are the denominator: a queue seen once in 60 captures is a blip, "
             + "and one seen in 55 is a standing problem. The Mode column decides the remedy — an "
@@ -961,7 +961,7 @@ public partial class ViewerServerTab
                 + "DATABASE, so it may be installed in one database and not another - the Extensions "
                 + "panel says which. Note also that its sample_rate defaults to 1/max_connections, so a "
                 + "lightly-used database can genuinely record nothing.")
-            : new PanelNoteText($"{CountText.Plural(rows.Count, "predicate")}, sampled at {sampled:P2} of executions - these counts are a "
+            : new PanelNoteText(PgDisplay.PredicateStatsSummary(rows.Count, sampled) + " - these counts are a "
               + "SAMPLE, so a small number means the sampler fired rarely rather than the predicate "
               + "being rare. Filtered % with no supporting index is the index candidate. "
               + $"{CountText.Plural(misestimated, "predicate")} {(misestimated == 1 ? "shows" : "show")} an estimate error of 10x or worse, which is a "
@@ -1441,7 +1441,7 @@ public partial class ViewerServerTab
               + "server is cascading to a downstream of its own. On a primary it means nothing is "
               + "replicating from it, which is either correct or the finding."
             : $"{CountText.Plural(rows.Count, "standby connection")}. The worst {(rows.Count == 1 ? "it" : "any of them")} fell behind in this window was "
-              + $"{worst:N0} bytes of unapplied WAL — that column, not the current one, is what catches a "
+              + string.Create(CultureInfo.InvariantCulture, $"{worst:N0} bytes of unapplied WAL — that column, not the current one, is what catches a ")
               + "replica that drifts far behind and recovers before anybody looks. Rank on BYTES rather than "
               + "the lag columns: measured against a stalled standby, the time lag read 2.8 seconds for a "
               + "33.7 MB backlog, because it times the round trip of the last replayed record rather than "
@@ -1644,7 +1644,7 @@ public partial class ViewerServerTab
               + "covered, and when this does record it records EVERY btree at any size, which is why its "
               + "index count exceeds the usage panel's. " + coverage.Message
             : $"ESTIMATED from catalog statistics - no index page is read. About "
-              + $"{page.ReclaimableBytesShown:N0} bytes look reclaimable across {CountText.Plural(rows.Count, "index", "indexes")}, "
+              + string.Create(CultureInfo.InvariantCulture, $"{page.ReclaimableBytesShown:N0} bytes look reclaimable across {CountText.Plural(rows.Count, "index", "indexes")}, ")
               + "and the answered rows are ranked by that figure: a percentage ranks the wrong thing, "
               + "since a tiny index at 20% is worth kilobytes next to a large one at 70%. Measured against "
               + "pgstatindex ground truth, median absolute error is 2.79 percentage points and p90 is 6.63 "

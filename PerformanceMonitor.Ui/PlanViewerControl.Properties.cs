@@ -781,7 +781,7 @@ public partial class PlanViewerControl
             {
                 AddPropertySection("Wait Stats");
                 foreach (var w in s.WaitStats.OrderByDescending(w => w.WaitTimeMs))
-                    AddPropertyRow(w.WaitType, $"{w.WaitTimeMs:N0} ms ({w.WaitCount:N0} waits)");
+                    AddPropertyRow(w.WaitType, PlanDisplayText.WaitRowText(w.WaitTimeMs, w.WaitCount));
             }
 
             // === Trace Flags ===
@@ -1500,7 +1500,7 @@ public partial class PlanViewerControl
         var totalWait = sorted.Sum(w => w.WaitTimeMs);
 
         // The header ellipsizes in a narrow card, so the total it carries goes on a tooltip too.
-        WaitStatsHeader.Text = $"  Wait Stats \u2014 {totalWait:N0}ms total";
+        WaitStatsHeader.Text = "  " + PlanDisplayText.WaitStatsHeaderText(totalWait);
         WaitStatsHeader.ToolTip = PlanDisplayText.WaitStatsHeaderTooltip(sorted.Count, totalWait);
 
         /* Ported from PerformanceStudio (erikdarlingdata/PerformanceStudio@78a3370, refined @80de6fc):
@@ -1563,7 +1563,7 @@ public partial class PlanViewerControl
             // Duration text: the other flexible column, so this is what gives when the strip is narrow.
             var durationText = new TextBlock
             {
-                Text = $"{w.WaitTimeMs:N0}ms ({w.WaitCount:N0} waits)",
+                Text = PlanDisplayText.WaitRowText(w.WaitTimeMs, w.WaitCount),
                 FontSize = 12,
                 Foreground = TooltipFgBrush,
                 TextTrimming = TextTrimming.CharacterEllipsis,
