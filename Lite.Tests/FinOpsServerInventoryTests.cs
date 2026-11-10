@@ -234,11 +234,11 @@ public sealed class FinOpsServerInventoryTests : IDisposable
         /* The row keeps the collection instant in UTC. The collected row carries no UTC offset, so the cell reads it on the
            selected time display with the active tab's clock. */
         Assert.Equal(CollectedAtUtc, lastKnown.LastUpdated);
+        var mode = ServerTimeHelper.CurrentDisplayMode;
+        var clock = ServerTimeHelper.ActiveServerClock;
         Assert.Equal(
-            "last known, " + ServerTimeHelper.FormatInstant(
-                CollectedAtUtc,
-                ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, ServerTimeHelper.ActiveServerClock),
-                "yyyy-MM-dd HH:mm"),
+            "last known, " + ServerTimeHelper.FormatInstant(CollectedAtUtc, ServerTimeHelper.DisplayZoneFor(mode, clock), "yyyy-MM-dd HH:mm")
+                + (mode == PerformanceMonitor.Ui.TimeDisplayMode.ServerTime ? " (" + ServerTimeHelper.GetTimezoneLabel(mode, clock, CollectedAtUtc) + ")" : ""),
             lastKnown.LastUpdatedDisplay);
         Assert.Equal(100m, lastKnown.MonthlyCost);
         Assert.Equal(99m, lastKnown.AvgCpuPct);

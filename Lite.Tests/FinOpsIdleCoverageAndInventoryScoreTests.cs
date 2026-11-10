@@ -147,15 +147,6 @@ VALUES ($1, $2, $3, 'IdleSrv', 'DbElsewhere', '0xE', 1, 10, 20, 1)", _nextId++, 
         Assert.True(coverage >= 0 && read > coverage);
         Assert.Contains("IdleDatabasesNoDataMessage.Text = LocalDataService.IdleDatabasesEmptyText(covered);", body, StringComparison.Ordinal);
     }
-
-    [Fact]
-    public void TheServerInventoryIdleCountCell_ShowsADash_AndTheHealthCell_SaysNotCollected_WhenThereIsNoValue()
-    {
-        var xaml = ParitySource.ReadFile("Lite/Controls/FinOpsTab.xaml");
-
-        Assert.Contains("Binding=\"{Binding IdleDbCount, TargetNullValue='-'}\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("Binding=\"{Binding HealthScore, TargetNullValue='Not collected'}\"", xaml, StringComparison.Ordinal);
-    }
 }
 
 /// <summary>

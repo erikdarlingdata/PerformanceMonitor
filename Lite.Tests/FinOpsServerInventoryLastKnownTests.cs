@@ -76,10 +76,10 @@ public sealed class FinOpsServerInventoryLastKnownTests : IDisposable
     {
         var collected = Unreachable("inv-offline-collected", 1);
         var neverCollected = Unreachable("inv-offline-never-collected", 2);
-        var expectedTime = ServerTimeHelper.FormatInstant(
-            CollectedAtUtc,
-            ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, ServerTimeHelper.ClockForServer(null, null)),
-            "yyyy-MM-dd HH:mm");
+        var mode = ServerTimeHelper.CurrentDisplayMode;
+        var clock = ServerTimeHelper.ClockForServer(null, null);
+        var expectedTime = ServerTimeHelper.FormatInstant(CollectedAtUtc, ServerTimeHelper.DisplayZoneFor(mode, clock), "yyyy-MM-dd HH:mm")
+            + (mode == PerformanceMonitor.Ui.TimeDisplayMode.ServerTime ? " (" + ServerTimeHelper.GetTimezoneLabel(mode, clock, CollectedAtUtc) + ")" : "");
 
         var initializer = await StoreAsync(collected);
         var problems = OnTheInventory(new LocalDataService(initializer), new[] { collected, neverCollected }, (grid, message, count) =>

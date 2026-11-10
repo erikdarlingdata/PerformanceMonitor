@@ -113,6 +113,26 @@ public sealed class FinOpsServerInventoryCellsTests : IDisposable
                 }
             }
 
+            /* The Status cell says what was not collected, as the Health cell's tooltip does; a cell with a verdict has none. */
+            var statusColumn = grid.Columns.First(c => HeaderText(c) == "Status");
+            var unsampledTip = (statusColumn.GetCellContent(unsampledRow) as TextBlock)?.ToolTip as string;
+            if (unsampledTip != "No CPU sample in the last 24 hours")
+            {
+                found.Add($"the unsampled server's Status cell has the tooltip \"{unsampledTip}\", not \"No CPU sample in the last 24 hours\"");
+            }
+
+            if ((statusColumn.GetCellContent(sampledRow) as TextBlock)?.ToolTip is string sampledTip)
+            {
+                found.Add($"the sampled server's Status cell has the tooltip \"{sampledTip}\" beside a verdict");
+            }
+
+            /* Idle DBs keeps its dash for a server with no query-stats coverage. */
+            var idle = CellText(grid, unsampledRow, "Idle DBs");
+            if (idle != "-")
+            {
+                found.Add($"the unsampled server's Idle DBs cell reads \"{idle}\", not \"-\"");
+            }
+
             return found;
         });
 
@@ -150,17 +170,17 @@ public sealed class FinOpsServerInventoryCellsTests : IDisposable
                 }
             }
 
-            Expect("Server Time", kathmanduRow, "last known, 2026-11-07 15:15");
-            Expect("Server Time", pacificRow, "last known, 2026-11-07 01:30");
+            /* In Server Time each row names the offset of the clock it is worded on. */
+            Expect("Server Time", kathmanduRow, "last known, 2026-11-07 15:15 (UTC+05:45)");
+            Expect("Server Time", pacificRow, "last known, 2026-11-07 01:30 (UTC-08:00)");
 
+            /* The setting changes while the grid is on screen: the cells follow it with no reload and no refresh from here. */
             ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
-            grid.Items.Refresh();
             grid.UpdateLayout();
             Expect("UTC", kathmanduRow, "last known, 2026-11-07 09:30");
             Expect("UTC", pacificRow, "last known, 2026-11-07 09:30");
 
             ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
-            grid.Items.Refresh();
             grid.UpdateLayout();
             var local = "last known, " + CollectedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
             Expect("Local Time", kathmanduRow, local);
@@ -202,7 +222,45 @@ public sealed class FinOpsServerInventoryCellsTests : IDisposable
             }
 
             return Task.FromResult(found);
-        }, betweenStartUpAndFirstShow: () => SeedCpuAndMemoryAsync(server));
+        }, betweenStartUpAndFirstShow: _ => SeedCpuAndMemoryAsync(server));
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    /// <summary>A show reads the collected overlay again and lays it on the rows already loaded. It does not build the rows
+    /// again, which would open a connection to every monitored server each time the tab is shown.</summary>
+    [Fact]
+    public async Task AShow_LaysTheOverlayOnTheRowsAlreadyLoaded_AndDoesNotBuildThemAgain()
+    {
+        var server = Unreachable("inv-cells-overlay-only", 1);
+        var initializer = await StoreAsync((server, null));
+        ServerPropertyRow? atStartUp = null;
+
+        var problems = OnTheInventory(new LocalDataService(initializer), new[] { server }, (_, _, grid) =>
+        {
+            var found = new List<string>();
+            if (grid.Items.Count != 1 || grid.Items[0] is not ServerPropertyRow shown)
+            {
+                found.Add($"after the show the inventory lists {grid.Items.Count} servers, not the one");
+                return Task.FromResult(found);
+            }
+
+            if (!ReferenceEquals(atStartUp, shown))
+            {
+                found.Add("the show built the inventory's rows again instead of laying the overlay on the ones start-up loaded");
+            }
+
+            if (string.IsNullOrEmpty(shown.ProvisioningStatus))
+            {
+                found.Add("the row has no verdict after the show; the samples the collection brought were not read");
+            }
+
+            return Task.FromResult(found);
+        }, betweenStartUpAndFirstShow: tab =>
+        {
+            atStartUp = (typeof(FinOpsTab).GetField("_serverInventoryCache", Instance)!.GetValue(tab) as List<ServerPropertyRow>)?.FirstOrDefault();
+            return SeedCpuAndMemoryAsync(server);
+        });
 
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
@@ -216,7 +274,7 @@ public sealed class FinOpsServerInventoryCellsTests : IDisposable
 
         ServerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(345);
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
-        Assert.Equal("2026-11-07 15:15", row.LastUpdatedDisplay);
+        Assert.Equal("2026-11-07 15:15 (UTC+05:45)", row.LastUpdatedDisplay);
 
         ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
         Assert.Equal("2026-11-07 09:30", row.LastUpdatedDisplay);
@@ -292,7 +350,7 @@ public sealed class FinOpsServerInventoryCellsTests : IDisposable
     /// window is shown (the tab's first show, which runs its own show handler), and the load that show starts is awaited.</summary>
     private List<string> OnTheInventory(
         LocalDataService dataService, IReadOnlyList<ServerConnection> servers, Func<FinOpsTab, Window, DataGrid, Task<List<string>>> check,
-        Func<Task>? betweenStartUpAndFirstShow = null)
+        Func<FinOpsTab, Task>? betweenStartUpAndFirstShow = null)
     {
         var configDir = Path.Combine(_tempDir, "config");
         Directory.CreateDirectory(configDir);
@@ -322,7 +380,7 @@ public sealed class FinOpsServerInventoryCellsTests : IDisposable
                 if (betweenStartUpAndFirstShow is not null)
                 {
                     await (Task)load.Invoke(tab, new object[] { false })!;
-                    await betweenStartUpAndFirstShow();
+                    await betweenStartUpAndFirstShow(tab);
                 }
 
                 var window = new Window { Content = tab, Width = 1000, Height = 700, Left = 0, Top = 0, WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize };
