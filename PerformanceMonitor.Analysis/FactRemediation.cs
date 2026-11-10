@@ -38,18 +38,21 @@ public static class FactRemediation
     /// <see cref="GenerateForFinding(AnalysisFinding)"/> with the read-time forcing and
     /// automatic-plan-correction state of the finding's force-plan targets (#8542). A target that state
     /// blocks (<see cref="BlockersFor"/>) is named in comments with its blockers and gets no runnable
-    /// statement. A null <paramref name="states"/> withholds nothing.
+    /// statement. A null <paramref name="states"/> withholds nothing; when the read failed, pass why in
+    /// <paramref name="stateUnavailableReason"/> and the force-plan text opens by saying no target was
+    /// checked (<see cref="StateNotReadPrefix"/>).
     /// </summary>
     public static string? GenerateForFinding(
         AnalysisFinding finding,
-        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states)
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states,
+        string? stateUnavailableReason = null)
     {
         if (finding is null || string.IsNullOrEmpty(finding.RootFactKey))
             return null;
 
         return finding.RootFactKey switch
         {
-            "PLAN_REGRESSION" => GenerateForPlanRegression(finding, states),
+            "PLAN_REGRESSION" => GenerateForPlanRegression(finding, states, stateUnavailableReason),
             "DB_CONFIG" => GenerateForDbConfig(finding),
             "FILE_AUTOGROWTH_PERCENT" => GenerateForFileAutogrowth(finding),
             _ => null
@@ -586,7 +589,8 @@ public static class FactRemediation
     /// </summary>
     private static string? GenerateForPlanRegression(
         AnalysisFinding finding,
-        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states)
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states,
+        string? stateUnavailableReason)
     {
         var targets = ExtractPlanRegressionTargets(finding);
         if (targets.Count == 0)
@@ -604,18 +608,18 @@ public static class FactRemediation
             /* #8542: a target the store's state blocks is described and named, never handed over as a statement. */
             var blockers = BlockersFor(target, states);
 
-            sb.AppendLine($"-- Database: {target.Database}");
+            sb.AppendLine($"-- Database: {OneLine(target.Database)}");
             sb.AppendLine(blockers.Count == 0
                 ? $"-- query_id = {target.QueryId}, forcing plan_id = {target.PlanId}"
                 : $"-- query_id = {target.QueryId}, best plan_id = {target.PlanId} (not offered as a force)");
             if (!string.IsNullOrEmpty(target.LatestPlanHash))
-                sb.AppendLine($"--   latest plan hash: {target.LatestPlanHash} (cpu/exec {target.LatestCpuPerExecUs:F0} us)");
+                sb.AppendLine($"--   latest plan hash: {OneLine(target.LatestPlanHash)} (cpu/exec {target.LatestCpuPerExecUs:F0} us)");
             if (!string.IsNullOrEmpty(target.BestPlanHash))
-                sb.AppendLine($"--   best plan hash:   {target.BestPlanHash}   (cpu/exec {target.BestCpuPerExecUs:F0} us)");
+                sb.AppendLine($"--   best plan hash:   {OneLine(target.BestPlanHash)}   (cpu/exec {target.BestCpuPerExecUs:F0} us)");
             AppendBestPlanAge(sb, target);
             sb.AppendLine($"--   regression factor: {target.RegressionFactor:F1}x");
             if (!string.IsNullOrEmpty(target.ReplicaRole))
-                sb.AppendLine($"--   measured on replica: {target.ReplicaRole}");
+                sb.AppendLine($"--   measured on replica: {OneLine(target.ReplicaRole)}");
             emitted++;
 
             if (blockers.Count > 0)
@@ -636,15 +640,40 @@ public static class FactRemediation
         }
 
         var body = sb.ToString().TrimEnd();
-        return eligible == 0
-            ? NoEligibleForceTarget + Environment.NewLine + Environment.NewLine + body
-            : body;
+        if (eligible == 0)
+            body = NoEligibleForceTarget + Environment.NewLine + Environment.NewLine + body;
+
+        return WithStateNotRead(body, states, stateUnavailableReason);
     }
 
     /// <summary>The line a force-plan remediation opens with when the store's state blocks every target
     /// (#8542): the text then carries no force statement at all.</summary>
-    private const string NoEligibleForceTarget =
+    public const string NoEligibleForceTarget =
         "-- No force statement is offered: the store's forcing state blocks every target below.";
+
+    /// <summary>How a force-plan remediation opens when the store's forcing state could not be read
+    /// (#8542): one comment line, so a statement in the text is not taken for one the store was asked
+    /// about.</summary>
+    public const string StateNotReadPrefix = "-- NOT CHECKED:";
+
+    /// <summary>The comment line that names a target the store's state blocks (#8542) starts with this.</summary>
+    public const string NotEligiblePrefix = "-- NOT ELIGIBLE:";
+
+    /// <summary>
+    /// Opens a force-plan text with the not-read line when the state read failed: no state, and a reason.
+    /// The reason is flattened to one line. With a state, or with no reason, the text is returned as is.
+    /// </summary>
+    private static string WithStateNotRead(
+        string text,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states,
+        string? stateUnavailableReason)
+    {
+        if (states is not null || string.IsNullOrWhiteSpace(stateUnavailableReason))
+            return text;
+
+        return $"{StateNotReadPrefix} the store's forcing and automatic-plan-correction state could not be read, so no target below was checked against it. {OneLine(stateUnavailableReason.Trim())}" +
+               Environment.NewLine + Environment.NewLine + text;
+    }
 
     /// <summary>
     /// The blockers that withhold one target's statement in the copy-paste renderers (#8542). The gate
@@ -691,7 +720,7 @@ public static class FactRemediation
     /// </summary>
     private static void AppendNotEligible(StringBuilder sb, ForcePlanTarget target, IReadOnlyList<ForcePlanBlocker> blockers)
     {
-        sb.AppendLine($"-- NOT ELIGIBLE: no force statement is given for {OneLine(QuoteName(target.Database))} query_id = {target.QueryId}, plan_id = {target.PlanId}.");
+        sb.AppendLine($"{NotEligiblePrefix} no force statement is given for {OneLine(QuoteName(target.Database))} query_id = {target.QueryId}, plan_id = {target.PlanId}.");
         foreach (var blocker in blockers)
             sb.AppendLine($"--   {blocker.Name}: {OneLine(blocker.Evidence)}");
     }
@@ -778,7 +807,7 @@ public static class FactRemediation
             return;
 
         sb.AppendLine("--");
-        sb.AppendLine($"-- HEADS UP: this regression was measured on the {target.ReplicaRole} replica's workload,");
+        sb.AppendLine($"-- HEADS UP: this regression was measured on the {OneLine(target.ReplicaRole)} replica's workload,");
         sb.AppendLine("-- but the statement below forces on the PRIMARY. sp_query_store_force_plan is executed on");
         sb.AppendLine("-- the primary in every case, and its @replica_group_id argument defaults to the primary");
         sb.AppendLine("-- when omitted -- so running this as written changes the plan the primary's WRITE workload");
@@ -1427,7 +1456,7 @@ public static class FactRemediation
                     sb.AppendLine();
                 }
                 currentDb = target.Database;
-                sb.AppendLine($"-- Database: {target.Database}");
+                sb.AppendLine($"-- Database: {OneLine(target.Database)}");
             }
 
             sb.AppendLine($"{StatementFor(target.Setting, target.Database)}   -- was {target.CurrentValue}");
@@ -1635,12 +1664,14 @@ public static class FactRemediation
     /// automatic-plan-correction state of the action's force-plan targets (#8542). A force-plan target
     /// that state blocks (<see cref="BlockersFor"/>) is named in comments with its blockers and gets no
     /// runnable statement; when it blocks every target the text says so and carries no force statement.
-    /// A null <paramref name="states"/> withholds nothing. The other remediation shapes ignore
-    /// <paramref name="states"/>.
+    /// A null <paramref name="states"/> withholds nothing; when the read failed, pass why in
+    /// <paramref name="stateUnavailableReason"/> and the force-plan text opens by saying no target was
+    /// checked (<see cref="StateNotReadPrefix"/>). The other remediation shapes ignore both.
     /// </summary>
     public static string? RenderCopyPasteCommand(
         RemediationAction? action,
-        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states)
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states,
+        string? stateUnavailableReason = null)
     {
         if (action is null)
             return null;
@@ -1689,7 +1720,7 @@ public static class FactRemediation
             foreach (var t in forceTargets)
             {
                 var disclosure = IsNonPrimaryReplicaRow(t.ReplicaRole)
-                    ? $"-- Measured on the {t.ReplicaRole} replica; this forces on the PRIMARY (@replica_group_id" + nl +
+                    ? $"-- Measured on the {OneLine(t.ReplicaRole)} replica; this forces on the PRIMARY (@replica_group_id" + nl +
                       "-- defaults there when omitted). Scope it with @replica_group_id to target that replica." + nl
                     : string.Empty;
 
@@ -1723,7 +1754,10 @@ public static class FactRemediation
                 return null;
 
             var forceText = string.Join(nl + nl, blocks);
-            return eligible == 0 ? NoEligibleForceTarget + nl + nl + forceText : forceText;
+            if (eligible == 0)
+                forceText = NoEligibleForceTarget + nl + nl + forceText;
+
+            return WithStateNotRead(forceText, states, stateUnavailableReason);
         }
 
         // RCSI reconstructed action (FactKey "RCSI") — DESTRUCTIVE. Carries a ReadCommittedSnapshotOn

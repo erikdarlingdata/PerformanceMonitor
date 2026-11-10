@@ -196,7 +196,7 @@ public sealed class DarlingMcpTools
                acts. A failed read does not fail the tool: the reason lands on every target's state_note
                and eligible is then explicitly the finding-only verdict. */
             var (forcePlanStates, forcePlanStateNote) =
-                await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, resolved.ServerId, findings, logger: logger);
+                await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, resolved.ServerId, findings, McpCommandDeadlines.ReadSeconds, logger: logger);
 
             /* #3691: collection.Attach returns this very object on a clean pass — same object, same
                serializer call, same bytes — and a JsonObject with collection_caveats appended last otherwise. */
@@ -230,7 +230,7 @@ public sealed class DarlingMcpTools
                 findings = findings.Take(returned).Select(f =>
                 {
                     /* #8542: the advice T-SQL is built over the same read-time state as structured_remediation. */
-                    var advice = FactAdvice.GetForFinding(f, forcePlanStates);
+                    var advice = FactAdvice.GetForFinding(f, forcePlanStates, forcePlanStateNote);
                     /* #3691: the config levers hanging off this chain that the greedy single-path walk could not
                        reach get a card each, appended as side_leaves. They used to root their own one-node cards
                        beside this one (CONFIG_PG_MAINT_WORK_MEM at 0.6 next to a backlog → wraparound → hold
@@ -292,7 +292,7 @@ public sealed class DarlingMcpTools
                         // renders on get_analysis_findings, where the drill-down is gone. Null when the
                         // finding has no remediable action. PRODUCE ONLY — advisory text; the read-only
                         // MCP never executes it.
-                        remediation_command = FactRemediation.RenderCopyPasteCommand(f.Remediation, forcePlanStates),
+                        remediation_command = FactRemediation.RenderCopyPasteCommand(f.Remediation, forcePlanStates, forcePlanStateNote),
                         // #2138: the machine-first projection — verdict (eligible/blockers, the future
                         // bot's policy gate), evidence, and split force/unforce/verify artifacts as
                         // named fields, so an agent never regexes the comment prose above. Null for
@@ -1253,7 +1253,7 @@ public sealed class DarlingMcpTools
 
             /* #3652: one state read for every representative's force-plan targets — see analyze_server. */
             var (forcePlanStates, forcePlanStateNote) =
-                await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, resolved.ServerId, groups.Select(g => g.Latest), logger: logger, cancellationToken: cancellationToken);
+                await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, resolved.ServerId, groups.Select(g => g.Latest), McpCommandDeadlines.ReadSeconds, logger: logger, cancellationToken: cancellationToken);
 
             return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
@@ -1307,7 +1307,7 @@ public sealed class DarlingMcpTools
                     // pushed a 20+-finding default call over budget; previewed like the other free-text
                     // fields below, full_text opts back in.
                     var confidenceBasis = StoryConfidence.DescribeBasis(f.RootFactKey, f.Confidence, f.FactCount);
-                    var remediationCommand = FactRemediation.RenderCopyPasteCommand(f.Remediation, forcePlanStates);
+                    var remediationCommand = FactRemediation.RenderCopyPasteCommand(f.Remediation, forcePlanStates, forcePlanStateNote);
                     return new
                     {
                         finding_id = f.FindingId,

@@ -496,7 +496,7 @@ public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixtur
     public void StateReaderSql_IsTheDarlingText_ButForTheViewNamesAndTheCasts()
     {
         var lite = ForcePlanTargetStateReader.SqlTemplate;
-        var darling = ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingForcePlanTargetStateReader.cs");
+        var darling = ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Analysis/DarlingForcePlanTargetStateReader.cs");
         const string marker = "public const string SqlTemplate = @\"";
         var darlingSql = darling[(darling.IndexOf(marker, StringComparison.Ordinal) + marker.Length)..];
         darlingSql = darlingSql[..darlingSql.IndexOf("\";", StringComparison.Ordinal)];
@@ -1113,5 +1113,85 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.True(states!.TryGetValue(new ForcePlanTargetKey(Db, 202, 12), out var state), "the drill-down's target was not read");
         Assert.False(Forces(RunnableLines(FactRemediation.GenerateForFinding(finding, states)), 202, 12));
         Assert.Equal("Expired", state!.ApcState);
+    }
+
+    private static AnalysisFinding DrillDownFinding(params (long QueryId, long PlanId)[] rows) => new()
+    {
+        RootFactKey = "PLAN_REGRESSION",
+        DrillDown = new Dictionary<string, object>
+        {
+            ["regressed_queries"] = rows.Select(row => new Dictionary<string, object>
+            {
+                ["database"] = Db,
+                ["query_id"] = row.QueryId,
+                ["best_plan_id"] = row.PlanId,
+                ["regression_factor"] = 7.5
+            }).ToArray()
+        }
+    };
+
+    /// <summary>
+    /// #8542: a failed state read withholds nothing and says so. Every statement stays, and the text opens
+    /// with the renderer's not-checked line, in the command, the preview and the Lite card. With no reason
+    /// the text is the one a caller with no state gets.
+    /// </summary>
+    [Fact]
+    public void AFailedStateRead_KeepsEveryStatement_AndTheTextOpensBySayingNothingWasChecked()
+    {
+        const string reason = "the forcing and automatic-plan-correction state read failed (TimeoutException)";
+        var action = Action(Target(201, 11), Target(202, 12));
+
+        var command = FactRemediation.RenderCopyPasteCommand(action, states: null, stateUnavailableReason: reason);
+        Assert.StartsWith(FactRemediation.StateNotReadPrefix, command, StringComparison.Ordinal);
+        Assert.True(Forces(RunnableLines(command), 201, 11));
+        Assert.True(Forces(RunnableLines(command), 202, 12));
+        Assert.Equal(FactRemediation.RenderCopyPasteCommand(action), FactRemediation.RenderCopyPasteCommand(action, states: null, stateUnavailableReason: null));
+
+        var finding = DrillDownFinding((201, 11), (202, 12));
+        var preview = FactRemediation.GenerateForFinding(finding, states: null, stateUnavailableReason: reason);
+        Assert.StartsWith(FactRemediation.StateNotReadPrefix, preview, StringComparison.Ordinal);
+        Assert.True(Forces(RunnableLines(preview), 201, 11));
+        Assert.Equal(FactRemediation.GenerateForFinding(finding), FactRemediation.GenerateForFinding(finding, states: null, stateUnavailableReason: null));
+
+        var card = PerformanceMonitorLite.Analysis.Recommendations.LiteRecommendationsReader.MapFinding(
+            new AnalysisFinding { RootFactKey = "PLAN_REGRESSION", Remediation = action }, "TestServer",
+            forcePlanStates: null, forcePlanStateUnavailableReason: reason);
+        Assert.StartsWith(FactRemediation.StateNotReadPrefix, card.CopyPasteSql, StringComparison.Ordinal);
+        Assert.True(Forces(RunnableLines(card.CopyPasteSql), 202, 12));
+
+        /* A state that was read never carries the line, whatever it holds. */
+        var read = FactRemediation.RenderCopyPasteCommand(action, For(Target(202, 12), State(failures: 2, failureReason: "GENERAL_FAILURE")));
+        Assert.False(read!.StartsWith(FactRemediation.StateNotReadPrefix, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #8542: the notification's remediation T-SQL is built over the same state. The message gives the
+    /// force statement for the target the store holds nothing against and none for the two it blocks,
+    /// and names their blockers.
+    /// </summary>
+    [Fact]
+    public void NotificationAdvice_GivesNoForceStatement_ForATargetTheStoreBlocks()
+    {
+        var finding = DrillDownFinding((201, 11), (202, 12), (203, 13));
+        var states = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer)
+        {
+            [new ForcePlanTargetKey(Db, 201, 11)] = State(planForced: false, forcingType: "NONE", failures: 0),
+            [new ForcePlanTargetKey(Db, 202, 12)] = State(apcState: "Expired", apcReason: "TempTableChanged", apcLastGood: 12),
+            [new ForcePlanTargetKey(Db, 203, 13)] = State(failures: 2, failureReason: "GENERAL_FAILURE"),
+        };
+
+        var context = PerformanceMonitor.Notifications.FindingMessageFormatter.BuildContext(finding, 1.5, states);
+        var text = string.Join("\n", context.Details.Select(detail => detail.Body ?? string.Empty));
+        var runnable = RunnableLines(text);
+
+        Assert.True(Forces(runnable, 201, 11), "the target the store holds nothing against keeps its statement");
+        Assert.False(Forces(runnable, 202, 12), "plan 12 is apc_withdrew_it in the store, and the notification must not carry a runnable force statement for it");
+        Assert.False(Forces(runnable, 203, 13), "plan 13 is forcing_failed_on_this_plan in the store, and the notification must not carry a runnable force statement for it");
+        Assert.Contains(ForcePlanBlockerNames.ApcWithdrewIt, text, StringComparison.Ordinal);
+        Assert.Contains(ForcePlanBlockerNames.ForcingFailedOnThisPlan, text, StringComparison.Ordinal);
+
+        /* A failed read reaches the message too. */
+        var unread = PerformanceMonitor.Notifications.FindingMessageFormatter.BuildContext(finding, 1.5, null, "the read failed (TimeoutException)");
+        Assert.Contains(unread.Details, detail => (detail.Body ?? string.Empty).StartsWith(FactRemediation.StateNotReadPrefix, StringComparison.Ordinal));
     }
 }

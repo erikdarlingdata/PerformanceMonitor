@@ -1311,6 +1311,10 @@ WHERE server_id = $1";
         {
             if (finding.Remediation?.Targets is { Count: > 0 } ts)
                 targets.AddRange(ts);
+            else
+                /* #8542: a finding with no persisted action renders its statements from its drill-down, so
+                   its targets are read from there, through the extraction the renderer uses. */
+                targets.AddRange(FactRemediation.ExtractPlanRegressionTargets(finding));
         }
 
         if (targets.Count == 0)

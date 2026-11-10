@@ -184,11 +184,14 @@ public static class FactAdvice
     /// <summary>
     /// <see cref="GetForFinding(AnalysisFinding)"/> with the read-time forcing and automatic-plan-correction
     /// state of the finding's force-plan targets (#8542), so the generated T-SQL gives no statement for
-    /// a target that state blocks. A null <paramref name="forcePlanStates"/> withholds nothing.
+    /// a target that state blocks. A null <paramref name="forcePlanStates"/> withholds nothing; when the
+    /// read failed, <paramref name="forcePlanStateUnavailableReason"/> says why and the T-SQL opens by
+    /// saying no target was checked.
     /// </summary>
     public static AdviceBlock? GetForFinding(
         AnalysisFinding finding,
-        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? forcePlanStates)
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? forcePlanStates,
+        string? forcePlanStateUnavailableReason = null)
     {
         if (finding is null)
             return null;
@@ -199,7 +202,7 @@ public static class FactAdvice
         if (advice is null)
             return null;
 
-        var tsql = FactRemediation.GenerateForFinding(finding, forcePlanStates);
+        var tsql = FactRemediation.GenerateForFinding(finding, forcePlanStates, forcePlanStateUnavailableReason);
         if (tsql is not null)
             advice = advice with { RemediationTsql = tsql };
 
@@ -2069,7 +2072,7 @@ public static class FactAdvice
 
         var unverified = FactMeta(facts, "PLAN_REGRESSION", "inputs_unverified_count");
         var rem = paramSensitive
-            ? "Parameter sensitivity fired for this server too, so do not force a query that also shows that signature: forcing the cheaper plan can lock in the wrong shape for other parameter values and make the slow calls slower. The fix is the parameter sensitivity: OPTION (RECOMPILE) on the statement, or branch the procedure by parameter."
+            ? "Parameter sensitivity fired for this server too, so be cautious about forcing a query that also shows that signature: forcing the cheaper plan can lock in the wrong shape for other parameter values and make the slow calls slower. The statement for such a query carries a caution. Fix the parameter sensitivity first: OPTION (RECOMPILE) on the statement, or branch the procedure by parameter."
             : forceFailing
             ? "Fix the failing force first: the recorded plan force is not taking effect (the plan was likely evicted or invalidated); re-force the good plan or clear the broken force, then confirm it sticks. Then address WHY the plan regressed, usually stale statistics or a parameter-sensitivity swing."
             : basis == 2

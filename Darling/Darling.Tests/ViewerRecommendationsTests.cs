@@ -306,6 +306,96 @@ public sealed class ViewerRecommendationCardTests
         Assert.Null(item.Database);
     }
 
+    // ── The force-plan card against the store's forcing and automatic-plan-correction state ────────
+
+    private static readonly ForcePlanTarget OpenTarget = new("StackOverflow", QueryId: 201, PlanId: 11);
+    private static readonly ForcePlanTarget WithdrawnTarget = new("StackOverflow", QueryId: 202, PlanId: 12);
+    private static readonly ForcePlanTarget FailedTarget = new("StackOverflow", QueryId: 203, PlanId: 13);
+
+    private static AnalysisFinding ThreeTargetForceFinding() =>
+        Finding(
+            severity: 1.6, rootFactKey: "PLAN_REGRESSION", database: "StackOverflow",
+            remediation: new RemediationAction(
+                "PLAN_REGRESSION", "force", new[] { OpenTarget, WithdrawnTarget, FailedTarget }));
+
+    private static ForcePlanTargetState NothingObserved() =>
+        new(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+
+    /// <summary>The lines of a copy-paste text that SQL Server would run: not blank, not a comment.</summary>
+    private static List<string> RunnableLines(string? sql) =>
+        (sql ?? string.Empty)
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0 && !line.StartsWith("--", StringComparison.Ordinal))
+            .ToList();
+
+    private static string ForceStatement(ForcePlanTarget target) =>
+        $"EXEC sys.sp_query_store_force_plan @query_id = {target.QueryId}, @plan_id = {target.PlanId};";
+
+    [Fact]
+    public void MapItem_WithholdsTheForceStatement_ForATargetTheStoreBlocks()
+    {
+        var states = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer)
+        {
+            [ForcePlanTargetKey.Of(WithdrawnTarget)] =
+                NothingObserved() with { ApcState = "Expired", ApcLastGoodPlanId = WithdrawnTarget.PlanId },
+            [ForcePlanTargetKey.Of(FailedTarget)] =
+                NothingObserved() with { ForceFailureCount = 2 },
+        };
+
+        var item = RecommendationsViewModel.MapItem(
+            Row(ThreeTargetForceFinding()), "SQL2022", forcePlanStates: states);
+
+        var forces = RunnableLines(item.CopyPasteSql)
+            .Where(line => line.Contains("sp_query_store_force_plan", StringComparison.Ordinal))
+            .ToList();
+        Assert.Equal(new[] { ForceStatement(OpenTarget) }, forces);
+        Assert.Contains(ForcePlanBlockerNames.ApcWithdrewIt, item.CopyPasteSql, StringComparison.Ordinal);
+        Assert.Contains(ForcePlanBlockerNames.ForcingFailedOnThisPlan, item.CopyPasteSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MapItem_KeepsEveryForceStatement_AndSaysTheStateWasNotRead_WhenTheStateReadFailed()
+    {
+        const string reason = "the state read timed out";
+
+        var item = RecommendationsViewModel.MapItem(
+            Row(ThreeTargetForceFinding()), "SQL2022",
+            forcePlanStates: null, forcePlanStateUnavailableReason: reason);
+
+        Assert.StartsWith(FactRemediation.StateNotReadPrefix, item.CopyPasteSql, StringComparison.Ordinal);
+        Assert.Contains(reason, item.CopyPasteSql, StringComparison.Ordinal);
+
+        var forces = RunnableLines(item.CopyPasteSql)
+            .Where(line => line.Contains("sp_query_store_force_plan", StringComparison.Ordinal))
+            .ToList();
+        Assert.Equal(
+            new[] { ForceStatement(OpenTarget), ForceStatement(WithdrawnTarget), ForceStatement(FailedTarget) },
+            forces);
+    }
+
+    [Fact]
+    public void FromFindings_CarriesTheForcePlanStateOntoTheCard()
+    {
+        var states = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer)
+        {
+            [ForcePlanTargetKey.Of(FailedTarget)] = NothingObserved() with { ForceFailureCount = 2 },
+        };
+        var rows = new List<ViewerFindingRow> { Row(ThreeTargetForceFinding()) };
+
+        var blocked = RecommendationsViewModel.FromFindings(rows, "SQL2022", forcePlanStates: states)
+            .Sections[0].Cards[0];
+        Assert.DoesNotContain(ForceStatement(FailedTarget), RunnableLines(blocked.CopyPasteSql));
+        Assert.Contains(ForceStatement(OpenTarget), RunnableLines(blocked.CopyPasteSql));
+        Assert.Contains(ForcePlanBlockerNames.ForcingFailedOnThisPlan, blocked.CopyPasteSql, StringComparison.Ordinal);
+
+        var unread = RecommendationsViewModel.FromFindings(
+                rows, "SQL2022", forcePlanStates: null, forcePlanStateUnavailableReason: "the state read timed out")
+            .Sections[0].Cards[0];
+        Assert.StartsWith(FactRemediation.StateNotReadPrefix, unread.CopyPasteSql, StringComparison.Ordinal);
+        Assert.Contains(ForceStatement(FailedTarget), RunnableLines(unread.CopyPasteSql));
+    }
+
     [Fact]
     public void Card_AffordanceModel_CopyFixOnlyWhenSqlPresent_AskAiAlways()
     {

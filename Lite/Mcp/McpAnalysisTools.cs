@@ -196,7 +196,7 @@ public sealed class McpAnalysisTools
                 findings = findings.Take(returned).Select(f =>
                 {
                     /* #8542: the advice T-SQL is built over the same read-time state as structured_remediation. */
-                    var advice = FactAdvice.GetForFinding(f, forcePlanStates);
+                    var advice = FactAdvice.GetForFinding(f, forcePlanStates, forcePlanStateNote);
                     /* #3691: the config levers hanging off this chain that the greedy single-path walk could not
                        reach get a card each, appended as side_leaves. They used to root their own one-node cards
                        beside this one; now the walk consumes them and the root's investigation carries the sentence
@@ -257,7 +257,7 @@ public sealed class McpAnalysisTools
                         // renders on get_analysis_findings, where the drill-down is gone. Null when the
                         // finding has no remediable action. PRODUCE ONLY — advisory text; the read-only
                         // MCP never executes it.
-                        remediation_command = FactRemediation.RenderCopyPasteCommand(f.Remediation, forcePlanStates),
+                        remediation_command = FactRemediation.RenderCopyPasteCommand(f.Remediation, forcePlanStates, forcePlanStateNote),
                         // #2138: the machine-first projection — verdict (eligible/blockers, the future
                         // bot's policy gate), evidence, and split force/unforce/verify artifacts as
                         // named fields, so an agent never regexes the comment prose above. Null for
@@ -1095,7 +1095,7 @@ public sealed class McpAnalysisTools
                         // has no remediable action. PRODUCE ONLY — the read-only MCP never executes it.
                         // #4198: NEVER previewed — see Darling's twin comment (a half a risk-disclosure
                         // header is worse than none).
-                        remediation_command = FactRemediation.RenderCopyPasteCommand(f.Remediation, forcePlanStates),
+                        remediation_command = FactRemediation.RenderCopyPasteCommand(f.Remediation, forcePlanStates, forcePlanStateNote),
                         // #2138: the machine-first projection — see analyze_server's twin field.
                         structured_remediation = FactRemediation.BuildStructuredRemediation(f.Remediation, forcePlanStates, forcePlanStateNote),
                         // A standing config fix (database/RCSI/autogrowth/server config), not an incident: the same rule Darling's twin field uses.
