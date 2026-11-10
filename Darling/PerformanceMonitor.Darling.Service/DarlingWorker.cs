@@ -994,8 +994,11 @@ public sealed partial class DarlingWorker : BackgroundService
 
     /// <summary>#8539: the bodies waiting for a fleet collection slot right now, each with the time it started waiting
     /// (ProcessServerSweepAsync). A due scheduled analysis pass reads how long the longest of them has waited
-    /// (<see cref="ScheduledAnalysisAdmission"/>). Internal so a test can state a wait of a given length.</summary>
-    internal FleetSlotWaiters SlotWaiters { get; } = new();
+    /// (<see cref="ScheduledAnalysisAdmission"/>). Created on first use, so a worker built without its constructor has
+    /// one. Internal so a test can state a wait of a given length.</summary>
+    internal FleetSlotWaiters SlotWaiters => LazyInitializer.EnsureInitialized(ref _slotWaiters, static () => new FleetSlotWaiters());
+
+    private FleetSlotWaiters? _slotWaiters;
 
     /* How far past its budget an in-flight pass must be before the sweep starts reporting it. The
        ordinary overrun already gets the "exceeded Ns" warning; this is for the pass that ignored the
