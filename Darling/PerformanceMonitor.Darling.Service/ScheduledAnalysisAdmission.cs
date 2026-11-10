@@ -61,9 +61,9 @@ internal static class ScheduledAnalysisAdmission
 
     /// <summary>The answer for a pass due since <paramref name="dueUtc"/> that asks at <paramref name="nowUtc"/>. Giving way
     /// is asked first and takes no place; a place is taken only by <see cref="Answer.Starts"/>.</summary>
-    internal static Answer Ask(int bodiesWaiting, DateTime dueUtc, DateTime nowUtc, ref int passesInSlot, int fleetSlots)
+    internal static Answer Ask(TimeSpan? longestWait, DateTime dueUtc, DateTime nowUtc, ref int passesInSlot, int fleetSlots)
     {
-        if (GivesWay(bodiesWaiting, dueUtc, nowUtc))
+        if (GivesWay(longestWait, dueUtc, nowUtc))
         {
             return Answer.GivesWayToCollection;
         }
@@ -85,9 +85,10 @@ internal static class ScheduledAnalysisAdmission
     internal static int SlotShare(int fleetSlots) => Math.Max(1, fleetSlots / 2);
 
     /// <summary>Whether a pass due since <paramref name="dueUtc"/> gives way: a collection body is waiting for a fleet slot
+    /// (<paramref name="longestWait"/> is how long the one that has waited longest has waited, null when none is waiting)
     /// and the pass is not yet <see cref="YieldLimit"/> past due.</summary>
-    internal static bool GivesWay(int bodiesWaiting, DateTime dueUtc, DateTime nowUtc) =>
-        bodiesWaiting > 0 && nowUtc - dueUtc < YieldLimit;
+    internal static bool GivesWay(TimeSpan? longestWait, DateTime dueUtc, DateTime nowUtc) =>
+        longestWait is not null && nowUtc - dueUtc < YieldLimit;
 
     /// <summary>
     /// Takes one of the share's places for a pass that is starting, or returns false when passes already hold the whole

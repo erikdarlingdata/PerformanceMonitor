@@ -992,9 +992,10 @@ public sealed partial class DarlingWorker : BackgroundService
        when it got one. Interlocked. */
     private int _analysisPassesInSlot;
 
-    /* #8539: how many bodies are waiting for a fleet collection slot right now (ProcessServerSweepAsync). A due scheduled
-       analysis pass gives way while this is above zero (ScheduledAnalysisAdmission). Interlocked. */
-    private int _bodiesWaitingForSlot;
+    /// <summary>#8539: the bodies waiting for a fleet collection slot right now, each with the time it started waiting
+    /// (ProcessServerSweepAsync). A due scheduled analysis pass reads how long the longest of them has waited
+    /// (<see cref="ScheduledAnalysisAdmission"/>). Internal so a test can state a wait of a given length.</summary>
+    internal FleetSlotWaiters SlotWaiters { get; } = new();
 
     /* How far past its budget an in-flight pass must be before the sweep starts reporting it. The
        ordinary overrun already gets the "exceeded Ns" warning; this is for the pass that ignored the

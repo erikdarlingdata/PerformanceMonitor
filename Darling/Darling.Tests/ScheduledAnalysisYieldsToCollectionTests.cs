@@ -18,11 +18,11 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #8539: a scheduled analysis pass runs inside its server's fleet collection slot and holds it for its whole length. After
-/// a service restart every server's first pass comes due within a few minutes, and on a store whose pass is long those
-/// passes took most of the slots while collection bodies waited minutes for one and stepped over their one-minute slots.
-/// These tests drive the body's analysis step with a stand-in pass that stays open until the test ends it, a real body
-/// parked on a full fleet gate, and due stamps minutes either side of the limit, so nothing here depends on timing.
+/// #8539: a scheduled analysis pass runs inside its server's fleet collection slot and holds it for its whole length, and
+/// after a service restart every server's first pass comes due within a few minutes. These tests drive the body's analysis
+/// step with a stand-in pass that stays open until the test ends it, faults it or cancels it, and a real body parked on a
+/// full fleet gate. Each ask names its own instant, a minute after the body parked or just before it, and the due stamps
+/// sit minutes either side of the limit, so nothing here depends on timing.
 /// </summary>
 public sealed class ScheduledAnalysisYieldsToCollectionTests
 {
@@ -57,7 +57,21 @@ public sealed class ScheduledAnalysisYieldsToCollectionTests
                 _open[server.Config.Name] = open;
             }
 
+            /* A pass whose token is cancelled ends as cancelled, as the real pass does on a shutdown. */
+            token.Register(() => open.TrySetCanceled(token));
             return open.Task;
+        }
+
+        internal void Fault(string name, Exception error)
+        {
+            TaskCompletionSource open;
+            lock (_lock)
+            {
+                open = _open[name];
+                _open.Remove(name);
+            }
+
+            open.SetException(error);
         }
 
         internal void End(string name)
@@ -69,7 +83,7 @@ public sealed class ScheduledAnalysisYieldsToCollectionTests
                 _open.Remove(name);
             }
 
-            open.SetResult();
+            open.TrySetResult();
         }
 
         internal void EndAll()
@@ -83,7 +97,7 @@ public sealed class ScheduledAnalysisYieldsToCollectionTests
 
             foreach (var pass in open)
             {
-                pass.SetResult();
+                pass.TrySetResult();
             }
         }
     }
@@ -97,10 +111,14 @@ public sealed class ScheduledAnalysisYieldsToCollectionTests
     }
 
     /// <summary>A connected server whose scheduled analysis pass came due <paramref name="minutesAgo"/> minutes ago.</summary>
-    private static DarlingWorker.ServerLoopState DueServer(string name, double minutesAgo = 1)
+    private static DarlingWorker.ServerLoopState DueServer(string name, double minutesAgo = 1) =>
+        DueServer(name, DateTime.UtcNow.AddMinutes(-minutesAgo));
+
+    /// <summary>A connected server whose scheduled analysis pass came due at <paramref name="dueUtc"/>.</summary>
+    private static DarlingWorker.ServerLoopState DueServer(string name, DateTime dueUtc)
     {
         var server = SelfAlertFleetPassTests.MakeServer(name, connected: true);
-        server.NextAnalysisDue = DateTime.UtcNow.AddMinutes(-minutesAgo);
+        server.NextAnalysisDue = dueUtc;
         return server;
     }
 
@@ -110,6 +128,13 @@ public sealed class ScheduledAnalysisYieldsToCollectionTests
     /// keeps it open) or has not started at all, so the caller reads which it was without waiting.</summary>
     private static Task Step(DarlingWorker worker, DarlingWorker.ServerLoopState server, int slots) =>
         worker.RunScheduledAnalysisIfDueAsync(server, null!, null!, Fleet(slots), Ct);
+
+    /// <summary>The due half of the step, asked at <paramref name="nowUtc"/> with a 30-minute analysis interval.</summary>
+    private static Task Ask(DarlingWorker worker, DarlingWorker.ServerLoopState server, DateTime nowUtc, int slots = 4, CancellationToken? token = null) =>
+        worker.RunDueScheduledAnalysisAsync(server, null!, null!, Fleet(slots), 30, nowUtc, token ?? Ct);
+
+    /// <summary>An instant a minute after now. A body parked before this is read has waited more than the floor at it.</summary>
+    private static DateTime AMinuteFromNow() => DateTime.UtcNow.AddMinutes(1);
 
     /// <summary>
     /// A real body that is waiting for a fleet slot: the gate has no free permit, so the body parks on it before this
@@ -128,18 +153,19 @@ public sealed class ScheduledAnalysisYieldsToCollectionTests
     }
 
     [Fact]
-    public async Task ADuePass_DoesNotStart_WhileACollectionBodyWaitsForAFleetSlot_AndStartsOnceItHasOne()
+    public async Task ADuePass_DoesNotStart_WhileACollectionBodyHasWaitedPastTheFloorForAFleetSlot_AndStartsOnceItHasOne()
     {
         var (worker, passes) = NewWorker();
         using var gate = new SemaphoreSlim(0, 4);
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
         var waitingBody = StartBodyWaitingForASlot(worker, gate, stop.Token);
-        var server = DueServer("due");
+        var ask = AMinuteFromNow();
+        var server = DueServer("due", ask.AddMinutes(-1));
         var dueStamp = server.NextAnalysisDue;
 
         try
         {
-            var yielded = Step(worker, server, slots: 4);
+            var yielded = Ask(worker, server, ask);
 
             Assert.Empty(passes.Started);
             Assert.True(yielded.IsCompletedSuccessfully, "a pass that gives way ends the step at once");
@@ -149,14 +175,45 @@ public sealed class ScheduledAnalysisYieldsToCollectionTests
             gate.Release();
             await waitingBody.WaitAsync(Patience, Ct);
 
-            var started = Step(worker, server, slots: 4);
+            var started = Ask(worker, server, ask.AddSeconds(15));
 
             Assert.Equal(new[] { "due" }, passes.Started);
             Assert.False(started.IsCompleted, "the pass is open, so the step is still inside it");
-            Assert.True(server.NextAnalysisDue > DateTime.UtcNow, "a pass that starts moves its stamp one interval on");
+
+            /* A pass that starts is due again one interval after the ask that started it. */
+            Assert.Equal(ask.AddSeconds(15).AddMinutes(30), server.NextAnalysisDue);
 
             passes.End("due");
             await started.WaitAsync(Patience, Ct);
+        }
+        finally
+        {
+            passes.EndAll();
+            await stop.CancelAsync();
+        }
+    }
+
+    [Fact]
+    public async Task ADuePass_Starts_WhileABodyThatHasWaitedNoTimeIsParkedOnTheGate_AsOnEveryTickOfAFleetLargerThanItsGate()
+    {
+        var (worker, passes) = NewWorker();
+        using var gate = new SemaphoreSlim(0, 4);
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+
+        /* The ask's instant is read before the body parks, so at that instant the body has waited no time: the launch
+           queue of one sweep tick, which drains inside the tick and costs no collection slot. */
+        var ask = DateTime.UtcNow;
+        _ = StartBodyWaitingForASlot(worker, gate, stop.Token);
+        Assert.Equal(1, worker.SlotWaiters.Count);
+        var server = DueServer("due", ask.AddMinutes(-1));
+
+        try
+        {
+            var started = Ask(worker, server, ask);
+
+            Assert.Equal(new[] { "due" }, passes.Started);
+            Assert.False(started.IsCompleted, "the pass is open, so the step is still inside it");
+            Assert.Equal(0, server.AnalysisGaveWay);
         }
         finally
         {
@@ -173,7 +230,7 @@ public sealed class ScheduledAnalysisYieldsToCollectionTests
     [InlineData(6, 3)]
     [InlineData(8, 4)]
     [InlineData(16, 8)]
-    public async Task ScheduledPasses_HoldAtMostHalfTheFleetSlots_AndTheNextOneStartsWhenOneEnds(int slots, int share)
+    public async Task ScheduledPasses_HoldHalfTheFleetSlots_OrTheOnlySlotOfAGateOneWide_AndTheNextOneStartsWhenOneEnds(int slots, int share)
     {
         var (worker, passes) = NewWorker();
         var steps = new List<Task>();
@@ -226,11 +283,12 @@ public sealed class ScheduledAnalysisYieldsToCollectionTests
         using var gate = new SemaphoreSlim(0, 4);
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
         _ = StartBodyWaitingForASlot(worker, gate, stop.Token);
-        var server = DueServer("due", minutesPastDue);
+        var ask = AMinuteFromNow();
+        var server = DueServer("due", ask.AddMinutes(-minutesPastDue));
 
         try
         {
-            var step = Step(worker, server, slots: 4);
+            var step = Ask(worker, server, ask);
 
             Assert.Equal(starts ? new[] { "due" } : Array.Empty<string>(), passes.Started);
             Assert.Equal(!starts, step.IsCompleted);
@@ -253,8 +311,9 @@ public sealed class ScheduledAnalysisYieldsToCollectionTests
         try
         {
             /* Four slots, so two places. Three servers are all long overdue while collection is still queueing. */
-            var servers = Enumerable.Range(0, 3).Select(i => DueServer("overdue-" + i, minutesAgo: 20)).ToArray();
-            var steps = servers.Select(server => Step(worker, server, slots: 4)).ToArray();
+            var ask = AMinuteFromNow();
+            var servers = Enumerable.Range(0, 3).Select(i => DueServer("overdue-" + i, ask.AddMinutes(-20))).ToArray();
+            var steps = servers.Select(server => Ask(worker, server, ask)).ToArray();
 
             Assert.Equal(new[] { "overdue-0", "overdue-1" }, passes.Started);
             Assert.True(steps[2].IsCompletedSuccessfully);
@@ -273,19 +332,21 @@ public sealed class ScheduledAnalysisYieldsToCollectionTests
         using var gate = new SemaphoreSlim(0, 4);
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
         var waitingBody = StartBodyWaitingForASlot(worker, gate, stop.Token);
-        var server = DueServer("due");
+        var ask = AMinuteFromNow();
+        var server = DueServer("due", ask.AddMinutes(-1));
 
         try
         {
-            var yielded = Step(worker, server, slots: 4);
+            var yielded = Ask(worker, server, ask);
             Assert.Empty(passes.Started);
             Assert.True(yielded.IsCompletedSuccessfully);
 
             /* The service stops the body while it is still queued: it leaves the queue without ever taking a slot. */
             await stop.CancelAsync();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waitingBody.WaitAsync(Patience, Ct));
+            Assert.Equal(0, worker.SlotWaiters.Count);
 
-            var started = Step(worker, server, slots: 4);
+            var started = Ask(worker, server, ask.AddSeconds(15));
 
             Assert.Equal(new[] { "due" }, passes.Started);
             passes.End("due");
@@ -309,7 +370,7 @@ public sealed class ScheduledAnalysisYieldsToCollectionTests
 
         try
         {
-            var step = Step(worker, server, slots: 4);
+            var step = Ask(worker, server, AMinuteFromNow());
 
             Assert.Equal(new[] { "never-stamped" }, passes.Started);
             passes.End("never-stamped");
@@ -319,6 +380,58 @@ public sealed class ScheduledAnalysisYieldsToCollectionTests
         {
             passes.EndAll();
             await stop.CancelAsync();
+        }
+    }
+
+    [Fact]
+    public async Task APassThatFaults_GivesItsPlaceBack_SoTheNextServerStarts()
+    {
+        var (worker, passes) = NewWorker();
+
+        try
+        {
+            /* Two slots, so one place, and the holder has it. */
+            var holderStep = Step(worker, DueServer("holder"), slots: 2);
+            var next = DueServer("next");
+            await Step(worker, next, slots: 2);
+            Assert.Equal(new[] { "holder" }, passes.Started);
+
+            passes.Fault("holder", new InvalidOperationException("the pass faulted"));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => holderStep.WaitAsync(Patience, Ct));
+
+            _ = Step(worker, next, slots: 2);
+            Assert.Equal(new[] { "holder", "next" }, passes.Started);
+        }
+        finally
+        {
+            passes.EndAll();
+        }
+    }
+
+    [Fact]
+    public async Task APassThatIsCancelled_GivesItsPlaceBack_SoTheNextServerStarts()
+    {
+        var (worker, passes) = NewWorker();
+        using var holderStop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+
+        try
+        {
+            /* Two slots, so one place, and the holder has it. Its step runs under a token of its own. */
+            var ask = DateTime.UtcNow;
+            var holderStep = Ask(worker, DueServer("holder", ask.AddMinutes(-1)), ask, slots: 2, token: holderStop.Token);
+            var next = DueServer("next", ask.AddMinutes(-1));
+            await Ask(worker, next, ask, slots: 2);
+            Assert.Equal(new[] { "holder" }, passes.Started);
+
+            await holderStop.CancelAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => holderStep.WaitAsync(Patience, Ct));
+
+            _ = Ask(worker, next, ask.AddSeconds(15), slots: 2);
+            Assert.Equal(new[] { "holder", "next" }, passes.Started);
+        }
+        finally
+        {
+            passes.EndAll();
         }
     }
 }

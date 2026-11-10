@@ -2124,14 +2124,14 @@ public sealed partial class DarlingWorker
 
         /* #8539: counted for as long as it waits, a cancelled wait included, so a due scheduled analysis pass gives way to
            it rather than take a slot it is waiting for. */
-        Interlocked.Increment(ref _bodiesWaitingForSlot);
+        var waiter = SlotWaiters.Enter(DateTime.UtcNow);
         try
         {
             await gate.WaitAsync(stoppingToken);
         }
         finally
         {
-            Interlocked.Decrement(ref _bodiesWaitingForSlot);
+            SlotWaiters.Leave(waiter);
         }
 
         var gateWaited = Stopwatch.GetElapsedTime(gateWaitStarted);
@@ -2293,7 +2293,7 @@ public sealed partial class DarlingWorker
         server.NextAnalysisDue = dueUtc;
 
         var fleetSlots = StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps);
-        var answer = ScheduledAnalysisAdmission.Ask(Volatile.Read(ref _bodiesWaitingForSlot), dueUtc, nowUtc, ref _analysisPassesInSlot, fleetSlots);
+        var answer = ScheduledAnalysisAdmission.Ask(SlotWaiters.LongestWait(nowUtc), dueUtc, nowUtc, ref _analysisPassesInSlot, fleetSlots);
         if (answer != ScheduledAnalysisAdmission.Answer.Starts)
         {
             if (answer == ScheduledAnalysisAdmission.Answer.GivesWayToCollection)
