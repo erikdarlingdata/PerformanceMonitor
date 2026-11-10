@@ -321,6 +321,19 @@ public sealed class ViewerRecommendationCardTests
     private static ForcePlanTargetState NothingObserved() =>
         new(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
 
+    /// <summary>The collection time of the snapshot a state half was read from. The state reader stamps every half
+    /// it finds a row for, and a state with no stamp on any half is one the read found no row for.</summary>
+    private static readonly DateTime Snapshot = new(2026, 7, 1, 11, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>The state the reader returns for a plan whose forcing is failing: the plan's own snapshot row.</summary>
+    private static ForcePlanTargetState ForcingFailing() =>
+        NothingObserved() with { ForceFailureCount = 2, PlanObservedAtUtc = Snapshot };
+
+    /// <summary>The state the reader returns for a plan the engine recommended and then withdrew: the query's
+    /// newest recommendation row.</summary>
+    private static ForcePlanTargetState RecommendationWithdrawn(ForcePlanTarget target) =>
+        NothingObserved() with { ApcState = "Expired", ApcLastGoodPlanId = target.PlanId, ApcObservedAtUtc = Snapshot };
+
     /// <summary>The lines of a copy-paste text that SQL Server would run: not blank, not a comment.</summary>
     private static List<string> RunnableLines(string? sql) =>
         (sql ?? string.Empty)
@@ -337,10 +350,8 @@ public sealed class ViewerRecommendationCardTests
     {
         var states = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer)
         {
-            [ForcePlanTargetKey.Of(WithdrawnTarget)] =
-                NothingObserved() with { ApcState = "Expired", ApcLastGoodPlanId = WithdrawnTarget.PlanId },
-            [ForcePlanTargetKey.Of(FailedTarget)] =
-                NothingObserved() with { ForceFailureCount = 2 },
+            [ForcePlanTargetKey.Of(WithdrawnTarget)] = RecommendationWithdrawn(WithdrawnTarget),
+            [ForcePlanTargetKey.Of(FailedTarget)] = ForcingFailing(),
         };
 
         var item = RecommendationsViewModel.MapItem(
@@ -379,7 +390,7 @@ public sealed class ViewerRecommendationCardTests
     {
         var states = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer)
         {
-            [ForcePlanTargetKey.Of(FailedTarget)] = NothingObserved() with { ForceFailureCount = 2 },
+            [ForcePlanTargetKey.Of(FailedTarget)] = ForcingFailing(),
         };
         var rows = new List<ViewerFindingRow> { Row(ThreeTargetForceFinding()) };
 

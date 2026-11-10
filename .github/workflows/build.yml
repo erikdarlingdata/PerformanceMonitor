@@ -144,9 +144,13 @@ jobs:
               # WatermarkPolicy.MaxCatchup. Three of the twelve sites it was written for live here, so a
               # Darling-only PR reintroducing one would fire `darling` but not `lite` and skip the step
               # that runs the guard — caught a day later by the nightly, which is exactly the silent
-              # drift the pin exists to close. A diff that reaches only these three Darling trees runs just
-              # the Lite.Tests classes tagged Reads=Darling, in one shard (the lite-tests job's scope step).
+              # drift the pin exists to close.
               - 'Darling/PerformanceMonitor.Darling.Service/**/!(*.md)'
+              # Lite.Tests' ForcePlanTargetStateTests reads DarlingForcePlanTargetStateReader.cs in this tree and holds
+              # its SQL to Lite's own state reader, so an edit to that file alone has to reach the Lite suite.
+              # A diff that reaches only these four Darling trees runs just the Lite.Tests classes tagged
+              # Reads=Darling, in one shard (the lite-tests job's scope step).
+              - 'Darling/PerformanceMonitor.Darling.Analysis/**/!(*.md)'
             darling:
               - 'Darling/**/!(*.md)'
               # nightly.yml is not a build input, but Darling.Tests PARSES it: the #1888
