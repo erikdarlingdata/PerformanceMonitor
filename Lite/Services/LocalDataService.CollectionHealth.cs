@@ -594,7 +594,8 @@ LIMIT 1";
             using var command = connection.CreateCommand();
             command.CommandText = CollectionHealthReadSourceSql;
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
-            command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
+            /* #8533: the same window as the rows this stamps, from the constant their read uses. */
+            command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-CollectionConnectionFailures.RowWindowDays) });
             ApplyReadSource(rows, await command.ExecuteScalarAsync(cancellationToken) as string);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -678,7 +679,8 @@ GROUP BY collector_name";
             using var command = connection.CreateCommand();
             command.CommandText = ObservedQuietGapsSql(needing.Count);
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
-            command.Parameters.Add(new DuckDBParameter { Value = nowUtc.AddDays(-7) });
+            /* #8533: the same window as the rows this stamps, from the constant their read uses. */
+            command.Parameters.Add(new DuckDBParameter { Value = nowUtc.AddDays(-CollectionConnectionFailures.RowWindowDays) });
             foreach (var row in needing)
             {
                 command.Parameters.Add(new DuckDBParameter { Value = row.CollectorName });

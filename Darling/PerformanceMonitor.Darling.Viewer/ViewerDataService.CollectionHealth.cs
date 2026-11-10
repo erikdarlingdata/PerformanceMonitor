@@ -609,7 +609,8 @@ LIMIT 1";
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<DateTime>
             {
-                TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified),
+                /* #8533: the same window as the rows this stamps, from the constant their read uses. */
+                TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-CollectionConnectionFailures.RowWindowDays), DateTimeKind.Unspecified),
             });
             var value = await command.ExecuteScalarAsync(cancellationToken);
             ApplyReadSource(rows, value as string);
