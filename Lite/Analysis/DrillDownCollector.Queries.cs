@@ -335,11 +335,7 @@ SELECT
     server_time_zone_id
 FROM latest
 WHERE rn = 1
-AND   min_worker_time >= 10000
-AND   max_worker_time >= 250000
-AND   execution_count >= 20
-AND   creation_time_utc <= $4
-AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
+" + ParameterSensitivitySignature.PredicateSql("creation_time_utc <= $4") + @"
 ORDER BY worker_ratio DESC";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -555,11 +551,7 @@ psp_signature AS
         AND   delta_execution_count > 0
     ) AS latest_cache
     WHERE rn = 1
-    AND   min_worker_time >= 10000
-    AND   max_worker_time >= 250000
-    AND   execution_count >= 20
-    AND   creation_time_utc <= $7
-    AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
+" + ParameterSensitivitySignature.PredicateSql("creation_time_utc <= $7", "    ") + @"
     GROUP BY database_name, query_hash
 ),
 deduped AS
