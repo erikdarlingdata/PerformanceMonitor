@@ -1533,7 +1533,8 @@ public partial class MainWindow : Window
 
         var utcOffset = status.UtcOffsetMinutes ?? 0;
         var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialResolver, utcOffset, status.HasMsdbAccess, status.SqlEngineEdition, awsRdsKind: CollectorEngineCapability.AwsRdsKindOf(status.IsAwsRds, status.IsAwsRdsWebOrExpress),
-            isLongQueryTraceEnabled: () => _scheduleManager.GetScheduleForServer(server.Id, "long_query_completions")?.Enabled ?? false);
+            isLongQueryTraceEnabled: () => _scheduleManager.GetScheduleForServer(server.Id, "long_query_completions")?.Enabled ?? false,
+            isQueryStoreHealthEnabled: () => _scheduleManager.GetScheduleForServer(server.Id, "query_store_health")?.Enabled ?? true);
         var tabHeader = CreateTabHeader(server);
         var tabItem = new TabItem
         {

@@ -179,14 +179,6 @@ public sealed partial class ViewerDataService
 
         var withRows = data.Sections.GetValueOrDefault(QueryTagRollupSection.QueryStore.Name)?.Select(f => f.ServerId).ToHashSet() ?? [];
         IReadOnlyList<CollectorScheduleRow>? scheduleRows = null;
-        /* Whether the query_store_health collector's effective schedule lets it refresh its capture on the server: the service's own
-           selection of the server's row over the fleet row, and the collector's default when neither row says. */
-        static bool QueryStoreHealthCaptureRefreshes(IReadOnlyList<CollectorScheduleRow> rows, int serverId)
-        {
-            var name = PerformanceMonitor.Collectors.QueryStoreHealthCollector.Instance.Name;
-            var (perServer, fleet) = PerformanceMonitor.Collectors.CollectorScheduleDefaults.SelectScheduleOverrides(name, serverId, rows);
-            return perServer?.Enabled ?? fleet?.Enabled ?? PerformanceMonitor.Collectors.CollectorScheduleDefaults.All[name].DefaultEnabled;
-        }
 
         foreach (var server in servers)
         {
@@ -207,5 +199,63 @@ public sealed partial class ViewerDataService
         }
 
         return reasons;
+    }
+
+    /// <summary>
+    /// Whether the <c>query_store_health</c> collector's effective schedule lets it refresh its capture on the server: the service's
+    /// own selection of the server's row over the fleet row, and the collector's default when neither row says.
+    /// </summary>
+    private static bool QueryStoreHealthCaptureRefreshes(IReadOnlyList<CollectorScheduleRow> rows, int serverId)
+    {
+        var name = PerformanceMonitor.Collectors.QueryStoreHealthCollector.Instance.Name;
+        var (perServer, fleet) = PerformanceMonitor.Collectors.CollectorScheduleDefaults.SelectScheduleOverrides(name, serverId, rows);
+        return perServer?.Enabled ?? fleet?.Enabled ?? PerformanceMonitor.Collectors.CollectorScheduleDefaults.All[name].DefaultEnabled;
+    }
+
+    /// <summary>The server's newest <c>query_store_health</c> capture time beside the store's own clock, both UTC. $1 server_id.</summary>
+    private const string NewestQueryStoreHealthCaptureSql =
+        "SELECT (SELECT MAX(h.capture_time) FROM v_query_store_health AS h WHERE h.server_id = $1), (now() AT TIME ZONE 'UTC')";
+
+    /// <summary>
+    /// #8541: why a Query Store read on this server has no rows, for the Query Store panel's empty window. A server that is a readable
+    /// secondary Darling does not collect Query Store from answers <paramref name="ReadableSecondary"/>, the sentence the MCP reads
+    /// give (<see cref="DarlingQueryStoreReadableSecondary"/>, with the <c>query_store_health</c> collector's effective schedule read
+    /// from the store's rows). Otherwise a server whose newest <c>query_store_health</c> capture is older than
+    /// <see cref="PerformanceMonitor.Common.QueryStoreSnapshotStaleness.Threshold"/> on the store's clock answers
+    /// <paramref name="StaleCapture"/>, which says whether that collector's schedule still takes a capture. Both are null when the
+    /// store has no reason to give, and when a read fails: the panel has already said its window is empty.
+    /// </summary>
+    public async Task<(string? ReadableSecondary, string? StaleCapture)> GetQueryStoreEmptyReasonAsync(
+        int serverId, string displayName, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var healthCaptureRefreshes = QueryStoreHealthCaptureRefreshes(await ReadScheduleOverridesForHealthAsync(cancellationToken), serverId);
+            if (await DarlingQueryStoreReadableSecondary.MessageAsync(
+                    _dataSource, serverId, displayName, healthCaptureRefreshes,
+                    ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken) is { } secondary)
+            {
+                return (secondary, null);
+            }
+
+            await using var command = _dataSource.CreateCommand(NewestQueryStoreHealthCaptureSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
+            {
+                return (null, null);
+            }
+
+            return (null, PerformanceMonitor.Common.QueryStoreSnapshotStaleness.PanelNote(
+                DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+                DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc),
+                PerformanceMonitor.Collectors.QueryStoreHealthCollector.Instance.Name,
+                healthCaptureRefreshes));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return (null, null);
+        }
     }
 }

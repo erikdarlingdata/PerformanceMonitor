@@ -199,7 +199,7 @@ public partial class ServerTab : UserControl
             if (data.Count == 0)
             {
                 QueryStoreSlicer.ShowEmpty(QueryStoreEmptyWindowText);
-                await ShowQueryStoreEmptyReasonAsync(QueryStoreSlicer, _dataService, _serverId, _server.DisplayName, healthCollectorEnabled: true);
+                await ShowQueryStoreEmptyReasonAsync(QueryStoreSlicer, _dataService, _serverId, _server.DisplayName, _isQueryStoreHealthEnabled());
             }
             else
                 QueryStoreSlicer.LoadData(data, "Total CPU (ms)", slicerStart, slicerEnd, PerformanceMonitor.Common.SlicerBuckets.MinutesFor(slicerStart, slicerEnd));
@@ -213,16 +213,63 @@ public partial class ServerTab : UserControl
     /// <summary>What the Query Store panel says over a window that holds no rows.</summary>
     internal const string QueryStoreEmptyWindowText = "No Query Store data in the selected time window.";
 
-    /// <summary>The step that follows the Query Store panel saying its window is empty. It leaves that sentence as it is.</summary>
-    internal static System.Threading.Tasks.Task ShowQueryStoreEmptyReasonAsync(
+    /// <summary>
+    /// #8541: the step that follows the Query Store panel saying its window is empty. It asks the store why
+    /// (<see cref="QueryStoreEmptyReasonAsync"/>) and shows the answer on the same slicer: the readable-secondary sentence
+    /// <c>get_query_store_top</c> gives, in place of the empty-window sentence, or the stale-capture sentence after it. The
+    /// empty-window sentence shows first and stays when the store has no reason to give. Nothing is shown when the slicer moved on
+    /// while the store was asked (it loaded data, or says something else).
+    /// </summary>
+    internal static async System.Threading.Tasks.Task ShowQueryStoreEmptyReasonAsync(
         Controls.TimeRangeSlicerControl slicer, LocalDataService dataService, int serverId, string serverName, bool healthCollectorEnabled)
     {
         ArgumentNullException.ThrowIfNull(slicer);
         ArgumentNullException.ThrowIfNull(dataService);
         ArgumentNullException.ThrowIfNull(serverName);
-        _ = serverId;
-        _ = healthCollectorEnabled;
-        return System.Threading.Tasks.Task.CompletedTask;
+
+        var shown = slicer.EmptyText;
+        if (shown is null)
+        {
+            return;
+        }
+
+        var (readableSecondary, staleCapture) = await System.Threading.Tasks.Task.Run(
+            () => QueryStoreEmptyReasonAsync(dataService, serverId, serverName, healthCollectorEnabled));
+        var text = readableSecondary ?? (staleCapture is null ? null : shown + " " + staleCapture);
+        if (text is not null && ReferenceEquals(slicer.EmptyText, shown))
+        {
+            slicer.ShowEmpty(text);
+        }
+    }
+
+    /// <summary>
+    /// #8541: why a Query Store read on this server has no rows. A readable secondary Lite does not collect Query Store from answers
+    /// <c>ReadableSecondary</c>, the sentence the MCP reads give. Otherwise a server whose newest <c>query_store_health</c> capture is
+    /// older than <see cref="QueryStoreSnapshotStaleness.Threshold"/> answers <c>StaleCapture</c>, which says whether that collector's
+    /// schedule still takes a capture (<paramref name="healthCollectorEnabled"/>). Both are null when the store has no reason to give,
+    /// and when a read fails: the panel has already said its window is empty.
+    /// </summary>
+    private static async System.Threading.Tasks.Task<(string? ReadableSecondary, string? StaleCapture)> QueryStoreEmptyReasonAsync(
+        LocalDataService dataService, int serverId, string serverName, bool healthCollectorEnabled)
+    {
+        try
+        {
+            if (await PerformanceMonitorLite.Mcp.McpRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(dataService, serverId, serverName) is { } secondary)
+            {
+                return (secondary, null);
+            }
+
+            var captures = await dataService.GetLatestQueryStoreHealthAsync(serverId);
+            return captures.Count == 0
+                ? (null, null)
+                : (null, QueryStoreSnapshotStaleness.PanelNote(
+                    DateTime.SpecifyKind(captures[0].CaptureTime, DateTimeKind.Utc), DateTime.UtcNow, "query_store_health", healthCollectorEnabled));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Info("ServerTab", $"[{serverName}] QueryStoreEmptyReasonAsync failed: {ex.Message}");
+            return (null, null);
+        }
     }
 
     private async void OnQueryStoreSlicerChanged(object? sender, Controls.SlicerRangeEventArgs e)

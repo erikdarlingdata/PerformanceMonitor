@@ -35,11 +35,7 @@ public static class QueryStoreSnapshotStaleness
     {
         var age = nowUtc - capturedUtc;
         if (age < Threshold) return null;
-        var days = (int)age.TotalDays;
-        var hours = age.Hours;
-        var ago = days > 0
-            ? string.Format(CultureInfo.InvariantCulture, "{0} day{1} {2} hour{3}", days, days == 1 ? "" : "s", hours, hours == 1 ? "" : "s")
-            : string.Format(CultureInfo.InvariantCulture, "{0} hour{1}", hours, hours == 1 ? "" : "s");
+        var ago = Ago(age);
         if (!collectorEnabled)
         {
             return $"This is the newest capture, and it is {ago} old: the {collectorName} collector is disabled for this server, so no "
@@ -49,5 +45,31 @@ public static class QueryStoreSnapshotStaleness
 
         return $"This is the newest capture, and it is {ago} old: the {collectorName} collector runs hourly, so the state shown is "
             + "the server's as of captured_at, not now. Check get_collection_health for why no newer capture exists.";
+    }
+
+    /// <summary>
+    /// #8541: the sentence a desktop Query Store panel adds over an empty window when the server's newest
+    /// <c>query_store_health</c> capture is older than <see cref="Threshold"/>, or null while it is fresh. It gives the reason
+    /// <see cref="Note"/> gives, the capture's age and whether the collector's schedule still takes one, in the words of a panel:
+    /// the panel shows no capture and names no tool.
+    /// </summary>
+    public static string? PanelNote(DateTime capturedUtc, DateTime nowUtc, string collectorName, bool collectorEnabled)
+    {
+        var age = nowUtc - capturedUtc;
+        if (age < Threshold) return null;
+        var ago = Ago(age);
+        return collectorEnabled
+            ? $"The newest Query Store health capture is {ago} old: the {collectorName} collector runs hourly, so collection health shows why no newer capture exists."
+            : $"The newest Query Store health capture is {ago} old: the {collectorName} collector is disabled for this server, so no newer capture is taken.";
+    }
+
+    /// <summary>An age as whole days and hours ("19 days 4 hours"), or hours alone under a day.</summary>
+    private static string Ago(TimeSpan age)
+    {
+        var days = (int)age.TotalDays;
+        var hours = age.Hours;
+        return days > 0
+            ? string.Format(CultureInfo.InvariantCulture, "{0} day{1} {2} hour{3}", days, days == 1 ? "" : "s", hours, hours == 1 ? "" : "s")
+            : string.Format(CultureInfo.InvariantCulture, "{0} hour{1}", hours, hours == 1 ? "" : "s");
     }
 }

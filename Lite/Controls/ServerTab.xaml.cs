@@ -199,6 +199,9 @@ public partial class ServerTab : UserControl
        Queries tab shows an explicit "trace is OFF" empty-state banner when it is disabled — read fresh
        each refresh so toggling it in the schedule editor updates the banner without reopening the tab. */
     private readonly Func<bool> _isLongQueryTraceEnabled;
+    /* #8541: whether the query_store_health collector's schedule runs it on this server, read fresh each time the Query Store
+       panel's window comes back empty, so the panel says whether a newer health capture is coming. */
+    private readonly Func<bool> _isQueryStoreHealthEnabled;
 
     /// <summary>
     /// Raised after each data refresh with alert counts for tab badge display.
@@ -208,7 +211,7 @@ public partial class ServerTab : UserControl
     public event Func<Task>? ManualRefreshRequested;
     public event Action<ServerConnection>? PersistServerRequested; /* #1319: persist ViewFilterDatabases via ServerManager */
 
-    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null, AwsRdsKind awsRdsKind = AwsRdsKind.None)
+    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null, AwsRdsKind awsRdsKind = AwsRdsKind.None, Func<bool>? isQueryStoreHealthEnabled = null)
     {
         InitializeComponent();
         PerformanceMonitor.Ui.ChartPairLayout.Attach(CurrentWaitsScroll, CurrentWaitsGrid, CurrentWaitsFirstCard, CurrentWaitsSecondCard, CurrentWaitsGrid.RowDefinitions[2]); // #8219: side by side when the tab is too short for both stacked
@@ -234,6 +237,8 @@ public partial class ServerTab : UserControl
         /* Default to "enabled" when no probe is supplied so the empty-state banner never falsely claims
            the trace is off; MainWindow always wires the live schedule probe. */
         _isLongQueryTraceEnabled = isLongQueryTraceEnabled ?? (() => true);
+        /* Enabled when no probe is supplied: the collector runs by default, and MainWindow wires the live schedule probe. */
+        _isQueryStoreHealthEnabled = isQueryStoreHealthEnabled ?? (() => true);
         foreach (var db in _server.ViewFilterDatabases)
             _selectedDatabases.Add(db);
         _dataService = new LocalDataService(duckDb);

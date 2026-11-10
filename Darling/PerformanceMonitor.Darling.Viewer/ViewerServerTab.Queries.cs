@@ -708,13 +708,31 @@ public partial class ViewerServerTab
     /// <summary>What the Query Store panel says over a window that holds no rows.</summary>
     internal const string QueryStoreEmptyWindowText = "No Query Store data in the selected time window.";
 
-    /// <summary>The step that follows the Query Store panel saying its window is empty. It leaves that sentence as it is.</summary>
-    internal static Task ShowQueryStoreEmptyReasonAsync(TimeRangeSlicerControl slicer, ViewerDataService dataService, DarlingServer server)
+    /// <summary>
+    /// #8541: the step that follows the Query Store panel saying its window is empty. It asks the store why
+    /// (<see cref="ViewerDataService.GetQueryStoreEmptyReasonAsync"/>) and shows the answer on the same slicer: the readable-secondary
+    /// sentence the MCP reads give, in place of the empty-window sentence, or the stale-capture sentence after it. The empty-window
+    /// sentence shows first and stays when the store has no reason to give. Nothing is shown when the slicer moved on while the
+    /// store was asked (it loaded data, or says something else).
+    /// </summary>
+    internal static async Task ShowQueryStoreEmptyReasonAsync(TimeRangeSlicerControl slicer, ViewerDataService dataService, DarlingServer server)
     {
         ArgumentNullException.ThrowIfNull(slicer);
         ArgumentNullException.ThrowIfNull(dataService);
         ArgumentNullException.ThrowIfNull(server);
-        return Task.CompletedTask;
+
+        var shown = slicer.EmptyText;
+        if (shown is null)
+        {
+            return;
+        }
+
+        var (readableSecondary, staleCapture) = await dataService.GetQueryStoreEmptyReasonAsync(server.ServerId, server.DisplayName);
+        var text = readableSecondary ?? (staleCapture is null ? null : shown + " " + staleCapture);
+        if (text is not null && ReferenceEquals(slicer.EmptyText, shown))
+        {
+            slicer.ShowEmpty(text);
+        }
     }
 
     private async void OnQueryStoreSlicerChanged(object? sender, SlicerRangeEventArgs e)
