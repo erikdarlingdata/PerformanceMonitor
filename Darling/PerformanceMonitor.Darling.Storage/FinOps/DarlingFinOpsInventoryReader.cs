@@ -542,7 +542,7 @@ SELECT
     /* #2359: real collection freshness, which is NOT what sp.collection_time means. server_properties
        has FrequencyMinutes 0 - collected once on server load - so its timestamp is the last service
        start, not a heartbeat. Appended LAST so no existing reader ordinal moves. */
-    (SELECT MAX(cl.collection_time) FROM v_collection_log cl WHERE cl.server_id = sp.server_id AND {CollectionCycleRow.NotCycleRowSql}) AS last_collection,
+    (SELECT MAX(cl.collection_time) FROM v_collection_log cl WHERE cl.server_id = sp.server_id AND {CollectionRunSql.SuccessfulCollectorRun}) AS last_collection,
     /* #7176: the zone id and offset that turn sqlserver_start_time (server-local) into UTC. Appended LAST so no existing reader ordinal moves. */
     sp.utc_offset_minutes,
     sp.time_zone_id

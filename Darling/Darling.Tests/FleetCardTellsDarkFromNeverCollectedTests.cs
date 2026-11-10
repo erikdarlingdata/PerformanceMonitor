@@ -12,6 +12,7 @@ using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -198,7 +199,10 @@ public sealed class FleetCardTellsDarkFromNeverCollectedTests
         Assert.Contains("s.created_date", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
         Assert.Matches(@"ORDER BY collection_time DESC\s+LIMIT 1", sql);
-        Assert.Single(Regex.Matches(sql, @"\bv_collection_log\b"));
+        /* Two reads of the log and no more: the newest-success LATERAL and, beside it, the any-collector-row probe (#8464) that tells a
+           server whose collectors all fail from one that has never been tried. */
+        Assert.Equal(2, Regex.Matches(sql, @"\bv_collection_log\b").Count);
+        Assert.Contains(CollectionAttemptSql.Attempted, sql, StringComparison.Ordinal);
         Assert.DoesNotContain("CROSS JOIN", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("GROUP BY", sql, StringComparison.Ordinal);
         Assert.True(FleetReadsAreBoundedByTheFleetTests.IsBoundedByTheFleet(sql));

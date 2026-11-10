@@ -8,6 +8,7 @@
 
 using System;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -153,7 +154,11 @@ public sealed class ViewerServerChromeTests
     {
         var sql = ViewerDataService.ServerFreshnessSql;
         Assert.Contains("FROM servers AS s", sql, StringComparison.Ordinal);
-        Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
+        /* #8464: every registered server gets a row (LEFT JOIN), with its newest successful collection or null, and beside it whether
+           any collector has run against it, so the dot can tell a server whose collectors all fail from one never tried. */
+        Assert.Contains("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains(") AS latest ON TRUE", sql, StringComparison.Ordinal);
+        Assert.Contains(CollectionAttemptSql.Attempted + " AS attempted", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_collection_log", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = s.server_id", sql, StringComparison.Ordinal);
         Assert.Matches(@"ORDER BY collection_time DESC\s+LIMIT 1", sql);

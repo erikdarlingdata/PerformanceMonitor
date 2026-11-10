@@ -182,16 +182,20 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)";
         }
     }
 
+    /// <summary>#8464: a server whose only collector runs have failed has been reached and refused, so it is offline by the rule every
+    /// surface shares, whatever its registration's age; the empty answer gives way to <c>unavailable</c> with the lead that names the failing
+    /// collectors as the cause, as it does for every other read of such a server. A server with no run at all keeps the tools' own answers.</summary>
     [Fact]
-    public async Task TraceFlagChanges_WithNoSuccessfulRun_KeepTheTwoSnapshotsText()
+    public async Task TraceFlagChanges_WithNoSuccessfulRun_IsOffline_WithTheCollectorsFailLead()
     {
         await LogRunAsync("trace_flags", DateTime.UtcNow.AddMinutes(-20), 0, status: "ERROR");
         var service = new LocalDataService(_duckDb);
 
         var changes = await McpConfigHistoryTools.GetTraceFlagChanges(service, _serverManager, ServerName);
 
-        Assert.Equal("empty", Field(changes, "status"));
-        Assert.Contains("at least two snapshots", Field(changes, "message"), StringComparison.Ordinal);
+        Assert.Equal("unavailable", Field(changes, "status"));
+        Assert.Contains(" is offline: its collectors run and every collection fails", Field(changes, "message"), StringComparison.Ordinal);
+        Assert.DoesNotContain("at least two snapshots", Field(changes, "message"), StringComparison.Ordinal);
     }
 
     [Fact]

@@ -1882,9 +1882,11 @@ public sealed class McpQueryTools
     private static async Task<(string? Lead, DateTime? Newest)> OfflineLeadOrNullAsync(LocalDataService dataService, int serverId, DateTime windowEnd)
     {
         DateTime? last;
+        bool attempted;
         try
         {
             last = await dataService.GetLastSuccessfulCollectionAsync(serverId);
+            attempted = last.HasValue || await dataService.HasAnyCollectorRowAsync(serverId);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1898,14 +1900,19 @@ public sealed class McpQueryTools
                what a server whose credentials have been wrong since it was added looks like. One registered inside the horizon, or with no
                registration known, keeps the tools' own "never collected" answers. */
             var registered = dataService.RegisteredAtUtcLookup?.Invoke(serverId);
-            if (ServerHealthClassifier.ClassifyFreshness(null, registered, RetentionService.OldestRetainedInstant(windowEnd), windowEnd)
+            if (ServerHealthClassifier.ClassifyFreshness(null, registered, RetentionService.OldestRetainedInstant(windowEnd), windowEnd, attempted)
                 != ServerFreshness.Offline)
             {
                 return (null, null);
             }
 
-            return ($"{OfflineSubject(dataService, serverId)} is offline: the store holds no successful collection from it within its retained history, "
-                + "so nothing is arriving to read, whatever the collectors would otherwise report.", null);
+            /* #8464: a server the collectors reach and are refused by on every attempt is told from one whose history retention dropped,
+               so the sentence sends the reader to the collectors' errors (get_collection_health) and not to retention. */
+            return (attempted
+                ? $"{OfflineSubject(dataService, serverId)} is offline: its collectors run and every collection fails, so the store holds no successful "
+                    + "collection from it and nothing is arriving to read; get_collection_health names the failing collectors and their errors."
+                : $"{OfflineSubject(dataService, serverId)} is offline: the store holds no successful collection from it within its retained history, "
+                    + "so nothing is arriving to read, whatever the collectors would otherwise report.", null);
         }
 
         if (windowEnd <= newest

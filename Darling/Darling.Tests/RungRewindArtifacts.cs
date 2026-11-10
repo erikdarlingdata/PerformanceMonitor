@@ -757,6 +757,9 @@ DROP TABLE IF EXISTS collect.schema_columns;
 DROP TABLE IF EXISTS collect.schema_objects;
 DROP TABLE IF EXISTS collect.schema_capture_state;
 DROP TABLE IF EXISTS collect.schema_capture_passes;"),
+        // V257 (#8464): the status-leading collection_log index. The probe's sentinel is the index itself, so the rewind drops it and a re-run
+        // of V257 makes it again. Safe on a store that never had it.
+        new(257, "hasCollectionLogStatusTimeIndex", "DROP INDEX IF EXISTS collect.idx_collection_log_status_time;"),
     ];
 
     /// <summary>

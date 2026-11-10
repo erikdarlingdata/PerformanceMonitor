@@ -249,7 +249,10 @@ FROM
 ) AS sampled";
 
     /// <summary>
-    /// Newest collection time across all collectors for one server. $1 server_id.
+    /// Newest successful collection time across all collectors for one server. $1 server_id. #8464: only a
+    /// <c>SUCCESS</c> row counts (<see cref="CollectionRunSql.SuccessfulCollectorRun"/>). Every attempt writes a row, a failed
+    /// one included, so a read over every row moved this stamp, and the freshness band under it, forward on each failed
+    /// attempt, and a dark server read fresh. Collection Health and the alert notebook already counted SUCCESS rows only.
     ///
     /// <para><b>#3976: <c>ORDER BY collection_time DESC LIMIT 1</c>, not <c>MAX(collection_time)</c>.</b> Same
     /// answer — <c>ExecuteScalarAsync</c> reads null identically whether MAX found no matching row or LIMIT 1
@@ -265,7 +268,7 @@ FROM
 SELECT collection_time
 FROM v_collection_log
 WHERE server_id = $1
-AND   {CollectionCycleRow.NotCycleRowSql}
+AND   {CollectionRunSql.SuccessfulCollectorRun}
 ORDER BY collection_time DESC
 LIMIT 1";
 
@@ -1083,6 +1086,11 @@ public sealed class ServerSummaryItem
     /// </summary>
     public DateTime? RegisteredAt { get; set; }
 
+    /// <summary>#8464: whether any collector has run against this server, a failed attempt included, copied from the registry row the card
+    /// was built from. With no successful collection, <see cref="ApplyFreshness(DateTime)"/> bands a tried-and-refused server Offline and a
+    /// server no collector has reached yet as awaiting its first collection.</summary>
+    public bool Attempted { get; set; }
+
     /// <summary>When the service's connect to this server first failed (UTC), or null (#7590). Copied from the registry row the card was built
     /// from; set, <see cref="ApplyFreshness(DateTime)"/> bands the card Offline and <see cref="FleetRollup.BuildReason"/> says why.</summary>
     public DateTime? ConnectDownSince { get; set; }
@@ -1327,13 +1335,19 @@ public sealed class ServerSummaryItem
     /// The stored collection_time is naive UTC; the viewer shows it in the viewer machine's local time
     /// (the viewer convention — Lite used its per-server offset helper instead).
     ///
-    /// <para>With no collection to show, "Never" only when the card is awaiting its first one. A card that
-    /// reads Offline with nothing to show is a server whose history retention has dropped (#3967): something
-    /// was collected, and none of it is retained, which is what the row says.</para>
+    /// <para>With no collection to show, "None retained" only for a server registered before the collection log's
+    /// retention horizon (#3967, <see cref="HistoryAgedOut"/>): it had time to collect before everything the store
+    /// keeps, so what it collected is gone. Every other such card reads "Never", whatever its band.</para>
     /// </summary>
     public string LastCollectionDisplay => LastCollectionTime.HasValue
         ? FormatLastCollect(LastCollectionTime.Value, ViewerTimeHelper.CurrentDisplayZone(), DateTime.UtcNow)
-        : IsOnline == false ? "None retained" : "Never";
+        : HistoryAgedOut(RegisteredAt, DateTime.UtcNow) ? "None retained" : "Never";
+
+    /// <summary>#3967, #8464: true when <paramref name="registeredAtUtc"/> precedes the collection log's retention horizon at
+    /// <paramref name="nowUtc"/>, so a server with no retained collection collected before everything the store keeps. The
+    /// Overview card and Manage Servers word their empty Last Collect from this alone; the band is a separate question.</summary>
+    public static bool HistoryAgedOut(DateTime? registeredAtUtc, DateTime nowUtc) =>
+        registeredAtUtc is { } registered && registered < DarlingRetentionHorizons.CollectionLogHorizon(nowUtc);
 
     /// <summary>
     /// The Last Collect time as the card words it (D4 of the final walk, the twin of Lite's
@@ -1665,6 +1679,13 @@ public sealed class ServerSummaryItem
         ServerHealthClassifier.ClassifyFreshness(
             lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc, connectDownSinceUtc);
 
+    /// <summary>The rule above with the log's failed rows folded in (#8464): a server any collector has run against and none has
+    /// collected from is Offline, not awaiting its first collection. The card, the sidebar dot and the server tab's header call this one.</summary>
+    public static ServerFreshness ClassifyFreshness(
+        DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, DateTime? connectDownSinceUtc, bool attempted) =>
+        ServerHealthClassifier.ClassifyFreshness(
+            lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc, connectDownSinceUtc, attempted);
+
     /// <summary>
     /// Maps the freshness band onto the card's three status flags, taking the live-ping's place: Fresh →
     /// Online, Stale → the amber Warning state, Offline → the red Offline status, NeverCollected → the amber
@@ -1680,7 +1701,7 @@ public sealed class ServerSummaryItem
     {
         /* #7590: as on the sidebar row, a collection newer than the first failed connect makes the stored flag stale. */
         ConnectDownSince = ServerHealthClassifier.EffectiveConnectDownSince(LastCollectionTime, ConnectDownSince);
-        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, RegisteredAt, nowUtc, ConnectDownSince));
+        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, RegisteredAt, nowUtc, ConnectDownSince, Attempted));
         IsOnline = flags.IsOnline;
         CollectionStale = flags.CollectionStale;
         AwaitingFirstCollection = flags.AwaitingFirstCollection;

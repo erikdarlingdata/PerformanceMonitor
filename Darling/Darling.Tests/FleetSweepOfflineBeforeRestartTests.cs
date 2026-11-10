@@ -79,6 +79,33 @@ public sealed class FleetSweepOfflineBeforeRestartTests
         Assert.Contains("startup-transient", composition.Verdicts.Single(v => v.ServerId == 2).BandReason, StringComparison.Ordinal);
     }
 
+    /// <summary>#8464: a target registered inside the retention horizon whose collectors have run and all failed (collector rows, no
+    /// success) was offline before the restart by every other surface's rule, so the sweep says so too, names the failing collectors as
+    /// the cause, and does not call its silence startup-transient. The probe behind the flag is unbounded in time, so a target first
+    /// registered after the restart with failed rows is not offline before it; and one with no collector row at all keeps the
+    /// registration rule above.</summary>
+    [Fact]
+    public void ATargetWhoseCollectorsAllFail_WasOfflineBeforeTheRestart_WhateverItsRegistrationsAge()
+    {
+        var failing = new FleetSweepServerReading(1, "all-failed", default, 0, null, null, Started.AddDays(-2), Attempted: true);
+        var registeredAfter = new FleetSweepServerReading(2, "failed-since-restart", default, 0, null, null, Started.AddMinutes(1), Attempted: true);
+        var untried = new FleetSweepServerReading(3, "untried", default, 0, null, null, Started.AddDays(-2), Attempted: false);
+        Assert.True(failing.WasOfflineBeforeRestart(Started));
+        Assert.True(failing.WasFailingBeforeRestart(Started));
+        Assert.False(registeredAfter.WasOfflineBeforeRestart(Started));
+        Assert.False(untried.WasOfflineBeforeRestart(Started));
+        Assert.False(untried.WasFailingBeforeRestart(Started));
+
+        var composition = Compose(failing, registeredAfter, untried);
+        var offline = composition.Verdicts.Single(v => v.ServerId == 1);
+        Assert.Contains("already offline before the restart", offline.BandReason, StringComparison.Ordinal);
+        Assert.Contains("every collection fails", offline.BandReason, StringComparison.Ordinal);
+        Assert.DoesNotContain("retained history", offline.BandReason, StringComparison.Ordinal);
+        Assert.Contains("classified offline, not startup-transient", offline.BandReason, StringComparison.Ordinal);
+        Assert.Contains("startup-transient", composition.Verdicts.Single(v => v.ServerId == 2).BandReason, StringComparison.Ordinal);
+        Assert.Contains("startup-transient", composition.Verdicts.Single(v => v.ServerId == 3).BandReason, StringComparison.Ordinal);
+    }
+
     /// <summary>A server that has data in the span is never offline before the restart, whatever its last collection says.</summary>
     [Fact]
     public void ATargetWithDataInTheSpan_IsNotOfflineBeforeTheRestart()

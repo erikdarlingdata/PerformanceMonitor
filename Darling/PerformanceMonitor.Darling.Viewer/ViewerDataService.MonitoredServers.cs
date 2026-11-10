@@ -260,7 +260,7 @@ AND   port = $5";
     /// queries for the #3145 one: it is the first successful connect, and a server the operator added that the
     /// service has not reached has none, which keeps its dot on "Awaiting first collection".</para>
     /// </summary>
-    public const string ManagedServersSql = @"
+    public const string ManagedServersSql = $@"
 SELECT
     c.server_id,
     COALESCE(s.server_name, c.host) AS server_name,
@@ -271,7 +271,8 @@ SELECT
     s.engine_kind,
     COALESCE(s.sql_engine_edition, 0) AS sql_engine_edition,
     s.postgres_major_version,
-    s.created_date
+    s.created_date,
+    {CollectionAttemptSql.Attempted} AS attempted
 FROM config_monitored_servers c
 LEFT JOIN servers s ON s.server_id = c.server_id
 ORDER BY COALESCE(s.display_name, c.name)";
@@ -440,7 +441,10 @@ GROUP BY s.server_id";
                 reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(7),
                 reader.IsDBNull(8) ? null : reader.GetInt32(8),
-                reader.IsDBNull(9) ? null : reader.GetDateTime(9)));
+                reader.IsDBNull(9) ? null : reader.GetDateTime(9))
+            {
+                Attempted = reader.GetBoolean(10),
+            });
         }
 
         await AttachSameMachineAsync(servers, cancellationToken);

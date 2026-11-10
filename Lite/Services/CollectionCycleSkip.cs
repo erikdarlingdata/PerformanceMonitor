@@ -35,7 +35,7 @@ internal static class CollectionCycleSkip
     /// return the log as rows (the Collection Log grid and <c>get_collection_log</c>, and their fleet forms) show
     /// the row on purpose, filterable by <c>status = SKIPPED</c>; <c>get_collection_log</c> counts it in
     /// <c>skipped_cycle_rows</c> and not in <c>run_count</c> (#5731).</summary>
-    internal const string CollectorName = "collection_cycle";
+    internal const string CollectorName = CollectionRunSql.CycleRowCollectorName;
 
     /// <summary>The <c>collection_log.status</c> of a skipped-slots row.</summary>
     internal const string Status = "SKIPPED";

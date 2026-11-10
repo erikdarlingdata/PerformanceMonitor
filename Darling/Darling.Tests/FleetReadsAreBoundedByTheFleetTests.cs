@@ -452,13 +452,20 @@ GROUP BY server_id";
                finds, the probe finds identically. */
             var lastArgs = new object[] { DarlingFleetReader.LastCollectionWindowStart(now) };
             var oldLast = Scoped(await ReadRowsAsync(connection, OldLastCollectionSql, lastArgs, ct), s_compared);
-            var newLast = Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetLastCollectionSql, lastArgs, ct), s_compared);
+            /* #8464: the read's last cell is whether any collector has run against the server, a failed attempt included; it is taken
+               off for the comparison with the oracle, which has no such column, and asserted on its own: true for every server with a
+               row in the log, the dark one included, and false for the one never collected. */
+            var newLastWithAttempt = Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetLastCollectionSql, lastArgs, ct), s_compared);
+            var newLast = newLastWithAttempt.Select(WithoutLastCell).ToList();
             Assert.Equal(3, oldLast.Count);
             Assert.Equal(oldLast, newLast.Where(r => !r.Contains("|null|", StringComparison.Ordinal)).Select(WithoutLastCell).ToList());
             Assert.Equal(s_compared.Length, newLast.Count);
             Assert.Contains(Id(DarkFiveDays) + "null|" + Stamp(RegisteredLongAgo(now)), newLast);
             Assert.Contains(Id(NeverCollected) + "null|" + Stamp(RegisteredJustNow(now)), newLast);
             Assert.Contains(Id(CollectingA) + Stamp(now.AddMinutes(-1)) + "|" + Stamp(RegisteredLongAgo(now)), newLast);
+            Assert.Contains(Id(DarkFiveDays) + "null|" + Stamp(RegisteredLongAgo(now)) + "|True", newLastWithAttempt);
+            Assert.Contains(Id(NeverCollected) + "null|" + Stamp(RegisteredJustNow(now)) + "|False", newLastWithAttempt);
+            Assert.Contains(Id(CollectingA) + Stamp(now.AddMinutes(-1)) + "|" + Stamp(RegisteredLongAgo(now)) + "|True", newLastWithAttempt);
             Assert.DoesNotContain(
                 await ReadRowsAsync(connection, DarlingFleetReader.FleetLastCollectionSql, lastArgs, ct),
                 r => r.StartsWith(Id(Disabled), StringComparison.Ordinal));
@@ -467,10 +474,15 @@ GROUP BY server_id";
                dark and the disabled servers keep their real last collection. */
             var registry = s_all;
             var oldFresh = Scoped(await ReadRowsAsync(connection, OldViewerFreshnessSql, Array.Empty<object>(), ct), registry);
-            var newFresh = Scoped(await ReadRowsAsync(connection, ViewerDataService.ServerFreshnessSql, Array.Empty<object>(), ct), registry);
+            /* #8464: the sidebar read reports every registered server, the never-collected one with a null newest success, and carries
+               whether any collector has run against it as its last cell; the oracle's rows are the ones with a collection, without it. */
+            var newFreshWithAttempt = Scoped(await ReadRowsAsync(connection, ViewerDataService.ServerFreshnessSql, Array.Empty<object>(), ct), registry);
+            var newFresh = newFreshWithAttempt.Where(r => !r.Contains("|null|", StringComparison.Ordinal)).Select(WithoutLastCell).ToList();
             Assert.Equal(oldFresh, newFresh);
             Assert.Contains(newFresh, r => r.StartsWith(Id(DarkFiveDays), StringComparison.Ordinal));
             Assert.Contains(newFresh, r => r.StartsWith(Id(Disabled), StringComparison.Ordinal));
+            Assert.Contains(Id(NeverCollected) + "null|False", newFreshWithAttempt);
+            Assert.Contains(newFreshWithAttempt, r => r.StartsWith(Id(DarkFiveDays), StringComparison.Ordinal) && r.EndsWith("|True", StringComparison.Ordinal));
 
             await using (var viewer = new ViewerDataService(connectionString!))
             {

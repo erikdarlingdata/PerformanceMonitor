@@ -112,7 +112,10 @@ SELECT
 SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2 AND collection_time >= $3";
 
     /// <summary>
-    /// Newest collection time across all collectors for one server. $1 server_id.
+    /// Newest successful collection time across all collectors for one server. $1 server_id. #8464: only a
+    /// <c>SUCCESS</c> row counts (<see cref="CollectionRunSql.SuccessfulCollectorRun"/>). Every attempt writes a row, a failed
+    /// one included, so a read over every row moved <c>last_collection</c> forward on each failed attempt, and a dark server
+    /// read fresh.
     ///
     /// <para><b>#3976: <c>ORDER BY collection_time DESC LIMIT 1</c>, not <c>MAX(collection_time)</c>.</b> Same
     /// answer — <c>ExecuteScalarAsync</c> reads null identically whether MAX found no matching row or LIMIT 1
@@ -125,7 +128,7 @@ SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2 AN
     /// plan built to prove a MAX over the whole retained history cannot do regardless of any WHERE clause.</para>
     /// </summary>
     public const string ServerSummaryLastCollectionSql = $@"
-SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {CollectionCycleRow.NotCycleRowSql} ORDER BY collection_time DESC LIMIT 1";
+SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {CollectionRunSql.SuccessfulCollectorRun} ORDER BY collection_time DESC LIMIT 1";
 
     /// <summary>The span the blocking and deadlock counts cover, ending at the read's clock — Lite's window.
     /// Published by the tool so "recent" has a number.</summary>

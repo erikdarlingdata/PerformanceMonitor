@@ -436,6 +436,15 @@ public sealed class MigrationDataMovingRungCensusPins
             + "config.investigation_request_threads (created V252) over its two text columns, a table of one row per request thread that the Slack bot "
             + "posted, at most the request count (tens of thousands on the largest store) and empty on a store that never posted. Both scans are "
             + "sub-second, so the rung spends none of the lock-wait budget and the multiple stays 5."),
+        new(
+            257,
+            SetsTheFloor: false,
+            "#8464: one CREATE INDEX IF NOT EXISTS over the populated collect.collection_log hypertable (created V2), V150's shape: "
+            + "idx_collection_log_status_time (server_id, status, collection_time DESC), the index every last-collected read's newest-SUCCESS "
+            + "descent takes. Measured on a 900,000-row store with 61 one-day chunks, 59 of them compressed: under a second, 1,160 kB in all, "
+            + "because a compressed chunk's B-tree holds only its uncompressed rows and the cost is the day or two of rows not yet compressed. "
+            + "Not CONCURRENTLY (TimescaleDB refuses it on a hypertable), inside the ladder's transaction like V150. Does not move the "
+            + "MigrationLockWaitTimeoutSeconds multiple."),
     ];
 
     /// <summary>

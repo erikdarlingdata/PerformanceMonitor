@@ -245,10 +245,11 @@ public partial class ViewerServerTab
     {
         try
         {
-            var freshness = await _dataService.GetServerFreshnessAsync();
+            var freshness = await _dataService.GetServerCollectionStateAsync();
+            var found = freshness.TryGetValue(_server.ServerId, out var state);
             _pgOffline = ServerSummaryItem.ClassifyFreshness(
-                freshness.TryGetValue(_server.ServerId, out var lastUtc) ? lastUtc : null,
-                _server.RegisteredAt, DateTime.UtcNow) == ServerFreshness.Offline;
+                found ? state.LastCollectionUtc : null,
+                _server.RegisteredAt, DateTime.UtcNow, _server.ConnectDownSince, found ? state.Attempted : _server.Attempted) == ServerFreshness.Offline;
         }
         catch
         {
