@@ -984,8 +984,8 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
 
             /* #5630: read the candidates first (the worst 100 by factor), then judge them, because judging reads plans
                and a second command cannot run while this reader is open. */
-            /* #5812: a current MCP or viewer call reuses the candidates of a read of the same shape younger than one analysis
-               cadence (PlanRegressionCandidateCache.RefreshAfter). The scheduled pass always reads and refills the entry, so it
+            /* #5812: a current MCP or viewer call reuses the candidates of a read of the same shape younger than the reuse
+               window (PlanRegressionCandidateCache.RefreshAfter). The scheduled pass always reads and refills the entry, so it
                stays as fresh as before. Everything below the read (the input check, the cut, the fact) still runs every time. */
             var readStartedUtc = DateTime.UtcNow;
             /* The daily read's leading five parameters stand for the window and the built days; $6, the watermarks, goes in
