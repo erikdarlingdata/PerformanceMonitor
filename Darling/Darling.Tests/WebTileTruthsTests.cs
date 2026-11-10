@@ -389,6 +389,19 @@ public sealed class WebTileTruthsTests
         Assert.Contains("platform managed", Strings(p.GetProperty("managedCells")));
     }
 
+    /// <summary>#8532: a fleet card that counted a deadlock never shows a zero rate beside the count. One deadlock in a
+    /// day is 0.04/hr, which one decimal place writes as "0.0"; the tile says "&lt;0.1" there, the desktop cards' rule. A
+    /// rate one decimal place can write is the rounded number, and no deadlocks over a measured window still read "0.0".</summary>
+    [Fact]
+    public void TheDeadlocksTile_SaysLessThanATenth_WhenAPositiveRateRoundsToZero()
+    {
+        var rates = Run().GetProperty("deadlockRates");
+        Assert.Equal("<0.1/hr", rates.GetProperty("one").GetString());
+        Assert.Equal("0.1/hr", rates.GetProperty("two").GetString());
+        Assert.Equal("0.0/hr", rates.GetProperty("none").GetString());
+        Assert.Equal("50.0/hr", rates.GetProperty("busy").GetString());
+    }
+
     [Fact]
     public void TheBlockingAndDeadlocksTiles_NameTheWindowTheReplyCovered_EvenWithNoEvents()
     {
