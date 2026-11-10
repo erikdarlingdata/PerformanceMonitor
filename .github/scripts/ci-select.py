@@ -1040,7 +1040,13 @@ def with_reads_traits(classes: "dict[str, dict[str, set[str]]]", root: str = ROO
 SLOW_TRAIT = "Cost=Slow"
 # Two rules read _BUILD_INPUT_NAMES and _BUILD_INPUT_SUFFIXES: SlowIndex.skip below, and restore_input, through which
 # pr.yml's plan job decides whether the build job restores the WPF smoke harness in locked mode (harness_restore). A name or
-# suffix taken out for one rule is taken out for both; ci-plan-test.py's harness rows hold each one.
+# suffix taken out for one rule is taken out for both. ci-plan-test.py's harness rows hold all eleven: the five suffixes and
+# the three names no suffix matches by what restore_input answers, and the three Directory.* names, which a suffix matches
+# too, by reading the set.
+#
+# CI runs those rows only on a "CI scripts only" plan (ci-plan.py's script_tests, #7743): documentation plus files under
+# .github/scripts/ that no area knows. A change to these constants that also touches any other file plans every area, and
+# that plan runs no Python check, so run `python -I .github/scripts/tests/ci-plan-test.py` by hand on such a change.
 _BUILD_INPUT_NAMES = {"directory.build.props", "directory.build.targets", "directory.packages.props", "global.json",
                       "nuget.config", "packages.lock.json"}
 _BUILD_INPUT_PATHS = {".github/workflows/build.yml", ".github/scripts/ci-select.py", ".github/darling-paths-filter.yml",

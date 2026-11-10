@@ -286,7 +286,9 @@ jobs:
       # locked mode, when this step answers true: a restore input changed (a csproj, props, targets or solution file,
       # global.json, nuget.config or any packages.lock.json) or a file of the harness itself, or the run is one the exporter
       # rule above treats as untrusted or whole-tree. The rule is ci-select.py's harness_restore, which reads the same
-      # build-input names and suffixes as the slow-class skip, and ci-plan-test.py holds its rows.
+      # build-input names and suffixes as the slow-class skip, and ci-plan-test.py holds its rows. CI runs those rows only
+      # on a "CI scripts only" plan (script_tests, #7743): a change to the rule that also touches a file outside
+      # .github/scripts/ plans every area, which runs no Python check, so such a change needs the rows run by hand.
       - name: Decide whether the build job restores the WPF smoke harness
         id: harness_restore
         if: steps.skip.outputs.skip != 'true'
