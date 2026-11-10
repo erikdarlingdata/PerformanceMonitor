@@ -34,7 +34,21 @@ public sealed record WebAccessGroupCredential(WebAccessGroup Group, string Seale
 /// change the credential tables or their audit trail. PostgreSQL enforces validation and revision conflicts
 /// even when the caller bypasses this adapter. No plaintext token is accepted by this layer.
 /// </summary>
-public sealed class WebAccessGroupStore
+/// <summary>The web-side group reads the service's per-request guard and its snapshot refresh depend on; a seam so the guard is provable without a store.</summary>
+public interface IWebAccessGroupMetadata
+{
+    Task<(WebAccessGroup Group, Guid Epoch)?> ReadEnabledGroupAsync(Guid groupId, CancellationToken ct = default);
+    Task<Guid?> ReadAdvancedSessionEpochAsync(CancellationToken ct = default);
+}
+
+/// <summary>The owner-side reads and the activation write the service's snapshot refresh performs.</summary>
+public interface IWebAccessGroupCredentials
+{
+    Task<IReadOnlyList<WebAccessGroupCredential>> ReadCredentialsAsync(CancellationToken ct = default);
+    Task<bool> ActivateAsync(Guid id, long revision, Guid generation, string? refusalCode, CancellationToken ct = default);
+}
+
+public sealed class WebAccessGroupStore : IWebAccessGroupMetadata, IWebAccessGroupCredentials
 {
     private readonly NpgsqlDataSource _postgres;
     private readonly int _timeout;
@@ -82,10 +96,13 @@ public sealed class WebAccessGroupStore
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>The per-request read: the group's safe columns and the current session epoch, and a row only while the advanced web access switch is on.</summary>
+    public const string EnabledGroupSql = "SELECT " + SafeColumns + ",a.session_epoch FROM config.web_access_groups g " +
+        "JOIN config.web_access_advanced a ON a.id=1 AND a.enabled WHERE g.group_id=$1";
+
     public async Task<(WebAccessGroup Group, Guid Epoch)?> ReadEnabledGroupAsync(Guid groupId, CancellationToken ct = default)
     {
-        await using var command = Command("SELECT " + SafeColumns + ",a.session_epoch FROM config.web_access_groups g " +
-            "JOIN config.web_access_advanced a ON a.id=1 AND a.enabled WHERE g.group_id=$1");
+        await using var command = Command(EnabledGroupSql);
         command.Parameters.AddWithValue(groupId);
         await using var reader = await command.ExecuteReaderAsync(ct);
         return await reader.ReadAsync(ct) ? (Read(reader), reader.GetGuid(9)) : null;

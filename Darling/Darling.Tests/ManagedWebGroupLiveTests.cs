@@ -103,6 +103,8 @@ public sealed class ManagedWebGroupLiveTests
             Assert.Null(groups.FindMatch(token));
             Assert.Equal("pending", (await store.ReadAsync(id, ct))!.ActivationState);
             await store.SetAdvancedEnabledAsync(true, ct);
+            await using(var journal=postgres.CreateCommand("SELECT count(*) FROM config.web_access_group_events WHERE event='advanced_enabled' AND actor=session_user"))
+                Assert.Equal(1L,await journal.ExecuteScalarAsync(ct));
             await groups.RefreshAsync(ct);
             Assert.Equal("active",(await store.ReadAsync(id,ct))!.ActivationState);
             var activeGroup = (await viewer.GetWebAccessGroupAsync(id, ct))!;

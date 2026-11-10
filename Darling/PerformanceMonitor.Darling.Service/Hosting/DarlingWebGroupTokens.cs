@@ -36,9 +36,9 @@ internal sealed class DarlingWebGroupTokens : IDisposable
         internal DarlingWebTokenSet Tokens { get; } = new(Entries.Select(entry =>
             new DarlingWebTokenSet.Entry(entry.Name,entry.Token,WebTokenEntry.ReaderRole)).ToArray());
     }
-    private readonly Func<NpgsqlDataSource?> _owner;
+    private readonly Func<IWebAccessGroupCredentials?> _owner;
     private readonly Func<IPasswordKeyRing> _ring;
-    private readonly WebAccessGroupStore _metadata;
+    private readonly IWebAccessGroupMetadata _metadata;
     private readonly string[] _reservedTokens;
     private readonly HashSet<string> _reservedNames;
     private readonly ILogger _logger;
@@ -49,8 +49,16 @@ internal sealed class DarlingWebGroupTokens : IDisposable
     internal DarlingWebGroupTokens(Func<NpgsqlDataSource?> owner, NpgsqlDataSource web,
         Func<IPasswordKeyRing> ring, string sharedToken, DarlingWebTokenSet? fileTokens,
         IReadOnlyList<string>? mcpTokens, ILogger logger)
+        : this(()=>owner() is { } source ? new WebAccessGroupStore(source) : null, new WebAccessGroupStore(web), ring, sharedToken, fileTokens, mcpTokens, logger)
     {
-        _owner=owner; _metadata=new(web); _ring=ring; _logger=logger;
+    }
+
+    /// <summary>The owner-side credential reads and the web-side metadata reads behind their seams, so the guards are provable without a store.</summary>
+    internal DarlingWebGroupTokens(Func<IWebAccessGroupCredentials?> owner, IWebAccessGroupMetadata metadata,
+        Func<IPasswordKeyRing> ring, string sharedToken, DarlingWebTokenSet? fileTokens,
+        IReadOnlyList<string>? mcpTokens, ILogger logger)
+    {
+        _owner=owner; _metadata=metadata; _ring=ring; _logger=logger;
         _reservedNames=(fileTokens?.Named.Select(entry=>entry.Name) ?? Array.Empty<string>()).ToHashSet(StringComparer.Ordinal);
         _reservedTokens=new[]{sharedToken}.Concat(fileTokens?.Named.Select(entry=>entry.Token) ?? Array.Empty<string>())
             .Concat(mcpTokens ?? Array.Empty<string>()).Where(value=>!string.IsNullOrEmpty(value)).ToArray();
@@ -77,15 +85,14 @@ internal sealed class DarlingWebGroupTokens : IDisposable
                 _snapshot = new(false, null, Array.Empty<Match>());
                 return;
             }
-            var source=_owner();
+            var store=_owner();
             var ring=_ring();
-            if(source is null || !ring.Status.CanSeal)
+            if(store is null || !ring.Status.CanSeal)
             {
                 Unavailable();
                 return;
             }
 
-            var store=new WebAccessGroupStore(source);
             var stored=await store.ReadCredentialsAsync(ct);
             var opened=new List<(WebAccessGroup Group,string? Token,string? Refusal)>();
             foreach(var credential in stored.Where(item=>item.Group.Enabled && item.Group.ActivationState!="refused"))
