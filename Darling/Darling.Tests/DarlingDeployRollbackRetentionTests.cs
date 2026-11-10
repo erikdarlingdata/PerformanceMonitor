@@ -658,6 +658,216 @@ public sealed class DarlingDeployRollbackRetentionTests
     }
 
     /// <summary>
+    /// #8537: the pre-stop guard decides on the path it read when it listed the processes, so a managed
+    /// PostgreSQL backend that exits a moment later does not refuse the upgrade.
+    ///
+    /// <para>On Windows every PostgreSQL connection is its own <c>postgres.exe</c>, and on a busy store
+    /// backends start and end all the time. One that exits after the guard lists it has no path left to
+    /// read, and a missing path is not a path outside <c>pg-runtime</c>.</para>
+    ///
+    /// <para>Run as shipped, see <see cref="RunPreStopGuard"/>: the guard's own statements run against a
+    /// process list the test supplies, so no real process has to exit at the right moment.</para>
+    /// </summary>
+    [Fact]
+    public void ThePreStopGuard_LetsThroughAManagedBackendThatExitsAfterItIsListed()
+    {
+        var run = RunPreStopGuard(
+            new GuardProcess("PerformanceMonitor.Darling.Service", 4100, GuardRoot + @"\PerformanceMonitor.Darling.Service.exe", Fate.Running),
+            new GuardProcess("postgres", 4200, GuardRoot + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.Running),
+            new GuardProcess("postgres", 10048, GuardRoot + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.ExitsOnceListed));
+
+        Assert.False(run.Refused,
+            "the pre-stop guard refused the upgrade over a managed PostgreSQL backend that exited after it was listed (#8537):\n  " + run.Text);
+    }
+
+    /// <summary>
+    /// #8537: a process the service stop would not close, which has exited by the time the guard decides,
+    /// is dropped. It holds no file, so there is nothing for an operator to close.
+    /// </summary>
+    [Fact]
+    public void ThePreStopGuard_DropsAProcessOutsideTheServiceThatHasExitedByTheDecision()
+    {
+        var run = RunPreStopGuard(
+            new GuardProcess("PerformanceMonitor.Darling.Service", 4100, GuardRoot + @"\PerformanceMonitor.Darling.Service.exe", Fate.Running),
+            new GuardProcess("PerformanceMonitor.Darling.Viewer", 5300, GuardRoot + @"\viewer\PerformanceMonitor.Darling.Viewer.exe", Fate.ExitsOnceListed));
+
+        Assert.False(run.Refused,
+            "the pre-stop guard refused the upgrade over a process that had already exited (#8537):\n  " + run.Text);
+    }
+
+    /// <summary>
+    /// The refusal the guard exists for is kept (#2525): a running process the service stop will not close
+    /// refuses the upgrade, and so does one whose exit state cannot be read. Only a process known to have
+    /// exited is dropped. The service and the bundled PostgreSQL are not listed.
+    /// </summary>
+    [Fact]
+    public void ThePreStopGuard_StillRefusesARunningProcessTheServiceStopWillNotClose()
+    {
+        var run = RunPreStopGuard(
+            new GuardProcess("PerformanceMonitor.Darling.Service", 4100, GuardRoot + @"\PerformanceMonitor.Darling.Service.exe", Fate.Running),
+            new GuardProcess("postgres", 4200, GuardRoot + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.Running),
+            new GuardProcess("PerformanceMonitor.Darling.Viewer", 5300, GuardRoot + @"\viewer\PerformanceMonitor.Darling.Viewer.exe", Fate.Running),
+            new GuardProcess("psql", 5400, GuardRoot + @"\psql.exe", Fate.ExitStateUnreadable));
+
+        Assert.True(run.Refused, "the pre-stop guard let an upgrade through with processes holding the install tree (#2525):\n  " + run.Text);
+        Assert.Contains(run.Lines, line => line.Contains("PerformanceMonitor.Darling.Viewer (pid 5300)", StringComparison.Ordinal));
+        Assert.Contains(run.Lines, line => line.Contains("psql (pid 5400)", StringComparison.Ordinal));
+        Assert.DoesNotContain(run.Lines, line => line.Contains("(pid 4100)", StringComparison.Ordinal));
+        Assert.DoesNotContain(run.Lines, line => line.Contains("(pid 4200)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #8537: the refusal names each process with the path the guard read from it, so an operator can see
+    /// which executable under the install tree it is. A backend that exited after it was listed is not
+    /// among them.
+    /// </summary>
+    [Fact]
+    public void ThePreStopGuard_NamesEachProcessItRefusesOn_WithThePathItRead()
+    {
+        const string viewerPath = GuardRoot + @"\viewer\PerformanceMonitor.Darling.Viewer.exe";
+
+        var run = RunPreStopGuard(
+            new GuardProcess("postgres", 10048, GuardRoot + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.ExitsOnceListed),
+            new GuardProcess("PerformanceMonitor.Darling.Viewer", 5300, viewerPath, Fate.Running));
+
+        Assert.True(run.Refused, "the pre-stop guard let an upgrade through with a Viewer holding the install tree (#2525):\n  " + run.Text);
+        Assert.True(
+            run.Lines.Exists(line => line.Contains("PerformanceMonitor.Darling.Viewer (pid 5300)", StringComparison.Ordinal)
+                && line.Contains(viewerPath, StringComparison.Ordinal)),
+            "the refusal does not name the Viewer with the path the guard read from it (#8537):\n  " + run.Text);
+        Assert.False(
+            run.Lines.Exists(line => line.Contains("(pid 10048)", StringComparison.Ordinal)),
+            "the refusal names a managed PostgreSQL backend that exited after it was listed (#8537):\n  " + run.Text);
+    }
+
+    /// <summary>
+    /// The check after the stop is kept (#2525): with the service down, a single process still running out
+    /// of the install tree refuses the run, the bundled PostgreSQL included, and an empty tree passes. One
+    /// process is the count that matters: a lone object is not a list, and the check counts what it is given.
+    /// </summary>
+    [Fact]
+    public void ThePostStopCheck_StillRefusesOnASingleProcessLeftUnderTheInstallTree()
+    {
+        var clear = RunPostStopCheck();
+        Assert.False(clear.Refused, "the post-stop check refused with nothing running out of the install tree:\n  " + clear.Text);
+
+        var held = RunPostStopCheck(
+            new GuardProcess("postgres", 4200, GuardRoot + @"\pg-runtime\pgsql\bin\postgres.exe", Fate.Running));
+
+        Assert.True(held.Refused, "the post-stop check let the copy go ahead with a process still running out of the install tree (#2525):\n  " + held.Text);
+        Assert.Contains(held.Lines, line => line.Contains("postgres (pid 4200)", StringComparison.Ordinal));
+    }
+
+    private const string GuardRoot = @"C:\PerformanceMonitorDarling";
+
+    /// <summary>What a stand-in process does once the guard has listed it.</summary>
+    private enum Fate
+    {
+        /// <summary>Still running when the guard decides.</summary>
+        Running,
+
+        /// <summary>Exits once its path has been read: a later read finds no path, and <c>HasExited</c> is true.</summary>
+        ExitsOnceListed,
+
+        /// <summary>Still running, and reading its <c>HasExited</c> fails.</summary>
+        ExitStateUnreadable,
+    }
+
+    private sealed record GuardProcess(string Name, int Id, string Path, Fate Fate);
+
+    private sealed record GuardRun(bool Refused, List<string> Lines)
+    {
+        public string Text => Lines.Count == 0 ? "(the guard printed nothing)" : string.Join("\n  ", Lines);
+    }
+
+    /// <summary>The guard before the stop: the statement that lists <c>$holders</c> through the <c>if</c>
+    /// that refuses on them.</summary>
+    private static GuardRun RunPreStopGuard(params GuardProcess[] processes) => RunGuardStatements("$holders", processes);
+
+    /// <summary>The check after the stop: the statement that lists <c>$stillHolding</c> through the
+    /// <c>if</c> that refuses on them.</summary>
+    private static GuardRun RunPostStopCheck(params GuardProcess[] processes) => RunGuardStatements("$stillHolding", processes);
+
+    /// <summary>
+    /// Runs one phase of the stop guard as the script ships it, under Windows PowerShell 5.1, against
+    /// <paramref name="processes"/> in place of the machine's own process list.
+    ///
+    /// <para>PowerShell's parser hands over every function the script defines, and the phase's own
+    /// statements: from the one that assigns <paramref name="listVariable"/> through the <c>if</c> that
+    /// refuses. None of the script's other code runs. <c>Get-Process</c> returns the stand-ins,
+    /// <c>Note</c> and <c>Fail</c> print what they are given, and <c>Fail</c> ends the phase the way the
+    /// script's own ends the run.</para>
+    ///
+    /// <para>A stand-in is a .NET object, as a process is, so a lone one counts as one the way a lone
+    /// process does. Its name, id, <c>Path</c> and <c>HasExited</c> are the test's. <c>Path</c> and
+    /// <c>HasExited</c> answer the way a process does at that point in its life: see <see cref="Fate"/>.</para>
+    /// </summary>
+    private static GuardRun RunGuardStatements(string listVariable, GuardProcess[] processes)
+    {
+        static string Quote(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+
+        var probe = new StringBuilder();
+        probe.AppendLine("$ErrorActionPreference = 'Stop'");
+        probe.AppendLine($"$listVariable = {Quote(listVariable)}");
+        probe.AppendLine($"$ast = [System.Management.Automation.Language.Parser]::ParseFile({Quote(PathTo("Darling", "tools", "upgrade-darling.ps1"))}, [ref]$null, [ref]$null)");
+        probe.AppendLine("""
+            foreach ($definition in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
+                . ([scriptblock]::Create($definition.Extent.Text))
+            }
+
+            $listing = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq $listVariable }, $true)
+            if ($null -eq $listing) { throw "upgrade-darling.ps1 no longer lists $listVariable." }
+            $guard = @()
+            foreach ($statement in $listing.Parent.Statements) {
+                if ($statement.Extent.StartOffset -lt $listing.Extent.StartOffset) { continue }
+                $guard += $statement.Extent.Text
+                if ($statement -is [System.Management.Automation.Language.IfStatementAst]) { break }
+            }
+            if ($guard.Count -lt 2) { throw "upgrade-darling.ps1 no longer refuses on the $listVariable it lists." }
+
+            function New-TestProcess([string]$name, [int]$id, [string]$path, [string]$fate) {
+                $process = New-Object System.Object
+                $process | Add-Member -NotePropertyMembers @{ ProcessName = $name; Id = $id; ImagePath = $path; Fate = $fate; Life = @{ Exited = $false } }
+                $process | Add-Member -MemberType ScriptProperty -Name Path -Value {
+                    if ($this.Life.Exited) { return $null }
+                    if ($this.Fate -eq 'ExitsOnceListed') { $this.Life.Exited = $true }
+                    return $this.ImagePath
+                }
+                $process | Add-Member -MemberType ScriptProperty -Name HasExited -Value {
+                    if ($this.Fate -eq 'ExitStateUnreadable') { throw 'Access is denied' }
+                    return $this.Life.Exited
+                }
+                return $process
+            }
+
+            $testProcesses = @()
+            """);
+        foreach (var process in processes)
+        {
+            probe.AppendLine($"$testProcesses += New-TestProcess {Quote(process.Name)} {process.Id} {Quote(process.Path)} {Quote(process.Fate.ToString())}");
+        }
+        probe.AppendLine($"$InstallRoot = {Quote(GuardRoot)}");
+        probe.AppendLine("""
+            function Get-Process { return $testProcesses }
+            function Note([string]$message) { Write-Output "NOTE $message" }
+            function Fail([string]$message) { Write-Output "REFUSED $message"; throw 'refused' }
+
+            $serviceName = 'PerformanceMonitor Darling'
+            $SkipStopGuard = $false
+            try { . ([scriptblock]::Create($guard -join "`r`n")) }
+            catch { if ($_.Exception.Message -ne 'refused') { throw } }
+            'DONE'
+            """);
+
+        var lines = RunWindowsPowerShell(probe.ToString());
+        Assert.True(lines.Count > 0 && lines[^1] == "DONE",
+            "the stop guard probe did not run to its end:\n  " + string.Join("\n  ", lines));
+        lines.RemoveAt(lines.Count - 1);
+
+        return new GuardRun(lines.Exists(line => line.StartsWith("REFUSED ", StringComparison.Ordinal)), lines);
+    }
+
+    /// <summary>
     /// The copy path requires the service to be REGISTERED, and refuses before anything is stopped or
     /// copied when it is not.
     ///
