@@ -224,10 +224,20 @@ public class SystemTrayService : IDisposable
 
     /// <summary>
     /// #8475: a card stays while the pointer is on it or keyboard focus is inside it, and its timeout runs again from the
-    /// moment the reader leaves, so a message long enough to scroll is not closed under the reader.
+    /// moment the reader leaves, so a message long enough to scroll is not closed under the reader. The hold's two actions
+    /// act only while this card is the balloon the tray is showing: a card that the next toast has replaced, or that Dismiss
+    /// has closed, neither stops the current balloon's timer nor closes it.
     /// </summary>
     private static void HoldWhileRead(FrameworkElement balloon, TaskbarIcon trayIcon, int timeoutMs) =>
-        BalloonHoverHold.Attach(balloon, TimeSpan.FromMilliseconds(timeoutMs), trayIcon.ResetBalloonCloseTimer, trayIcon.CloseBalloon);
+        BalloonHoverHold.Attach(
+            balloon,
+            TimeSpan.FromMilliseconds(timeoutMs),
+            holdOpen: () => { if (IsShowing(trayIcon, balloon)) trayIcon.ResetBalloonCloseTimer(); },
+            close: () => { if (IsShowing(trayIcon, balloon)) trayIcon.CloseBalloon(); });
+
+    /// <summary>Whether <paramref name="balloon"/> is the custom balloon the tray icon has on screen now.</summary>
+    private static bool IsShowing(TaskbarIcon trayIcon, FrameworkElement balloon) =>
+        ReferenceEquals(trayIcon.CustomBalloon?.Child, balloon);
 
     public void Dispose()
     {

@@ -25,8 +25,8 @@ namespace PerformanceMonitorLite.Tests;
 /// #8475: an alert toast carries the alert's whole message, which can run to twenty lines. The card stays the height of a toast and
 /// scrolls the rest of the message, so the end of it can be read from the toast. The toast sits in a popup with no window above it, so
 /// a theme change, which repaints every window, has to reach it too: a toast raised under Dark follows a switch to Cool Breeze. A card
-/// the reader is on stays open, and its timeout runs again from the moment the pointer leaves. Both cards are built on the shared STA
-/// thread and laid out at their own width, as the tray shows them.
+/// the reader is on stays open, its timeout runs again from the moment the pointer leaves, and a card that has gone never closes the
+/// toast after it. Both cards are built on the shared STA thread and laid out at their own width, as the tray shows them.
 /// </summary>
 [Collection("application-theme")] // #8395: changes the application-scope theme
 public sealed class LiteAlertToastTests
@@ -150,6 +150,21 @@ public sealed class LiteAlertToastTests
     private static void Pointer(UIElement card, RoutedEvent routedEvent) =>
         card.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = routedEvent });
 
+    /// <summary>The tray as the hold sees it: a current balloon, a hold that stops its timer, and a close that closes whichever is current.</summary>
+    private sealed class FakeTray
+    {
+        public UserControl? Current;
+        public int Holds;
+        public readonly List<UserControl> Closed = new();
+        public void HoldCurrent() => Holds++;
+        public void CloseCurrent()
+        {
+            if (Current is null) return;
+            Closed.Add(Current);
+            Current = null;
+        }
+    }
+
     /// <summary>The close timer the hold starts after the pointer leaves: the test fires it, and a disposed one fires nothing.</summary>
     private sealed class FakeTimer(TimeSpan after, Action fire) : IDisposable
     {
@@ -157,6 +172,40 @@ public sealed class LiteAlertToastTests
         public bool Disposed { get; private set; }
         public void Fire() { if (!Disposed) fire(); }
         public void Dispose() => Disposed = true;
+    }
+
+    [Fact]
+    public void ACardThatHasUnloaded_NeverArmsACloseAgain_SoTheNextToastStaysOpen()
+    {
+        StaTestThread.Run(() =>
+        {
+            var first = new StyledBalloon(Title, LongMessage, ToastSeverity.Warning);
+            var next = new StyledBalloon(Title, LongMessage, ToastSeverity.Warning);
+            WithOwnTheme(first, "Dark");
+            WithOwnTheme(next, "Dark");
+            Layout(first);
+            Layout(next);
+            /* The tray as the hold sees it: one current balloon, a hold that stops the current balloon's timer, and a close that closes
+               whichever balloon is current, as the tray's own CloseBalloon does. */
+            var tray = new FakeTray { Current = first };
+            var timers = new List<FakeTimer>();
+            BalloonHoverHold.Attach(first, TimeSpan.FromSeconds(10), tray.HoldCurrent, tray.CloseCurrent, (after, fire) => { var timer = new FakeTimer(after, fire); timers.Add(timer); return timer; });
+
+            Pointer(first, Mouse.MouseEnterEvent);
+            Assert.Equal(1, tray.Holds);
+
+            /* The card is dismissed or replaced while the pointer is still on it: WPF raises Unloaded first and the pointer's leave after. */
+            first.RaiseEvent(new RoutedEventArgs(FrameworkElement.UnloadedEvent));
+            Pointer(first, Mouse.MouseLeaveEvent);
+            Assert.Empty(timers);
+
+            tray.Current = next;
+            Pointer(first, Mouse.MouseEnterEvent);
+            Assert.Equal(1, tray.Holds);
+            foreach (var timer in timers) timer.Fire();
+            Assert.Same(next, tray.Current);
+            Assert.Empty(tray.Closed);
+        });
     }
 
     /// <summary>The message block is taller than the card allows, the card stays under its cap, and the viewer reaches the end of the text.</summary>
