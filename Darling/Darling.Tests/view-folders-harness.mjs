@@ -284,15 +284,55 @@ try {
     local.reload();
     out.afterReload = local.isViewGroupCollapsed("folder:Secret plans");
   } else if (scenario === "scope") {
-    // The shipped scope verdict (app.js): only a session that says scoped gates a route or hides a nav link; no session and a
-    // failed probe render as before.
+    // The shipped scope verdict and the shipped route() (app.js), run against stand-ins: only a session that says scoped gates a
+    // route or hides a nav link; no session and a failed probe render the page as before.
     const vm = await import("node:vm");
     const full = fs.readFileSync(path.join(jsDir, "app.js"), "utf8").replace(/\r\n/g, "\n");
     const a = full.indexOf("const scopedRoutes = new Set(");
-    const b = full.indexOf("function route(opts)", a);
-    if (a < 0 || b < a) throw new Error("app.js layout changed: scopedRoutes");
-    const ctx = vm.createContext({ Set });
-    vm.runInContext(full.slice(a, b).replace(/^export /gm, "") + "\nthis.scopeVerdict = scopeVerdict;", ctx);
+    const b = full.indexOf("/* Whether a route targets a specific saved view/notebook", a);
+    if (a < 0 || b < a || full.indexOf("function route(opts)", a) > b) throw new Error("app.js layout changed: scopedRoutes");
+    const shell = { session: null, routeName: "fleet", links: [], mounted: [], rendered: [] };
+    const renderer = (name) => (_main, r) => { shell.rendered.push(name + ":" + r.name); };
+    const ctx = vm.createContext({
+      Set,
+      main: {},
+      document: { querySelectorAll: (selector) => (selector === ".nav a" ? shell.links : []) },
+      isSessionExpired: () => false,
+      beginPageScope: () => {},
+      frontDoor: () => false,
+      gateStore: () => false,
+      currentRoute: () => ({ name: shell.routeName, id: null, param: null }),
+      peekSession: () => shell.session,
+      el: (tag, attrs) => ({ tag, ...attrs }),
+      mount: (_target, node) => { shell.mounted.push(node.text); },
+      resetScrollOnRouteChange: () => {},
+      markPageRenderStart: () => {},
+      setActiveNav: () => {},
+      ROUTE_RENDERERS: { fleet: renderer("fleet"), admin: renderer("admin"), alerts: renderer("alerts") },
+    });
+    vm.runInContext(full.slice(a, b).replace(/^export /gm, "") + "\nthis.scopeVerdict = scopeVerdict; this.route = route;", ctx);
+    // One visit: the nav as the page ships it (every link shown but Availability Groups, which its own probe reveals), then route().
+    const visit = (session, routeName) => {
+      shell.session = session;
+      shell.routeName = routeName;
+      shell.links = ["fleet", "alerts", "admin", "ag"].map((name) => ({ dataset: { route: name }, hidden: name === "ag" }));
+      shell.mounted = [];
+      shell.rendered = [];
+      ctx.route();
+      return { rendered: shell.rendered, mounted: shell.mounted, hidden: shell.links.filter((l) => l.hidden).map((l) => l.dataset.route) };
+    };
+    out.routeProbeFailedFleet = visit({ can_edit: false, probe_failed: true }, "fleet");
+    out.routeProbeFailedAdmin = visit({ can_edit: false, probe_failed: true }, "admin");
+    out.routeNoSessionAdmin = visit(null, "admin");
+    out.routeUnscopedAdmin = visit({ can_edit: true, scoped: false }, "admin");
+    out.routeScopedAdmin = visit({ can_edit: false, scoped: true }, "admin");
+    out.routeScopedFleet = visit({ can_edit: false, scoped: true }, "fleet");
+    // A link a scoped visit hid is shown again by the next visit whose session is not scoped.
+    shell.session = { can_edit: true, scoped: false };
+    shell.rendered = [];
+    shell.mounted = [];
+    ctx.route();
+    out.routeAfterScoped = { rendered: shell.rendered, hidden: shell.links.filter((l) => l.hidden).map((l) => l.dataset.route) };
     const v = (s, r) => ctx.scopeVerdict(s, r);
     out.probeFailedFleet = v({ can_edit: false, probe_failed: true }, "fleet").blocked;
     out.probeFailedAdmin = v({ can_edit: false, probe_failed: true }, "admin").blocked;

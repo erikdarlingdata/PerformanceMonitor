@@ -287,7 +287,8 @@ public sealed class DarlingWebNamedTokenTests
 
     /// <summary>The real pipeline, as <see cref="DarlingWebHostGateLiveTests"/> builds it, in network mode with the shared token and
     /// <paramref name="webTokens"/>. The signing key is fixed so a second server reads the first one's cookie.</summary>
-    internal static async Task<TestServer> BuildServer(DarlingWebTokenSet? webTokens, CapturingTestLogger? hostLogger = null, NpgsqlDataSource? dataSource = null, ReadAdmission? readAdmission = null)
+    internal static async Task<TestServer> BuildServer(DarlingWebTokenSet? webTokens, CapturingTestLogger? hostLogger = null, NpgsqlDataSource? dataSource = null, ReadAdmission? readAdmission = null,
+        ReadLatencyAccumulator? readLatency = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -299,7 +300,7 @@ public sealed class DarlingWebNamedTokenTests
 
         var host = new DarlingWebHostService(
             hostLogger is null ? Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingWebHostService>.Instance : new HostLogger(hostLogger),
-            new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache(), readAdmission: readAdmission);
+            new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache(), readLatency: readLatency, readAdmission: readAdmission);
 
         host.ConfigurePipeline(
             app, postgres, networkMode: true,

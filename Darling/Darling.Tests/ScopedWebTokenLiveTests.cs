@@ -650,6 +650,108 @@ public sealed class ScopedWebTokenLiveTests
         Assert.True(problems.Count == 0, string.Join("\n", problems));
     }
 
+    /// <summary>#7988: a registry read that fails is a fault of the store for a scoped reader, as it is for any other reader. The grant
+    /// resolves (its query reads the registry table by server_id alone), the registry statement then fails, and each per-server route
+    /// answers the scoped reader with the status and body it answers the unscoped reader and writes one line naming the registry to
+    /// the service log. The two routes that open their run before the server is resolved (the read mirror and the catalog) record the
+    /// scoped read as an error. The 403 with the fixed sentence stays the answer for a server outside the grant.</summary>
+    [Fact]
+    public async Task ARegistryReadFault_IsAnsweredToAScopedReaderAsTheStoreFault_NotAsAScopeRefusal()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the scoped-token test against PostgreSQL.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        var settings = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath };
+        await using var postgres = NpgsqlDataSource.Create(settings.ConnectionString);
+        await using var connection = await postgres.OpenConnectionAsync(ct);
+        await PgMigrations.MigrateAsync(connection, null, ct);
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, 41, "finance-server", ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, 42, "operations-server", ct);
+        int finance;
+        await using (var tag = connection.CreateCommand())
+        {
+            tag.CommandText = """
+                WITH tag AS (
+                    INSERT INTO server_tags (name, parent_id) VALUES ('Finance', NULL) RETURNING id
+                )
+                INSERT INTO server_tag_map (server_id, tag_id)
+                SELECT 41, id FROM tag
+                RETURNING tag_id
+                """;
+            finance = (int)(await tag.ExecuteScalarAsync(ct))!;
+        }
+
+        var readLatency = new ReadLatencyAccumulator();
+        var log = new CapturingTestLogger();
+        using var server = await BuildServer(SetFor(ScopedEntry("finance", ReaderToken, finance)), log, postgres,
+            new ReadAdmission(TimeProvider.System, TimeSpan.Zero, null), readLatency);
+        var scopedCookie = await SignIn(server, ReaderToken);
+        var sharedCookie = await SignIn(server, SharedToken);
+        var paths = new[] { "/api/read/get_wait_stats", "/api/server-databases", "/api/server-data-start", "/api/catalog" };
+        const string refusal = "Server data is unavailable to this token.";
+        const string registrySentence = "Could not read the servers registry from the Postgres store";
+
+        // While the registry reads: the scoped reader is answered for its own server and refused the hidden one.
+        foreach (var path in paths)
+        {
+            var (permitted, permittedBody) = await Send(server, HttpMethods.Get, path + "?server=finance-server", scopedCookie);
+            Assert.True(permitted.Response.StatusCode == StatusCodes.Status200OK, path + " answered " + permitted.Response.StatusCode + ": " + permittedBody);
+            var (hidden, hiddenBody) = await Send(server, HttpMethods.Get, path + "?server=operations-server", scopedCookie);
+            Assert.Equal(StatusCodes.Status403Forbidden, hidden.Response.StatusCode);
+            Assert.Contains(refusal, hiddenBody, StringComparison.Ordinal);
+        }
+
+        // The registry statement now fails for every caller. The grant's own query joins the registry table on server_id, so it still answers.
+        await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE collect.servers RENAME COLUMN is_enabled TO is_enabled_moved");
+        Assert.Equal(new[] { 41 }, await DarlingWebEndpoints.AllowedWebServerIdsAsync(postgres, new[] { finance }, ct));
+
+        var recordedRoutes = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["/api/read/get_wait_stats"] = "get_wait_stats",
+            ["/api/catalog"] = DarlingWebEndpoints.CatalogRoute,
+        };
+        var problems = new List<string>();
+        foreach (var path in paths)
+        {
+            var (shared, sharedBody) = await Send(server, HttpMethods.Get, path + "?server=finance-server", sharedCookie);
+            Assert.True(shared.Response.StatusCode == StatusCodes.Status500InternalServerError, path + " answered the unscoped reader " + shared.Response.StatusCode + ": " + sharedBody);
+
+            var linesBefore = log.Lines.Count;
+            readLatency.Drain();
+            var (scoped, scopedBody) = await Send(server, HttpMethods.Get, path + "?server=finance-server", scopedCookie);
+            if (scoped.Response.StatusCode != shared.Response.StatusCode || scopedBody != sharedBody)
+            {
+                problems.Add(path + " answered the scoped reader " + scoped.Response.StatusCode + " " + scopedBody
+                    + " and the unscoped reader " + shared.Response.StatusCode + " " + sharedBody);
+            }
+
+            if (scopedBody.Contains(refusal, StringComparison.Ordinal))
+            {
+                problems.Add(path + " told the scoped reader the server is outside its grant when the registry could not be read");
+            }
+
+            var faultLines = log.Lines.Skip(linesBefore).Count(line => line.Contains(registrySentence, StringComparison.Ordinal));
+            if (faultLines != 1)
+            {
+                problems.Add(path + " wrote " + faultLines + " service log lines naming the registry fault for the scoped read; expected 1");
+            }
+
+            // The scoped read's own sample: an error where the route records one, and never an answered read.
+            var outcomes = readLatency.Drain().GroupBy(sample => sample.Route + " " + sample.Outcome)
+                .Select(group => group.Key + " x" + group.Sum(sample => sample.Count)).Order(StringComparer.Ordinal).ToArray();
+            var expected = recordedRoutes.TryGetValue(path, out var route) ? new[] { route + " " + ReadOutcome.Error + " x1" } : [];
+            if (!outcomes.SequenceEqual(expected))
+            {
+                problems.Add(path + " recorded the scoped read as " + (outcomes.Length == 0 ? "nothing" : string.Join(", ", outcomes))
+                    + "; expected " + (expected.Length == 0 ? "nothing" : expected[0]));
+            }
+        }
+
+        Assert.True(problems.Count == 0, string.Join("\n", problems));
+    }
+
     /// <summary>Every <c>collector_interval_minutes</c> value in a catalog answer, wherever the read's parameter nodes sit.</summary>
     private static IEnumerable<int> IntervalsOf(JsonElement element)
     {

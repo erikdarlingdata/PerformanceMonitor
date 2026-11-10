@@ -268,12 +268,48 @@ public sealed class CustomViewFoldersWebTests
         Assert.False(r.GetProperty("afterReload").GetBoolean());
     }
 
-    /// <summary>#7988: the shell gates routes and hides nav links only for a session that says scoped. No session yet and a failed
-    /// probe are an unknown seat: the page renders as before (#7928), and the server answers whatever the seat may not read.</summary>
+    /// <summary>#7988: the shell gates routes and hides nav links only for a session that says scoped. With no session yet, or a
+    /// failed probe, what the caller may read is unknown: the page renders as before (#7928), and the server refuses whatever it may
+    /// not read. The shipped <c>route()</c> is run for each session: what it drew, what it mounted in the page's place, and which nav
+    /// links it left hidden (Availability Groups starts hidden and is revealed by its own probe, never by <c>route()</c>).</summary>
     [Fact]
     public void TheShell_GatesRoutesAndNavOnlyForAScopedSession_AndRendersWhenTheProbeFailed()
     {
         if (!TryRun("scope", out var r)) return;
+
+        static string[] Texts(JsonElement visit, string name) => visit.GetProperty(name).EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+        /* A failed probe, no session yet and an unscoped session: the page is drawn and no link is hidden. */
+        foreach (var (visit, drawn) in new[]
+        {
+            ("routeProbeFailedFleet", "fleet:fleet"),
+            ("routeProbeFailedAdmin", "admin:admin"),
+            ("routeNoSessionAdmin", "admin:admin"),
+            ("routeUnscopedAdmin", "admin:admin"),
+        })
+        {
+            var seen = r.GetProperty(visit);
+            Assert.True(Texts(seen, "rendered").SequenceEqual([drawn]), visit + " drew " + string.Join(",", Texts(seen, "rendered")));
+            Assert.True(Texts(seen, "mounted").Length == 0, visit + " mounted " + string.Join(",", Texts(seen, "mounted")));
+            Assert.True(Texts(seen, "hidden").SequenceEqual(["ag"]), visit + " hid " + string.Join(",", Texts(seen, "hidden")));
+        }
+
+        /* A scoped session on a route outside its set: the refusal card in the page's place, and the page's renderer never runs. */
+        var scopedAdmin = r.GetProperty("routeScopedAdmin");
+        Assert.Empty(Texts(scopedAdmin, "rendered"));
+        Assert.Equal(["This page requires an unrestricted dashboard session."], Texts(scopedAdmin, "mounted"));
+        Assert.Equal(["admin", "ag"], Texts(scopedAdmin, "hidden"));
+
+        /* A scoped session on one of its own routes: the page is drawn, with the links outside its set hidden. */
+        var scopedFleet = r.GetProperty("routeScopedFleet");
+        Assert.Equal(["fleet:fleet"], Texts(scopedFleet, "rendered"));
+        Assert.Empty(Texts(scopedFleet, "mounted"));
+        Assert.Equal(["admin", "ag"], Texts(scopedFleet, "hidden"));
+
+        /* The next visit under an unscoped session shows the links the scoped one hid. */
+        var afterScoped = r.GetProperty("routeAfterScoped");
+        Assert.Equal(["fleet:fleet"], Texts(afterScoped, "rendered"));
+        Assert.Equal(["ag"], Texts(afterScoped, "hidden"));
 
         Assert.False(r.GetProperty("probeFailedFleet").GetBoolean());
         Assert.False(r.GetProperty("probeFailedAdmin").GetBoolean());
