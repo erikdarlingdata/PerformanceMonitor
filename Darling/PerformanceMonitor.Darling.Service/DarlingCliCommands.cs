@@ -6321,7 +6321,7 @@ public static partial class DarlingCliCommands
                    unattended. Each slice is its own transaction, so earlier slices are already committed
                    and are not lost — and the collapse is idempotent, so re-running picks up where this
                    stopped. */
-                error.WriteLine($"  The collapse failed after {CountText.Plural(removed, "row")}; the failing {actualWidth.TotalMinutes:F0}m slice at {sliceStart:yyyy-MM-dd HH:mm} was rolled back: {ex.Message}");
+                error.WriteLine(Inv($"  The collapse failed after {CountText.Plural(removed, "row")}; the failing {actualWidth.TotalMinutes:F0}m slice at {sliceStart:yyyy-MM-dd HH:mm} was rolled back: {ex.Message}"));
                 error.WriteLine("  Slices already committed are safe. Re-run to continue — the repair is idempotent.");
                 return 1;
             }

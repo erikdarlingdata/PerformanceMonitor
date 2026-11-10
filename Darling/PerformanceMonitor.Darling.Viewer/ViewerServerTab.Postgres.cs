@@ -961,7 +961,7 @@ public partial class ViewerServerTab
                 + "DATABASE, so it may be installed in one database and not another - the Extensions "
                 + "panel says which. Note also that its sample_rate defaults to 1/max_connections, so a "
                 + "lightly-used database can genuinely record nothing.")
-            : new PanelNoteText($"{CountText.Plural(rows.Count, "predicate")}, sampled at {sampled:P2} of executions - these counts are a "
+            : new PanelNoteText(string.Create(CultureInfo.InvariantCulture, $"{CountText.Plural(rows.Count, "predicate")}, sampled at {sampled:P2} of executions") + " - these counts are a "
               + "SAMPLE, so a small number means the sampler fired rarely rather than the predicate "
               + "being rare. Filtered % with no supporting index is the index candidate. "
               + $"{CountText.Plural(misestimated, "predicate")} {(misestimated == 1 ? "shows" : "show")} an estimate error of 10x or worse, which is a "
@@ -1644,7 +1644,7 @@ public partial class ViewerServerTab
               + "covered, and when this does record it records EVERY btree at any size, which is why its "
               + "index count exceeds the usage panel's. " + coverage.Message
             : $"ESTIMATED from catalog statistics - no index page is read. About "
-              + $"{page.ReclaimableBytesShown:N0} bytes look reclaimable across {CountText.Plural(rows.Count, "index", "indexes")}, "
+              + string.Create(CultureInfo.InvariantCulture, $"{page.ReclaimableBytesShown:N0} bytes look reclaimable across {CountText.Plural(rows.Count, "index", "indexes")}, ")
               + "and the answered rows are ranked by that figure: a percentage ranks the wrong thing, "
               + "since a tiny index at 20% is worth kilobytes next to a large one at 70%. Measured against "
               + "pgstatindex ground truth, median absolute error is 2.79 percentage points and p90 is 6.63 "
