@@ -767,7 +767,7 @@ public sealed partial class DarlingWorker
                             connected: server.Runtime is not null,
                             stoppingToken,
                             engine: server.Runtime?.Target.Engine ?? CollectorTargetEngine.SqlServer,
-                            captureSessions: server.CaptureSessionReport());
+                            captureSessions: CaptureSessionReportFor(server));
                     }
                 }
 

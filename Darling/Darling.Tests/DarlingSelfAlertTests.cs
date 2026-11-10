@@ -5889,7 +5889,7 @@ public sealed class DarlingSelfAlertTests
             "await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken, sweepGeneration: generation);",
             sweep, StringComparison.Ordinal);
         Assert.Contains(
-            "await ApplyCaptureDownAsync(serverId, serverName, missing, notRunOnEngine, cancellationToken, sweepGeneration: generation);",
+            "await ApplyCaptureDownAsync(serverId, serverName, missing, notRunOnEngine, cancellationToken, sweepGeneration: generation, ensure: captureSessions);",
             sweep, StringComparison.Ordinal);
         Assert.Contains(
             "await ApplyAgentNotRunningAsync(serverId, serverName, freshRunning, everRan, cancellationToken, sweepGeneration: generation);",

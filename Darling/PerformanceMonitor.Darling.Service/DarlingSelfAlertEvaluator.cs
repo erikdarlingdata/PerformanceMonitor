@@ -162,8 +162,6 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, bool> _captureDownSeedDone = new();
     /* #6912: the captures named by the last pass that found any down, so a recovery can say which came back. */
     private readonly ConcurrentDictionary<string, string> _lastCaptureDownList = new();
-    /* #8528: what the service's own ensure of the capture sessions found, per server, as the latest store pass was handed it. */
-    private readonly ConcurrentDictionary<string, CaptureSessionEnsureReport> _captureSessionReports = new();
     private readonly ConcurrentDictionary<string, bool> _activeAgentDown = new();
     /* #6875: the Identity Capacity alert's standing state, the same two maps as Agent Not Running. */
     private readonly ConcurrentDictionary<string, bool> _activeIdentityCapacity = new();
@@ -1553,9 +1551,6 @@ internal sealed class DarlingSelfAlertEvaluator
             return;
         }
 
-        /* #8528: what the service's own ensure found for this server rides beside the store read, for ApplyCaptureDownAsync to judge with. */
-        _captureSessionReports[Key(serverId)] = captureSessions ?? CaptureSessionEnsureReport.Empty;
-
         var captureReadClock = Stopwatch.StartNew();
         try
         {
@@ -1595,7 +1590,7 @@ internal sealed class DarlingSelfAlertEvaluator
             }
 
             captureReadClock.Restart();
-            await ApplyCaptureDownAsync(serverId, serverName, missing, notRunOnEngine, cancellationToken, sweepGeneration: generation);
+            await ApplyCaptureDownAsync(serverId, serverName, missing, notRunOnEngine, cancellationToken, sweepGeneration: generation, ensure: captureSessions);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1996,9 +1991,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// this judges nothing, sends nothing and leaves no standing-alert flag or cooldown stamp behind.</param>
     /// <param name="ensure">#8528: what the service's own ensure of the capture sessions found on this server. A capture whose session
     /// the ensure started, and whose collector has not read since, has a SESSION_MISSING row from before the start: it is neither down
-    /// nor restored until the read says which, so it is held out of both verdicts. A capture the ensure could not start, or could not
-    /// create for permission, fires on this sweep as ever, and the detail says which and quotes the server. Null takes the report the store
-    /// pass was handed for this server (<see cref="EvaluateStoreAlertsAsync"/>), else an empty one.</param>
+    /// nor restored until the read says which, so it is held out of both verdicts, and so is one whose ensure failed with a transient
+    /// error, until its retry has run. A capture whose collector is turned off is not judged at all. A capture the ensure could not
+    /// start fires on this sweep as ever, and the detail says what the service found and quotes the server. Null is an empty report.</param>
     internal async Task ApplyCaptureDownAsync(
         int serverId, string serverName, IReadOnlyList<string> missing, IReadOnlyList<string> notRunOnEngine, CancellationToken cancellationToken,
         int? sweepGeneration = null, CaptureSessionEnsureReport? ensure = null)
@@ -2016,10 +2011,12 @@ internal sealed class DarlingSelfAlertEvaluator
 
         var key = Key(serverId);
         var now = _utcNow();
-        ensure ??= _captureSessionReports.TryGetValue(key, out var handed) ? handed : CaptureSessionEnsureReport.Empty;
+        ensure ??= CaptureSessionEnsureReport.Empty;
 
-        /* #8528: the captures whose newest row is SESSION_MISSING but whose session the service started since, with no read yet. */
-        var (down, awaitingRead) = SplitCapturesAwaitingRead(missing, ensure);
+        /* #8528: a capture whose collector is turned off writes no new row, so its last SESSION_MISSING row is not a reading of now: it
+           is judged neither as down nor as awaiting a read. Of the rest, a capture whose newest row is SESSION_MISSING but whose session
+           the service started since with no read yet, or whose ensure failed transiently and awaits its retry, is held. */
+        var (down, awaitingRead) = SplitCapturesAwaitingRead(CapturesBeingCollected(missing, ensure), ensure);
         missing = down;
 
         if (missing.Count > 0)
@@ -2064,7 +2061,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 _lastCaptureDownAlert[key] = now;
                 var delivery = await FireAsync(
                     key, serverName, CaptureDownMetric, list, "session running",
-                    detail: StateRepeatNote(decision, refire) + $"The {list} Extended Events {(missing.Count == 1 ? "session is" : "sessions are")} missing: " +
+                    detail: StateRepeatNote(decision, refire) + $"The {list} Extended Events {(missing.Count == 1 ? "session is" : "sessions are")} missing. " +
                         CaptureDownCause(missing, ensure) + " " + CaptureDownConsequence(missing),
                     severity: AlertSeverityLevel.Critical,
                     shortMessage: $"{list} capture is not running — XE {(missing.Count == 1 ? "session" : "sessions")} missing",
@@ -2082,12 +2079,13 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         else if (awaitingRead.Count > 0)
         {
-            /* #8528: every capture the read named has a session the service started since its newest row, and no read yet. The verdict
+            /* #8528: every capture the read named has a session the service started since its newest row and no read yet, or an ensure
+               that failed transiently and awaits its retry. The verdict
                waits for the collector's next row: nothing fires, nothing is seeded, and an active Capture Down neither repeats nor writes
                its Capture Restored until the read says the session took (or did not). Debug, because the pass says it again every 30 s
                until that row lands; the ensure's own "Started ... XE session" line is the one Information record of the start. */
             _logger?.LogDebug(
-                "[{Server}] The {Captures} capture session{Plural} restarted by the service after the newest SESSION_MISSING run; Capture Down waits for the collector's next read",
+                "[{Server}] The {Captures} capture session{Plural} started by the service, or its check did not complete, after the newest SESSION_MISSING run; Capture Down waits for the collector's next read or the service's next check",
                 serverName, string.Join(" and ", awaitingRead), awaitingRead.Count == 1 ? " was" : "s were");
         }
         else if (_captureDownSeedDone.TryAdd(key, true) && !_activeCaptureDown.ContainsKey(key))
@@ -2108,6 +2106,14 @@ internal sealed class DarlingSelfAlertEvaluator
                     "Capture Cleared",
                     $"{serverName}: The {string.Join(" and ", notRunOnEngine)} capture does not run on this server's engine, so it is no longer expected"), cancellationToken);
             }
+            else if (CaptureDownClearedNotRestored(wasDown, ensure) is { } cleared)
+            {
+                /* #8528: a capture left the read without its session coming back: its collector's newest row is the PERMISSIONS of a
+                   create the server refused, or its collector is turned off. "Restored" would be false for it. */
+                await RecordResolutionAsync(new AlertResolution(
+                    key, serverName, CaptureDownMetric,
+                    "Capture Cleared", $"{serverName}: {cleared}"), cancellationToken);
+            }
             else
             {
                 await RecordResolutionAsync(new AlertResolution(
@@ -2127,13 +2133,14 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>
     /// #8528: splits the captures the read named into those that are down and those whose session the service's own ensure started
-    /// after their newest row, with no read since. The second group's SESSION_MISSING row is from before the start, so it is held out
-    /// of both the fire and the restore until its collector reads again.
+    /// after their newest row, with no read since, or whose ensure failed transiently and awaits its retry. The second group's
+    /// SESSION_MISSING row does not yet say whether the capture is down, so it is held out of both the fire and the restore until
+    /// its collector reads again or the retry has run.
     /// </summary>
     internal static (IReadOnlyList<string> Down, IReadOnlyList<string> AwaitingRead) SplitCapturesAwaitingRead(
         IReadOnlyList<string> missing, CaptureSessionEnsureReport ensure)
     {
-        if (missing.Count == 0 || ensure.RestartedAwaitingRead.Count == 0)
+        if (missing.Count == 0 || (ensure.RestartedAwaitingRead.Count == 0 && ensure.AwaitingRetry.Count == 0))
         {
             return (missing, Array.Empty<string>());
         }
@@ -2142,52 +2149,162 @@ internal sealed class DarlingSelfAlertEvaluator
         var awaitingRead = new List<string>();
         foreach (var capture in missing)
         {
-            (ensure.IsAwaitingRead(CaptureCollectorName(capture)) ? awaitingRead : down).Add(capture);
+            (ensure.IsHeld(CaptureCollectorName(capture)) ? awaitingRead : down).Add(capture);
         }
 
         return (down, awaitingRead);
     }
 
     /// <summary>
-    /// #8528: why each capture the alert names is down, from what the service's own ensure found, so the detail says what happened
-    /// and quotes the server where it has that. A session the ensure could not create for permission names the grant; one the ensure
-    /// found stopped or absent and could not start says so; one with no ensure failure on record was found stopped, absent or
-    /// unreadable by its collector, and the text says what the service does next and where the server's own words are.
+    /// #8528: the captures the read named whose collector is turned on. A collector that is turned off writes no new row, so its last
+    /// SESSION_MISSING row stays the newest for good and says nothing about the capture now.
+    /// </summary>
+    internal static IReadOnlyList<string> CapturesBeingCollected(IReadOnlyList<string> missing, CaptureSessionEnsureReport ensure) =>
+        missing.Count == 0 || ensure.NotCollecting.Count == 0
+            ? missing
+            : missing.Where(capture => !ensure.IsNotCollecting(CaptureCollectorName(capture))).ToArray();
+
+    /// <summary>
+    /// #8528: the closing text for a Capture Down whose captures left the read without all of them running again, or null when every
+    /// capture that was down is running. A capture leaves the read when its collector's newest row is no longer SESSION_MISSING: a
+    /// success, but also the PERMISSIONS row of a session the server refused to create, and a collector that is turned off is not
+    /// counted at all. Neither is a session that came back, so the row is a clear that says why, and names any capture that is
+    /// running again beside it.
+    /// </summary>
+    internal static string? CaptureDownClearedNotRestored(string? wasDown, CaptureSessionEnsureReport ensure)
+    {
+        if (string.IsNullOrEmpty(wasDown))
+        {
+            return null;
+        }
+
+        var sentences = new List<string>();
+        var running = new List<string>();
+        foreach (var capture in wasDown.Split(" and ", StringSplitOptions.RemoveEmptyEntries))
+        {
+            var collector = CaptureCollectorName(capture);
+            if (ensure.IsNotCollecting(collector))
+            {
+                sentences.Add($"The {capture} capture is not running and is no longer reported as down: its collector is turned off, so no session is expected.");
+            }
+            else if (ensure.FailureOf(collector) is { IsPermission: true })
+            {
+                sentences.Add(
+                    $"The {capture} capture is not running and is no longer reported as down: the monitoring login was refused the permission to create its session, " +
+                    "which collection health reports as PERMISSIONS.");
+            }
+            else
+            {
+                running.Add(capture);
+            }
+        }
+
+        if (sentences.Count == 0)
+        {
+            return null;
+        }
+
+        if (running.Count > 0)
+        {
+            sentences.Add($"The {string.Join(" and ", running)} capture is running again.");
+        }
+
+        return string.Join(" ", sentences);
+    }
+
+    /// <summary>
+    /// #8528: why each capture the alert names is down, from what the service's own ensure found, so the detail says what the service
+    /// saw and claims nothing it did not see. Each cause is a sentence of its own. A session the ensure found stopped or absent and
+    /// could not start says so and quotes the server; one whose last ensure did not complete says when it is asked again; one the last
+    /// ensure started and that is stopped again says that; any other was found stopped, absent or unreadable by its collector, and the
+    /// text says the service's check found nothing to start only when a check in that same run did. The permission sentence covers
+    /// one interval only: between an ensure the server refused for permission and that collector's next row, which is PERMISSIONS and
+    /// takes the capture out of this alert's read.
     /// </summary>
     internal static string CaptureDownCause(IReadOnlyList<string> missing, CaptureSessionEnsureReport ensure)
     {
         var sentences = new List<string>();
-        var unexplained = new List<string>();
+        var foundStopped = new List<string>();
+        var foundStoppedAfterCheck = new List<string>();
         foreach (var capture in missing)
         {
-            var failure = ensure.FailureOf(CaptureCollectorName(capture));
-            if (failure is null)
-            {
-                unexplained.Add(capture);
-            }
-            else if (failure.IsPermission)
+            var collector = CaptureCollectorName(capture);
+            var failure = ensure.FailureOf(collector);
+            if (failure is { IsPermission: true })
             {
                 sentences.Add(
-                    $"the service could not create the {capture} session because the monitoring login lacks the permission to create Extended Events sessions " +
-                    $"(ALTER ANY EVENT SESSION on-premises, CREATE ANY DATABASE EVENT SESSION on Azure SQL Database). The server said: {failure.Message}");
+                    $"The service could not create the {capture} session because the monitoring login lacks the permission to create Extended Events sessions " +
+                    "(ALTER ANY EVENT SESSION on-premises, CREATE ANY DATABASE EVENT SESSION on Azure SQL Database)." + ServerSaid(failure));
+            }
+            else if (failure is not null)
+            {
+                sentences.Add($"The service found the {capture} session stopped or absent and could not start it." + ServerSaid(failure));
+            }
+            else if (ensure.WasTransientAtLastEnsure(collector))
+            {
+                sentences.Add(
+                    $"The service's last check of the {capture} session did not complete (a timeout or a dropped connection), so it does not know whether the session can be started. " +
+                    $"It checks again within {(int)DarlingXeSessions.TransientRetryInterval.TotalMinutes} minutes.");
+            }
+            else if (ensure.WasStartedAtLastEnsure(collector))
+            {
+                sentences.Add(
+                    $"The service started the {capture} session at its last check, and its collector has found it stopped, absent or unreadable again since. " +
+                    "The service starts it again at its next check (within the hour, and at once after a restart or failover it has seen).");
             }
             else
             {
-                sentences.Add($"the service found the {capture} session stopped or absent and could not start it. The server said: {failure.Message}");
+                (ensure.WasCheckedAfterMissingRead(collector) ? foundStoppedAfterCheck : foundStopped).Add(capture);
             }
         }
 
-        if (unexplained.Count > 0)
+        AddFoundStopped(sentences, foundStoppedAfterCheck, checkedInTheSameRun: true);
+        AddFoundStopped(sentences, foundStopped, checkedInTheSameRun: false);
+        return string.Join(" ", sentences);
+    }
+
+    /// <summary>The sentences for captures with no ensure finding of their own: what the collector found, and what the service does next.</summary>
+    private static void AddFoundStopped(List<string> sentences, List<string> captures, bool checkedInTheSameRun)
+    {
+        if (captures.Count == 0)
         {
-            var one = unexplained.Count == 1;
-            sentences.Add(
-                $"{(one ? "its collector" : "their collectors")} found the {string.Join(" and ", unexplained)} session{(one ? "" : "s")} stopped, absent or unreadable, " +
-                "and the service's last check of the sessions found nothing to fix. The service starts a stopped session at its next check " +
-                "(within the hour, and at once after a restart or failover it has seen), and this alert clears when the collector reads the session again. " +
-                "The collection log's SESSION_MISSING detail has what the server said.");
+            return;
         }
 
-        return string.Join(" ", sentences);
+        var one = captures.Count == 1;
+        sentences.Add(
+            $"The collector{(one ? "" : "s")} found the {string.Join(" and ", captures)} session{(one ? "" : "s")} stopped, absent or unreadable" +
+            (checkedInTheSameRun ? ", and the service's check of the sessions in that same run found nothing to start. " : ". ") +
+            "The service starts a stopped session at its next check (within the hour, and at once after a restart or failover it has seen), " +
+            "and this alert clears when the collector reads the session again. The collection log's SESSION_MISSING detail has what the server said.");
+    }
+
+    /// <summary>The longest quote of the server's text in a Capture Down detail. Longer text is cut there and ends in an ellipsis.</summary>
+    internal const int MaxQuotedServerText = 300;
+
+    /// <summary>
+    /// #8528: " The server said: ..." for the detail: the server's own text from the failed ensure, on one line (a SqlException's
+    /// message holds one line per error), cut at <see cref="MaxQuotedServerText"/> and ended with a full stop. Empty when the failure
+    /// carries no server text, so the service's own sentence is never quoted as the server's.
+    /// </summary>
+    internal static string ServerSaid(DarlingXeSessions.XeEnsureFailure failure)
+    {
+        var text = string.Join(' ', (failure.ServerText ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        if (text.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        if (text.Length > MaxQuotedServerText)
+        {
+            text = text[..MaxQuotedServerText].TrimEnd() + "...";
+        }
+        else if (text[^1] is not ('.' or '!' or '?'))
+        {
+            text += ".";
+        }
+
+        return " The server said: " + text;
     }
 
     /// <summary>
@@ -9835,7 +9952,6 @@ WHERE c.is_enabled";
         _activeCaptureDown.TryRemove(key, out _);
         _lastCaptureDownAlert.TryRemove(key, out _);
         _lastCaptureDownList.TryRemove(key, out _);
-        _captureSessionReports.TryRemove(key, out _);
         _activeAgentDown.TryRemove(key, out _);
         _lastAgentDownAlert.TryRemove(key, out _);
         _activeAgentAlertGaps.TryRemove(key, out _);

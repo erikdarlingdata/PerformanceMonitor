@@ -2455,6 +2455,16 @@ public sealed partial class DarlingWorker
         StoreConfigProvider.ResolveSchedule("attention", server.Config.ServerId, _scheduleOverrides).Enabled;
 
     /// <summary>
+    /// #8528: what the fleet self-alert pass hands the Capture Down self-alert for a server: the loop state's report as of now, with
+    /// each capture collector's effective schedule, so a collector that is turned off is neither held nor judged and a started
+    /// session awaits its read for two of its collector's intervals at most.
+    /// </summary>
+    internal CaptureSessionEnsureReport CaptureSessionReportFor(ServerLoopState server) =>
+        server.CaptureSessionReportAt(
+            DateTime.UtcNow,
+            collectorName => StoreConfigProvider.ResolveSchedule(collectorName, server.Config.ServerId, _scheduleOverrides));
+
+    /// <summary>
     /// #4961: a SQL Server restart stops the long-query trace's session, because the per-install session is created
     /// with <c>STARTUP_STATE = OFF</c>, and a stopped session reads as a quiet one. When a collector run saw the
     /// instance's identity move (<see cref="ServerEpoch.IdentityChangesMeasurement"/>: the start time, or the name
