@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using PerformanceMonitor.PlanAnalysis;
@@ -145,5 +146,49 @@ public sealed class PlanAnalysisCountOfOneTextTests
     public void WaitStatsHeader_CountsItsWaitTypesAsAPersonSays(int waitCount, string expected)
     {
         Assert.Equal(expected, PlanDisplayText.WaitStatsHeaderTooltip(waitCount, 250));
+    }
+
+    /// <summary>
+    /// Runs <paramref name="read"/> with the thread's culture set to German, which groups with a dot and uses a decimal
+    /// comma, and restores the culture afterwards. Every number in a plan-analysis sentence is written in the invariant
+    /// culture, so the text reads the same on that desktop as on an English one.
+    /// </summary>
+    private static T OnAGermanDesktop<T>(Func<T> read)
+    {
+        var saved = CultureInfo.CurrentCulture;
+        CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("de-DE");
+        try
+        {
+            return read();
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = saved;
+        }
+    }
+
+    [Fact]
+    public void LazySpool_OnAGermanDesktop_WritesEveryNumberInOneConvention()
+    {
+        var warning = OnAGermanDesktop(() => AnalyzeSingle(LazySpool(true, 1500, 2000), statementMs: 1_000, "Lazy Spool Ineffective"));
+
+        Assert.Contains("1,500 rebinds (cache misses), 2,000 rewinds (cache hits), 1.3x rewinds (cache hits) per rebind (cache miss)", warning.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void KeyLookup_OnAGermanDesktop_WritesEveryNumberInOneConvention()
+    {
+        var node = Lookup(5000);
+        node.ActualElapsedMs = 1200;
+
+        var warning = OnAGermanDesktop(() => AnalyzeSingle(node, statementMs: 10_000, "Key Lookup"));
+
+        Assert.Contains("Operator time: 1,200ms (12% of statement) over 5,000 lookups.", warning.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WaitStatsHeader_OnAGermanDesktop_WritesEveryNumberInOneConvention()
+    {
+        Assert.Equal("1,250 ms of waits across 1 wait type", OnAGermanDesktop(() => PlanDisplayText.WaitStatsHeaderTooltip(1, 1250)));
     }
 }
