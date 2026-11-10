@@ -264,7 +264,8 @@ public sealed class ManagedWebGroupLiveTests
             await Fleet(replacementCookie,1);
             published=null;
             await groups.RefreshAsync(ct);
-            Assert.Equal(503,(await Read("/api/session",replacementCookie)).Status);
+            // No usable snapshot: the cookie is not honoured and the request is refused as unauthenticated, so the holder lands on the sign-in form rather than a 503.
+            Assert.Equal(401,(await Read("/api/session",replacementCookie)).Status);
             var sharedCookie=await Cookie(Shared);
             Assert.Contains("\"can_edit\":true",(await Read("/api/session",sharedCookie)).Body,StringComparison.Ordinal);
             var legacyCookie=await Cookie(Legacy);
@@ -272,7 +273,8 @@ public sealed class ManagedWebGroupLiveTests
             published=postgres;
             await groups.RefreshAsync(ct);
             ring=DarlingPasswordKey.Refusing("test key temporarily unavailable");
-            Assert.Equal(503,(await Read("/api/session",replacementCookie)).Status);
+            // No usable snapshot: the cookie is not honoured and the request is refused as unauthenticated, so the holder lands on the sign-in form rather than a 503.
+            Assert.Equal(401,(await Read("/api/session",replacementCookie)).Status);
             ring=DarlingPasswordKey.FromPrivateKey(key);
             await Fleet(replacementCookie,1);
 
