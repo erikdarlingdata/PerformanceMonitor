@@ -429,9 +429,18 @@ ORDER BY event_time DESC";
 
     // ── Memory Broker ──
 
-    /// <summary>Significant memory-broker ratio changes (SHRINK, #7466) for the window, newest first.</summary>
-    public async Task<List<MemoryBrokerRow>> GetMemoryBrokerAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null) =>
-        (await GetMemoryBrokerWithCountsAsync(serverId, hoursBack, fromDate, toDate, asOfUtc)).Rows;
+    /// <summary>
+    /// Significant memory-broker ratio changes (SHRINK, #7466) for the window, newest first: the grid's read. It keeps the rows
+    /// <see cref="SystemHealthSignificance.SignificantBrokerRecords"/> keeps and counts nothing; the read that also reports what the gate
+    /// left out is <see cref="GetMemoryBrokerWithCountsAsync"/>.
+    /// </summary>
+    public async Task<List<MemoryBrokerRow>> GetMemoryBrokerAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    {
+        using var _q = TimeQuery("GetMemoryBrokerAsync", "v_system_health_events memory_broker shred");
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.MemoryBrokerEvent);
+        return SystemHealthSignificance.SignificantBrokerRecords(xmls).Select(r => new MemoryBrokerRow(r)).ToList();
+    }
 
     /// <summary>
     /// The significant memory-broker rows plus how many broker events of each notification value (STABLE, GROW, SHRINK) the
@@ -442,7 +451,7 @@ ORDER BY event_time DESC";
     public async Task<(List<MemoryBrokerRow> Rows, SortedDictionary<string, int> NotificationCounts, int RawEventCount)> GetMemoryBrokerWithCountsAsync(
         int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
-        using var _q = TimeQuery("GetMemoryBrokerAsync", "v_system_health_events memory_broker shred");
+        using var _q = TimeQuery("GetMemoryBrokerWithCountsAsync", "v_system_health_events memory_broker shred");
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.MemoryBrokerEvent);
 
