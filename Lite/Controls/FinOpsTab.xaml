@@ -3243,7 +3243,7 @@
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Binding="{Binding SqlServerStartTime, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="150">
+                            <DataGridTextColumn Binding="{Binding StartTimeDisplay}" SortMemberPath="SqlServerStartTime" Width="Auto" MinWidth="200">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SqlServerStartTime" Click="FilterButton_Click" Margin="0,0,4,0"/>

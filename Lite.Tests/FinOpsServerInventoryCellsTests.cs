@@ -434,6 +434,32 @@ public sealed class FinOpsServerInventoryCellsTests : IDisposable
         Assert.Equal("2026-11-07 09:30", row.LastUpdatedDisplay);
     }
 
+    /// <summary>#8634: Start Time and Last Updated are worded the same way: both carry the server's offset in Server Time and neither
+    /// in UTC. Start Time is the instant the server's tick counts give, not its own clock reading, so UTC shows the UTC time.</summary>
+    [Fact]
+    public void StartTime_IsLabelledLikeLastUpdated_OnTheSelectedTimeDisplay()
+    {
+        var row = new ServerPropertyRow
+        {
+            LastUpdated = CollectedAtUtc,
+            SqlServerStartUtc = new DateTime(2026, 9, 9, 4, 41, 0, DateTimeKind.Unspecified),
+            SqlServerStartTime = new DateTime(2026, 9, 9, 0, 41, 0, DateTimeKind.Unspecified),
+        };
+
+        ServerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(-240);
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.Equal("2026-09-09 00:41 (UTC-04:00)", row.StartTimeDisplay);
+        Assert.EndsWith("(UTC-04:00)", row.LastUpdatedDisplay);
+
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+        Assert.Equal("2026-09-09 04:41", row.StartTimeDisplay);
+
+        /* A row with no start instant shows the server's own reading, which carries no label it cannot back. */
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.Equal("2026-09-09 00:41", new ServerPropertyRow { SqlServerStartTime = row.SqlServerStartTime }.StartTimeDisplay);
+        Assert.Equal("", new ServerPropertyRow().StartTimeDisplay);
+    }
+
     /// <summary>A fresh store from the product's template with one collected <c>server_properties</c> row per server, each with the
     /// UTC offset its server reported (null for a row collected without one).</summary>
     private async Task<DuckDbInitializer> StoreAsync(params (ServerConnection Server, int? UtcOffsetMinutes)[] servers)

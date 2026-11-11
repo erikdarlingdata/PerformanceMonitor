@@ -61,7 +61,7 @@ public partial class FleetSweepsTab : UserControl
     private bool _detailLoaded;
     private bool _watchItemsLoaded;
 
-    /// <summary>Raises "fleet sweeps — refreshed …" when all three loads last finished. Each load reports its own failure, so the stamp
+    /// <summary>Raises "fleet sweeps: refreshed …" when all three loads last finished. Each load reports its own failure, so the stamp
     /// never writes over one, and a load that finishes after a failure replaces the failure line it answers.</summary>
     private void StampIfLoaded()
     {
