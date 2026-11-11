@@ -66,6 +66,14 @@ public sealed class DarlingMcpPgIndexUsageTools
                  + "waiting on the index it was meant to become.";
         }
 
+        /* #8572: the text is chosen from the row's own flags and its scans. A constraint index that was scanned is not "zero scans", and a
+           unique index that backs no constraint (supports_constraint false) is not a constraint index at all. */
+        if (r.IsPrimaryKey && scansInWindow > 0)
+        {
+            return "Backs the PRIMARY KEY and was scanned during this window, so it is in use for reads as well. This cannot be "
+                 + "dropped without dropping the constraint.";
+        }
+
         if (r.IsPrimaryKey)
         {
             return "Backs the PRIMARY KEY. Zero scans does NOT mean unused: enforcing the key on every "
@@ -73,12 +81,31 @@ public sealed class DarlingMcpPgIndexUsageTools
                  + "dropping the constraint.";
         }
 
-        if (r.SupportsConstraint || r.IsUnique)
+        if (r.SupportsConstraint && scansInWindow > 0)
+        {
+            return "Backs a UNIQUE or EXCLUSION constraint and was scanned during this window, so it is in use for reads as "
+                 + "well. Dropping the index drops the constraint with it, which changes what data the table will accept.";
+        }
+
+        if (r.SupportsConstraint)
         {
             return "Backs a UNIQUE or EXCLUSION constraint. Zero scans does NOT mean unused - a uniqueness "
                  + "check is not counted as a scan - and dropping the index drops the constraint with it, "
                  + "which changes what data the table will accept. Treat the scan count as irrelevant here "
                  + "unless you have already decided the constraint itself is not wanted.";
+        }
+
+        if (r.IsUnique && scansInWindow > 0)
+        {
+            return "In use: scanned during this window. It is also a UNIQUE index that backs no constraint, so dropping it would "
+                 + "remove the uniqueness check it enforces as well as the reads it serves.";
+        }
+
+        if (r.IsUnique)
+        {
+            return "This is a UNIQUE index that backs no constraint. Zero scans does NOT mean unused: a uniqueness check is not "
+                 + "counted as a scan, and dropping the index removes the uniqueness it enforces. Decide whether that uniqueness is "
+                 + "wanted (if it is, a UNIQUE constraint should own it) before treating the scan count as a reason to drop it.";
         }
 
         if (r.IsReplicaIdentity)
@@ -165,7 +192,7 @@ public sealed class DarlingMcpPgIndexUsageTools
     /// makes the cost visible on an index that is never read: those accesses are the write path maintaining
     /// it, counted by the server rather than inferred from the size.
     /// </summary>
-    internal static string CostFinding(long indexBytes, long tableBytes, long blocksHit, long blocksRead)
+    internal static string CostFinding(long indexBytes, long tableBytes, long blocksHit, long blocksRead, long scansInWindow = 0)
     {
         if (indexBytes < 0)
         {
@@ -177,10 +204,19 @@ public sealed class DarlingMcpPgIndexUsageTools
             : string.Empty;
 
         var maintenance = blocksHit + blocksRead > 0
-            ? $" The server recorded {(blocksHit + blocksRead).ToString(CultureInfo.InvariantCulture)} block "
-            + "accesses against it. On an index with no scans those are the WRITE path maintaining it and "
-            + "VACUUM cleaning it, which is the cost being paid stated in the server's own units."
+            ? $" The server recorded {(blocksHit + blocksRead).ToString("N0", CultureInfo.InvariantCulture)} block "
+            + (scansInWindow > 0
+                ? "accesses against it. The scans that read it are part of that figure, beside the WRITE path maintaining it and "
+                  + "VACUUM cleaning it."
+                : "accesses against it. On an index with no scans those are the WRITE path maintaining it and "
+                  + "VACUUM cleaning it, which is the cost being paid stated in the server's own units.")
             : string.Empty;
+
+        if (scansInWindow > 0)
+        {
+            return $"{DescribeBytes(indexBytes)}." + share + maintenance
+                 + " Every write maintains it and every VACUUM cleans it, so its size is also paid on the write path.";
+        }
 
         return $"{DescribeBytes(indexBytes)}." + share + maintenance
              + " On PostgreSQL an unused index costs more than the space: it is maintained by every write "
@@ -373,7 +409,7 @@ public sealed class DarlingMcpPgIndexUsageTools
                    against production. */
                 index_definition = r.IndexDefinition,
                 droppability_finding = DroppabilityFinding(r, r.ScansInWindow, r.SampleCount),
-                cost_finding = CostFinding(r.IndexBytes, r.TableBytes, r.BlocksHit, r.BlocksRead),
+                cost_finding = CostFinding(r.IndexBytes, r.TableBytes, r.BlocksHit, r.BlocksRead, r.ScansInWindow),
                 sample_count = r.SampleCount,
                 first_seen_at = r.FirstSeenAt.ToString("o"),
                 measured_at = r.MeasuredAt.ToString("o"),

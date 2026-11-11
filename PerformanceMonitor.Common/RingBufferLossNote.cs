@@ -268,9 +268,10 @@ public static class RingBufferLossNote
             /* The times are the collector runs that FOUND the loss; each loss happened in the window before its run. */
             var first = FirstLossUtc.ToString("yyyy-MM-dd HH:mm", inv);
             var last = LastLossUtc.ToString("yyyy-MM-dd HH:mm", inv);
+            /* #8572: its own sentence, so the last count does not read as the thing that was found ("1 span ... could not be counted found by the run"). */
             var found = first == last
-                ? string.Format(inv, " found by the run at {0} UTC", first)
-                : string.Format(inv, " found by the runs between {0} and {1} UTC", first, last);
+                ? string.Format(inv, ". The loss was found by the run at {0} UTC", first)
+                : string.Format(inv, ". The loss was found by the runs between {0} and {1} UTC", first, last);
             var text = string.Join("; ", parts) + found;
             return Describe(NewestNote) is { } latest ? text + ". Latest: " + latest : text;
         }

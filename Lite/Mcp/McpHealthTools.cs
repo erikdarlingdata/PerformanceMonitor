@@ -141,7 +141,8 @@ public sealed class McpHealthTools
                 data_state = DailySummaryRetention.Label(row.DataState),
                 data_note = row.RetentionHorizon is { } horizon ? DailySummaryRetention.Note(row.DataState, horizon, row.SignalSourcesPresent) : null,
                 retention_horizon = row.RetentionHorizon?.ToString("yyyy-MM-dd"),
-                total_wait_time_sec = row.TotalWaitTimeSec,
+                /* #8572: the store's numeric carries sixteen decimals (9387.6560000000000000); the source is whole milliseconds, so three places. */
+                total_wait_time_sec = Math.Round(row.TotalWaitTimeSec, 3),
                 top_wait_type = row.TopWaitType,
                 unique_queries = row.UniqueQueries,
                 deadlock_count = row.DeadlockCount,
@@ -268,7 +269,7 @@ public sealed class McpHealthTools
                     health_band = row.HealthBand.ToString(),
                     data_state = DailySummaryRetention.Label(row.DataState),
                     data_note = row.RetentionHorizon is { } rowHorizon ? DailySummaryRetention.Note(row.DataState, rowHorizon, row.SignalSourcesPresent) : null,
-                    total_wait_time_sec = row.TotalWaitTimeSec,
+                    total_wait_time_sec = Math.Round(row.TotalWaitTimeSec, 3),
                     top_wait_type = row.TopWaitType,
                     unique_queries = row.UniqueQueries,
                     deadlock_count = row.DeadlockCount,
