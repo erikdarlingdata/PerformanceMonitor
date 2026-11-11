@@ -1768,11 +1768,47 @@ const fleetRequests = new Map();
  * read — so every visible tab computed the whole overview twice a minute. The second caller of a tick now joins
  * the first's request instead of sending its own.
  *
- * Nothing outlives the response: a caller that starts after it has landed sends a fresh request, exactly as
- * before, so no page renders an older roll-up than it would have — only the duplicate is gone. And each caller
- * classifies (so parses) the shared body for itself, so every page still owns the cards it was handed.
+ * Nothing outlives the response, except the one case apiGetFleetShell keeps for the poll (#8633): a caller that
+ * starts after it has landed sends a fresh request, exactly as before, so no page renders an older roll-up than it
+ * would have — only the duplicate is gone. And each caller classifies (so parses) the shared body for itself, so
+ * every page still owns the cards it was handed.
  */
 export async function apiGetFleet(store) {
+  return readFleet(store, false);
+}
+
+/* #8633: the request the shell's sidebar sent for each store on its last refresh, kept after it lands for the page's own
+   poll re-render to take (once), with the time it started. See apiGetFleetShell. */
+const shellFleets = new Map();
+
+/* How old the sidebar's kept roll-up may be when the page's poll takes it. The page's re-render trails the sidebar's
+   refresh by the length of its last render (its next poll is counted from where that render settled, the sidebar's from
+   where its refresh started), a few seconds on a store that answers quickly. A page that trails further reads for itself. */
+const SHELL_FLEET_SHARE_MS = 20000;
+
+/* Whether the page render in progress is the poll's (or the Refresh button's) re-render of the page already on screen, as
+   against a navigation. app.js sets it from the render's start to its settle. */
+let pollRender = false;
+export function setPollRender(on) {
+  pollRender = on === true;
+}
+
+/**
+ * The shell's own fleet read (the sidebar, one per store). Same request, same sharing as apiGetFleet, and the request is
+ * kept for the page. The page's poll re-render starts about two seconds after the shell's refresh: its next poll is
+ * counted from where its last render settled, the shell's from where its refresh began, so the two never meet in the
+ * same synchronous pass and the page sent the store a second roll-up a moment after the first landed (#8633, the idle
+ * Fleet Overview behind three stores read it six times a minute).
+ *
+ * The page's poll render takes the kept request ONCE, and only while it is no older than SHELL_FLEET_SHARE_MS: the next
+ * poll (a 15 second page interval, say) reads for itself. A read that is not a poll's, a navigation or an action on the
+ * page, never takes it, so it never gets a roll-up older than its own request, the #3895 rule. A read that failed is not kept.
+ */
+export async function apiGetFleetShell(store) {
+  return readFleet(store, true);
+}
+
+async function readFleet(store, shell) {
   const scope = pageReads;
   scope.n++;
   try {
@@ -1780,14 +1816,22 @@ export async function apiGetFleet(store) {
        is the current store's, and without a front door the one key and the one request it always was. */
     const key = frontDoorOn ? (store != null && store !== "" ? store : pickedStore || "") : "";
     let request = fleetRequests.get(key);
+    if (!shell && pollRender) {
+      const kept = shellFleets.get(key);
+      shellFleets.delete(key);
+      if (!request && kept && Date.now() - kept.at <= SHELL_FLEET_SHARE_MS) request = kept.request;
+    }
     if (!request) {
       request = fetchBody("/api/fleet", undefined, frontDoorOn ? key : undefined).finally(() => {
         if (fleetRequests.get(key) === request) fleetRequests.delete(key);
       });
+      request.startedAt = Date.now();
       fleetRequests.set(key, request);
     }
+    if (shell) shellFleets.set(key, { request, at: request.startedAt ?? Date.now() });
 
     const shared = await request;
+    if (shell && !shared.ok && shellFleets.get(key)?.request === request) shellFleets.delete(key);
     if (shared.transportError) return { kind: "error", message: shared.transportError };
     const res = await classifyResponse({ ok: shared.ok, status: shared.status, url: shared.url, text: async () => shared.raw });
     if (res.kind === "data") stampFleetWindow(res.data);
