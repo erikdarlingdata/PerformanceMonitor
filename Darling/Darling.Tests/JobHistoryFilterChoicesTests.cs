@@ -108,14 +108,14 @@ public sealed class JobHistoryFilterChoicesTests
     }
 
     [Fact]
-    public void TheViewersKnownServers_AreTheServersAJobHistoryCanBeAskedOf_ByDisplayName()
+    public void TheViewersKnownServers_AreTheEnabledServersAJobHistoryTabCanBeAskedAbout_ByDisplayName()
     {
         var choices = ViewerDataService.ServerChoicesOf(
         [
             new DarlingServer(1, "sql-a", "Alias A", true, 16),
             new DarlingServer(2, "sql-b", "", true, 16),
             new DarlingServer(3, "pg-a", "pg-a", true, null, engineKind: "postgres"),
-            /* A disabled server is never collected, so it is not offered. */
+            /* An enabled PostgreSQL server is offered so the tab can say why it has no runs. A disabled server is not. */
             new DarlingServer(4, "sql-off", "Disabled", false, 16),
             new DarlingServer(9, "azure-off", "Azure Off", false, 12, engineEdition: CollectorEngineCapability.AzureSqlDatabaseEngineEdition),
             /* #6391: an Azure SQL Database has no SQL Agent and never any rows, but it is a registered server and is offered, so it can be picked. */
@@ -127,7 +127,7 @@ public sealed class JobHistoryFilterChoicesTests
         ]);
 
         Assert.Equal(
-            new[] { new Choice(1, "Alias A"), new Choice(2, "sql-b"), new Choice(5, "Azure DB"), new Choice(6, "Managed Instance"), new Choice(7, "Box"), new Choice(8, "Not connected") },
+            new[] { new Choice(1, "Alias A"), new Choice(2, "sql-b"), new Choice(3, "pg-a"), new Choice(5, "Azure DB"), new Choice(6, "Managed Instance"), new Choice(7, "Box"), new Choice(8, "Not connected") },
             choices.ToArray());
     }
 

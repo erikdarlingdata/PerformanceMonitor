@@ -134,9 +134,22 @@ internal static class PgDisplay
             return NotApplicableText;
         }
 
-        return ms < 1000
-            ? $"{ms:N0} ms"
-            : TimeSpan.FromMilliseconds(ms).ToString(ms < 3_600_000 ? @"mm\:ss" : @"d\.hh\:mm\:ss", CultureInfo.CurrentCulture);
+        if (ms < 1000)
+        {
+            return $"{ms:N0} ms";
+        }
+
+        /* #8564: ONE labelled format from a second to many days, the one the Running Jobs tab speaks ("2m 5s", "1h 5m"). The
+           clock-style text this replaced ("02:05", "1.08:23:10") put "41 ms" and a bare time in one column, and "02:05" read as
+           hours and minutes as easily as minutes and seconds. */
+        var span = TimeSpan.FromMilliseconds(ms);
+        return span.TotalDays >= 1
+            ? string.Create(CultureInfo.CurrentCulture, $"{(long)span.TotalDays}d {span.Hours}h {span.Minutes}m")
+            : span.TotalHours >= 1
+                ? string.Create(CultureInfo.CurrentCulture, $"{span.Hours}h {span.Minutes}m")
+                : span.TotalMinutes >= 1
+                    ? string.Create(CultureInfo.CurrentCulture, $"{span.Minutes}m {span.Seconds}s")
+                    : string.Create(CultureInfo.CurrentCulture, $"{span.Seconds}s");
     }
 
     internal static string Timestamp(DateTime? utc) =>
