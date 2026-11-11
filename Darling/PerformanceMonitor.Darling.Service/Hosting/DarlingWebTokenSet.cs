@@ -121,7 +121,7 @@ internal sealed class DarlingWebTokenSet
             if (IsReservedName(entry.Name))
             {
                 problems.Add(label + " is named " + entry.Name + ", which is reserved: web, mcp, cli and viewer (in any case) are the names the " +
-                    "dashboard, the MCP surface, the command line and the Viewer stamp their own writes with, and invalid and unclaimed are the " +
+                    "dashboard, the MCP surface, the command line and the Viewer stamp their own writes with, and invalid, unclaimed and legacy-token are the " +
                     "mcp.tokens placeholders. A token so named would make a person's edits read as one of those. Rename the token. The token is not served.");
                 continue;
             }

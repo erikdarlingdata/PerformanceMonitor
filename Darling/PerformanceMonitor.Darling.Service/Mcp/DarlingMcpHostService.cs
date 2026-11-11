@@ -1078,11 +1078,25 @@ public sealed class DarlingMcpHostService : BackgroundService
             else
             {
                 logger.LogWarning(
-                    "MCP investigation tools are ON ({Setting}): claim_investigation_request and submit_investigation_report " +
-                    "write investigation state; every MCP request, loopback included, must present the bearer token.",
-                    DarlingMcpWritePolicy.InvestigationsSetting);
+                    "MCP investigation tools are ON ({Setting}): {Tools} write investigation state; every MCP request, loopback included, " +
+                    "must present the bearer token.",
+                    DarlingMcpWritePolicy.InvestigationsSetting,
+                    DescribeInvestigationArmTools(served));
             }
         }
+    }
+
+    /// <summary>
+    /// What the start line says the investigations arm serves (#8611), built from the policy's own sets so it cannot drift from the gate: every
+    /// state-changing investigation tool by name (<see cref="DarlingMcpWritePolicy.InvestigationTools"/>), then the Level 2 agent action tools the
+    /// arm offers (<see cref="DarlingMcpWritePolicy.AgentActionTools"/> through <c>served.Offers</c>) as a counted family, not 16 names. The four
+    /// mute rule tools are among those action tools: the arm also serves them without an agent_action, which the line says in a clause.
+    /// </summary>
+    internal static string DescribeInvestigationArmTools(DarlingMcpWritePolicy.Effective served)
+    {
+        var actionCount = DarlingMcpWritePolicy.AgentActionTools.Count(served.Offers);
+        return string.Join(", ", DarlingMcpWritePolicy.InvestigationTools.OrderBy(t => t, StringComparer.Ordinal))
+            + $", and {actionCount} agent action tools (each with an agent_action; the mute rule tools also work without one)";
     }
 
     /// <summary>
@@ -2362,7 +2376,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                             totalHold
                                 ? $"requests are held for {seconds} more second(s): {DarlingSignInThrottle.GlobalMaxAttempts} wrong bearer tokens arrived within the hour from several addresses, so no token is compared from an address that has not presented a correct one recently; restarting the service clears it, and the failing client is in this log with its 401 lines (fix its token or take it out of allowFrom)"
                                 : $"requests from this source are held for {seconds} more second(s) after repeated wrong bearer tokens; no token is compared during the wait, and restarting the service clears it",
-                            now);
+                            now,
+                            state: totalHold ? "held-total" : "held-source");
                         context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
                         context.Response.Headers.RetryAfter = seconds.ToString(CultureInfo.InvariantCulture);
                         context.Response.ContentType = "text/plain; charset=utf-8";
@@ -2413,11 +2428,13 @@ public sealed class DarlingMcpHostService : BackgroundService
                        testing only it reported "nothing was presented" about a client that presented
                        a malformed header - collapsing precisely the ambiguity this exists to resolve.
                        None of the three says anything about what the token IS. */
+                    var refusal = DescribeBearerRefusal(authorization);
                     refusals.Report(
                         _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized,
                         remote,
-                        DescribeBearerRefusal(authorization),
-                        now);
+                        refusal,
+                        now,
+                        state: refusal);
                     context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                     context.Response.Headers.WWWAuthenticate = "Bearer";
                     return;
