@@ -3689,6 +3689,14 @@ ORDER BY server_name";
                 postgres, start, end, limit + 1, collector_name, min_duration_ms, status, cancellationToken);
             var truncated = rows.Count > limit;
             if (truncated) rows = rows.Take(limit).ToList();
+            /* #8571: runs_total is the runs that matched the filters in the window across the enabled fleet, not the page the limit left.
+               Counted only when the over-fetch saw more than the limit; a page that is not cut holds every match. */
+            long matchingRuns = rows.Count;
+            if (truncated)
+            {
+                matchingRuns = Math.Max(rows.Count, await DarlingDataReader.CountCollectionLogFleetAsync(
+                    postgres, start, end, collector_name, min_duration_ms, status, cancellationToken));
+            }
 
             var filtered = !string.IsNullOrWhiteSpace(collector_name)
                 || min_duration_ms is not null
@@ -3796,7 +3804,7 @@ ORDER BY server_name";
                 min_duration_ms,
                 status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
                 runs_returned = pageCount,
-                runs_total = rows.Count,
+                runs_total = matchingRuns,
                 size_note = cut
                     ? $"{rows.Count - pageCount} of the {CountText.Plural(rows.Count, "run")} this read selected {(rows.Count - pageCount == 1 ? "was" : "were")} left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one server_name / collector_name / status to read the rest in full."
                     : null,

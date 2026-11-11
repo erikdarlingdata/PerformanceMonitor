@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 
@@ -37,6 +38,43 @@ AND   ($5 IS NULL OR duration_ms >= $5)
 AND   ($6 IS NULL OR status = UPPER($6))";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrWhiteSpace(collectorName) ? DBNull.Value : collectorName.Trim() });
+        command.Parameters.Add(new DuckDBParameter { Value = (object?)minDurationMs ?? DBNull.Value });
+        command.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrWhiteSpace(status) ? DBNull.Value : status.Trim() });
+
+        return Convert.ToInt64(await command.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// #8571, Darling's <c>CountCollectionLogFleetAsync</c>: the fleet twin of <see cref="CountRecentCollectionLogAsync"/>. The log rows that
+    /// match <see cref="GetRecentCollectionLogFleetAsync"/>'s filters in the window across the same <paramref name="serverIds"/>, uncapped, for
+    /// the fleet page's <c>runs_total</c>. Asked only when the over-fetch saw more rows than the limit.
+    /// </summary>
+    public async Task<long> CountRecentCollectionLogFleetAsync(
+        IReadOnlyList<int> serverIds, int hoursBack, DateTime? asOfUtc, string? collectorName, double? minDurationMs, string? status)
+    {
+        if (serverIds.Count == 0)
+        {
+            return 0;
+        }
+
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+
+        command.CommandText = $@"
+SELECT COUNT(*)
+FROM v_collection_log
+WHERE server_id IN ({string.Join(",", serverIds)})
+AND   collection_time >= $1
+AND   collection_time <= $2
+AND   ($3 IS NULL OR collector_name = $3)
+AND   ($4 IS NULL OR duration_ms >= $4)
+AND   ($5 IS NULL OR status = UPPER($5))";
+
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrWhiteSpace(collectorName) ? DBNull.Value : collectorName.Trim() });

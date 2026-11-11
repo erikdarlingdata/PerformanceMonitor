@@ -4857,6 +4857,38 @@ FROM config.config_collector_schedules";
         LIMIT $3
         """;
 
+    /// <summary>
+    /// #8571: the fleet twin of <see cref="CollectionLogCountSql"/>: the log rows that match <see cref="CollectionLogFleetBody"/>'s
+    /// filters in the window across the same enabled servers (the same <c>servers</c> join), uncapped, for the fleet page's
+    /// <c>runs_total</c>. Asked only when the over-fetch saw more rows than the limit. $1 window start, $2 window end, $3 collector
+    /// name or NULL, $4 duration floor or NULL, $5 status or NULL.
+    /// </summary>
+    public const string CollectionLogFleetCountSql = """
+        SELECT COUNT(*)
+        FROM v_collection_log cl
+        JOIN servers s ON s.server_id = cl.server_id AND s.is_enabled
+        WHERE cl.collection_time >= $1
+        AND   cl.collection_time <= $2
+        AND   ($3::text IS NULL OR cl.collector_name = $3::text)
+        AND   ($4::double precision IS NULL OR cl.duration_ms >= $4::double precision)
+        AND   ($5::text IS NULL OR cl.status = UPPER($5::text))
+        """;
+
+    /// <summary>Runs <see cref="CollectionLogFleetCountSql"/>.</summary>
+    public static async Task<long> CountCollectionLogFleetAsync(
+        NpgsqlDataSource postgres, DateTime windowStartUtc, DateTime windowEndUtc,
+        string? collectorName, double? minDurationMs, string? status, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(CollectionLogFleetCountSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddTimestamp(command, windowStartUtc);
+        AddTimestamp(command, windowEndUtc);
+        AddNullableText(command, string.IsNullOrWhiteSpace(collectorName) ? null : collectorName.Trim());
+        AddNullableDouble(command, minDurationMs);
+        AddNullableText(command, string.IsNullOrWhiteSpace(status) ? null : status.Trim());
+        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
     /// <summary>Whether ANY enabled server has EVER recorded a collector run — the fleet-wide
     /// <see cref="HasAnyCollectionLogSql"/>, used the same way: to tell a genuinely quiet fleet-wide window
     /// from a fleet that has never once collected (every server newly added, or the service never started).

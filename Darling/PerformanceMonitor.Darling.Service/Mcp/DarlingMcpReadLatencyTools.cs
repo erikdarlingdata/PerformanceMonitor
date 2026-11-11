@@ -64,7 +64,7 @@ public sealed class DarlingMcpReadLatencyTools
         + "together, bucket 2 across every hour summed together, and so on), and computes p50/p95/p99 from "
         + "the SUMMED histogram. Every percentile here is a BUCKET UPPER BOUND, never an interpolated exact "
         + "value: the histogram only knows which bucket a duration landed in, so the honest answer is \"at most "
-        + "this many ms\", flagged with \"≥ <bound>\" on the rare row whose true value only proven to exceed "
+        + "this many ms\", flagged with \"≥ <bound>\" on the rare row whose true value is only proven to exceed "
         + "the last finite bucket; a bound above max_ms is capped to max_ms, the slowest read seen. timeouts is the run_count of samples whose outcome was a caught statement "
         + "timeout (57014) for that route: a route that answers fast most of the time but times out on a heavy "
         + "case shows both figures side by side. Sorted by p95 descending, then by count, then surface and route, so the worst tail "
