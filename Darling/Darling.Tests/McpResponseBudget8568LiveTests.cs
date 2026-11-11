@@ -9,10 +9,12 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -463,8 +465,9 @@ VALUES ($1, $2, $3, $4, $5, $6, 'kB', 'Resource Usage / Memory', 'sighup', 'inte
 
     /// <summary>
     /// Every message of one capture carries that capture's time, and a window includes its end. When the rows that
-    /// fit are all from one capture, a window ending at that time returns them again, so the note names the two ways
-    /// that do move: previews, which fit more of that capture's messages, and a window that ends before it.
+    /// fit are all from one capture, a window ending at that time returns them again, so the note names the ways that
+    /// do move: first an <c>offset</c> past the rows returned, which reads the rest of that capture, then previews,
+    /// which fit more of its messages, and a window that ends before it.
     /// </summary>
     [Fact]
     public async Task StoreLog_CutInsideOneCapture_SendsTheReaderToPreviewsAndToTheCapturesBeforeIt()
@@ -493,6 +496,16 @@ VALUES ($1, $2, $3, $4, $5, $6, 'kB', 'Resource Usage / Memory', 'sighup', 'inte
             Assert.Contains("full_text", note, StringComparison.Ordinal);
             Assert.Contains("as_of earlier than", note, StringComparison.Ordinal);
 
+            /* The way on inside the capture comes first: an offset past the rows held reads messages the page left out. */
+            Assert.Contains($"offset={held.Count}", note, StringComparison.Ordinal);
+            Assert.True(note!.IndexOf("offset=", StringComparison.Ordinal) < note.IndexOf("full_text", StringComparison.Ordinal),
+                $"the note names the offset before the previews: {note}");
+            var onward = AssertWithinBudget("get_store_log at the offset", await ReadStoreLogAsync(
+                postgres, held.Count, root.GetProperty("as_of").GetString(), fullText: true, ct));
+            var onwardMessages = onward.GetProperty("retained_events").EnumerateArray().Select(r => r.GetProperty("message_text").GetString()!).ToList();
+            Assert.NotEmpty(onwardMessages);
+            Assert.All(onwardMessages, message => Assert.DoesNotContain(message, held));
+
             /* Previews: more of the capture's twelve messages fit, among them ones the whole lines left out. */
             var previews = AssertWithinBudget("get_store_log", await DarlingMcpStoreLogTools.GetStoreLog(postgres, cancellationToken: ct));
             var previewed = previews.GetProperty("retained_events").EnumerateArray().Select(r => r.GetProperty("message_text").GetString()!).ToList();
@@ -508,6 +521,71 @@ VALUES ($1, $2, $3, $4, $5, $6, 'kB', 'Resource Usage / Memory', 'sighup', 'inte
                 Assert.Equal(earlier, ParseUtc(r.GetProperty("last_capture_at").GetString()!));
                 Assert.DoesNotContain(r.GetProperty("message_text").GetString()!, held);
             });
+        });
+    }
+
+    /// <summary>
+    /// One capture keeps up to twenty distinct messages a class, each message whole, so one capture's rows can be
+    /// more than the budget holds, and no <c>as_of</c> divides a capture. <c>offset</c> does: a reader who passes the
+    /// offset each note names, at the first answer's <c>as_of</c>, reads every message of the capture exactly once.
+    /// The web viewer's read holds them all in one answer.
+    /// </summary>
+    [Fact]
+    public async Task StoreLog_OneCaptureOverTheBudget_FollowingOffsetReadsEveryRetainedMessageExactlyOnce()
+    {
+        await WithStoreAsync(async (_, postgres, ct) =>
+        {
+            var slab = string.Concat(Enumerable.Range(0, 20).Select(LoggedPlan)) + string.Concat(Enumerable.Range(0, 20).Select(LongComplaint));
+            var retained = StoreLogClassifier.Classify(slab).Groups.Count(g => g.MessageText is not null);
+            Assert.Equal(40, retained);
+            await WriteCaptureAsync(postgres, DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-5), slab, ct);
+
+            var seen = new List<(string EventClass, string Message)>();
+            var named = new List<(int Offset, string? Note)>();
+            var offset = 0;
+            string? asOf = null;
+            var pages = 0;
+            while (true)
+            {
+                Assert.True(pages < retained, $"{pages} pages did not reach the end of {retained} messages.");
+                var root = AssertWithinBudget("get_store_log", await ReadStoreLogAsync(postgres, offset, asOf, fullText: false, ct));
+                pages++;
+                var rows = root.GetProperty("retained_events").EnumerateArray()
+                    .Select(r => (EventClass: r.GetProperty("event_class").GetString()!, Message: r.GetProperty("message_text").GetString()!))
+                    .ToList();
+                Assert.Equal(rows.Count, root.GetProperty("retained_events_returned").GetInt32());
+                var repeated = rows.Intersect(seen).Count();
+                Assert.True(repeated == 0, $"the page read at offset {offset} repeated {repeated} of the messages the pages before it held.");
+                seen.AddRange(rows);
+
+                /* The census counts the whole capture on every page. */
+                Assert.Equal(retained, root.GetProperty("classes").EnumerateArray().Sum(c => c.GetProperty("occurrences_window").GetInt64()));
+
+                if (!root.GetProperty("budget_truncated").GetBoolean())
+                {
+                    break;
+                }
+
+                Assert.NotEmpty(rows);
+                offset += rows.Count;
+                named.Add((offset, root.GetProperty("budget_note").GetString()));
+                asOf ??= root.GetProperty("as_of").GetString();
+            }
+
+            Assert.True(pages > 1, "the capture's messages are more than one answer holds.");
+            Assert.Equal(retained, seen.Count);
+            Assert.Equal(retained, seen.Distinct().Count());
+            Assert.All(named, page => Assert.Contains($"offset={page.Offset}", page.Note, StringComparison.Ordinal));
+
+            /* Rows that tie on capture and count are listed by class, so every read lists them the same way. */
+            Assert.Equal(seen.Select(r => r.EventClass).OrderBy(c => c, StringComparer.Ordinal), seen.Select(r => r.EventClass));
+
+            /* The web viewer's read is not held to the budget: one answer, every message. */
+            var mirror = JsonDocument.Parse(await DarlingWebEndpoints.BuildReadDispatch()["get_store_log"](new DefaultHttpContext(), postgres, null!)).RootElement;
+            Assert.False(mirror.GetProperty("budget_truncated").GetBoolean());
+            Assert.Equal(
+                seen.Select(r => r.Message).OrderBy(m => m, StringComparer.Ordinal),
+                mirror.GetProperty("retained_events").EnumerateArray().Select(r => r.GetProperty("message_text").GetString()!).OrderBy(m => m, StringComparer.Ordinal));
         });
     }
 
@@ -637,6 +715,40 @@ VALUES ($1, $2, $3, $4, 91.5, 80, TRUE, 'email', NULL, FALSE, FALSE, $5, NULL)",
     }
 
     private static string SettingName(int i) => $"workload_class_memory_ceiling_for_tenant_group_{i:D3}";
+
+    /// <summary>Calls get_store_log by its parameter names, so the call reads the same whether or not the tool takes
+    /// <c>offset</c>: a tool without the parameter answers from its first row.</summary>
+    private static Task<string> ReadStoreLogAsync(NpgsqlDataSource postgres, int offset, string? asOf, bool fullText, CancellationToken ct)
+    {
+        var method = typeof(DarlingMcpStoreLogTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(m => m.Name == nameof(DarlingMcpStoreLogTools.GetStoreLog));
+        var supplied = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["postgres"] = postgres,
+            ["as_of"] = asOf,
+            ["full_text"] = fullText,
+            ["offset"] = offset,
+            ["cancellationToken"] = ct,
+        };
+        var args = method.GetParameters()
+            .Select(p => supplied.TryGetValue(p.Name!, out var value) ? value : p.HasDefaultValue ? p.DefaultValue : null)
+            .ToArray();
+        return McpReadToolBudgetLiveTests.InvokeAsync(method, args);
+    }
+
+    /// <summary>One ERROR no rule recognises, so it keeps its text: a message of about 1,900 characters, kept whole.
+    /// Each names a different relation, in letters, so no two share a row.</summary>
+    private static string LongComplaint(int i)
+    {
+        var relation = "journal_" + new string((char)('a' + i), 4);
+        var line = new StringBuilder("2026-09-22 14:03:02.551 UTC [5288] ERROR:  reconciliation of ").Append(relation).Append(" stopped");
+        for (var part = 0; line.Length < 1900; part++)
+        {
+            line.Append(", partition ").Append(relation).Append('_').Append((char)('a' + (part % 26)), 3).Append(" disagrees with its summary");
+        }
+
+        return line.Append('\n').ToString();
+    }
 
     /// <summary>One auto_explain entry as the store's own log holds it: a duration line and a JSON plan of several
     /// thousand characters. Each plan reads a different relation with different estimates, so no two share a row.</summary>
