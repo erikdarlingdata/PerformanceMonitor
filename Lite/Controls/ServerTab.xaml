@@ -402,7 +402,7 @@
                                                Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                                Background="#22FFAA00"/>
                                     <WrapPanel Orientation="Horizontal" Margin="0,0,0,8">
-                                        <TextBlock Text="Currently Running Queries" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Captured queries" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
                                         <Button x:Name="LiveSnapshotButton" Content="Live Snapshot"
                                                 Click="LiveSnapshot_Click" Padding="12,4" Margin="16,0,8,0"
                                                 VerticalAlignment="Center"/>

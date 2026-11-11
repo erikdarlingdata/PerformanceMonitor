@@ -1457,7 +1457,7 @@
                             <Button x:Name="RecommendationsGenerateButton" Content="Generate now" Margin="8,0,0,0" Padding="12,4"
                                     Style="{StaticResource DarkButton}"
                                     Click="RecommendationsGenerateNow_Click"
-                                    ToolTip="Ask the Darling service to run analysis for this server now, then refresh"/>
+                                    ToolTip="{x:Static local:ViewerCollectorRun.GenerateNowReadyTip}"/>
                             <TextBlock x:Name="RecommendationsStatusText" Margin="12,0,0,0" VerticalAlignment="Center"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
                         </StackPanel>
