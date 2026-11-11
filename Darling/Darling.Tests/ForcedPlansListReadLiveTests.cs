@@ -97,6 +97,36 @@ LIMIT 2001";
             Assert.True(newSort < 250, $"the force list sorted {newSort} kB: it sorts the window's capture rows again (the old statement sorted {oldSort} kB)");
         });
 
+    /// <summary>
+    /// A force present in every capture from its first row on has that row as its first sighting, and the new read skips the absence step for it. Plan 1004
+    /// is in all 400 captures, plan 1001 started 100 minutes ago and was never absent after, plan 1002 has a gap (so the absence step must still run for it:
+    /// its first sighting is the capture after the gap) and plan 1003 was removed (no row after the last capture it missed, so no first sighting). The
+    /// reply equals the old statement's for each. Query Store writes one row per plan per capture (<c>plan_id</c> is unique in a database's
+    /// <c>sys.query_store_plan</c> and the collector takes one marker row per database per pass), so a force never has two rows in one capture and the
+    /// count of marker matches over the force's rows is its count of captures.
+    /// </summary>
+    [Fact]
+    public Task AForcePresentFromItsFirstRowOn_HasThatRowAsItsFirstSighting_AndTheReplyEqualsTheOldStatements() =>
+        WithSeedAsync(async (connection, serverId, from, to, ct) =>
+        {
+            var expected = await RowsAsync(connection, OldSql, serverId, from, to, null, null, ct);
+            var actual = await RowsAsync(connection, DarlingForcedPlanStateReader.ForcesSql(DatabaseFilter.All, 2000), serverId, from, to, null, null, ct);
+            Assert.Equal(expected, actual);
+
+            string FirstSeen(string planId)
+            {
+                var row = Assert.Single(actual, r => r.Split('|')[1] == planId);
+                return row.Split('|')[7];
+            }
+
+            string At(int minutesBeforeNewestCapture) => Convert.ToString(to.AddMinutes(-1 - minutesBeforeNewestCapture), CultureInfo.InvariantCulture)!;
+
+            Assert.Equal(At(Captures - 1), FirstSeen("1004"));
+            Assert.Equal(At(100), FirstSeen("1001"));
+            Assert.Equal(At(49), FirstSeen("1002"));
+            Assert.Equal("<null>", FirstSeen("1003"));
+        });
+
     private static async Task<List<string>> RowsAsync(NpgsqlConnection connection, string sql, int serverId, DateTime from, DateTime to, long? queryId, long? planId, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };

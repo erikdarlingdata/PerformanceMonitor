@@ -829,6 +829,49 @@ AND   delta_execution_count > 0";
     }
 
     /// <summary>
+    /// The plan fetch of the plan advisory fact (<see cref="CollectPlanAdvisoryFactsAsync"/>) and of its drill-down: $1 server, $2 window start, $3 window end.
+    /// #8570: the rank reads only thin columns (the row's collection_id and its sort keys), and the ten winning rows' plan XML is read by collection_id after the
+    /// limit. The earlier statement carried every in-window row's plan XML through the window's sort, so a window of a few hundred thousand rows sorted gigabytes of
+    /// plan text to keep ten plans. The plan column is only tested for NULL in the rank. The result is the same ten plans in the same order (the Darling twin is
+    /// <c>PgFactCollector.PlanAdvisorySql</c>).
+    /// </summary>
+    internal const string PlanAdvisorySql = @"
+SELECT w.query_plan_xml
+FROM
+(
+    SELECT collection_id, delta_worker_time
+    FROM
+    (
+        SELECT
+            collection_id,
+            delta_worker_time,
+            /* #7886: one row per plan. v_query_stats holds one row per query per snapshot, and every snapshot
+               row of a cached plan resolves to the same plan XML. Without this rank the hottest plan fills all
+               ten slots and is parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count
+               multiply by its snapshot count and the two facts cover one to three plans instead of ten. The
+               plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A plan is
+               a statement's plan in one database: query_plan_hash is a shape hash that two statements with one
+               shape share, as does one statement in two databases, and a hashless row's plan_handle is shared by
+               every statement in its batch, so database_name and query_hash stay in the key. */
+            ROW_NUMBER() OVER (PARTITION BY database_name, query_hash, COALESCE(query_plan_hash, plan_handle) ORDER BY delta_worker_time DESC) AS plan_rank
+        FROM v_query_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   query_plan_xml IS NOT NULL
+    ) AS ranked
+    WHERE plan_rank = 1
+    ORDER BY delta_worker_time DESC
+    LIMIT 10
+) AS top
+JOIN v_query_stats AS w
+  ON w.collection_id = top.collection_id
+WHERE w.server_id = $1
+AND   w.collection_time >= $2
+AND   w.collection_time <= $3
+ORDER BY top.delta_worker_time DESC";
+
+    /// <summary>
     /// WS4: plan-XML advisories. Parses the already-collected query plans of the top queries by
     /// cost with the shared ShowPlanParser/PlanAnalyzer and emits two advise-only facts —
     /// MISSING_INDEX (Value = distinct suggested indexes) and PLAN_WARNING (Value = actionable
@@ -848,32 +891,7 @@ AND   delta_execution_count > 0";
                 await connection.OpenAsync(context.CancellationToken);
 
                 using var command = connection.CreateCommand();
-                command.CommandText = @"
-SELECT query_plan_xml
-FROM
-(
-    SELECT
-        query_plan_xml,
-        delta_worker_time,
-        /* #7886: one row per plan. v_query_stats holds one row per query per snapshot, and every snapshot
-           row of a cached plan resolves to the same plan XML. Without this rank the hottest plan fills all
-           ten slots and is parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count
-           multiply by its snapshot count and the two facts cover one to three plans instead of ten. The
-           plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A plan is
-           a statement's plan in one database: query_plan_hash is a shape hash that two statements with one
-           shape share, as does one statement in two databases, and a hashless row's plan_handle is shared by
-           every statement in its batch, so database_name and query_hash stay in the key. The window sorts
-           every in-window row that has a plan, plan column included, before the limit takes ten. */
-        ROW_NUMBER() OVER (PARTITION BY database_name, query_hash, COALESCE(query_plan_hash, plan_handle) ORDER BY delta_worker_time DESC) AS plan_rank
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    AND   query_plan_xml IS NOT NULL
-) AS ranked
-WHERE plan_rank = 1
-ORDER BY delta_worker_time DESC
-LIMIT 10";
+                command.CommandText = DuckDbFactCollector.PlanAdvisorySql;
                 command.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                 command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                 command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
