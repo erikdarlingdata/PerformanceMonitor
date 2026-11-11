@@ -208,12 +208,14 @@ public sealed class RetentionTierRouterTests
            DAY (#3653: the daily rollup lags a day or two behind the clock, and those days used to print
            unique_queries = 0 beside fresh raw numbers). Exactly one raw read, inside the UNION ALL tail, gated
            on the ceiling; the rollup half stays the routed read for everything the rollup has. */
-        var rawReads = sql.Split("FROM v_query_stats").Length - 1;
-        Assert.Equal(1, rawReads);
+        /* #8651: the raw reads are credited-pairs reads of collect.query_stats now (DailySummarySql.CreditedPairs, index-only), not the passthrough
+           view: one in the tail, and for the daily tier one more for the raw hours its hourly rollup does not hold (#8549). */
+        var rawReads = sql.Split("SELECT p.d, p.query_hash").Length - 1;
+        Assert.Equal(tier == RetentionTier.Daily ? 2 : 1, rawReads);
         var ceilingAt = sql.IndexOf("SELECT date_trunc('day', max(bucket)) AS last_day", StringComparison.Ordinal);
         var rollupReadAt = sql.IndexOf("SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash", StringComparison.Ordinal);
         var unionAt = sql.IndexOf("UNION ALL", StringComparison.Ordinal);
-        var rawReadAt = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
+        var rawReadAt = sql.IndexOf("SELECT p.d, p.query_hash", StringComparison.Ordinal);
         Assert.True(ceilingAt >= 0, "the rollup's last materialized day must be read per server");
         Assert.Contains($"FROM collect.{expectedRelation}", sql[ceilingAt..rollupReadAt], StringComparison.Ordinal);
         Assert.True(rollupReadAt > ceilingAt, "the rollup half follows the ceiling CTE");

@@ -76,9 +76,13 @@ public static class DailySummarySql
             FROM (
                 SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
                 /* #7147: collect.query_stats, not the v_query_stats view: the view's payload joins keep the planner off an
-                   index-only scan even though this read needs only server_id, collection_time and query_hash. */
+                   index-only scan even though this read needs only server_id, collection_time and query_hash.
+                   #8651: unique queries counts queries with credited executions in the window, so a restart row
+                   (sample_interval_seconds = 0: a first sighting, an uncredited reset or a gap) does not count its hash. A NULL
+                   interval (a row from before the column) passes, the rule the interval rollups' own WHERE states. */
                 FROM collect.query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+                  AND sample_interval_seconds IS DISTINCT FROM 0
             ) AS x
             GROUP BY x.d
         ),
@@ -415,21 +419,98 @@ public static class DailySummarySql
             FROM (
                 SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
                 /* #7147: collect.query_stats, not the v_query_stats view: the view's payload joins keep the planner off an
-                   index-only scan even though this read needs only server_id, collection_time and query_hash. */
+                   index-only scan even though this read needs only server_id, collection_time and query_hash.
+                   #8651: unique queries counts queries with credited executions in the window, so a restart row
+                   (sample_interval_seconds = 0: a first sighting, an uncredited reset or a gap) does not count its hash. A NULL
+                   interval (a row from before the column) passes, the rule the interval rollups' own WHERE states. */
                 FROM collect.query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+                  AND sample_interval_seconds IS DISTINCT FROM 0
             ) AS x
             GROUP BY x.d
         ),
         """;
 
     /// <summary>
+    /// The row predicate of the full-window raw queries read, shared by the credited-pairs shape below.
+    /// </summary>
+    private const string RawRowPredicate = "server_id = $1 AND collection_time >= $2 AND collection_time < $3";
+
+    /// <summary>
+    /// The distinct <c>(day, query_hash)</c> pairs of <paramref name="relation"/> under <paramref name="rowPredicate"/> that have a
+    /// credited execution, in a shape that keeps the pair read index-only (#8651).
+    ///
+    /// <para>The simple form, <c>AND sample_interval_seconds IS DISTINCT FROM 0</c> on the pair read, names a column
+    /// <c>idx_query_stats_server_hash_time</c> does not hold, so the read left its index-only scan for heap fetches (a busy server's
+    /// open day: 252 ms warm to 432 ms, 2,080 heap fetches to a bitmap heap scan over 39,228 heap blocks). This shape reads the
+    /// pairs with no interval column, as the count did before, and takes away the restart-only pairs: a pair is restart-only when
+    /// the day holds a restart row for the hash (<c>sample_interval_seconds = 0</c>, read through the partial index
+    /// <c>idx_query_stats_restart_rows_time</c>, about 1,600 rows a day across 42 servers) and no credited row for it under the same
+    /// <paramref name="rowPredicate"/>. The credited probe seeks <c>idx_query_stats_server_hash_time</c> by hash and day. A NULL
+    /// interval counts as credited, as before. <paramref name="rowPredicate"/> is written once and used in all three reads, and its
+    /// columns are unqualified so each read binds them to its own table. It must hold <c>server_id = $1</c>.</para>
+    ///
+    /// <para>A compressed chunk has no partial index, so the restart read would decompress every day again. The reads that span
+    /// compressed chunks keep the simple form (<see cref="QueriesCteRaw"/>).</para>
+    /// </summary>
+    private static string CreditedPairs(string relation, string rowPredicate) => $"""
+        SELECT p.d, p.query_hash
+                FROM (
+                    SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
+                    FROM {relation}
+                    WHERE {rowPredicate}
+                ) AS p
+                LEFT JOIN (
+                    SELECT r0.d, r0.query_hash
+                    FROM (
+                        SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
+                        FROM collect.query_stats
+                        WHERE {rowPredicate}
+                          AND sample_interval_seconds = 0
+                    ) AS r0
+                    LEFT JOIN LATERAL (
+                        SELECT 1 AS credited
+                        FROM collect.query_stats AS k
+                        WHERE k.server_id = $1 AND k.query_hash = r0.query_hash
+                          AND k.collection_time >= r0.d AND k.collection_time < r0.d + INTERVAL '1 day'
+                          AND {rowPredicate}
+                          AND k.sample_interval_seconds IS DISTINCT FROM 0
+                        LIMIT 1
+                    ) AS c ON TRUE
+                    WHERE c.credited IS NULL
+                ) AS ro ON ro.d = p.d AND ro.query_hash = p.query_hash
+                WHERE ro.d IS NULL
+        """;
+
+    /// <summary>
+    /// The queries CTE for a store with no TimescaleDB rollups, where every chunk is uncompressed and the restart rows have their
+    /// partial index (#8651). Same result as <see cref="QueriesCteRaw"/>, with the index-only pair read of <see cref="CreditedPairs"/>.
+    /// </summary>
+    private static readonly string QueriesCteRawUncompressed = $"""
+        queries AS (
+            /* #3905: distinct (day, hash) pairs, then counted. #8651: the pairs with a credited execution, see CreditedPairs. */
+            SELECT x.d, COUNT(x.query_hash) AS c
+            FROM (
+                {CreditedPairs("collect.query_stats", RawRowPredicate)}
+            ) AS x
+            GROUP BY x.d
+        ),
+        """;
+
+    /// <summary>
+    /// <see cref="RangeSql"/> for a store with no rollups at all (plain PostgreSQL, so no compressed chunk): its queries CTE reads
+    /// the pairs through <see cref="CreditedPairs"/>. The same text as <see cref="RangeSql"/> otherwise.
+    /// </summary>
+    internal static readonly string RangeSqlPlainStore = RangeSql.Replace(QueriesCteRaw, QueriesCteRawUncompressed, StringComparison.Ordinal);
+
+    /// <summary>
     /// The same CTE against a rollup. <c>COUNT(DISTINCT query_hash)</c> is exact over a CAGG because query_hash is
     /// one of its GROUP BY columns — the rollup preserves every distinct hash per bucket, so counting them per day
-    /// gives the count of distinct hashes the rollup's source rows produced. That is raw's answer except for the
-    /// rows the rollup's own <c>WHERE</c> leaves out: the interval-honest successor skips restart rows
-    /// (<c>sample_interval_seconds IS DISTINCT FROM 0</c>), so a closed day can read a few hashes lower from the
-    /// rollup than from raw (369 against 362 on one store, #7505). The time column becomes <c>bucket</c>; parameter positions are
+    /// gives the count of distinct hashes the rollup's source rows produced. Raw skips restart rows
+    /// (<c>sample_interval_seconds IS DISTINCT FROM 0</c>) in this count, as the interval-honest successor's own
+    /// <c>WHERE</c> does (#8651), so raw and the successor agree. The legacy rollups cannot skip them: they carry no
+    /// per-hash column that tells a restart row apart after aggregation, so a legacy rollup still counts a hash whose only
+    /// rows that day are restart rows (369 against 362 on one store, #7505). The time column becomes <c>bucket</c>; parameter positions are
     /// unchanged, so the caller binds the same three values either way.
     ///
     /// <para><b>The days the rollup has not reached yet come from raw (#3653 A6, the <c>unique_queries = 0</c>
@@ -564,13 +645,8 @@ public static class DailySummarySql
                 (hourlySource, string.Empty));
         var rawTailGate = hourlySource is null ? string.Empty : "\n                  AND (SELECT raw_from FROM queries_ceiling) IS NULL";
 
-        /* #7505: the partial ceiling day's raw rows are counted with the rollup's own source filter, so that day
-           is not read higher than the rollup would have read it once it catches up (a restart row's hash counts in
-           raw and not in the interval-honest successor). Days past the ceiling keep reading raw unfiltered, as they
-           always did. The filter is a no-op for a rollup with none. */
-        var partialDayFilter = filter.Length == 0
-            ? string.Empty
-            : $"\n                  AND (collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2) OR ({filter}))";
+        var tailRowPredicate =
+            $"server_id = $1 AND collection_time >= $2 AND collection_time < $3 AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling), $2){rawTailGate}";
 
         return $"""
         /* #7505: last_day is the newest day the rollup holds a bucket for. raw_from is the first day the rollup
@@ -601,10 +677,10 @@ public static class DailySummarySql
             UNION ALL
             SELECT x.d, COUNT(x.query_hash) AS c
             FROM (
-                SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
-                FROM v_query_stats
-                WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-                  AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling), $2){partialDayFilter}{rawTailGate}{closedHours}
+                /* #8651: raw counts only queries with credited executions, as the interval rollups do. The open day and the hours
+                   neither rollup holds are uncompressed, so the pairs are read index-only and the restart-only ones taken away.
+                   See CreditedPairs. */
+                {CreditedPairs("collect.query_stats", tailRowPredicate)}{closedHours}
             ) AS x
             GROUP BY x.d
             UNION ALL
@@ -677,13 +753,17 @@ public static class DailySummarySql
 
             """));
 
+        /* #8651: the raw hours' rows, as one predicate for CreditedPairs. Each hour sits inside one day, so the pairs an hour
+           yields are that hour's own, and the union of the hours is the day's credited pairs. */
+        const string hourRowPredicate = "server_id = $1 AND collection_time >= GREATEST(q.h, $2) AND collection_time < LEAST(q.h + INTERVAL '1 hour', $3)";
+
         return "\n" + $"""
             /* #8549: the hours at and after the daily's ceiling. A held hour is read from the hourly rollup, every other hour from raw,
                and the pairs are UNIONed with the raw tail's (empty here, its gate is closed) under the tail's one count per day. See ClosedHoursMember.
                The interval hourly's count skips restart rows (sample_interval_seconds = 0) by design: unique queries counts queries with credited
                executions in the window (#8651). */
             UNION
-            {hourly}                SELECT date_trunc('day', q.h) AS d, r.query_hash
+            {hourly}                SELECT r.d, r.query_hash
                 FROM (
                     SELECT g.h,
                            (g.h >= $2 AND g.h + INTERVAL '1 hour' <= $3 AND {heldProbe}) AS held
@@ -692,11 +772,7 @@ public static class DailySummarySql
                     OFFSET 0
                 ) AS q
                 CROSS JOIN LATERAL (
-                    SELECT DISTINCT c.query_hash
-                    FROM collect.query_stats AS c
-                    WHERE c.server_id = $1
-                      AND c.collection_time >= GREATEST(q.h, $2)
-                      AND c.collection_time < LEAST(q.h + INTERVAL '1 hour', $3)
+                    {CreditedPairs("collect.query_stats", hourRowPredicate)}
                 ) AS r
                 WHERE NOT q.held
             """;
@@ -755,9 +831,6 @@ public static class DailySummarySql
         var boundaryDay = successorFloor == successorFloor.Date ? successorFloor : successorFloor.Date.AddDays(1);
         /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
         var boundary = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{boundaryDay:yyyy-MM-dd HH:mm:ss.ffffff}'");
-        /* #7505: the partial ceiling day's raw rows carry the owning side's source filter. See QueriesCteForCagg. */
-        var partialDaySuccessor = successorFilter.Length == 0 ? "TRUE" : $"({successorFilter})";
-        var partialDayLegacy = legacyFilter.Length == 0 ? "TRUE" : $"({legacyFilter})";
         var legacyWidth = (long)legacyTarget.BucketWidth.TotalSeconds;
         var successorWidth = (long)successorTarget.BucketWidth.TotalSeconds;
 
@@ -774,6 +847,8 @@ public static class DailySummarySql
                 (successorTarget.Source, $" AND s.bucket >= {boundary}"))
             : string.Empty;
         var rawTailGate = hierarchical ? $"\n                  AND {stitchedRawFrom} IS NULL" : string.Empty;
+        var tailRowPredicate =
+            $"server_id = $1 AND collection_time >= $2 AND collection_time < $3 AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling_successor), (SELECT raw_from FROM queries_ceiling_legacy), $2){rawTailGate}";
 
         return $"""
         /* #7505: raw_from is the day in which each side's newest bucket ends, the first day that side does not
@@ -813,13 +888,8 @@ public static class DailySummarySql
             UNION ALL
             SELECT x.d, COUNT(x.query_hash) AS c
             FROM (
-                SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
-                FROM v_query_stats
-                WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-                  AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling_successor), (SELECT raw_from FROM queries_ceiling_legacy), $2)
-                  AND (collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_successor), (SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_legacy), $2)
-                       OR ((SELECT last_day FROM queries_ceiling_successor) IS NOT NULL AND {partialDaySuccessor})
-                       OR ((SELECT last_day FROM queries_ceiling_successor) IS NULL AND {partialDayLegacy})){rawTailGate}{closedHours}
+                /* #8651: raw counts only queries with credited executions, as the interval rollups do. See QueriesCteForCagg. */
+                {CreditedPairs("collect.query_stats", tailRowPredicate)}{closedHours}
             ) AS x
             GROUP BY x.d
             UNION ALL
@@ -878,7 +948,7 @@ public static class DailySummarySql
     /// <paramref name="hourlyRelation"/> is <c>query_stats_hourly</c> or its interval-honest successor
     /// <c>query_stats_interval_hourly</c>, by <see cref="RollupCoverage.HourlyRelationFor"/> over the window's
     /// start. The successor carries the same <c>query_hash</c> and <c>bucket</c> the queries CTE reads, and
-    /// leaves out the restart row the legacy counted as a query seen that day. This overload's OWN daily tier is
+    /// leaves out the restart row the legacy counted as a query seen that day, as raw's count now does (#8651). This overload's OWN daily tier is
     /// not parameterised — it always reads the legacy <c>query_stats_daily</c> unstitched, whatever
     /// <paramref name="hourlyRelation"/> carries; the daily's own stitch lives in the three-argument overload
     /// below, which does not call this one for that case at all — it builds its own queries CTE directly off
@@ -936,7 +1006,10 @@ public static class DailySummarySql
 
         if (tier != RetentionTier.Hourly && tier != RetentionTier.Daily)
         {
-            return RangeSqlFor(tier);
+            /* #8651: a store with no rollups has no compressed chunk and has the restart-row index, so its raw read keeps the
+               index-only pair read. A store with rollups may have compressed chunks under a raw read, which the simple
+               predicate serves without decompressing more. */
+            return tier == RetentionTier.Raw && !coverage.HasAnyRollup ? RangeSqlPlainStore : RangeSqlFor(tier);
         }
 
         var stitchTier = tier == RetentionTier.Hourly ? RollupCoverage.StitchTier.Hourly : RollupCoverage.StitchTier.Daily;

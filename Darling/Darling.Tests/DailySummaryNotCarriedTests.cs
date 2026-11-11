@@ -131,7 +131,8 @@ public sealed class DailySummaryNotCarriedTests
             var queriesAt = sql.IndexOf("queries AS (", StringComparison.Ordinal);
             Assert.Equal(2, sql[queriesAt..sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal)].Split("UNION ALL").Length - 1);
             var rollupAt = sql.IndexOf("SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash", StringComparison.Ordinal);
-            var rawAt = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
+            /* #8651: the raw tail reads collect.query_stats through the credited-pairs shape (DailySummarySql.CreditedPairs), no longer the view, so its pair select marks it. */
+            var rawAt = sql.IndexOf("SELECT p.d, p.query_hash", StringComparison.Ordinal);
             var notCarriedAt = sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal);
             Assert.True(rollupAt > 0 && rawAt > rollupAt && notCarriedAt > rawAt);
         }
