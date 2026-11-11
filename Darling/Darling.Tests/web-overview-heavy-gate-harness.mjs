@@ -53,11 +53,13 @@ process.on("unhandledRejection", () => {});
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "overview-heavy-gate-"));
 let strips;
 let overview;
+let tabs;
 try {
   fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   strips = await import(pathToFileURL(path.join(scratch, "pages", "overview-strips.js")).href);
   overview = await import(pathToFileURL(path.join(scratch, "pages", "server-tabs", "sql-overview.js")).href);
+  tabs = await import(pathToFileURL(path.join(scratch, "pages", "server-tabs.js")).href);
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
@@ -89,10 +91,10 @@ const out = {};
 let maxHeavyInFlight = 0;
 const noteHeavy = () => { maxHeavyInFlight = Math.max(maxHeavyInFlight, inFlight.filter((r) => HEAVY.has(r.tool)).length); };
 
-/* A server tab load: the strips panel first, then the daily summary panels, as the Overview's build lists them. */
-const body = document.createElement("div");
-strips.fillOverviewStrips(body, "A", { hours: 24, label: "24h", signal: null });
-overview.dailySummaryPanels("A");
+/* A server tab load: the shipped Overview tab's own build, as the server page calls it on a first paint (#8554 part 2: the order its reads are
+   asked for in is the order the heavy-read gate lets them go). */
+const overviewTab = tabs.SERVER_TABS.find((t) => t.id === "overview");
+overviewTab.build("A", { hours: 24, label: "24h", signal: null });
 await settle();
 noteHeavy();
 out.load = { sent: [...sent], heavyInFlight: inFlight.filter((r) => HEAVY.has(r.tool)).map((r) => r.tool) };

@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -379,7 +380,7 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
         + " days, one row per server, query_hash and database. A statement that left the plan cache before that, or ran only before the server was monitored, is not here.";
 
     [McpServerTool(Name = "find_queries_by_text"), Description(
-        "Finds statements whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. Name a server with server_name: database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. There is no index on the text unless the operator turned one on, so each source has a 4 second budget; a source that runs out is reported stopped with the rows it had found by then (the plan-cache text of one server is searched newest first, in spans of the raw window, so those rows are the newest matches and the message says how much of the window was searched; name a database to narrow it). Leave server_name out to search the plan-cache text of every server: that is served only when the opt-in trigram index is ready (darling.json queryTextTrigramIndexEnabled; get_store_metrics query_text_index says its state), is refused with the state otherwise, and does not search Query Store text, which is searched one server at a time. The trigram index finds the matching texts; the samples are then read by those texts' digests (sample_read probe, with matched_texts saying how many matched), which a second index the same option builds on query_stats serves on uncompressed chunks, and a pattern more than 1000 texts contain joins the whole raw window instead (sample_read join), which on a large store can reach the 4 second budget and report stopped. Each source in the reply carries a status: ok (rows found), empty (searched, nothing matched), stopped (the budget ran out, so the rows listed may be incomplete) or not_searched (the all-servers scope does not search that source, Query Store text). Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text; a statement the sensitive-statement filter withholds is listed with the withheld marker in place of the excerpt.")]
+        "Finds statements whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. Name a server with server_name: database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. There is no index on the text unless the operator turned one on, so each source has a 4 second budget; a source that runs out is reported stopped with the rows it had found by then (the plan-cache text of one server is searched newest first, in spans of the raw window, so those rows are the newest matches and the message says how much of the window was searched; name a database to narrow it). Leave server_name out to search the plan-cache text of every server: that is served only when the opt-in trigram index is ready (darling.json queryTextTrigramIndexEnabled; get_store_metrics query_text_index says its state), is refused with the state otherwise, and does not search Query Store text, which is searched one server at a time. The trigram index finds the matching texts; the samples are then read by those texts' digests (sample_read probe, with matched_texts saying how many matched), which a second index the same option builds on query_stats serves on uncompressed chunks, and a pattern more than 1000 texts contain joins the whole raw window instead (sample_read join), which on a large store can reach the 4 second budget and report stopped. Each source in the reply carries a status: ok (rows found), empty (searched, nothing matched), stopped (the budget ran out, so the rows listed may be incomplete), not_searched (the all-servers scope does not search that source, Query Store text) or not_collected (a PostgreSQL target has neither SQL Server source: both sources say so and nothing was searched; read PostgreSQL statement text with get_pg_top_queries, full_text true). Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text; a statement the sensitive-statement filter withholds is listed with the withheld marker in place of the excerpt.")]
     public static Task<string> FindQueriesByText(
         NpgsqlDataSource postgres,
         [Description("Text to find in the statement. A literal substring, matched ignoring case; % and _ match themselves. At least 3 characters.")] string pattern,
@@ -433,6 +434,23 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
 
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
+
+        /* #8683: both sources read SQL Server tables (query_store, query_stats), so on a PostgreSQL target they would answer "empty" for a
+           statement the store does hold text for. Decided before either read runs. A registry read that fails answers null: search as before. */
+        string? engineKind;
+        try
+        {
+            (_, engineKind, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            engineKind = null;
+        }
+
+        if (PostgresTargetReply(resolved.DisplayName, engineKind, text, string.IsNullOrWhiteSpace(database_name) ? null : database_name.Trim(), limit) is { } postgresReply)
+        {
+            return postgresReply;
+        }
 
         try
         {
@@ -533,6 +551,44 @@ ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
         {
             return McpHelpers.FormatError(ToolName, ex);
         }
+    }
+
+    /// <summary>#8683: the one-server reply for a PostgreSQL target, or <c>null</c> for any other engine kind. Both sources are <c>not_collected</c>: they
+    /// read SQL Server tables a PostgreSQL target never fills, so <c>empty</c> (a true negative) would be false. The message names the engine and points at
+    /// get_pg_top_queries, the read that holds PostgreSQL statement text. Pure, so it is tested without a store.</summary>
+    internal static string? PostgresTargetReply(string serverName, string? engineKind, string pattern, string? database, int limit)
+    {
+        if (!MonitoredEngineKind.IsPostgres(engineKind))
+        {
+            return null;
+        }
+
+        string Message(string source) =>
+            $"{serverName} runs {MonitoredEngineKind.DescribeEngineKind(engineKind)}. {source} is a SQL Server signal that this engine does not collect, so " +
+            "this server has no text there and never will: a search of it would answer nothing, which says nothing about the server's statements. " +
+            "find_queries_by_text searches SQL Server targets only. Statement text for a PostgreSQL server is in get_pg_top_queries (set full_text to true " +
+            "for the whole statement, not the 400-character preview). " +
+            "This is a permanent engine capability gap, not a collection outage: checking collection health, enabling a collector or starting a capture cannot change it.";
+
+        object Source(string source) => new
+        {
+            status = "not_collected",
+            message = Message(source),
+            returned = 0,
+            truncated = false,
+            rows = Array.Empty<object>(),
+        };
+
+        return JsonSerializer.Serialize(new
+        {
+            server = serverName,
+            pattern,
+            database_name = database,
+            limit,
+            match = "literal substring, case-insensitive",
+            scope = "one_server",
+            sources = new { query_store = Source("Query Store text"), plan_cache = Source("Plan-cache text (query_stats)") },
+        }, McpHelpers.JsonOptions);
     }
 
     /// <summary>#7674: the all-servers scope. Offered only when the trigram index is <c>Ready</c>; otherwise <see cref="AllServersRefusal"/>. The plan-cache text

@@ -67,7 +67,9 @@ public sealed class WebHeavyReadGateBehaviourTests
     public void TheTabsLoad_SendsEveryPageAndSmallReadAtOnce_AndAtMostTwoHeavyReads()
     {
         var load = Run().GetProperty("load");
-        Assert.Equal(Others, Strings(load.GetProperty("otherSent")));
+        /* #8681: the Query Store top list and the active-query snapshots go through the gate too (it has room for them beside the two heavy reads),
+           so they leave a few ticks after the reads nothing gates; every one of them is still sent at once, in no particular order. */
+        Assert.Equal(Others.OrderBy(x => x, System.StringComparer.Ordinal), Strings(load.GetProperty("otherSent")).OrderBy(x => x, System.StringComparer.Ordinal));
         Assert.Equal(new[] { Heavy[0], Heavy[1] }, Strings(load.GetProperty("heavySent")));
         Assert.All(Strings(load.GetProperty("kinds")), kind => Assert.Equal("data", kind));
     }
