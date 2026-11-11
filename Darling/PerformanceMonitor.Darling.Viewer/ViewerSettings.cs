@@ -501,7 +501,7 @@ public sealed class ViewerSettings
         {
             return $"{subject} does not exist, and this is NOT a first run: {evidence}. The service has already run " +
                    "against this store and its bootstrap stopped before it got this far, so starting it again is not " +
-                   $"the fix. Read the newest service log ({logPath}) and work the FIRST error in it, a " +
+                   $"the fix. Read the newest service log ({logPath}) and work the FIRST error in it. A " +
                    "bundled Postgres tool that Windows killed is decoded there in words rather than left as a bare " +
                    "exit code. Nothing in darling.json produces this.";
         }

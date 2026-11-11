@@ -2839,7 +2839,7 @@ public partial class MainWindow : Window
 
                     _trayService?.ShowNotification(
                         "Capture Not Running",
-                        $"{server.DisplayNameWithIntent}: {captures} capture can't start: {reason}",
+                        $"{server.DisplayNameWithIntent}: {captures} capture can't start ({reason})",
                         Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
                 }
 

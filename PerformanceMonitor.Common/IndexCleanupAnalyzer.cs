@@ -836,14 +836,14 @@ namespace PerformanceMonitor.Common
                 {
                     yield return BuildReview(a, IndexCleanupRules.ReverseDuplicate, reverse,
                         "Same key columns in a different order/direction as: " + string.Join(", ", reverse)
-                        + ". A different leading column serves different queries — review whether both are needed (not auto-disabled).");
+                        + ". A different leading column serves different queries. Review whether both are needed (not auto-disabled).");
                 }
 
                 if (equalExceptFilter.Count > 0)
                 {
                     yield return BuildReview(a, IndexCleanupRules.EqualExceptForFilter, equalExceptFilter,
                         "Identical keys and includes but a different filter than: " + string.Join(", ", equalExceptFilter)
-                        + ". The filters index different rows — review whether both are needed (not auto-disabled).");
+                        + ". The filters index different rows. Review whether both are needed (not auto-disabled).");
                 }
             }
         }
@@ -1004,7 +1004,7 @@ namespace PerformanceMonitor.Common
                 ConsolidationRule = w.ConsolidationRule,
                 ScriptType = "REVIEW",
                 Script = "",   // a DROP_EXISTING rebuild of a constraint-backed index fails (Msg 1907)
-                AdditionalInfo = "Constraint-backed index cannot be rebuilt with DROP_EXISTING (Msg 1907) — review manually",
+                AdditionalInfo = "Constraint-backed index cannot be rebuilt with DROP_EXISTING (Msg 1907). Review manually",
             };
 
         private static IndexCleanupRecommendation BuildReview(WorkIndex w, string rule, List<string> siblings, string additionalInfo) =>

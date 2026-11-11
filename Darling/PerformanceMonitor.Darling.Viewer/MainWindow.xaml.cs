@@ -930,7 +930,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             ViewerLogger.Warn("AlertToasts", $"Snooze of {metricName} on {serverName} was not saved: {ex.Message}");
-            StatusText.Text = $"Snooze not saved: {metricName} on {serverName} will keep alerting: {ex.Message}";
+            StatusText.Text = $"Snooze not saved: {metricName} on {serverName} will keep alerting ({ex.Message})";
             return;
         }
 

@@ -222,7 +222,7 @@ internal static class FleetSweepsRows
             "Verdict: " + (Bool(detail, "instruments_alive", true) ? "alive" : "DEAD"),
             "Service started: " + Local(Str(lv, "service_started_at")),
         };
-        if (Bool(lv, "baseline_reset", false)) lines.Add("Pass-counter baseline: reset by restart: advance not judgeable this sweep");
+        if (Bool(lv, "baseline_reset", false)) lines.Add("Pass-counter baseline: reset by restart, so the advance is not judgeable this sweep");
         var previous = lv["alert_passes_previous"] is JsonValue ? $" (previous {Num(Int(lv, "alert_passes_previous"))})" : " (no baseline)";
         var advancing = lv["alert_passes_advancing"] is JsonValue av && av.TryGetValue<bool>(out var ab) ? (ab ? ", advancing" : ", frozen") : "";
         lines.Add("Alert passes: " + Num(Int(lv, "alert_passes_total")) + previous + advancing);
