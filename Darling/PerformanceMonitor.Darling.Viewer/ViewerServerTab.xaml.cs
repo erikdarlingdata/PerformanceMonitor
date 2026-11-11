@@ -109,6 +109,20 @@ public partial class ViewerServerTab : UserControl
     /// <summary>Raised after a load so MainWindow can surface progress/errors in its status bar.</summary>
     public event Action<string>? StatusChanged;
 
+    /* #8549: the first open's clock. A tab's first open spent its time before the landing sub-tab's own load began (the server clock, data start,
+       freshness and permission reads, the picker, the tab's construction) and wrote no SlowLoad line, because the only clock started inside
+       LoadInnerTabAsync. One clock now runs from the tab's activation to the first stamp and the landing load's reads book on it too. */
+    private readonly System.Diagnostics.Stopwatch _constructClock = System.Diagnostics.Stopwatch.StartNew();
+    private long _constructMs;
+    private ViewerLoadTimer? _firstOpenTimer;
+    private bool _firstOpenTaken;
+
+    /// <summary>Where a slow first open's line goes: the Viewer log's "SlowLoad" source. A test swaps it to read the line.</summary>
+    internal Action<string> SlowLoadSink { get; set; } = line => ViewerLogger.Warn("SlowLoad", line);
+
+    /// <summary>The first open's slow-load threshold. A test lowers it to read a line without waiting three seconds.</summary>
+    internal int FirstOpenSlowThresholdMs { get; set; } = ViewerLoadTimer.SlowLoadThresholdMs;
+
     /// <param name="preferences">
     /// The user's persisted viewer defaults (Settings window) that seed this tab's toolbar — default time
     /// window and auto-refresh on/off + interval. Null (or omitted) uses a default-constructed
@@ -253,6 +267,43 @@ public partial class ViewerServerTab : UserControl
         /* Per-row double-click history windows (ViewerServerTab.History.cs) on the three query grids — a
            different event from the SelectionChanged slicer overlay wired just above; both coexist. */
         WireHistoryDrillDowns();
+        _constructMs = _constructClock.ElapsedMilliseconds;
+    }
+
+    /// <summary>#8549: starts the first open's clock when the shell makes this tab visible, so the wait behind another tab's refresh counts. A
+    /// tab built in the background (a restored session) is not slow until the reader first shows it, so a later show restarts the clock until
+    /// the first load has begun. The tab's construction time is carried in as the clock's starting stretch.</summary>
+    internal void BeginFirstOpen()
+    {
+        if (_firstOpenTaken)
+        {
+            return;
+        }
+
+        _firstOpenTimer = new ViewerLoadTimer(FirstOpenSlowThresholdMs, _constructMs);
+        _firstOpenTimer.BookStep("tab construction", _constructMs);
+    }
+
+    /// <summary>The first open's clock for the load now starting, or null when this is not the tab's first load. Handed out once.</summary>
+    private ViewerLoadTimer? TakeFirstOpenTimer()
+    {
+        if (_firstOpenTaken)
+        {
+            return null;
+        }
+
+        _firstOpenTaken = true;
+        var timer = _firstOpenTimer;
+        if (timer is null)
+        {
+            /* A host that never showed the tab through the shell (a test, a deep link): the clock starts at the first load. */
+            timer = new ViewerLoadTimer(FirstOpenSlowThresholdMs, _constructMs);
+            timer.BookStep("tab construction", _constructMs);
+        }
+
+        timer.Lead = "server tab first open > ";
+        _firstOpenTimer = null;
+        return timer;
     }
 
     /// <summary>The server this tab is bound to; MainWindow keys open tabs by this for dedupe/close.</summary>
@@ -326,27 +377,34 @@ public partial class ViewerServerTab : UserControl
         }
 
         _refreshInFlight = true;
+        /* #8549: the first load of the tab runs on the first open's clock, so the reads below, which run before the landing sub-tab's own
+           load, are booked by name. Null for every later refresh, which keeps its per-sub-tab clock. */
+        var open = TakeFirstOpenTimer();
         try
         {
+            /* The time from the tab's activation to this point: the shell's refresh slot was taken by another tab's refresh, or its own
+               chrome ran first. Booked as a wait, not a read or a UI step. */
+            open?.BookPhaseEndingNow("waited for the shell to start this refresh", _constructMs);
+
             /* Point the process-wide time helper at THIS server's UTC offset before rendering — only the
                visible tab renders (the viewer's visible-only rule), so its offset wins. Loaded once, cached. */
-            await RefreshServerClockAsync();
-            ApplyServerClockToHelper();
+            await Timed(open, "server clock read", RefreshServerClockAsync());
+            ClientStep(open, "apply server clock", ApplyServerClockToHelper);
 
             /* #7386: the server's data start, for the charts' X axis. One cached read for the whole tab. */
-            await RefreshServerDataStartAsync();
+            await Timed(open, "server data start read", RefreshServerDataStartAsync());
 
             /* Refresh the toolbar freshness readout in the same pass (after the offset is applied so it renders
                in the active display mode). Non-critical chrome — its own try/catch keeps it off the load path. */
-            await UpdateServerFreshnessLabelAsync();
+            await Timed(open, "server freshness read", UpdateServerFreshnessLabelAsync());
 
             /* #1591: same slot, same reasoning — a permission-denied collector is only visible on the Collection
                Health tab, which is why it went unnoticed. Badge it so it is discoverable from any tab. */
-            await UpdatePermissionDeniedBadgeAsync();
+            await Timed(open, "permission denied count read", UpdatePermissionDeniedBadgeAsync());
 
             /* #5562: redraw the picker's resolved range from the clock (a range that slides with now) and refresh its
                "collected every N minutes" note (set for the page on screen in the load loop below, before each tab's load). */
-            RefreshRangePicker();
+            ClientStep(open, "range picker redraw", RefreshRangePicker);
 
             do
             {
@@ -358,8 +416,11 @@ public partial class ViewerServerTab : UserControl
                     loadedTab = InnerTabs.SelectedIndex;
                     /* L3: a tab switched to during this load changes the page on screen, so its note is set here too, not only
                        at the top of the pass. */
-                    await UpdateSampleIntervalAsync();
-                    await LoadInnerTabAsync(loadedTab);
+                    await Timed(open, "collection interval read", UpdateSampleIntervalAsync());
+                    /* The first pass hands the first open's clock on, so the landing sub-tab's reads land in the same line; a second pass
+                       (the reader switched tabs mid-load) is an ordinary load on its own clock. */
+                    await LoadInnerTabAsync(loadedTab, open);
+                    open = null;
                 }
                 while (InnerTabs.SelectedIndex != loadedTab);
             }
@@ -588,7 +649,7 @@ public partial class ViewerServerTab : UserControl
                rename it. */
             if (slow is not null)
             {
-                ViewerLogger.Warn("SlowLoad", $"[{_server.DisplayName}] {slow}");
+                SlowLoadSink($"[{_server.DisplayName}] {slow}");
             }
         }
     }
