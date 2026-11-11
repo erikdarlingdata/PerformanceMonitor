@@ -121,8 +121,8 @@ SELECT
     s.null_frac                             AS null_frac,
     s.avg_width                             AS avg_width,
     s.correlation                           AS correlation,
-    /* The head of the frequency array only. NULL when the column has no MCV list at all, which is itself
-       informative - a perfectly uniform column has none. */
+    " + /* The head of the frequency array only. NULL when the column has no MCV list at all, which is itself
+       informative - a perfectly uniform column has none. */ @"
     s.most_common_freqs[1]                  AS top_value_frequency,
     cardinality(s.most_common_vals)         AS common_value_count
 FROM pg_catalog.pg_stats AS s
@@ -135,11 +135,11 @@ WHERE s.schemaname NOT IN ('pg_catalog', 'information_schema')
 AND   c.relkind IN ('r', 'm', 'p')
 AND   c.relpages >= " + MinimumRelPages + @"
 ORDER BY c.relpages DESC, s.schemaname, s.tablename, s.attname
-/* Bounded (#2617's lesson applied before it bites). This is a catalog read rather than a page scan, so
+" + /* Bounded (#2617's lesson applied before it bites). This is a catalog read rather than a page scan, so
    it is nowhere near as costly as pg_index_bloat was - but it was still unbounded, and row count here is
    tables x columns: 361 tables over the size floor on one measured target, and a wide schema turns that
    into five figures per database per DAY. The ORDER BY already puts the biggest tables first, so the cap
-   keeps exactly the columns a plan-shape question is asked about. */
+   keeps exactly the columns a plan-shape question is asked about. */ @"
 LIMIT 5000";
 
     public override string Name => "pg_column_stats";

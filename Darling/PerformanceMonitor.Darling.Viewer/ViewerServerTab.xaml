@@ -5274,32 +5274,32 @@
                     </DataGrid.RowStyle>
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="PID" Binding="{Binding Pid}" ElementStyle="{StaticResource NumericCell}" Width="80"/>
-                        <DataGridTextColumn Header="Backend" Binding="{Binding BackendId}" Width="120"/>
-                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="130"/>
-                        <DataGridTextColumn Header="User" Binding="{Binding Username}" Width="110"/>
-                        <DataGridTextColumn Header="Application" Binding="{Binding ApplicationName}" Width="160"/>
-                        <DataGridTextColumn Header="Client" Binding="{Binding ClientAddr}" Width="120"/>
-                        <DataGridTextColumn Header="Backend Type" Binding="{Binding BackendType}" Width="120"/>
-                        <DataGridTextColumn Header="State" Binding="{Binding LastState}" Width="130"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Backend" Binding="{Binding BackendId}" Width="120"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Database" Binding="{Binding DatabaseName}" Width="130"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="User" Binding="{Binding Username}" Width="110"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Application" Binding="{Binding ApplicationName}" Width="160"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Client" Binding="{Binding ClientAddr}" Width="120"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Backend Type" Binding="{Binding BackendType}" Width="120"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="State" Binding="{Binding LastState}" Width="130"/>
                         <!-- Immediately after the state, because it is the column that decides whether the
                              state above it means anything: "pins nothing" here and the long idle duration
                              two columns along is a forgotten commit, not a vacuum problem. -->
-                        <DataGridTextColumn Header="Pinned Horizon (peak)" Binding="{Binding PeakHorizonAge}" SortMemberPath="PeakHorizonAgeSort" Width="160"/>
-                        <DataGridTextColumn Header="Held Horizon In" Binding="{Binding HorizonHoldShare}" SortMemberPath="HorizonHoldShareSort" Width="140"/>
-                        <DataGridTextColumn Header="Idle In Xact" Binding="{Binding IdleInTransactionShare}" SortMemberPath="IdleInTransactionShareSort" Width="140"/>
-                        <DataGridTextColumn Header="Peak Xact" Binding="{Binding PeakXactDuration}" SortMemberPath="PeakXactDurationSort" Width="110"/>
-                        <DataGridTextColumn Header="Peak State" Binding="{Binding PeakStateDuration}" SortMemberPath="PeakStateDurationSort" Width="110"/>
-                        <DataGridTextColumn Header="Peak Query" Binding="{Binding PeakQueryDuration}" SortMemberPath="PeakQueryDurationSort" Width="110"/>
-                        <DataGridTextColumn Header="Backend Age" Binding="{Binding BackendAge}" SortMemberPath="BackendAgeSort" Width="110"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Pinned Horizon (peak)" Binding="{Binding PeakHorizonAge}" SortMemberPath="PeakHorizonAgeSort" Width="160"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Held Horizon In" Binding="{Binding HorizonHoldShare}" SortMemberPath="HorizonHoldShareSort" Width="140"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Idle In Xact" Binding="{Binding IdleInTransactionShare}" SortMemberPath="IdleInTransactionShareSort" Width="140"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Peak Xact" Binding="{Binding PeakXactDuration}" SortMemberPath="PeakXactDurationSort" Width="110"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Peak State" Binding="{Binding PeakStateDuration}" SortMemberPath="PeakStateDurationSort" Width="110"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Peak Query" Binding="{Binding PeakQueryDuration}" SortMemberPath="PeakQueryDurationSort" Width="110"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Backend Age" Binding="{Binding BackendAge}" SortMemberPath="BackendAgeSort" Width="110"/>
                         <DataGridTextColumn Header="Peak xmin Age" Binding="{Binding PeakXminAge}" SortMemberPath="PeakXminAgeSort" ElementStyle="{StaticResource NumericCell}" Width="120"/>
                         <DataGridTextColumn Header="Peak XID Age" Binding="{Binding PeakXidAge}" SortMemberPath="PeakXidAgeSort" ElementStyle="{StaticResource NumericCell}" Width="120"/>
-                        <DataGridTextColumn Header="Last Wait" Binding="{Binding LastWait}" Width="150"/>
-                        <DataGridTextColumn Header="Command" Binding="{Binding LastCommandTag}" Width="110"/>
-                        <DataGridTextColumn Header="Query ID" Binding="{Binding LastQueryId}" SortMemberPath="LastQueryIdSort" Width="140"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Last Wait" Binding="{Binding LastWait}" Width="150"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Command" Binding="{Binding LastCommandTag}" Width="110"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Query ID" Binding="{Binding LastQueryId}" SortMemberPath="LastQueryIdSort" Width="140"/>
                         <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount}" ElementStyle="{StaticResource NumericCell}" Width="90"/>
-                        <DataGridTextColumn Header="First Seen" Binding="{Binding FirstSeenAt}" Width="140" SortMemberPath="FirstSeenAtUtc"/>
-                        <DataGridTextColumn Header="Last Seen" Binding="{Binding LastSeenAt}" Width="140" SortMemberPath="LastSeenAtUtc"/>
-                        <DataGridTextColumn Header="On The Instance" Binding="{Binding InstanceContext}" Width="220"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="First Seen" Binding="{Binding FirstSeenAt}" Width="140" SortMemberPath="FirstSeenAtUtc"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Last Seen" Binding="{Binding LastSeenAt}" Width="140" SortMemberPath="LastSeenAtUtc"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="On The Instance" Binding="{Binding InstanceContext}" Width="220"/>
                         <DataGridTemplateColumn Header="Caveats" Width="300">
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
@@ -5331,13 +5331,13 @@
                           MinHeight="110" MaxHeight="240"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
-                        <DataGridTextColumn Header="Cause" Binding="{Binding Source}" Width="200"/>
-                        <DataGridTextColumn Header="Holding Now" Binding="{Binding IsWinnerText}" Width="110"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Cause" Binding="{Binding Source}" Width="200"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Holding Now" Binding="{Binding IsWinnerText}" Width="110"/>
                         <DataGridTextColumn Header="xmin Age" Binding="{Binding XminAge}" SortMemberPath="XminAgeSort" ElementStyle="{StaticResource NumericCell}" Width="120"/>
                         <DataGridTextColumn Header="Peak In Window" Binding="{Binding PeakXminAge}" SortMemberPath="PeakXminAgeSort" ElementStyle="{StaticResource NumericCell}" Width="130"/>
-                        <DataGridTextColumn Header="Held In" Binding="{Binding WinnerShare}" SortMemberPath="WinnerShareSort" Width="130"/>
-                        <DataGridTextColumn Header="Measured" Binding="{Binding MeasuredAt}" Width="140" SortMemberPath="MeasuredAtUtc"/>
-                        <DataGridTextColumn Header="Holder" Binding="{Binding Holder}" Width="200"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Held In" Binding="{Binding WinnerShare}" SortMemberPath="WinnerShareSort" Width="130"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Measured" Binding="{Binding MeasuredAt}" Width="140" SortMemberPath="MeasuredAtUtc"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Holder" Binding="{Binding Holder}" Width="200"/>
                         <DataGridTemplateColumn Header="Detail" Width="*">
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
@@ -5370,26 +5370,26 @@
                         </Style>
                     </DataGrid.RowStyle>
                     <DataGrid.Columns>
-                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="140"/>
-                        <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="120"/>
-                        <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="200"/>
-                        <DataGridTextColumn Header="Autovacuum" Binding="{Binding AutovacuumState}" Width="110"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Database" Binding="{Binding DatabaseName}" Width="140"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Schema" Binding="{Binding SchemaName}" Width="120"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Table" Binding="{Binding TableName}" Width="200"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Autovacuum" Binding="{Binding AutovacuumState}" Width="110"/>
                         <DataGridTextColumn Header="Dead Tuples" Binding="{Binding DeadTuples}" SortMemberPath="DeadTuplesSort" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                         <DataGridTextColumn Header="Live Tuples" Binding="{Binding LiveTuples}" SortMemberPath="LiveTuplesSort" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                         <DataGridTextColumn Header="Dead %" Binding="{Binding DeadTuplePct}" SortMemberPath="DeadTuplePctSort" ElementStyle="{StaticResource NumericCell}" Width="90"/>
                         <DataGridTextColumn Header="Vacuum Threshold" Binding="{Binding VacuumThreshold}" SortMemberPath="VacuumThresholdSort" ElementStyle="{StaticResource NumericCell}" Width="140"/>
-                        <DataGridTextColumn Header="Past Threshold" Binding="{Binding ThresholdRatio}" SortMemberPath="ThresholdRatioSort" Width="120"/>
-                        <DataGridTextColumn Header="Dead Trend" Binding="{Binding DeadTupleTrend}" SortMemberPath="DeadTupleTrendSort" Width="130"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Past Threshold" Binding="{Binding ThresholdRatio}" SortMemberPath="ThresholdRatioSort" Width="120"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Dead Trend" Binding="{Binding DeadTupleTrend}" SortMemberPath="DeadTupleTrendSort" Width="130"/>
                         <DataGridTextColumn Header="Inserts Since Vacuum" Binding="{Binding InsertsSinceVacuum}" SortMemberPath="InsertsSinceVacuumSort" ElementStyle="{StaticResource NumericCell}" Width="150"/>
-                        <DataGridTextColumn Header="Insert Threshold" Binding="{Binding InsertVacuumThreshold}" SortMemberPath="InsertVacuumThresholdSort" Width="130"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Insert Threshold" Binding="{Binding InsertVacuumThreshold}" SortMemberPath="InsertVacuumThresholdSort" Width="130"/>
                         <DataGridTextColumn Header="Mods Since Analyze" Binding="{Binding ModsSinceAnalyze}" SortMemberPath="ModsSinceAnalyzeSort" ElementStyle="{StaticResource NumericCell}" Width="150"/>
                         <DataGridTextColumn Header="Analyze Threshold" Binding="{Binding AnalyzeThreshold}" SortMemberPath="AnalyzeThresholdSort" ElementStyle="{StaticResource NumericCell}" Width="140"/>
                         <DataGridTextColumn Header="Autovacuum Runs" Binding="{Binding AutovacuumCount}" SortMemberPath="AutovacuumCountSort" ElementStyle="{StaticResource NumericCell}" Width="140"/>
-                        <DataGridTextColumn Header="Last Autovacuum" Binding="{Binding LastAutovacuum}" Width="140" SortMemberPath="LastAutovacuumUtc"/>
-                        <DataGridTextColumn Header="Last Vacuum" Binding="{Binding LastVacuum}" Width="140" SortMemberPath="LastVacuumUtc"/>
-                        <DataGridTextColumn Header="Last Autoanalyze" Binding="{Binding LastAutoanalyze}" Width="140" SortMemberPath="LastAutoanalyzeUtc"/>
-                        <DataGridTextColumn Header="Last Analyze" Binding="{Binding LastAnalyze}" Width="140" SortMemberPath="LastAnalyzeUtc"/>
-                        <DataGridTextColumn Header="Size" Binding="{Binding TotalSize}" SortMemberPath="TotalSizeSort" Width="110"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Last Autovacuum" Binding="{Binding LastAutovacuum}" Width="140" SortMemberPath="LastAutovacuumUtc"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Last Vacuum" Binding="{Binding LastVacuum}" Width="140" SortMemberPath="LastVacuumUtc"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Last Autoanalyze" Binding="{Binding LastAutoanalyze}" Width="140" SortMemberPath="LastAutoanalyzeUtc"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Last Analyze" Binding="{Binding LastAnalyze}" Width="140" SortMemberPath="LastAnalyzeUtc"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Size" Binding="{Binding TotalSize}" SortMemberPath="TotalSizeSort" Width="110"/>
                         <DataGridTextColumn Header="Measured" Binding="{Binding MeasuredAt}" Width="*" SortMemberPath="MeasuredAtUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
@@ -5401,7 +5401,7 @@
                           MinHeight="90" MaxHeight="200"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
-                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="180"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Database" Binding="{Binding DatabaseName}" Width="180"/>
                         <DataGridTextColumn Header="Frozen XID Age" Binding="{Binding FrozenXidAge}" SortMemberPath="FrozenXidAgeSort" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                         <DataGridTextColumn Header="% To Emergency" Binding="{Binding PctTowardEmergencyVacuum}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                         <DataGridTextColumn Header="% To Wraparound" Binding="{Binding PctTowardWraparound}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
@@ -5414,7 +5414,7 @@
                         <DataGridTextColumn Header="MultiXID Freeze Max Age" Binding="{Binding MultixactFreezeMaxAge}" SortMemberPath="MultixactFreezeMaxAgeSort" ElementStyle="{StaticResource NumericCell}" Width="170"/>
                         <DataGridTextColumn Header="Peak XID Age" Binding="{Binding WindowPeakFrozenXidAge}" SortMemberPath="WindowPeakFrozenXidAgeSort" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                         <DataGridTextColumn Header="Peak MultiXID Age" Binding="{Binding WindowPeakMinMultiXidAge}" SortMemberPath="WindowPeakMinMultiXidAgeSort" ElementStyle="{StaticResource NumericCell}" Width="150"/>
-                        <DataGridTextColumn Header="Connections" Binding="{Binding ConnectionsAllowed}" Width="120"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Connections" Binding="{Binding ConnectionsAllowed}" Width="120"/>
                         <DataGridTextColumn Header="Measured" Binding="{Binding MeasuredAt}" Width="*" SortMemberPath="MeasuredAtUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
@@ -5435,11 +5435,11 @@
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>
-                        <DataGridTextColumn Header="Satisfied" Binding="{Binding Satisfied}" Width="80"/>
-                        <DataGridTextColumn Header="Observed" Binding="{Binding Observed}" Width="240"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Satisfied" Binding="{Binding Satisfied}" Width="80"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Observed" Binding="{Binding Observed}" Width="240"/>
                         <DataGridTextColumn Header="What it means / what to do" Binding="{Binding Detail}" Width="*"/>
                         <!-- Newest row per facet, so the rows can come from different snapshots. -->
-                        <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
+                        <DataGridTextColumn ElementStyle="{StaticResource TrimmedCell}" Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
 
@@ -5732,20 +5732,24 @@
              and the more dangerous of the two to act on, so it is read first and its note says so before
              any percentage is visible. -->
         <TabItem x:Name="PgStorageTab" Header="Storage" Visibility="Collapsed">
+            <!-- #8663: five grids and their notes do not fit one screen, and star rows gave each grid whatever the wrapped notes left (a header and one or two rows).
+                 Every row is Auto now and each grid has a MinHeight (about eight rows) and a MaxHeight (inner scroll), so the tab scrolls, as Vacuum does (#6133). -->
+            <ScrollViewer x:Name="PgStorageScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                          PreviewMouseWheel="PgStorageScroll_PreviewMouseWheel">
             <Grid Margin="8">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" x:Name="PgStorageNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
@@ -5757,7 +5761,7 @@
                                Foreground="{DynamicResource ForegroundBrush}"
                                Background="#22FFAA00"/>
                 </StackPanel>
-                <DataGrid Grid.Row="2" x:Name="PgTableBloatGrid" Style="{StaticResource DarkGrid}"
+                <DataGrid Grid.Row="2" x:Name="PgTableBloatGrid" Style="{StaticResource DarkGrid}" MinHeight="220" MaxHeight="420"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
                         <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
@@ -5802,7 +5806,7 @@
                                Foreground="{DynamicResource ForegroundBrush}"
                                Background="#22FFAA00"/>
                 </StackPanel>
-                <DataGrid Grid.Row="4" x:Name="PgIndexUsageGrid" Style="{StaticResource DarkGrid}"
+                <DataGrid Grid.Row="4" x:Name="PgIndexUsageGrid" Style="{StaticResource DarkGrid}" MinHeight="220" MaxHeight="420"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
                         <Style TargetType="DataGridRow" BasedOn="{StaticResource DarkGridRow}">
@@ -5848,7 +5852,7 @@
                      values, and collecting them would copy customer data into the monitoring store. -->
                 <TextBlock Grid.Row="5" x:Name="PgColumnStatsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                <DataGrid Grid.Row="6" x:Name="PgColumnStatsGrid" Style="{StaticResource DarkGrid}"
+                <DataGrid Grid.Row="6" x:Name="PgColumnStatsGrid" Style="{StaticResource DarkGrid}" MinHeight="220" MaxHeight="420"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <!-- These statistics describe ONE database and the collector sweeps every database
@@ -5876,7 +5880,7 @@
                      to be built on. -->
                 <TextBlock Grid.Row="7" x:Name="PgIndexBloatNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                <DataGrid Grid.Row="8" x:Name="PgIndexBloatGrid" Style="{StaticResource DarkGrid}"
+                <DataGrid Grid.Row="8" x:Name="PgIndexBloatGrid" Style="{StaticResource DarkGrid}" MinHeight="220" MaxHeight="420"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="150"/>
@@ -5940,7 +5944,7 @@
                 <TextBlock Grid.Row="9" Text="Predicates and planner estimate error - index candidates, and columns the planner misjudges" FontWeight="SemiBold" Margin="0,10,0,2"/>
                 <TextBlock Grid.Row="10" x:Name="PgPredicateStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                <DataGrid Grid.Row="11" x:Name="PgPredicateStatsGrid" Style="{StaticResource DarkGrid}"
+                <DataGrid Grid.Row="11" x:Name="PgPredicateStatsGrid" Style="{StaticResource DarkGrid}" MinHeight="220" MaxHeight="420"
                           ContextMenu="{StaticResource PredicateStatsContextMenu}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
@@ -5972,6 +5976,7 @@
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>
+            </ScrollViewer>
         </TabItem>
     </TabControl>
     </Grid>

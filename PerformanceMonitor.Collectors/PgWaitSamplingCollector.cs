@@ -263,12 +263,12 @@ WHERE a.pid <> pg_backend_pid()
 
     private static string QueryText => @"
 SELECT
-    /* A NULL wait event means the backend was NOT waiting - it was on CPU. That is PostgreSQL's own
+    " + /* A NULL wait event means the backend was NOT waiting - it was on CPU. That is PostgreSQL's own
        convention (pg_stat_activity.wait_event_type is NULL for a running backend) and it is real signal
        worth keeping, but stored raw it renders as a BLANK row sitting near the top of a grid sorted by
        count. Measured on the live rig: 23 samples across 11 backends arrived exactly that way. Labelled
        here so the row says what it is; 'CPU' is not a wait_event_type PostgreSQL itself emits, so it
-       cannot collide with a real one. */
+       cannot collide with a real one. */ @"
     coalesce(p.event_type, 'CPU')::text                      AS event_type,
     coalesce(p.event, 'Running')::text                       AS event,
     p.queryid::bigint                                        AS query_id,

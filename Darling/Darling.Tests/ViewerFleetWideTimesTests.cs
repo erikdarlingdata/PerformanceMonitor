@@ -147,4 +147,42 @@ public sealed class ViewerFleetWideTimesTests : IDisposable
         var sqlZone = ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, Eastern);
         Assert.Equal("collected 2026-07-01 12:59", ViewerServerTab.FreshnessLabel(last, registered, now, sqlZone));
     }
+
+    /// <summary>#8666: the Job History range picker words its range and "Data starts" note on the machine's zone from the first open, not on
+    /// the process-wide server clock. That clock is the machine's fixed offset until a server tab is opened, then that server's own zone,
+    /// so the same stored run read an hour apart (a day in daylight time shown an hour early) before and after a server tab opened.</summary>
+    [Theory]
+    [InlineData(TimeDisplayMode.ServerTime)]
+    [InlineData(TimeDisplayMode.LocalTime)]
+    public void JobHistoryPicker_ReadsTheMachinesZone_BeforeAndAfterAServerTabOpens(TimeDisplayMode mode)
+    {
+        ViewerTimeHelper.CurrentDisplayMode = mode;
+        var machineOffset = (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMinutes;
+
+        var (before, after) = StaTestThread.Run(() =>
+        {
+            /* A fixed offset no machine has, so the active clock can never pass for the machine's own zone. */
+            ViewerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(machineOffset + 137);
+            var tab = new JobHistoryTab();
+            var beforeZone = tab.TimeRangePickerControl.Zone;
+            ViewerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(machineOffset - 211);
+            return (beforeZone, tab.TimeRangePickerControl.Zone);
+        });
+
+        Assert.Equal(TimeZoneInfo.Local, before);
+        Assert.Equal(TimeZoneInfo.Local, after);
+    }
+
+    [Fact]
+    public void JobHistoryPicker_InUtcMode_ReadsUtc_NotTheActiveServersClock()
+    {
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+        var zone = StaTestThread.Run(() =>
+        {
+            ViewerTimeHelper.ActiveServerClock = Eastern;
+            return new JobHistoryTab().TimeRangePickerControl.Zone;
+        });
+
+        Assert.Equal(TimeZoneInfo.Utc, zone);
+    }
 }

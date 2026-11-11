@@ -90,7 +90,7 @@ internal static class ViewerPostgresTabs
                appears with the reason it is missing. */
             "Every PostgreSQL collector for this server: when it last ran, what it returned, and, for a "
             + "collector this engine cannot run at all, why it never will. The extension panel below is the "
-            + "third capability axis (#2545) and the only one that is ACTIONABLE: engine kind and edition "
+            + "third capability axis and the only one that is ACTIONABLE: engine kind and edition "
             + "are walls, but an extension that is available and not installed is one command away."),
 
         new ViewerPostgresTab(

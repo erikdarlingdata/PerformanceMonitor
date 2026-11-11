@@ -67,33 +67,33 @@ WITH holders AS
 (
     SELECT
         'session'::text                                       AS source,
-        /* The GREATER of the two ages. An idle-in-transaction writer under READ COMMITTED has RELEASED its
+        " + /* The GREATER of the two ages. An idle-in-transaction writer under READ COMMITTED has RELEASED its
            snapshot — backend_xmin is NULL — while still holding backend_xid, which pins the horizon just as
            hard. Reading only backend_xmin made this collector blind to idle-in-transaction, which is its
-           single most-cited cause and the one the read surface leads with. */
+           single most-cited cause and the one the read surface leads with. */ @"
         GREATEST(
             coalesce(age(a.backend_xmin), 0),
             coalesce(age(a.backend_xid), 0))::bigint            AS xmin_age,
         a.pid::text                                            AS holder,
         'state=' || coalesce(a.state, '(none)')
             || ' application=' || coalesce(a.application_name, '(none)')
-            /* AT TIME ZONE 'UTC', not ::text. These are timestamptz, so ::text renders in the SESSION
+            " + /* AT TIME ZONE 'UTC', not ::text. These are timestamptz, so ::text renders in the SESSION
                TimeZone — invisible on a UTC server, wrong everywhere else. The store's contract is naive UTC
-               and this detail string was the one place on the branch still breaking it. */
+               and this detail string was the one place on the branch still breaking it. */ @"
             || ' xact_start=' || coalesce((a.xact_start AT TIME ZONE 'UTC')::text, '(none)')
             || ' query_start=' || coalesce((a.query_start AT TIME ZONE 'UTC')::text, '(none)') AS detail
     FROM pg_stat_activity AS a
     WHERE (a.backend_xmin IS NOT NULL OR a.backend_xid IS NOT NULL)
-    /* Never attribute the horizon to the collector's own snapshot. Darling's read sits in
+    " + /* Never attribute the horizon to the collector's own snapshot. Darling's read sits in
        pg_stat_activity with a backend_xmin like any other session, so without this it is a PERMANENT
        'session' holder: zero-rows-when-healthy becomes unreachable, and it silently pads the persistence
-       denominator so a real transient holder reads as chronic. */
+       denominator so a real transient holder reads as chronic. */ @"
     AND   a.pid <> pg_backend_pid()
-    /* Nor any other connection this service holds open (#7381): the wait sampler's batch runs on a second
+    " + /* Nor any other connection this service holds open (#7381): the wait sampler's batch runs on a second
        connection inside a transaction, and would otherwise be named as a 'session' holder. Same two
        application_name values the sampler excludes itself by. So the 'session' row is the oldest holder
        outside this service's connections: when the sampler's batch is older, the next-oldest session is
-       named, younger than that batch of 30 seconds at most. */
+       named, younger than that batch of 30 seconds at most. */ @"
     AND   coalesce(a.application_name, '') NOT IN ('" + PgWaitSamplingCollector.ServiceApplicationName + "', '" + PgWaitSamplingCollector.ServiceRemediationApplicationName + @"')
 
     UNION ALL
@@ -149,8 +149,8 @@ SELECT DISTINCT ON (source)
     detail
 FROM holders
 WHERE xmin_age IS NOT NULL
-/* #6305: age 0 is a snapshot taken this instant, holding nothing back (another Darling connection reading
-   at the same moment looked like a holder). */
+" + /* #6305: age 0 is a snapshot taken this instant, holding nothing back (another Darling connection reading
+   at the same moment looked like a holder). */ @"
 AND   xmin_age > 0
 ORDER BY source, xmin_age DESC";
 

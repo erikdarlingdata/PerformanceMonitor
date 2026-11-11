@@ -620,6 +620,46 @@ public sealed class ViewerPostgresTabsTests
         Assert.Contains("transactions", pinned.PeakHorizonAge, StringComparison.Ordinal);
     }
 
+    /// <summary>#8664: a count of one is "1 transaction", not "1 transactions", and zero and many keep the plural.</summary>
+    [Theory]
+    [InlineData(0L, "0 transactions")]
+    [InlineData(1L, "1 transaction")]
+    [InlineData(2L, "2 transactions")]
+    [InlineData(4_200_000L, "4,200,000 transactions")]
+    public void APinnedHorizonAge_AgreesWithItsCountInNumber(long age, string expected)
+    {
+        Assert.Equal(expected, PgDisplay.SessionState(SessionRow(peakHorizonAge: age)).PeakHorizonAge);
+    }
+
+    /// <summary>#8664: the logging audit is shared with the MCP reply, but the Viewer has no tool and no field of those names.</summary>
+    [Fact]
+    public void TheLoggingAuditRows_NameNoMcpToolAndNoMcpField()
+    {
+        var names = new[] { "log_min_duration_statement", "log_lock_waits", "log_temp_files", "log_autovacuum_min_duration", "log_checkpoints", "auto_explain.log_min_duration" };
+        var audits = new List<DarlingPgLoggingAudit.Result>
+        {
+            /* A snapshot that holds none of the six settings: every verdict is unknown, which has its own wording. */
+            DarlingPgLoggingAudit.Audit([new DarlingPgLoggingAuditReader.PgLoggingSettingRow("work_mem", "4096", "kB", "user", "default", "4096", false, DateTime.UtcNow)]),
+        };
+        foreach (var (setting, restart) in new[] { ("off", true), ("on", false), ("-1", false), ("0", false), ("1000", false), ("garbled", false) })
+        {
+            audits.Add(DarlingPgLoggingAudit.Audit(names
+                .Select(name => new DarlingPgLoggingAuditReader.PgLoggingSettingRow(name, setting, null, "superuser", "user", "off", restart, DateTime.UtcNow))
+                .ToList()));
+        }
+
+        foreach (var audit in audits)
+        {
+            foreach (var row in audit.Facets.Select(PgDisplay.LoggingAudit))
+            {
+                foreach (var text in new[] { row.Unlocks, row.Recommended, row.CostNote, row.Remedy, row.PendingRestart })
+                {
+                    Assert.DoesNotMatch("get_pg_|cost_note|pending_restart_settings", text);
+                }
+            }
+        }
+    }
+
     /// <summary>
     /// #8014: the xmin grid's Held In column divides over the captures in the window, not over the source's own rows. The collector
     /// stores nothing on a capture with no holder, so a session seen in 2 captures that won both has 2 rows and 2 wins, and "2 of 2"
