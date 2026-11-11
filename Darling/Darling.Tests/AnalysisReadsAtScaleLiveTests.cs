@@ -127,12 +127,9 @@ SELECT
         return JsonDocument.Parse((string)(await explain.ExecuteScalarAsync(ct))!);
     }
 
-    private static long Blocks(JsonDocument explain)
-    {
-        var plan = explain.RootElement[0].GetProperty("Plan");
-        return plan.GetProperty("Shared Hit Blocks").GetInt64()
-             + (plan.TryGetProperty("Shared Read Blocks", out var read) ? read.GetInt64() : 0);
-    }
+    /// <summary>The pages the plan's scans read (#8570), not the root node's buffer total: the total also counts the catalog buffers a backend
+    /// reads to rebuild a cache entry, and a cache reset from another test creating a database on the same server brings those back.</summary>
+    private static long Blocks(JsonDocument explain) => ExplainBuffers.DataPages(explain.RootElement[0].GetProperty("Plan"));
 
     /// <summary>True when any node of the plan is a nested loop of the given join type.</summary>
     private static bool HasNestedLoop(JsonElement node, string joinType)
@@ -265,7 +262,7 @@ VALUES (857_900_000_001, $2::timestamp - interval '12 hours', $1, 'scale', $2::t
         var newBlocks = Blocks(newPlan);
         var oldBlocks = Blocks(oldPlan);
         Assert.True(newBlocks * 4 <= oldBlocks,
-            $"the read should touch a quarter of the blocks the whole-history read does or less: old={oldBlocks} new={newBlocks}");
+            $"the read should touch a quarter of the pages the whole-history read does or less: old={oldBlocks} new={newBlocks}");
     }
 
     private static async Task<List<string>> ReadLinesAsync(NpgsqlConnection c, string sql, object[] parameters, CancellationToken ct)

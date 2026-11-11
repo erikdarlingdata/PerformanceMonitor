@@ -74,16 +74,15 @@ public sealed class FinOpsInventorySizeSnapshotBuffersLiveTests
         explain.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now.Date.AddDays(-7), NpgsqlDbType = NpgsqlDbType.Timestamp });
         explain.Parameters.Add(new NpgsqlParameter<long> { TypedValue = 7 });
         explain.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now.Date, NpgsqlDbType = NpgsqlDbType.Timestamp });
-        var json = (string)(await explain.ExecuteScalarAsync(ct))!;
 
-        using var plan = JsonDocument.Parse(json);
-        var root = plan.RootElement[0].GetProperty("Plan");
-        var buffers = root.GetProperty("Shared Hit Blocks").GetInt64() + root.GetProperty("Shared Read Blocks").GetInt64();
+        /* The pages the scans read, not the root node's buffer total: the total also counts the catalog buffers a backend reads to rebuild its
+           cache of the ten chunks, and a cache reset from another test creating a database on the same server brings those back (#8570). */
+        var buffers = ExplainBuffers.DataPages(await explain.ExecuteScalarAsync(ct));
 
         /* The table's history is about 14,400 rows per server day-chunk set: reading all of it twice (the old hash joins) costs 513 buffers on the
            old statement. One snapshot per server (60 rows each) through the (server_id, collection_time) index is 46. */
         Assert.True(buffers < 200,
-            $"The inventory fleet read touched {buffers} buffers over {historyRows} history rows; reading only the newest snapshot per server stays far under that.");
+            $"The inventory fleet read touched {buffers} pages over {historyRows} history rows; reading only the newest snapshot per server stays far under that.");
     }
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct, params object[] values)

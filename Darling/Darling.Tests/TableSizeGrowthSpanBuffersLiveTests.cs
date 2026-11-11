@@ -8,9 +8,7 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
-using System.Text.Json;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -28,8 +26,8 @@ namespace Darling.Tests;
 /// <c>index_object_stats</c> row of the server, so it read every index row of every retained snapshot to find six
 /// timestamps. The statement now asks the (server_id, collection_time) index for each of them, one descent each.
 /// This test seeds a store with many snapshots of a few thousand index rows each, checks the statement's answer
-/// against the snapshot times the seed knows, and bounds the buffers the statement touches: the whole statement
-/// reads under 300 buffers where the aggregate form read about 700.
+/// against the snapshot times the seed knows, and bounds the pages the statement reads (<see cref="ExplainBuffers.DataPages(object?)"/>):
+/// the whole statement reads about 110 pages where the aggregate form read about 690.
 /// </summary>
 public sealed class TableSizeGrowthSpanBuffersLiveTests
 {
@@ -106,15 +104,17 @@ public sealed class TableSizeGrowthSpanBuffersLiveTests
         Assert.Equal(Latest.AddDays(-(Snapshots - 1)), first.EarliestSnapshotTime);
         Assert.Equal(Snapshots - 1, first.DaysOfData);
 
-        /* The buffers of the whole statement, as it runs in production (two timestamps and the tolerance as parameters). */
-        var buffers = await StatementBuffersAsync(connection, cutoff7d, cutoff30d, ct);
+        /* The pages the whole statement reads, as it runs in production (two timestamps and the tolerance as parameters). The root node's
+           buffer total is not used: it also counts the catalog buffers a backend reads to rebuild its cache of the 300 chunks, and a cache
+           reset from another test creating a database on the same server took it from 176 to 4,402 over the same plan (CI counted 4,430). */
+        var pages = await StatementPagesAsync(connection, cutoff7d, cutoff30d, ct);
 
-        /* Measured on the seed (240,000 index rows over 300 snapshots, all in cache): 695 buffers with the aggregate form of span, 198 with the
-           probes. 300 sits between, and grows with the retained snapshots only on the old form. */
-        Assert.True(buffers < 300, $"the statement touched {buffers} buffers");
+        /* Measured on the seed (240,000 index rows over 300 snapshots, all in cache): 688 pages with the aggregate form of span, 108 to 112
+           with the probes on every run, warm or cold. 300 sits between, and grows with the retained snapshots only on the old form. */
+        Assert.True(pages < 300, $"the statement read {pages} pages");
     }
 
-    private static async Task<long> StatementBuffersAsync(NpgsqlConnection connection, DateTime cutoff7d, DateTime cutoff30d, System.Threading.CancellationToken ct)
+    private static async Task<long> StatementPagesAsync(NpgsqlConnection connection, DateTime cutoff7d, DateTime cutoff30d, System.Threading.CancellationToken ct)
     {
         await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + DarlingTableSizeGrowthReader.Sql, connection);
         command.Parameters.AddWithValue(ServerId);
@@ -123,13 +123,6 @@ public sealed class TableSizeGrowthSpanBuffersLiveTests
         command.Parameters.AddWithValue(RowsPerSnapshot + 1);
         command.Parameters.Add(DatabaseFilter.All.Parameter());
         command.Parameters.AddWithValue(GrowthBaselineReach.Tolerance.TotalSeconds);
-        return BuffersOf(await command.ExecuteScalarAsync(ct));
-    }
-
-    private static long BuffersOf(object? json)
-    {
-        using var doc = JsonDocument.Parse(Convert.ToString(json, CultureInfo.InvariantCulture)!);
-        var plan = doc.RootElement[0].GetProperty("Plan");
-        return plan.GetProperty("Shared Hit Blocks").GetInt64() + plan.GetProperty("Shared Read Blocks").GetInt64();
+        return ExplainBuffers.DataPages(await command.ExecuteScalarAsync(ct));
     }
 }
