@@ -1158,7 +1158,7 @@ public sealed class McpHealthTools
             if (truncated)
             {
                 matchingRuns = Math.Max(rows.Count, await dataService.CountRecentCollectionLogAsync(
-                    resolved.ServerId, hours, windowEnd, collector_name, min_duration_ms, status));
+                    resolved.ServerId, hours, asOfUtc: windowEnd, collectorName: collector_name, minDurationMs: min_duration_ms, status: status));
             }
 
             var filtered = !string.IsNullOrWhiteSpace(collector_name) || min_duration_ms is not null

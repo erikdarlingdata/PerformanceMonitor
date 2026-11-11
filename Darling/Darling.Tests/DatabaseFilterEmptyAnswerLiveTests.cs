@@ -68,20 +68,17 @@ public sealed class DatabaseFilterEmptyAnswerLiveTests
     public Task LongQueryEmpty_UnderAFilter_KeepsTheOptInSentence_WhenTheStoreHoldsNoLongQueryRows() =>
         DurationTrendDatabaseFilterLiveTests.WithSharedStoreAsync("a5244r2-lq-off", async (connection, postgres, serverId, serverName, now, ct) =>
         {
-            /* #8571: a collector that never ran is not_collected, so this store records one recent run that found nothing (a run that is not recent reads as an offline server). */
-            await DarlingMcpTestData.ExecAsync(connection, ct,
-                "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, rows_collected) VALUES ($1, $2, $3, 'long_query_completions', $4, 'SUCCESS', 0)",
-                CollectionIdGenerator.Next(), serverId, serverName, DarlingMcpTestData.Naive(now.AddMinutes(-5)));
-
             var filtered = await DarlingMcpLongQueryTools.GetLongQueryCompletions(
                 postgres, serverName, 24, 10, null, DatabaseFilter.Of(new[] { "DbA", "DbB" }), null, ct);
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(filtered));
-            Assert.Contains("opt-in", Message(filtered), StringComparison.Ordinal);
+            /* #8571: no row and no logged run is the never-ran state: not_collected, which says it is off by default and how to turn it on. */
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(filtered));
+            Assert.Contains("has never run for it", Message(filtered), StringComparison.Ordinal);
             Assert.Equal(DatabaseFilter.ManyDatabasesDescription, Echo(filtered));
 
             var unfiltered = await DarlingMcpLongQueryTools.GetLongQueryCompletions(
                 postgres, serverName, 24, 10, null, DatabaseFilter.All, null, ct);
-            Assert.Contains("opt-in", Message(unfiltered), StringComparison.Ordinal);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(unfiltered));
+            Assert.Contains("has never run for it", Message(unfiltered), StringComparison.Ordinal);
             Assert.Null(Echo(unfiltered));
         }, Cleanup);
 
