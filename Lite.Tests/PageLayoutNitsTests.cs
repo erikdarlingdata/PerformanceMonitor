@@ -351,10 +351,10 @@ public sealed class PageLayoutNitsTests
                 found.Add($"the all-zero chart has a legend entry: {string.Join(", ", legend)}");
             }
 
-            var limits = chart.Plot.Axes.GetLimits();
-            if (limits.Bottom < 0)
+            /* #8644: the empty look has no axes at all, not the default -10 to 10. */
+            if (chart.Plot.Axes.Left.IsVisible)
             {
-                found.Add($"the all-zero chart runs from {limits.Bottom:0.##} to {limits.Top:0.##}");
+                found.Add("the all-zero chart still draws its axes");
             }
 
             if (!chart.Plot.GetPlottables<ScottPlot.Plottables.Text>().Any(t => t.LabelText.StartsWith("No ", StringComparison.Ordinal)))

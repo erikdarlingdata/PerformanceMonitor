@@ -72,6 +72,14 @@ public sealed class ChartRenderHelper
     /// <see cref="ChartGroupAligner"/> leaves it out of its group, since there is no plot rectangle to share.
     /// </summary>
     public void RefreshEmptyChart(ScottPlot.WPF.WpfPlot chart, string legendText, string yAxisLabel)
+        => RefreshEmptyChart(chart, legendText, yAxisLabel, pinToPlotCenter: false);
+
+    /// <summary>
+    /// <see cref="RefreshEmptyChart(ScottPlot.WPF.WpfPlot, string, string)"/>, optionally with the sentence pinned to the plot's center
+    /// in pixels (<paramref name="pinToPlotCenter"/>) instead of to the data point (0, 0). A chart whose X limits are set after this
+    /// (the Overview lanes share one time ruler, set once every lane has drawn) would carry a data-anchored sentence off the screen.
+    /// </summary>
+    public void RefreshEmptyChart(ScottPlot.WPF.WpfPlot chart, string legendText, string yAxisLabel, bool pinToPlotCenter)
     {
         ChartStyle.ReapplyAxisColors(chart);
 
@@ -79,11 +87,24 @@ public sealed class ChartRenderHelper
         var sentence = $"No {name} in this window";
         /* One sentence; on a narrow chart it breaks before the tail rather than running off the edge. */
         var label = sentence.Length > 36 ? $"No {name}\nin this window" : sentence;
-        var text = chart.Plot.Add.Text(label, 0, 0);
-        text.LabelFontColor = MutedTextColor();
-        text.LabelFontSize = 14;
-        text.LabelItalic = false;
-        text.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
+        if (pinToPlotCenter)
+        {
+            var note = chart.Plot.Add.Annotation(label, ScottPlot.Alignment.MiddleCenter);
+            note.LabelFontSize = 14;
+            note.LabelFontColor = MutedTextColor();
+            note.LabelBackgroundColor = ScottPlot.Colors.Transparent;
+            note.LabelBorderColor = ScottPlot.Colors.Transparent;
+            note.LabelBorderWidth = 0;
+            note.LabelShadowColor = ScottPlot.Colors.Transparent;
+        }
+        else
+        {
+            var text = chart.Plot.Add.Text(label, 0, 0);
+            text.LabelFontColor = MutedTextColor();
+            text.LabelFontSize = 14;
+            text.LabelItalic = false;
+            text.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
+        }
 
         chart.Plot.Axes.SetLimitsX(-1, 1);
         chart.Plot.Axes.SetLimitsY(-1, 1);

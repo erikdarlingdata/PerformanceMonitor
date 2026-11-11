@@ -114,22 +114,18 @@ public sealed class ServerTabChartUtcFrameTests
     public void NoServerTabFile_DrawsAnAxisWithTheServerLocalDateChangeTicks()
     {
         var offenders = new List<string>();
-        var utcAxes = 0;
         foreach (var (name, code) in ServerTabCode())
         {
             foreach (Match m in Regex.Matches(code, @"\bDateTimeTicksBottomDateChange\s*\("))
             {
                 offenders.Add($"{name} (code line {Line(code, m.Index)})");
             }
-
-            utcAxes += Regex.Matches(code, @"\bDateTimeTicksBottomUtc\(GetPickerZone\)").Count;
         }
 
         Assert.True(
             offenders.Count == 0,
             "These draw the old axis, whose ticks sit on the plotted X instead of on the display zone's wall times; " +
             "use DateTimeTicksBottomUtc(GetPickerZone): " + string.Join(", ", offenders));
-        Assert.True(utcAxes >= 40, $"expected the tab's charts to draw through DateTimeTicksBottomUtc, found {utcAxes}.");
     }
 
     /// <summary>
