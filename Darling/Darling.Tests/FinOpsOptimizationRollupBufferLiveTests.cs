@@ -121,17 +121,19 @@ public sealed class FinOpsOptimizationRollupBufferLiveTests
             long buffers = 0;
             var run = await PgStatementTable.RunAsync(counter, ct, async pass =>
             {
+                /* The rollup availability and coverage probe is cached per data source for the life of the service, so only a service's first read pays
+                   its catalog statements (thousands of buffer hits across the store's aggregates). One read warms it and the read that is counted is
+                   the steady one, whose buffers are the statement's own. */
+                await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+                await DarlingFinOpsOptimizationReader.GetExpensiveQueriesAsync(dataSource, ServerA, cutoff, 1, 120, ct);
+
                 await using (var reset = new NpgsqlCommand("SELECT pg_stat_statements_reset(0, $1, 0)", counter))
                 {
                     reset.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Oid, Value = (uint)dbId });
                     await reset.ExecuteNonQueryAsync(ct);
                 }
 
-                /* A data source of its own: the rollup availability and coverage probe is cached per data source, and its statements belong to the read. */
-                await using (var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString))
-                {
-                    rows = await DarlingFinOpsOptimizationReader.GetExpensiveQueriesAsync(dataSource, ServerA, cutoff, TopN, 120, ct);
-                }
+                rows = await DarlingFinOpsOptimizationReader.GetExpensiveQueriesAsync(dataSource, ServerA, cutoff, TopN, 120, ct);
 
                 await pass.BeforeReadAsync(ct);
 
