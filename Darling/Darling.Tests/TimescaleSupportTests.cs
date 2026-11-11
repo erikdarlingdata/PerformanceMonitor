@@ -2197,6 +2197,9 @@ AND   j.hypertable_name = '" + relation + "'", connection) { CommandTimeout = Po
     .Concat(TimescaleSupport.BaselineAggregates.Select(a => a.View))
     /* #3893: the off-grid fleet collection-health rollup carries its own 8-day leaf policy. 21 relations. */
     .Concat(TimescaleSupport.OffGridAggregates.Select(a => a.View))
+    /* #8549: the oldest-run rollup under the Job History note is off-grid too but carries NO retention policy: DarlingRetention purges it
+       with job_history at that table's own (configurable) horizon, so it is not in RetentionPolicies. 25 relations before it, 24 policies. */
+    .Where(view => view != TimescaleSupport.JobHistoryOldestDailyView)
     .ToArray();
 
     /// <summary>The policy set EnsureRetentionPoliciesAsync attaches, derived so the two cannot drift.</summary>
