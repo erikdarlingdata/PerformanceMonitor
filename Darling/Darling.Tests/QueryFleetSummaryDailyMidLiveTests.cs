@@ -91,20 +91,30 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), Skip);
         var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
         var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
-        Assert.SkipWhen(!timescaleEnabled, "The live #8570 tests need TimescaleDB.");
-        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
-        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
-        await Exec(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
-        foreach (var (id, name) in Servers)
+        try
         {
-            await DarlingMcpTestData.RegisterServerAsync(connection, id, name, ct);
-        }
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+            Assert.SkipWhen(!timescaleEnabled, "The live #8570 tests need TimescaleDB.");
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+            await Exec(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+            foreach (var (id, name) in Servers)
+            {
+                await DarlingMcpTestData.RegisterServerAsync(connection, id, name, ct);
+            }
 
-        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
-        return new Store(scratch, connection);
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+            return new Store(scratch, connection);
+        }
+        catch
+        {
+            /* A skip or a failure after minting must not leave the scratch database for the exit drain. */
+            await connection.DisposeAsync();
+            await scratch.DisposeAsync();
+            throw;
+        }
     }
 
     private static async Task Exec(NpgsqlConnection connection, string sql, CancellationToken ct)

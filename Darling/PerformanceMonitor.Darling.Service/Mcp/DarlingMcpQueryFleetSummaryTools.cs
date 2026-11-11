@@ -473,8 +473,9 @@ public sealed class DarlingMcpQueryFleetSummaryTools
 
                     /* #8570: whole closed days come from the daily tier. The hourly rollup reads one heap page per row on a cold cache
                        (and decompresses a day's batches on a compressed chunk), the daily rollup 24 times fewer rows. Any guard that
-                       fails leaves the hourly read alone. */
-                    mid = PlanDailyMid(coverage, hourlyRelation, start, windowEnd, ceiling, DateTime.UtcNow);
+                       fails leaves the hourly read alone. The re-read guard measures against the real clock, not the as_of window end:
+                       the daily refresh policy runs on the real clock, so a day is settled by when the policy last ran. */
+                    mid = PlanDailyMid(coverage, hourlyRelation, start, windowEnd, ceiling, TimeProvider.System.GetUtcNow().UtcDateTime);
                     if (mid is not null && !await DailyHasNoHoleAsync(postgres, mid, cancellationToken))
                     {
                         mid = null;
