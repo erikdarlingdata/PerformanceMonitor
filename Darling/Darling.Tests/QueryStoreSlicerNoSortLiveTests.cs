@@ -214,7 +214,7 @@ public sealed class QueryStoreSlicerNoSortLiveTests
         try
         {
             using var connection = await OpenAndResetAsync(cs!, ct);
-            var end = LiveClock.AnchoredEnd();
+            var end = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
             var start = end.AddDays(-30);
             var endHour = new DateTime(end.Year, end.Month, end.Day, end.Hour, 0, 0, DateTimeKind.Utc);
             await SeedBulkAsync(connection, endHour.AddHours(-(BulkIntervals - 1)), ct);

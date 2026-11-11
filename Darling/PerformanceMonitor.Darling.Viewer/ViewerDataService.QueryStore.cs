@@ -960,7 +960,7 @@ public sealed partial class ViewerDataService
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
     public const string QueryStoreSlicerSql = $$"""
-        WITH newest AS (
+        WITH deduped AS (
             /* LOAD-BEARING (correctness, not just perf) — #1841. The rows are CUMULATIVE per-interval
                snapshots and the collector re-fetches the OPEN interval every cycle, so summing the raw
                rows counts one interval's work once per collection. The bucket is an HOUR and the cadence
@@ -972,33 +972,22 @@ public sealed partial class ViewerDataService
                kept beside it as the tier-1 proxy for rows collected before it existed — both in the key
                rather than a COALESCE, because the id is NULL on exactly the pre-tier-2 generation and
                non-NULL on exactly the post-tier-2 one, so the two can never collide and a legacy-only
-               window degrades to precisely tier 1's key. Twins Lite's GetQueryStoreSlicerDataAsync.
-
-               #8549: the latest snapshot is picked by a hash aggregate, not a ROW_NUMBER window. The window
-               sorted every raw row in the window by the partition key (an external merge of the whole
-               30-day slice, 1.72 s of 2.05 s on a seed, 58 MB spilled), which grows with every collection
-               rather than with the number of intervals. MAX over an array compares its elements left to
-               right, so ARRAY[collection time, execution_count, ...] picks exactly the row the old
-               ORDER BY collection_time DESC, execution_count DESC (#1907) kept, with no sort:
-               - the time is the exact microsecond count, because a timestamp keeps microseconds and a
-                 seconds key would tie two snapshots the old ORDER BY told apart;
-               - a NULL element compares greater than every value, as a descending sort puts NULLs first,
-                 so a NULL execution_count ranks first, as it did before;
-               - the rest of the array is the winner's own columns, so the row comes back whole. They
-                 only break a tie of time AND count, which the old ORDER BY left to the engine.
-               The values are bigint, so the microsecond count (about 1.8e15 now) and every metric stay exact. */
+               window degrades to precisely tier 1's key. Twins Lite's GetQueryStoreSlicerDataAsync. */
             SELECT
+                collection_time,
+                interval_start_time_utc,
                 query_id,
-                MAX(ARRAY[
-                    CAST(EXTRACT(EPOCH FROM collection_time) * 1000000 AS bigint),
-                    execution_count,
-                    CAST(EXTRACT(EPOCH FROM interval_start_time_utc) * 1000000 AS bigint),
-                    avg_cpu_time_us,
-                    avg_duration_us,
-                    avg_logical_io_reads,
-                    avg_logical_io_writes,
-                    avg_physical_io_reads
-                ]) AS snap
+                execution_count,
+                avg_cpu_time_us,
+                avg_duration_us,
+                avg_logical_io_reads,
+                avg_logical_io_writes,
+                avg_physical_io_reads,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC, execution_count DESC
+                ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
             /* The window is filtered on the SAME expression the bars are keyed on (#1892). It used to filter
@@ -1031,22 +1020,6 @@ public sealed partial class ViewerDataService
             AND   collection_time >= $2 - {{CollectionFloorSlackSql}}
             AND   collection_time <= $3 + {{CollectionCeilingSql}}
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
-            GROUP BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-        ),
-        deduped AS (
-            /* Back to columns, under the names the bucket expression below reads. A NULL interval start stays NULL, so
-               a legacy row still buckets on its collection_time. */
-            SELECT
-                query_id,
-                TIMESTAMP '1970-01-01' + snap[1] * INTERVAL '1 microsecond' AS collection_time,
-                TIMESTAMP '1970-01-01' + snap[3] * INTERVAL '1 microsecond' AS interval_start_time_utc,
-                snap[2] AS execution_count,
-                snap[4] AS avg_cpu_time_us,
-                snap[5] AS avg_duration_us,
-                snap[6] AS avg_logical_io_reads,
-                snap[7] AS avg_logical_io_writes,
-                snap[8] AS avg_physical_io_reads
-            FROM newest
         )
         SELECT
             /* The bar sits in the hour the work RAN, not the hour it was last COLLECTED (#1841 tier 2).
@@ -1064,6 +1037,7 @@ public sealed partial class ViewerDataService
             COALESCE(SUM(CAST(avg_logical_io_writes AS double precision) * execution_count), 0) AS total_writes,
             COALESCE(SUM(CAST(avg_physical_io_reads AS double precision) * execution_count), 0) AS total_physical_reads
         FROM deduped
+        WHERE rn = 1
         GROUP BY 1
         ORDER BY bucket
         """;
