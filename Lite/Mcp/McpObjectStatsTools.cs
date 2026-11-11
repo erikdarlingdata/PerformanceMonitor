@@ -82,22 +82,24 @@ public sealed class McpObjectStatsTools
                 database_name = r.DatabaseName,
                 schema_name = r.SchemaName,
                 table_name = r.TableName,
-                reserved_mb = r.CurrentReservedMb,
-                used_mb = r.CurrentUsedMb,
+                /* #8572: every size and growth figure is rounded here, where the reply is built, to the two places growth_7d_mb has always
+                   carried. */
+                reserved_mb = McpHelpers.RoundTo(r.CurrentReservedMb, 2),
+                used_mb = McpHelpers.RoundTo(r.CurrentUsedMb, 2),
                 total_rows = r.TotalRows,
                 index_count = r.IndexCount,
                 /* Each nominal-window figure comes from exactly the baseline it names, or is null (#3541
                    A12). The SQL this replaced folded a missing 30-day baseline onto the 7-day one and a
                    missing 7-day one onto the oldest, and labelled the result with the window asked for. */
-                growth_7d_mb = r.Growth7dMb,
-                growth_30d_mb = r.Growth30dMb,
-                growth_pct_30d = r.GrowthPct30d,
+                growth_7d_mb = McpHelpers.RoundTo(r.Growth7dMb, 2),
+                growth_30d_mb = McpHelpers.RoundTo(r.Growth30dMb, 2),
+                growth_pct_30d = McpHelpers.RoundTo(r.GrowthPct30d, 2),
                 /* The figure that is always honest: growth from the store's earliest snapshot of this table
                    to its latest, over exactly growth_window_days. Null only when there is no span at all. */
-                growth_over_available_history_mb = r.GrowthOverAvailableHistoryMb,
-                growth_over_available_history_pct = r.GrowthOverAvailableHistoryPct,
+                growth_over_available_history_mb = McpHelpers.RoundTo(r.GrowthOverAvailableHistoryMb, 2),
+                growth_over_available_history_pct = McpHelpers.RoundTo(r.GrowthOverAvailableHistoryPct, 2),
                 growth_window_days = r.DaysOfData,
-                daily_growth_rate_mb = r.DailyGrowthRateMb,
+                daily_growth_rate_mb = McpHelpers.RoundTo(r.DailyGrowthRateMb, 2),
                 growth_note = GrowthNote(r),
             });
 

@@ -64,7 +64,7 @@ public sealed class WebPgGridTextTests
 
         Assert.Equal(new[] { "Low", "Moderate", "High" }, Strings(r, "bloat"));
         Assert.Equal(
-            new[] { "Invalid", "No, primary key", "No, constraint", "No, replica identity", "Too early", "No, in use", "Candidate" },
+            new[] { "Invalid", "No, primary key", "No, uniqueness", "No, replica identity", "Too early", "No, in use", "Candidate" },
             Strings(r, "droppability"));
         Assert.Equal(new[] { "977 KB, 11.1% of heap", "3 GB, 10% of heap", "Not measured" }, Strings(r, "cost"));
         Assert.Equal(new[] { "None recorded" }, Strings(r, "lastScan"));
