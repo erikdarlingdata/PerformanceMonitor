@@ -2376,7 +2376,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                             totalHold
                                 ? $"requests are held for {seconds} more second(s): {DarlingSignInThrottle.GlobalMaxAttempts} wrong bearer tokens arrived within the hour from several addresses, so no token is compared from an address that has not presented a correct one recently; restarting the service clears it, and the failing client is in this log with its 401 lines (fix its token or take it out of allowFrom)"
                                 : $"requests from this source are held for {seconds} more second(s) after repeated wrong bearer tokens; no token is compared during the wait, and restarting the service clears it",
-                            now);
+                            now,
+                            state: totalHold ? "held-total" : "held-source");
                         context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
                         context.Response.Headers.RetryAfter = seconds.ToString(CultureInfo.InvariantCulture);
                         context.Response.ContentType = "text/plain; charset=utf-8";
@@ -2427,11 +2428,13 @@ public sealed class DarlingMcpHostService : BackgroundService
                        testing only it reported "nothing was presented" about a client that presented
                        a malformed header - collapsing precisely the ambiguity this exists to resolve.
                        None of the three says anything about what the token IS. */
+                    var refusal = DescribeBearerRefusal(authorization);
                     refusals.Report(
                         _logger, "MCP", DarlingRefusalGate.Token, StatusCodes.Status401Unauthorized,
                         remote,
-                        DescribeBearerRefusal(authorization),
-                        now);
+                        refusal,
+                        now,
+                        state: refusal);
                     context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                     context.Response.Headers.WWWAuthenticate = "Bearer";
                     return;

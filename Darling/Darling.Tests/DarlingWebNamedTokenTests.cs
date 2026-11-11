@@ -105,6 +105,7 @@ public sealed class DarlingWebNamedTokenTests
     [InlineData("web")]
     [InlineData("MCP")]
     [InlineData("unclaimed")]
+    [InlineData("Legacy-Token")]
     [InlineData("Invalid")]
     [InlineData("cli")]
     [InlineData("Viewer")]

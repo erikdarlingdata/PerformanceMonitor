@@ -71,10 +71,15 @@ internal static class InvestigationToolCore
     /// <summary>The agent a submit refusal is journaled under when its claim_id resolves to no claim holder.</summary>
     internal const string UnclaimedAgent = "unclaimed";
 
-    /// <summary>The two names a refusal row is journaled under when no agent made the call: <see cref="InvestigationRules.InvalidAgentId"/> (an
-    /// agent_id that was refused) and <see cref="UnclaimedAgent"/> (a claim_id no claim holds). An agent or a token carrying either name would make
-    /// its own rows read as those placeholders, so both apps refuse them (#8611; Darling's token names and legacy-token agent_id, Lite's claim).</summary>
-    internal static readonly string[] ReservedAgentIds = { InvestigationRules.InvalidAgentId, UnclaimedAgent };
+    /// <summary>The agent a write through the legacy single token is journaled under when it names no claim (Darling's direct mute, as
+    /// <c>agent:legacy-token</c>).</summary>
+    internal const string LegacyTokenAgent = "legacy-token";
+
+    /// <summary>The three names a journal row is written under when no agent made the call: <see cref="InvestigationRules.InvalidAgentId"/> (an
+    /// agent_id that was refused), <see cref="UnclaimedAgent"/> (a claim_id no claim holds) and <see cref="LegacyTokenAgent"/> (a write through the
+    /// legacy token with no claim). An agent or a token carrying any of them would make its own rows read as those placeholders, so both apps refuse
+    /// them (#8611; Darling's token names and legacy-token agent_id, Lite's claim).</summary>
+    internal static readonly string[] ReservedAgentIds = { InvestigationRules.InvalidAgentId, UnclaimedAgent, LegacyTokenAgent };
 
     /// <summary>True when <paramref name="agentId"/> is one of <see cref="ReservedAgentIds"/>, compared case-insensitively.</summary>
     internal static bool IsReservedAgentId(string? agentId) =>

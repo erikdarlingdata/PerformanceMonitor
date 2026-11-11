@@ -194,10 +194,11 @@ public sealed class McpHostService : BackgroundService
             var authorization = context.Request.Headers.Authorization.ToString();
             if (!McpTokenStore.IsAuthorized(authorization, expected))
             {
-                if (refusals.TryLog(clock(), out var held))
+                var state = DescribeBearerRefusal(authorization);
+                if (refusals.TryLog(clock(), state, out var held))
                 {
-                    write("MCP refused a request (HTTP 401): the access token gate rejected it, " + DescribeBearerRefusal(authorization)
-                        + (held > 0 ? $". {held} further refusal(s) were not logged in the last {(int)McpTokenRefusalLog.DefaultWindow.TotalMinutes} minute(s)." : "."));
+                    write("MCP refused a request (HTTP 401): the access token gate rejected it, " + state
+                        + (held > 0 ? $". {held} further refusal(s) like this were not logged in the {(int)McpTokenRefusalLog.DefaultWindow.TotalMinutes} minute(s) after the previous line." : "."));
                 }
 
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
