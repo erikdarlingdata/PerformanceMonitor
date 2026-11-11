@@ -28,7 +28,7 @@ public sealed class ViewerRefreshLanesTests
         var fleetStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var serverStarted = 0;
 
-        var fleet = lanes.RunAsync(() => serverSelected, async () =>
+        var fleet = lanes.RunLaneAsync(() => serverSelected, async () =>
         {
             fleetStarted.SetResult();
             await fleetRelease.Task;
@@ -37,7 +37,7 @@ public sealed class ViewerRefreshLanesTests
 
         /* The reader clicks a server tab while the Overview read is still out. */
         serverSelected = true;
-        var server = lanes.RunAsync(() => serverSelected, () =>
+        var server = lanes.RunLaneAsync(() => serverSelected, () =>
         {
             Interlocked.Increment(ref serverStarted);
             return Task.CompletedTask;
@@ -61,7 +61,7 @@ public sealed class ViewerRefreshLanesTests
         var serverStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var fleetLoads = 0;
 
-        var server = lanes.RunAsync(() => serverSelected, async () =>
+        var server = lanes.RunLaneAsync(() => serverSelected, async () =>
         {
             serverStarted.SetResult();
             await serverRelease.Task;
@@ -69,7 +69,7 @@ public sealed class ViewerRefreshLanesTests
         await serverStarted.Task;
 
         serverSelected = false;
-        var fleet = lanes.RunAsync(() => serverSelected, () =>
+        var fleet = lanes.RunLaneAsync(() => serverSelected, () =>
         {
             Interlocked.Increment(ref fleetLoads);
             return Task.CompletedTask;
@@ -90,7 +90,7 @@ public sealed class ViewerRefreshLanesTests
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var loads = 0;
 
-        var first = lanes.RunAsync(() => false, async () =>
+        var first = lanes.RunLaneAsync(() => false, async () =>
         {
             if (Interlocked.Increment(ref loads) == 1)
             {
@@ -101,7 +101,7 @@ public sealed class ViewerRefreshLanesTests
         await started.Task;
 
         /* A second fleet trigger bounces: it returns at once and starts no load of its own. */
-        await lanes.RunAsync(() => false, () =>
+        await lanes.RunLaneAsync(() => false, () =>
         {
             Interlocked.Increment(ref loads);
             return Task.CompletedTask;
@@ -122,7 +122,7 @@ public sealed class ViewerRefreshLanesTests
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var loads = 0;
 
-        var first = lanes.RunAsync(() => serverSelected, async () =>
+        var first = lanes.RunLaneAsync(() => serverSelected, async () =>
         {
             Interlocked.Increment(ref loads);
             started.SetResult();
@@ -131,7 +131,7 @@ public sealed class ViewerRefreshLanesTests
         await started.Task;
 
         /* A second server-tab trigger queues a request, then the reader moves to a fleet tab before the load ends. */
-        await lanes.RunAsync(() => serverSelected, () => Task.CompletedTask);
+        await lanes.RunLaneAsync(() => serverSelected, () => Task.CompletedTask);
         serverSelected = false;
         release.SetResult();
         await first;

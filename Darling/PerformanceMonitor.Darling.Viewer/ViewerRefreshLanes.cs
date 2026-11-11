@@ -22,10 +22,16 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 internal sealed class ViewerRefreshLanes
 {
-    private bool _fleetInFlight;
-    private bool _fleetRequested;
-    private bool _serverInFlight;
-    private bool _serverRequested;
+    /// <summary>One lane's guard. The fields keep the leading underscore so ViewerFleetTimerGuardTests, which finds a single-flight guard by its
+    /// shape (tested, claimed and bailed out of before the first await, released in a finally), reads this as the guard it is.</summary>
+    private sealed class Lane
+    {
+        public bool _inFlight;
+        public bool _requested;
+    }
+
+    private readonly Lane _fleet = new();
+    private readonly Lane _server = new();
 
     /// <summary>
     /// Runs <paramref name="load"/> for the tab on screen unless a load is already running in the same lane, in which case the running
@@ -33,59 +39,32 @@ internal sealed class ViewerRefreshLanes
     /// a pass that finds the other lane's tab on screen does nothing, because that tab's own trigger already started or queued its load
     /// in its own lane.
     /// </summary>
-    public async Task RunAsync(Func<bool> serverTabSelected, Func<Task> load)
+    public async Task RunLaneAsync(Func<bool> serverTabSelected, Func<Task> load)
     {
         var server = serverTabSelected();
-        if (InFlight(server))
+        var lane = server ? _server : _fleet;
+        if (lane._inFlight)
         {
-            SetRequested(server, true);
+            lane._requested = true;
             return;
         }
 
-        SetInFlight(server, true);
+        lane._inFlight = true;
         try
         {
             do
             {
-                SetRequested(server, false);
+                lane._requested = false;
                 if (serverTabSelected() == server)
                 {
                     await load();
                 }
             }
-            while (Requested(server));
+            while (lane._requested);
         }
         finally
         {
-            SetInFlight(server, false);
-        }
-    }
-
-    private bool InFlight(bool server) => server ? _serverInFlight : _fleetInFlight;
-
-    private bool Requested(bool server) => server ? _serverRequested : _fleetRequested;
-
-    private void SetInFlight(bool server, bool value)
-    {
-        if (server)
-        {
-            _serverInFlight = value;
-        }
-        else
-        {
-            _fleetInFlight = value;
-        }
-    }
-
-    private void SetRequested(bool server, bool value)
-    {
-        if (server)
-        {
-            _serverRequested = value;
-        }
-        else
-        {
-            _fleetRequested = value;
+            lane._inFlight = false;
         }
     }
 }

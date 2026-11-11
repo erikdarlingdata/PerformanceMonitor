@@ -1313,7 +1313,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        await _refreshLanes.RunAsync(() => MainTabs.SelectedItem is TabItem { Content: ViewerServerTab }, LoadVisibleTabAsync);
+        await _refreshLanes.RunLaneAsync(() => MainTabs.SelectedItem is TabItem { Content: ViewerServerTab }, LoadVisibleTabAsync);
     }
 
     private async Task LoadVisibleTabAsync()
