@@ -2851,6 +2851,8 @@ public sealed partial class DarlingWorker
             var backfilled = await TimescaleSupport.BackfillBaselineAggregatesAsync(connection, _logger, stoppingToken);
             /* #8549: the daily wait totals, on the same connection and the same off-the-start-path run. */
             await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
+            /* #8549: the oldest-run rollup under the Job History note, the same way. */
+            await TimescaleSupport.BackfillJobHistoryOldestDailyAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
             if (backfilled > 0)
             {
                 _logger.LogInformation(

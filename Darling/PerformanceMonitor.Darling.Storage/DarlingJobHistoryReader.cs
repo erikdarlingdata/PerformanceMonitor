@@ -160,6 +160,22 @@ public static class DarlingJobHistoryReader
     /// <summary>The job-history statement's text scoped to one server.</summary>
     public static readonly string ServerSql = BuildJobHistorySql(scopedToServer: true);
 
+    /// <summary>How far back from the store's clock the narrow-first read looks (#8549).</summary>
+    public static readonly TimeSpan NarrowReadSpan = TimeSpan.FromDays(2);
+
+    /// <summary>The shortest window (<paramref name="sinceUtc"/> to now) that gets the narrow-first read (#8549). A seeded store with
+    /// compressed chunks measured it slower than the single read for a window under about ten days, where the single read decompresses
+    /// at most a day or two of chunks, and faster from ten days on, where it decompresses a chunk per server per day.</summary>
+    public static readonly TimeSpan NarrowReadMinWindow = TimeSpan.FromDays(10);
+
+    /// <summary>
+    /// Whether a read of the window starting at <paramref name="sinceUtc"/> takes <see cref="BuildJobHistorySql"/>'s narrow-first
+    /// shape (#8549): a window of at least <see cref="NarrowReadMinWindow"/> that has no end instant (a range that ended in the past
+    /// finds nothing in the recent days the narrow read looks at). Either shape returns the same rows; this only picks the faster one.
+    /// </summary>
+    public static bool UsesNarrowFirstRead(DateTime sinceUtc, JobHistoryFilter? filter) =>
+        filter?.UntilUtc is null && DateTime.UtcNow - sinceUtc >= NarrowReadMinWindow;
+
     /// <summary>
     /// Reads the newest <paramref name="limit"/> runs at or after <paramref name="sinceUtc"/> (naive UTC), for one
     /// server or, with no <paramref name="serverId"/>, all of them, newest first. The window is exact after the
@@ -169,7 +185,7 @@ public static class DarlingJobHistoryReader
         NpgsqlDataSource dataSource, DateTime sinceUtc, int? serverId, int limit, int commandTimeoutSeconds,
         JobHistoryFilter? filter = null, CancellationToken cancellationToken = default)
     {
-        var sql = BuildJobHistorySql(serverId.HasValue, filter);
+        var sql = BuildJobHistorySql(serverId.HasValue, filter, narrowFirst: UsesNarrowFirstRead(sinceUtc, filter));
         var clocks = await DarlingServerClocksReader.GetAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
 
         var rows = new List<DarlingJobHistoryRow>();
@@ -387,8 +403,15 @@ ORDER BY jh.category_name";
     /// no row and a job with no success lands on a NULL last success and a false long-running flag, as before. The values, the window
     /// predicates, the end-instant clause and the LEFT JOIN are unchanged, so the rows are identical.
     /// </para>
+    /// <para>
+    /// <b>The narrow-first shape (#8549).</b> With <paramref name="narrowFirst"/> the per-server newest-<c>limit</c> read first looks
+    /// only at the last <see cref="NarrowReadSpan"/> of collections and keeps that answer for a server only when it is provably the
+    /// whole-window answer, so a long window no longer decompresses every compressed chunk once per server. See
+    /// <see cref="BuildNarrowFirstTopByServerSql"/>. The rows are identical either way; <see cref="GetAsync"/> picks the shape by
+    /// the window's length (<see cref="UsesNarrowFirstRead"/>), and the default shape's text is unchanged.
+    /// </para>
     /// </summary>
-    public static string BuildJobHistorySql(bool scopedToServer, JobHistoryFilter? filter = null)
+    public static string BuildJobHistorySql(bool scopedToServer, JobHistoryFilter? filter = null, bool narrowFirst = false)
     {
         var serverFilter = scopedToServer ? "AND   jh.server_id = $2" : string.Empty;
         var floorParam = scopedToServer ? "$3" : "$2";
@@ -404,33 +427,8 @@ ORDER BY jh.category_name";
         var filterSql = filter?.Clauses(firstFilterParam) ?? string.Empty;
         var statsUntilSql = filter?.StatsClause(firstFilterParam) ?? string.Empty;
         var baseCutSql = filter is null ? new JobHistoryFilter().BaseCutSql(limitParam) : filter.BaseCutSql(limitParam);
-
-        return $@"
-WITH svr AS (
-    SELECT DISTINCT ON (server_id)
-        server_id,
-        utc_offset_minutes
-    FROM server_properties
-    WHERE utc_offset_minutes IS NOT NULL
-    ORDER BY server_id, collection_time DESC
-),
-active_servers AS (
-    SELECT DISTINCT jh.server_id
-    FROM job_history AS jh
-    WHERE jh.collection_time >= {floorParam}
-    {serverFilter}
-    {allowedServerSql}
-),
-server_offsets AS (
-    SELECT
-        a.server_id,
-        reg.display_name,
-        COALESCE(svr.utc_offset_minutes, 0) AS offset_minutes
-    FROM active_servers AS a
-    LEFT JOIN svr ON svr.server_id = a.server_id
-    LEFT JOIN servers AS reg ON reg.server_id = a.server_id
-),
-top_by_server AS (
+        var offsetKnownSql = narrowFirst ? ", svr.utc_offset_minutes IS NOT NULL AS offset_known" : string.Empty;
+        var topByServerSql = narrowFirst ? BuildNarrowFirstTopByServerSql(floorParam, limitParam, filterSql) : $@"top_by_server AS (
     SELECT
         so.server_id,
         COALESCE(so.display_name, top.server_name) AS server_name,
@@ -472,7 +470,35 @@ top_by_server AS (
         ORDER BY jh.run_datetime DESC, jh.instance_id DESC
         LIMIT {limitParam}
     ) AS top
+),";
+
+
+        return $@"
+WITH svr AS (
+    SELECT DISTINCT ON (server_id)
+        server_id,
+        utc_offset_minutes
+    FROM server_properties
+    WHERE utc_offset_minutes IS NOT NULL
+    ORDER BY server_id, collection_time DESC
 ),
+active_servers AS (
+    SELECT DISTINCT jh.server_id
+    FROM job_history AS jh
+    WHERE jh.collection_time >= {floorParam}
+    {serverFilter}
+    {allowedServerSql}
+),
+server_offsets AS (
+    SELECT
+        a.server_id,
+        reg.display_name,
+        COALESCE(svr.utc_offset_minutes, 0) AS offset_minutes{offsetKnownSql}
+    FROM active_servers AS a
+    LEFT JOIN svr ON svr.server_id = a.server_id
+    LEFT JOIN servers AS reg ON reg.server_id = a.server_id
+),
+{topByServerSql}
 base AS (
 {baseCutSql}
 ),
@@ -530,6 +556,140 @@ LEFT JOIN job_stats
     ON  job_stats.server_id = base.server_id
     AND job_stats.job_id = base.job_id
 ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
+    }
+
+    /// <summary>
+    /// The <c>bounds</c>, <c>narrow</c>, <c>narrow_state</c> and <c>top_by_server</c> CTEs of <see cref="BuildJobHistorySql"/>'s
+    /// narrow-first shape (#8549). It returns the same <c>top_by_server</c> rows as the single read, so the rest of the statement is
+    /// unchanged.
+    /// <para>
+    /// <b>Why.</b> The single read takes each server's newest <c>limit</c> rows over the whole window. Past the compression boundary a
+    /// chunk is compressed (segmented by <c>server_id</c>, ordered by time, not by <c>run_datetime</c>), so that read decompresses and
+    /// sorts every compressed chunk of the window once per server. On a field store at a 30-day window that was about 263 ms per server
+    /// (13.6 s for the fleet); on a 42-server store of about 5 million rows it was 3.1 s against 0.4 s here.
+    /// </para>
+    /// <para>
+    /// <b>What it does.</b> <c>narrow</c> reads each server's newest <c>limit</c> rows from the last <see cref="NarrowReadSpan"/>
+    /// of <c>collection_time</c> only (the store's clock, so the planner excludes the older chunks). <c>narrow_state</c> keeps that
+    /// answer only when it is provably the same as the full read: the server filled its <c>limit</c> there, and the oldest of those
+    /// rows ran later than any row collected before the narrow window could have. A row collected before <c>narrow_start</c>
+    /// ran before it was collected, in the server's own clock, so its <c>run_datetime</c> is below <c>narrow_start</c> plus the
+    /// server's UTC offset (14 hours when none is stored yet, the largest offset there is) plus the hour the other reads here widen by for a
+    /// DST change. A late collection that holds old runs fails that test for its server, as does a quiet server, and each takes the
+    /// full read instead. The full read is driven from the servers that need it, so a server that filled its limit costs nothing there.
+    /// The bound is strict, so the tie-break never has to be compared across the two reads.
+    /// </para>
+    /// </summary>
+    internal static string BuildNarrowFirstTopByServerSql(string floorParam, string limitParam, string filterSql)
+    {
+        const string columns = @"
+            jh.server_name,
+            jh.instance_id,
+            jh.job_id,
+            jh.job_name,
+            jh.job_enabled,
+            jh.category_name,
+            jh.step_id,
+            jh.step_name,
+            jh.run_status,
+            jh.run_status_desc,
+            jh.run_datetime,
+            jh.run_duration_seconds,
+            jh.retries_attempted,
+            jh.message";
+        var narrowStartSql = $"now() AT TIME ZONE 'UTC' - interval '{(int)NarrowReadSpan.TotalHours} hours'";
+
+        return $@"bounds AS (
+    SELECT GREATEST({floorParam}::timestamp, {narrowStartSql}) AS narrow_start
+),
+narrow AS MATERIALIZED (
+    SELECT
+        so.server_id,
+        so.display_name,
+        so.offset_minutes,
+        top.*
+    FROM server_offsets AS so
+    CROSS JOIN LATERAL (
+        SELECT{columns}
+        FROM job_history AS jh
+        WHERE jh.server_id = so.server_id
+        AND   jh.collection_time >= {floorParam}
+        AND   jh.collection_time >= {narrowStartSql}
+        AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes) - interval '1 hour'{filterSql}
+        ORDER BY jh.run_datetime DESC, jh.instance_id DESC
+        LIMIT {limitParam}
+    ) AS top
+),
+narrow_state AS (
+    SELECT
+        so.server_id,
+        so.display_name,
+        so.offset_minutes,
+        (
+            b.narrow_start > {floorParam}::timestamp
+            AND NOT COALESCE(
+                c.row_count >= {limitParam}
+                AND c.oldest_run >= b.narrow_start + make_interval(mins => CASE WHEN so.offset_known THEN so.offset_minutes ELSE 840 END + 60),
+                false)
+        ) AS needs_full
+    FROM server_offsets AS so
+    CROSS JOIN bounds AS b
+    LEFT JOIN (
+        SELECT n.server_id, count(*) AS row_count, min(n.run_datetime) AS oldest_run
+        FROM narrow AS n
+        GROUP BY n.server_id
+    ) AS c ON c.server_id = so.server_id
+),
+top_by_server AS (
+    SELECT
+        n.server_id,
+        COALESCE(n.display_name, n.server_name) AS server_name,
+        n.instance_id,
+        n.job_id,
+        n.job_name,
+        n.job_enabled,
+        n.category_name,
+        n.step_id,
+        n.step_name,
+        n.run_status,
+        n.run_status_desc,
+        n.run_datetime AS run_datetime_local,
+        n.run_datetime - make_interval(mins => n.offset_minutes) AS approx_run_utc,
+        n.run_duration_seconds,
+        n.retries_attempted,
+        n.message
+    FROM narrow AS n
+    JOIN narrow_state AS s ON s.server_id = n.server_id AND NOT s.needs_full
+    UNION ALL
+    SELECT
+        so.server_id,
+        COALESCE(so.display_name, top.server_name),
+        top.instance_id,
+        top.job_id,
+        top.job_name,
+        top.job_enabled,
+        top.category_name,
+        top.step_id,
+        top.step_name,
+        top.run_status,
+        top.run_status_desc,
+        top.run_datetime,
+        top.run_datetime - make_interval(mins => so.offset_minutes),
+        top.run_duration_seconds,
+        top.retries_attempted,
+        top.message
+    FROM narrow_state AS so
+    CROSS JOIN LATERAL (
+        SELECT{columns}
+        FROM job_history AS jh
+        WHERE jh.server_id = so.server_id
+        AND   jh.collection_time >= {floorParam}
+        AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes) - interval '1 hour'{filterSql}
+        ORDER BY jh.run_datetime DESC, jh.instance_id DESC
+        LIMIT {limitParam}
+    ) AS top
+    WHERE so.needs_full
+),";
     }
 
     /// <summary>Maps one row of <see cref="BuildJobHistorySql"/>'s result set. The run time and the last

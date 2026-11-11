@@ -1041,14 +1041,20 @@ public sealed partial class ViewerDataService
     internal async Task<List<TimeSliceBucket>> ReadQueryStatsSlicerAsync(
         string sql, int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
-        var items = new List<TimeSliceBucket>();
-
         await using var command = _dataSource.CreateCommand(sql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = SlicerBuckets.MinutesFor(startUtc, endUtc) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await ReadSlicerBucketsAsync(reader, cancellationToken);
+    }
+
+    /// <summary>The 7-column slicer rows (bucket, count, cpu_ms, elapsed_ms, reads, writes, physical_reads) as buckets. Shared by
+    /// <see cref="ReadQueryStatsSlicerAsync"/> and the Query Store slicer's interval-table read (#8549).</summary>
+    internal static async Task<List<TimeSliceBucket>> ReadSlicerBucketsAsync(System.Data.Common.DbDataReader reader, CancellationToken cancellationToken)
+    {
+        var items = new List<TimeSliceBucket>();
         while (await reader.ReadAsync(cancellationToken))
         {
             var cpu = reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2));

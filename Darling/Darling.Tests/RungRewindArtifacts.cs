@@ -785,6 +785,8 @@ DROP TABLE IF EXISTS collect.schema_capture_passes;"),
             DROP FUNCTION IF EXISTS config.harden_web_access_advanced();
             DROP TABLE IF EXISTS config.web_access_advanced;
             """),
+        // V263 (#8549): the oldest-run rollup under the Job History note. The probe's sentinel is the relation itself, so the rewind drops whichever shape stands and a re-run of V263 or the ensure sweep makes it again. Safe on a store that never had it.
+        new(263, "hasJobHistoryOldestDaily", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.JobHistoryOldestDailyView)),
     ];
 
     /// <summary>
