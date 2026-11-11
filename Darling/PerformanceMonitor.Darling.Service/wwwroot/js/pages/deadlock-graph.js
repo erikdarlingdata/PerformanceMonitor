@@ -102,7 +102,7 @@ export function deadlockGraphCell(server, row) {
   }
   if (graph.too_large) {
     const n = Number(graph.process_count) || 0;
-    return document.createTextNode(n + " processes — too many to draw here; use Save XML or the desktop viewer.");
+    return document.createTextNode(n + " processes: too many to draw here. Use Save XML or the desktop viewer.");
   }
 
   const processes = Array.isArray(graph.processes) ? graph.processes : [];

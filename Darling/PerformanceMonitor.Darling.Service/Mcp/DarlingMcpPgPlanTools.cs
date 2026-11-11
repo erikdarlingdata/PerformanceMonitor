@@ -341,7 +341,9 @@ public sealed class DarlingMcpPgPlanTools
         return McpHelpers.Status(
             "precondition",
             "This server cannot capture execution plans yet, so an empty result here says nothing about "
-            + "the query. Unsatisfied precondition(s), from pg_plan_capture_readiness: "
+            + "the query. "
+            + (unmet.Count == 1 ? "Unsatisfied precondition" : "Unsatisfied preconditions")
+            + ", from pg_plan_capture_readiness: "
             + string.Join(" | ", unmet)
             + ", the pg_plan_capture_readiness collector stores the full detail and the remedy "
             + "beside each observation, and get_pg_plan_capture_readiness returns them: every facet, "
