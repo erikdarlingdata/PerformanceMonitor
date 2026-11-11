@@ -1251,6 +1251,13 @@ public sealed class CollectorContext
     /// would be invisible there.
     /// </summary>
     public int QueryStoreIntervalMisses { get; set; }
+
+    /// <summary>
+    /// #8541: databases this cycle's <c>query_store_hints</c> pass skipped because their Query Store is a readable secondary's
+    /// (<c>readonly_reason</c> bit 8). Counted per database by the collector's readers and read once per cycle, after the writes,
+    /// to compose the collection_log note of a run that captured no database.
+    /// </summary>
+    public int QueryStoreSecondaryDatabases { get; set; }
 }
 
 /// <summary>

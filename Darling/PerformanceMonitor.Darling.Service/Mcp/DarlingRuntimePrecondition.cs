@@ -126,7 +126,7 @@ SELECT (
     /// Store, and a server-wide answer would hide an off database behind a healthy sibling.</para>
     /// </summary>
     public const string LatestQueryStoreStatesSql = @"
-SELECT database_name, actual_state, capture_time, interval_length_minutes
+SELECT database_name, actual_state, capture_time, interval_length_minutes, readonly_reason::integer
 FROM v_query_store_health
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)
@@ -290,7 +290,7 @@ ORDER BY lower(database_name), database_name";
         }
 
         var message = CollectorRuntimePrecondition.QueryStoreDisabledMessage(serverName, states, observedUtc);
-        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
+        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.QueryStoreDisabledStatusWord(states), message);
     }
 
     /// <summary>
@@ -497,7 +497,8 @@ ORDER BY lower(database_name), database_name";
             states.Add(new CollectorRuntimePrecondition.QueryStoreDatabaseState(
                 reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
                 reader.IsDBNull(1) ? null : reader.GetString(1),
-                reader.IsDBNull(3) ? null : reader.GetInt64(3)));
+                reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                reader.IsDBNull(4) ? null : reader.GetInt32(4)));
 
             observedUtc ??= reader.IsDBNull(2)
                 ? null

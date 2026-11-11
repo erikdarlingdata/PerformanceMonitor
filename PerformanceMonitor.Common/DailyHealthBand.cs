@@ -615,8 +615,9 @@ namespace PerformanceMonitor.Common
         /// <summary>The deadlock line — like <see cref="AppendCount"/> but appends the per-hour rate the
         /// band evaluated when the window is rateable, e.g. "120 deadlocks (5.0/hr)" — the card reason's own
         /// format (#3368/#3525): the count is the countable fact, the rate is the banded one, and a line
-        /// that shows only the count cannot say which tier was crossed. An unrateable window prints the
-        /// count alone, which is exactly what the band had to go on.</summary>
+        /// that shows only the count cannot say which tier was crossed. The rate is written by
+        /// <see cref="RatePerHourText"/>, so one deadlock in a day reads "1 deadlock (&lt;0.1/hr)". An
+        /// unrateable window prints the count alone, which is exactly what the band had to go on.</summary>
         private static void AppendDeadlocks(List<string> lines, in DailyHealthSignals signals)
         {
             if (signals.Deadlocks <= 0)
@@ -626,7 +627,7 @@ namespace PerformanceMonitor.Common
             var line = signals.Deadlocks.ToString("N0", CultureInfo.InvariantCulture) + " " + noun;
             var rate = ServerHealthClassifier.DeadlockRatePerHour(signals.Deadlocks, signals.Window);
             if (rate.HasValue)
-                line += " (" + rate.Value.ToString("0.0", CultureInfo.InvariantCulture) + "/hr)";
+                line += " (" + RatePerHourText(rate.Value) + "/hr)";
             lines.Add(line);
         }
 
@@ -669,7 +670,7 @@ namespace PerformanceMonitor.Common
             var qualifiers = new List<string>(2);
             var rate = ServerHealthClassifier.BlockingRatePerHour(signals.BlockingReports ?? count, signals.Window);
             if (rate.HasValue)
-                qualifiers.Add(rate.Value.ToString("0.0", CultureInfo.InvariantCulture)
+                qualifiers.Add(RatePerHourText(rate.Value)
                     + (signals.BlockingReports.HasValue ? " reports/hr" : " waits/hr"));
             if (peakBlockMs > 0)
                 qualifiers.Add("peak block " + FormatDurationMs(peakBlockMs));
@@ -680,6 +681,17 @@ namespace PerformanceMonitor.Common
                 line += " (" + string.Join(", ", qualifiers) + ")";
 
             lines.Add(line);
+        }
+
+        /// <summary>A per-hour rate to one decimal place, in the invariant convention. The count each caller prints
+        /// beside it reads the same on every desktop: an invariant "N0", or a whole number with no grouping. A positive
+        /// rate too small for one decimal place to show prints "&lt;0.1" (#8532): the count beside it says something
+        /// happened, and "0.0" would say nothing did. A sentence that drops a whole rate's ".0" passes its own
+        /// <paramref name="format"/> ("0.#") and gets the same rule.</summary>
+        public static string RatePerHourText(double ratePerHour, string format = "0.0")
+        {
+            var text = ratePerHour.ToString(format, CultureInfo.InvariantCulture);
+            return ratePerHour > 0 && text == 0d.ToString(format, CultureInfo.InvariantCulture) ? "<0.1" : text;
         }
 
         /// <summary>Formats a millisecond duration compactly ("800 ms" / "12.5 s" / "3.2 min").</summary>
