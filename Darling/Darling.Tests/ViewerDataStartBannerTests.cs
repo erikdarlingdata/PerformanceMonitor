@@ -93,7 +93,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
 
         Assert.Equal(1, Matches(tab, @"var dataStartTask = _dataService\.GetQuerySnapshotsDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
         Assert.Equal(1, Matches(tab,
-            @"UpdateTruncationBanner\(QuerySnapshotsTruncationBanner,\s*await DataStartOrNullAsync\(dataStartTask,\s*""Active Queries""\),\s*startUtc\);\s*await LoadActiveQueriesSlicerAsync\(startUtc,\s*endUtc\);"));
+            @"UpdateTruncationBanner\(QuerySnapshotsTruncationBanner,\s*await DataStartOrNullAsync\(dataStartTask,\s*""Active Queries""\),\s*startUtc\);\s*await LoadActiveQueriesSlicerAsync\(startUtc,\s*endUtc(?:,\s*timer)?\);"));
     }
 
     [Fact]

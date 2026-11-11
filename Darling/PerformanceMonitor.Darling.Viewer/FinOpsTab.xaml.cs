@@ -292,16 +292,28 @@ public partial class FinOpsTab : UserControl
     }
 
     /// <summary>Runs the active sub-tab's loader (FinOpsTab.Loaders.cs) with the status-bar error surfacing the per-server tab's LoadInnerTabAsync uses.</summary>
-    private async Task LoadActiveSubTabGuardedAsync()
+    private async Task LoadActiveSubTabGuardedAsync() => await LoadActiveSubTabGuardedAsync(new ViewerLoadTimer(), logSlowLoad: true);
+
+    /// <summary>#8549: the guarded load on a clock the caller may own (a test reads its phases). The sub-tab loads wrote no SlowLoad line at all, so a
+    /// slow FinOps open names the read or panel that was slow.</summary>
+    internal async Task LoadActiveSubTabGuardedAsync(ViewerLoadTimer timer, bool logSlowLoad)
     {
         try
         {
-            await LoadFinOpsAsync();
+            await LoadFinOpsAsync(timer);
             StatusChanged?.Invoke($"{_server.DisplayName}: refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
             StatusChanged?.Invoke($"refresh failed: {ex.Message}");
+        }
+        finally
+        {
+            if (logSlowLoad)
+            {
+                var header = (FinOpsSubTabControl.SelectedItem as TabItem)?.Header as string;
+                timer.FinishAndLog(string.IsNullOrWhiteSpace(header) ? "FinOps" : "FinOps > " + header.Trim());
+            }
         }
     }
 

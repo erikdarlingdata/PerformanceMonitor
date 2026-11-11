@@ -462,9 +462,11 @@ public partial class ViewerServerTab : UserControl
         return offline ? $"{collected}. {FleetRollup.OfflineNote}" : collected;
     }
 
-    private async Task LoadInnerTabAsync(int tabIndex)
+    /// <param name="tabIndex">The inner tab to load.</param>
+    /// <param name="loadTimer">The load's phase clock; null starts a new one. A test hands in its own to read the phases the load booked (#8549).</param>
+    internal async Task LoadInnerTabAsync(int tabIndex, ViewerLoadTimer? loadTimer = null)
     {
-        var timer = new ViewerLoadTimer();
+        var timer = loadTimer ?? new ViewerLoadTimer();
         try
         {
             /* #6155: a PostgreSQL panel's healthy sentence needs to know whether the server is offline before it is written. */
@@ -479,7 +481,7 @@ public partial class ViewerServerTab : UserControl
                     await LoadWaitStatsAsync();
                     break;
                 case LatchSpinlockInnerTabIndex:
-                    await LoadLatchSpinlockAsync();
+                    await LoadLatchSpinlockAsync(timer);
                     break;
                 case QueriesInnerTabIndex:
                     await LoadQueriesAsync(timer);
@@ -493,7 +495,7 @@ public partial class ViewerServerTab : UserControl
                     await LoadBlockingAsync();
                     break;
                 case PerfmonInnerTabIndex:
-                    await LoadPerfmonAsync();
+                    await LoadPerfmonAsync(timer);
                     break;
                 case SessionStatsInnerTabIndex:
                     await LoadSessionStatsAsync();
@@ -508,10 +510,10 @@ public partial class ViewerServerTab : UserControl
                     await LoadConfigChangesAsync();
                     break;
                 case DailySummaryInnerTabIndex:
-                    await LoadDailySummaryAsync();
+                    await LoadDailySummaryAsync(timer);
                     break;
                 case HealthInnerTabIndex:
-                    await LoadHealthAsync();
+                    await LoadHealthAsync(timer);
                     break;
                 case CpuInnerTabIndex:
                     await LoadCpuAsync();
@@ -523,7 +525,7 @@ public partial class ViewerServerTab : UserControl
                     await LoadTempDbAsync();
                     break;
                 case FileIoInnerTabIndex:
-                    await LoadFileIoAsync();
+                    await LoadFileIoAsync(timer);
                     break;
                 case SystemEventsInnerTabIndex:
                     await LoadSystemEventsAsync();
@@ -561,11 +563,16 @@ public partial class ViewerServerTab : UserControl
 
                 case OverviewInnerTabIndex:
                 default:
-                    await LoadOverviewChartsAsync();
+                    await LoadOverviewChartsAsync(timer);
                     break;
             }
 
-            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+            /* #8549: a refresh queued behind this one reads the window the picker names now, and this load read the one before it,
+               so it does not stamp "refreshed" over a header that already says the new range. The queued load stamps. */
+            if (ViewerRangeRefreshStatus.StampsRefreshed(_refreshRequested))
+            {
+                StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+            }
         }
         catch (Exception ex)
         {
@@ -591,13 +598,13 @@ public partial class ViewerServerTab : UserControl
     internal static string InnerTabLoadName(int tabIndex, object? header) =>
         header is string text && !string.IsNullOrWhiteSpace(text) ? text.Trim() : $"inner tab {tabIndex}";
 
-    private async Task LoadOverviewChartsAsync()
+    private async Task LoadOverviewChartsAsync(ViewerLoadTimer? timer = null)
     {
         /* The lanes control reads its own six feeds + four baselines concurrently over the toolbar's
            window: hours-back for a preset, or the custom From/To when the user picked a custom range
            (the lanes bound their own X-axis to it). Replaces wave-4's CPU-trend + wait-category charts. */
         var (fromDate, toDate) = GetOverviewCustomRange();
-        var failedReads = await OverviewLanes.RefreshAsync(GetWindowHoursBack(), fromDate, toDate);
+        var failedReads = await OverviewLanes.RefreshAsync(GetWindowHoursBack(), fromDate, toDate, timer);
         /* A lane that did not read is drawn as failed, and the tab is not refreshed: the status line names the reads instead. */
         if (failedReads is not null)
             throw new InvalidOperationException(failedReads);

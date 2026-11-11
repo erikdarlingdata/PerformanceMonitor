@@ -77,7 +77,7 @@ public sealed class ViewerQueryTabLoadTests
     public void EveryInnerTabLoad_IsTimed_AndASlowOneLogsItsPhaseSplit()
     {
         var shell = Source("ViewerServerTab.xaml.cs");
-        Assert.Contains("var timer = new ViewerLoadTimer();", shell, StringComparison.Ordinal);
+        Assert.Contains("var timer = loadTimer ?? new ViewerLoadTimer();", shell, StringComparison.Ordinal);
         Assert.Contains("timer.Finish(", shell, StringComparison.Ordinal);
         Assert.Contains("ViewerLogger.Warn(\"SlowLoad\"", shell, StringComparison.Ordinal);
     }
