@@ -38,7 +38,7 @@
  * list) still refreshes.
  */
 
-import { el, mount, apiGet, apiGetFleet, readTool, localTime, hasInFlightReads, beginPageScope, readErrorCount, isSessionExpired, onSessionExpired, frontDoor, currentStore, routeHash, splitStoreHash, storeHash, storeHeaders, loadingStrip } from "./util.js";
+import { el, mount, apiGet, apiGetFleetShell, setPollRender, readTool, localTime, hasInFlightReads, beginPageScope, readErrorCount, isSessionExpired, onSessionExpired, frontDoor, currentStore, routeHash, splitStoreHash, storeHash, storeHeaders, loadingStrip } from "./util.js";
 import { startFrontDoor as startFrontDoorIn, refreshPicker, rememberStore, frontDoorStores, isKnownStore, locateServer, ambiguousStrip, locateFailureStrip } from "./store-picker.js";
 import { makeScrollReset } from "./scroll-reset.js";
 import { renderFleet } from "./pages/fleet.js";
@@ -391,7 +391,7 @@ let lastStoreFleets = null;
 
 async function refreshStoreSidebar() {
   const list = frontDoorStores();
-  const groups = await Promise.all(list.map(async (s) => ({ store: s, res: await apiGetFleet(s.name) })));
+  const groups = await Promise.all(list.map(async (s) => ({ store: s, res: await apiGetFleetShell(s.name) })));
   lastStoreFleets = groups;
   const own = groups.find((g) => g.store.name === currentStore());
   lastSidebarFleet = own && own.res.kind === "data" ? own.res : null;
@@ -405,7 +405,7 @@ async function refreshSidebar() {
     await refreshStoreSidebar();
     return;
   }
-  const res = await apiGetFleet();
+  const res = await apiGetFleetShell();
   if (res.kind !== "data") {
     mount(serverList, el("div", { class: "muted", style: "padding:0.5rem 1.25rem", text: res.kind === "error" ? "Fleet unavailable" : "" }));
     updateStatusBar(null);
@@ -743,11 +743,14 @@ function markPageRenderStart(routeName, isPoll) {
      settles, like every polled page, not at render start. The editors and #/triage read once or not at all, so they stamp now. */
   if (isNoPollRoute(routeName) && routeName !== "queryTagUsage") {
     pageRendering = false;
+    setPollRender(false);
     pageNextRefreshAt = Infinity;
     notePageUpdated(Date.now());
     return;
   }
   pageRendering = true;
+  /* #8633: a poll's re-render may take the roll-up the sidebar just read (util.js apiGetFleetShell); a navigation never does. */
+  setPollRender(isPoll);
   pageRenderStart = Date.now();
   pageRenderErrorsAtStart = readErrorCount();
   pageNextRefreshAt = Infinity;
@@ -758,6 +761,7 @@ let pageRenderErrorsAtStart = 0;
 
 function settlePageRender(now) {
   pageRendering = false;
+  setPollRender(false);
   pageLastRenderMs = now - pageRenderStart;
   /* The footer says the page is current only when this render's reads settled without an error: a poll that failed keeps the last
      good time, and the red strip on the page is the failure's own notice. */
@@ -778,7 +782,8 @@ function pageIsDue(now) {
 function refreshShell() {
   shellLastRefreshAt = Date.now();
   /* The sidebar and the route() below both read /api/fleet in this same synchronous pass; apiGetFleet hands the
-     second caller the first one's request, so a tick costs the store ONE fleet roll-up, not two (#3895). */
+     second caller the first one's request, so a tick costs the store ONE fleet roll-up, not two (#3895). A page whose poll
+     trails the shell's by a few seconds takes the sidebar's roll-up too, once it has landed (#8633, apiGetFleetShell). */
   if (frontDoor()) refreshPicker();
   refreshSidebar();
   refreshViewList();

@@ -122,7 +122,7 @@ public sealed class ChartWindowDomainTests
     {
         var panels = PanelsJs;
         /* vizLine: width from the descriptor's own hours (windowHours when a fanout injected it, else params.hours). */
-        Assert.Contains("const win = windowFromHours(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours, desc.params && desc.params.as_of);", panels, StringComparison.Ordinal);
+        Assert.Contains("const win = windowFromHours(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours, desc.asOfIgnored ? null : desc.params && desc.params.as_of);", panels, StringComparison.Ordinal);
         Assert.Contains("windowStart: win ? win.windowStart : null,", panels, StringComparison.Ordinal);
         Assert.Contains("windowEnd: win ? win.windowEnd : null,", panels, StringComparison.Ordinal);
         /* The loader hands a narrowed read's kept hours to the renderer as windowHours. */

@@ -88,6 +88,7 @@ globalThis.clearTimeout = (handle) => { timers.delete(handle); };
 const fireDueTimers = () => { for (const [handle, t] of [...timers]) if (t.at <= now) { timers.delete(handle); t.run(); } };
 
 let fetches = 0; let renders = 0; const fetchLog = [];
+let fleetAnswers = false; // #8633: when set, /api/fleet answers with one card (every other read keeps failing)
 let fetchDelayMs = 0; // simulated time a read takes: each fetch holds open until the clock passes this
 let pending = [];
 globalThis.fetch = (url) => {
@@ -95,6 +96,15 @@ globalThis.fetch = (url) => {
      page read, so it is neither counted nor held open by the simulated read time: the page then starts as it always did. */
   if (String(url).split("?")[0] === "/api/session") {
     return Promise.resolve({ ok: true, status: 200, json: async () => ({ can_edit: false }), text: async () => JSON.stringify({ can_edit: false }) });
+  }
+  if (fleetAnswers && String(url).split("?")[0] === "/api/fleet") {
+    fetches++; fetchLog.push(Math.round((now - 1000000) / 1000) + ' ' + url);
+    const body = JSON.stringify({ total_servers: 1, critical_count: 0, warning_count: 0, offline_count: 0, offline_servers: 0, tags: [], worst_servers: [],
+      additional_problem_count: 0, generated_at: "2026-11-11T12:00:00Z", cards: [{ server_id: 1, display_name: "alpha", server_name: "alpha", band: "Healthy",
+      band_label: "Healthy", is_online: true, status: "ok", last_collection: null, tags: [], is_silenced: false, metric_count: 0, measured_metric_count: 0 }] });
+    return new Promise((resolve) => {
+      pending.push({ at: now + fetchDelayMs, done: () => resolve({ ok: true, status: 200, json: async () => JSON.parse(body), text: async () => body }) });
+    });
   }
   fetches++; if (String(url).includes('get_server_summary')) renders++; fetchLog.push(Math.round((now - 1000000) / 1000) + ' ' + url);
   return new Promise((resolve) => {
@@ -336,6 +346,21 @@ out.next5m = await secondsToNextRead("5m");
   out.tickRendersAfter = renders - r0;
   out.tickFleetReadsAfter = fleetReads(log0);
   out.tickRepeatedReads = repeated(log0);
+  fetchDelayMs = 0;
+}
+
+// #8633: an idle Fleet Overview. The page's poll re-render trails the shell's refresh by the length of its last render (its next poll is
+// counted from where that render settled, the shell's from where its refresh began), so the sidebar's /api/fleet had landed before the
+// page's poll asked again: two roll-ups per tick. The page's poll now takes the sidebar's, so each tick reads it once.
+{
+  fleetAnswers = true;
+  fetchDelayMs = 1000; // the roll-up takes 1 s to come back
+  await fresh("1m", "#/fleet");
+  await advance(10); // the first render settles
+  const log0 = fetchLog.length;
+  await advance(130); // two idle ticks
+  out.idleFleetTickReads = fetchLog.slice(log0).filter((l) => l.includes("/api/fleet")).length;
+  fleetAnswers = false;
   fetchDelayMs = 0;
 }
 

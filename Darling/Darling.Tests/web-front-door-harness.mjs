@@ -130,6 +130,65 @@ try {
       await Promise.all([a, b, c]);
       return { calls: calls.map((x) => ({ url: x.url, store: x.headers["X-Darling-Store"] ?? null })) };
     },
+    /* #8633: an idle Fleet Overview tick behind three stores. The sidebar reads every store's roll-up through apiGetFleetShell, and
+       the page's poll re-render reads each one again a few seconds later, after the first has landed. The shipped util.js is
+       driven the way app.js drives it (setPollRender around the page's render), and the /api/fleet requests are counted per store. */
+    fleetTick: async () => {
+      util.setFrontDoor(true);
+      util.setStore("use1");
+      const stores = ["use1", "use2", "use3"];
+      handler = async () => reply(200, fleetBody(["a"]));
+      let clock = 1_000_000;
+      Date.now = () => clock;
+      const perStore = () => Object.fromEntries(stores.map((s) => [s, calls.filter((c) => c.url === "/api/fleet" && c.headers["X-Darling-Store"] === s).length]));
+      const sidebar = () => Promise.all(stores.map((s) => util.apiGetFleetShell(s)));
+      const page = () => Promise.all(stores.map((s) => util.apiGetFleet(s)));
+      const poll = async (read) => { util.setPollRender(true); try { return await read(); } finally { util.setPollRender(false); } };
+
+      const result = {};
+      // two ticks: the sidebar, then 2 s later the page's poll re-render
+      await sidebar(); await settle(); clock += 2000;
+      const firstPage = await poll(page);
+      result.tick1 = perStore();
+      result.pageGotCards = firstPage.every((r) => r.kind === "data" && r.data.cards.length === 1);
+      clock += 58000;
+      await sidebar(); await settle(); clock += 2000;
+      await poll(page);
+      result.tick2 = perStore();
+
+      // a navigation after the tick's sidebar read has landed reads for itself
+      clock += 58000;
+      await sidebar(); await settle(); clock += 2000;
+      const before = perStore();
+      await page();
+      result.navigationAdded = stores.map((s) => perStore()[s] - before[s]);
+
+      // the kept read is taken once: a second poll render (a 15 s page interval) reads again
+      clock += 58000;
+      await sidebar(); await settle(); clock += 2000;
+      await poll(page);
+      const afterFirstPoll = perStore();
+      clock += 15000;
+      await poll(page);
+      result.secondPollAdded = stores.map((s) => perStore()[s] - afterFirstPoll[s]);
+
+      // a page poll that trails the sidebar by more than the share window reads for itself
+      clock += 45000;
+      await sidebar(); await settle(); clock += 30000;
+      const beforeLate = perStore();
+      await poll(page);
+      result.latePollAdded = stores.map((s) => perStore()[s] - beforeLate[s]);
+
+      // a sidebar read that failed is not kept for the page
+      handler = async () => reply(500, { error: "down" });
+      clock += 60000;
+      await sidebar(); await settle(); clock += 2000;
+      handler = async () => reply(200, fleetBody(["a"]));
+      const beforeFailed = perStore();
+      await poll(page);
+      result.afterFailedSidebarAdded = stores.map((s) => perStore()[s] - beforeFailed[s]);
+      return result;
+    },
     address: async () => {
       util.setFrontDoor(true);
       util.setStore("use1");

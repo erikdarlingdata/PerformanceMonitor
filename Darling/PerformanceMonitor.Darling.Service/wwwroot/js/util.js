@@ -1651,8 +1651,19 @@ const joinedReads = new Map();
    browser's connections beside the page's own. */
 const HEAVY_PAGE_READS = new Set(["get_query_store_clutter", "get_query_store_regressions", "get_query_heatmap", "get_plan_corrections"]);
 const HEAVY_READ_CAP = 2;
+/* #8632: the Queries tab's other long reads. On a server's first visit the three duration trends and the two top lists at
+   detail=full took 3 to 6 s each, were sent at once with the rest of the tab, and held five of the browser's six connections
+   until they landed, so the page's own ping, store host and alert badge queued 3.4 to 4.5 s behind them although the service
+   answered each in 30 to 280 ms. They go through the gate beside the heavy reads, under one cap on the connections the gate holds,
+   GATED_READ_CAP, which stays below the six a browser opens so that some connections are always free for the reads nothing gates.
+   The heavy reads keep their own cap inside it (HEAVY_READ_CAP), and a read that is next in line but not allowed yet does not hold
+   back one behind it that is. */
+const LONG_TAB_READS = new Set(["get_query_duration_trend", "get_procedure_duration_trend", "get_query_store_duration_trend"]);
+const LONG_TOP_READS = new Set(["get_top_queries_by_cpu", "get_top_procedures_by_cpu"]);
+const GATED_READ_CAP = 4;
 let heavyInFlight = 0;
-const heavyWaiting = [];
+let gatedInFlight = 0;
+const gateWaiting = [];
 
 /** True for a read the page sends through the heavy-read gate (#8452): the Queries tab's four Query Store reads. The gate keeps
  *  them from holding the browser's connections over HTTP/1.1; over HTTP/2 it only limits how many of them run side by side. */
@@ -1660,20 +1671,33 @@ export function isHeavyPageRead(tool) {
   return HEAVY_PAGE_READS.has(tool);
 }
 
-/* Resolves true when a heavy slot is this request's, in the order asked, or false if `signal` aborted while it waited. */
-function takeHeavySlot(signal) {
-  if (heavyInFlight < HEAVY_READ_CAP && heavyWaiting.length === 0) {
-    heavyInFlight++;
+/** True for one of the Queries tab's five other long reads (#8632), which go through the gate beside the heavy ones: the three duration
+ *  trends, and the two top lists when asked at detail=full (the CPU tab's plain top list is small and goes at once). */
+export function isLongTabRead(tool, params) {
+  return LONG_TAB_READS.has(tool) || (LONG_TOP_READS.has(tool) && !!params && params.detail === "full");
+}
+
+const canTakeGateSlot = (heavy) => gatedInFlight < GATED_READ_CAP && (!heavy || heavyInFlight < HEAVY_READ_CAP);
+
+function grantGateSlot(heavy) {
+  gatedInFlight++;
+  if (heavy) heavyInFlight++;
+}
+
+/* Resolves true when a slot is this request's, in the order asked, or false if `signal` aborted while it waited. */
+function takeGateSlot(signal, heavy) {
+  if (gateWaiting.length === 0 && canTakeGateSlot(heavy)) {
+    grantGateSlot(heavy);
     return Promise.resolve(true);
   }
   return new Promise((resolve) => {
-    const waiter = { resolve };
-    heavyWaiting.push(waiter);
+    const waiter = { resolve, heavy };
+    gateWaiting.push(waiter);
     if (signal) {
       signal.addEventListener("abort", () => {
-        const i = heavyWaiting.indexOf(waiter);
+        const i = gateWaiting.indexOf(waiter);
         if (i >= 0) {
-          heavyWaiting.splice(i, 1);
+          gateWaiting.splice(i, 1);
           resolve(false);
         }
       }, { once: true });
@@ -1681,21 +1705,30 @@ function takeHeavySlot(signal) {
   });
 }
 
-function releaseHeavySlot() {
-  heavyInFlight--;
-  while (heavyInFlight < HEAVY_READ_CAP && heavyWaiting.length > 0) {
-    heavyInFlight++;
-    heavyWaiting.shift().resolve(true);
+function releaseGateSlot(heavy) {
+  gatedInFlight--;
+  if (heavy) heavyInFlight--;
+  for (let i = 0; i < gateWaiting.length && gatedInFlight < GATED_READ_CAP; ) {
+    const waiter = gateWaiting[i];
+    if (canTakeGateSlot(waiter.heavy)) {
+      gateWaiting.splice(i, 1);
+      grantGateSlot(waiter.heavy);
+      waiter.resolve(true);
+    } else {
+      i++;
+    }
   }
 }
 
-/* fetchBody for a heavy read: the request is sent when a slot is free and the slot is given back when the body has landed. */
-async function gatedFetchBody(path, signal) {
-  if (!(await takeHeavySlot(signal))) return { aborted: true };
+/* fetchBody for a gated read: the request is sent when a slot is free and the slot is given back when the body has landed.
+   `gate` is "heavy" or "long". */
+async function gatedFetchBody(path, signal, gate) {
+  const heavy = gate === "heavy";
+  if (!(await takeGateSlot(signal, heavy))) return { aborted: true };
   try {
     return await fetchBody(path, signal);
   } finally {
-    releaseHeavySlot();
+    releaseGateSlot(heavy);
   }
 }
 
@@ -1709,10 +1742,10 @@ async function gatedFetchBody(path, signal) {
  * Nothing outlives the response: a caller that starts after it landed sends a fresh request, so no page renders an
  * older answer than it would have. Each caller classifies (so parses) the shared body for itself, so every panel owns
  * the rows it was handed. A caller's `signal` (#4191) cancels only that caller: it gets { kind: "aborted" } at once,
- * and the request itself is cancelled only when no caller is left waiting on it. A `heavy` read (#8452, isHeavyPageRead) is
- * sent through the heavy-read gate above, once per joined request rather than once per caller.
+ * and the request itself is cancelled only when no caller is left waiting on it. A `gate` ("heavy", #8452 isHeavyPageRead, or "long", #8632 isLongTabRead) sends the
+ * read through the read gate above, once per joined request rather than once per caller.
  */
-export async function apiGetJoined(path, signal, heavy) {
+export async function apiGetJoined(path, signal, gate) {
   if (signal && signal.aborted) return { kind: "aborted" };
   const scope = pageReads;
   scope.n++;
@@ -1725,7 +1758,7 @@ export async function apiGetJoined(path, signal, heavy) {
     if (!entry) {
       const controller = new AbortController();
       const joined = { controller, waiters: 0, body: null };
-      joined.body = (heavy ? gatedFetchBody(path, controller.signal) : fetchBody(path, controller.signal)).finally(() => {
+      joined.body = (gate ? gatedFetchBody(path, controller.signal, gate) : fetchBody(path, controller.signal)).finally(() => {
         if (joinedReads.get(key) === joined) joinedReads.delete(key);
       });
       joinedReads.set(key, joined);
@@ -1768,11 +1801,47 @@ const fleetRequests = new Map();
  * read — so every visible tab computed the whole overview twice a minute. The second caller of a tick now joins
  * the first's request instead of sending its own.
  *
- * Nothing outlives the response: a caller that starts after it has landed sends a fresh request, exactly as
- * before, so no page renders an older roll-up than it would have — only the duplicate is gone. And each caller
- * classifies (so parses) the shared body for itself, so every page still owns the cards it was handed.
+ * Nothing outlives the response, except the one case apiGetFleetShell keeps for the poll (#8633): a caller that
+ * starts after it has landed sends a fresh request, exactly as before, so no page renders an older roll-up than it
+ * would have — only the duplicate is gone. And each caller classifies (so parses) the shared body for itself, so
+ * every page still owns the cards it was handed.
  */
 export async function apiGetFleet(store) {
+  return readFleet(store, false);
+}
+
+/* #8633: the request the shell's sidebar sent for each store on its last refresh, kept after it lands for the page's own
+   poll re-render to take (once), with the time it started. See apiGetFleetShell. */
+const shellFleets = new Map();
+
+/* How old the sidebar's kept roll-up may be when the page's poll takes it. The page's re-render trails the sidebar's
+   refresh by the length of its last render (its next poll is counted from where that render settled, the sidebar's from
+   where its refresh started), a few seconds on a store that answers quickly. A page that trails further reads for itself. */
+const SHELL_FLEET_SHARE_MS = 20000;
+
+/* Whether the page render in progress is the poll's (or the Refresh button's) re-render of the page already on screen, as
+   against a navigation. app.js sets it from the render's start to its settle. */
+let pollRender = false;
+export function setPollRender(on) {
+  pollRender = on === true;
+}
+
+/**
+ * The shell's own fleet read (the sidebar, one per store). Same request, same sharing as apiGetFleet, and the request is
+ * kept for the page. The page's poll re-render starts about two seconds after the shell's refresh: its next poll is
+ * counted from where its last render settled, the shell's from where its refresh began, so the two never meet in the
+ * same synchronous pass and the page sent the store a second roll-up a moment after the first landed (#8633, the idle
+ * Fleet Overview behind three stores read it six times a minute).
+ *
+ * The page's poll render takes the kept request ONCE, and only while it is no older than SHELL_FLEET_SHARE_MS: the next
+ * poll (a 15 second page interval, say) reads for itself. A read that is not a poll's, a navigation or an action on the
+ * page, never takes it, so it never gets a roll-up older than its own request, the #3895 rule. A read that failed is not kept.
+ */
+export async function apiGetFleetShell(store) {
+  return readFleet(store, true);
+}
+
+async function readFleet(store, shell) {
   const scope = pageReads;
   scope.n++;
   try {
@@ -1780,14 +1849,22 @@ export async function apiGetFleet(store) {
        is the current store's, and without a front door the one key and the one request it always was. */
     const key = frontDoorOn ? (store != null && store !== "" ? store : pickedStore || "") : "";
     let request = fleetRequests.get(key);
+    if (!shell && pollRender) {
+      const kept = shellFleets.get(key);
+      shellFleets.delete(key);
+      if (!request && kept && Date.now() - kept.at <= SHELL_FLEET_SHARE_MS) request = kept.request;
+    }
     if (!request) {
       request = fetchBody("/api/fleet", undefined, frontDoorOn ? key : undefined).finally(() => {
         if (fleetRequests.get(key) === request) fleetRequests.delete(key);
       });
+      request.startedAt = Date.now();
       fleetRequests.set(key, request);
     }
+    if (shell) shellFleets.set(key, { request, at: request.startedAt ?? Date.now() });
 
     const shared = await request;
+    if (shell && !shared.ok && shellFleets.get(key)?.request === request) shellFleets.delete(key);
     if (shared.transportError) return { kind: "error", message: shared.transportError };
     const res = await classifyResponse({ ok: shared.ok, status: shared.status, url: shared.url, text: async () => shared.raw });
     if (res.kind === "data") stampFleetWindow(res.data);
@@ -2144,7 +2221,8 @@ export function alertDeliveryState(a) {
 }
 
 /** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). `options.heavy` (#8554) sends the
- *  read through the heavy-read gate, as the Queries tab's four Query Store reads always go. `options.wholeWindow` (#6359): under
+ *  read through the heavy-read gate, as the Queries tab's four Query Store reads always go. The tab's duration trends and detail=full
+ *  top lists (isLongTabRead, #8632) go through the same gate on their own, under the gate's combined cap. `options.wholeWindow` (#6359): under
  *  a custom range the read is still anchored at the range's end, but its rows are NOT cut to the exact picked pair, so a read
  *  that answers over the whole hours the grid ranked over (a row's History) shows all of that window. */
 export function readTool(tool, params, signal, options) {
@@ -2156,7 +2234,7 @@ export function readTool(tool, params, signal, options) {
      a table, a stat or any other caller passes none and its read keeps the old budget, and so does a read of a level (withPlotPoints). */
   const plotPx = options && options.plotPx > 0 ? options.plotPx : 0;
   const sized = withPlotPoints(tool, plan.params, plotPx);
-  return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, sized)), signal, isHeavyPageRead(tool) || !!(options && options.heavy))
+  return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, sized)), signal, isHeavyPageRead(tool) || !!(options && options.heavy) ? "heavy" : isLongTabRead(tool, params) ? "long" : null)
     .then(localizeWindowNote)
     .then((res) => finishCustomRange(res, plan, bucketStarts))
     .then((res) => (selection && res && res.kind === "data" ? { ...res, data: trimToRange(res.data, selection.startMs, selection.endMs, 0, bucketStarts) } : res));
