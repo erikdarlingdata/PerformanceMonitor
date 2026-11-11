@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage.FinOps;
 using PerformanceMonitor.Ui;
 
@@ -46,11 +47,12 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// The 7-day provisioning trend, each row one calendar day of <paramref name="dayZone"/>: the selected time display's zone on the
     /// server's clock (<see cref="DisplayDayZoneAsync"/>), so a row's Day reads in the same clock as every other time on the page.
+    /// The days are the seven of <see cref="ProvisioningTrendWindow"/>: the six whole days before today and today so far.
     /// </summary>
     public async Task<List<ProvisioningTrendRow>> GetProvisioningTrendAsync(int serverId, TimeZoneInfo dayZone, CancellationToken cancellationToken = default)
     {
         var nowUtc = DateTime.UtcNow;
-        var cutoff = nowUtc.AddDays(-7);
+        var cutoff = DisplayZone.ToUtcBound(ProvisioningTrendWindow.FirstDay(DisplayZone.ToDisplay(nowUtc, dayZone)), dayZone, BoundSide.From);
         var dtos = await DarlingFinOpsUtilizationReader.GetProvisioningTrendAsync(
             _dataSource, serverId, cutoff, DisplayDays(cutoff, nowUtc, dayZone), ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
         return dtos.ConvertAll(ProvisioningTrendRow.From);
