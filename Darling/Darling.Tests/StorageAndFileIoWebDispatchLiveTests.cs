@@ -103,7 +103,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
             Assert.Equal(new[] { A, B, C }, DatabasesIn(sizes, "databases"));
             Assert.True(HasEchoKey(sizes));
             Assert.Null(Echo(sizes));
-            Assert.Equal(new[] { A },DatabasesIn(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, serverName, A, ct), "tables"));
+            Assert.Equal(new[] { A },DatabasesIn(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, serverName, database_name: A, cancellationToken: ct), "tables"));
             Assert.Equal(new[] { C }, DatabasesIn(await DarlingMcpPvsTools.GetPvsStats(postgres, serverName, 0, C, ct), "databases"));
             Assert.Equal(new[] { B }, DatabasesIn(await DarlingMcpDataTools.GetFileIoStats(postgres, serverName, B, ct), "files"));
         }, Cleanup);

@@ -13,6 +13,9 @@ public sealed class McpObjectStatsTools
     /// <summary>Lite's default result cap for get_table_index_sizes (the tool takes no top parameter) — the same 100 Darling uses.</summary>
     private const int TableSizesTop = 100;
 
+    /// <summary>The largest <c>offset</c> get_table_index_sizes takes (#8655), the figure Darling's paged reads use.</summary>
+    internal const int MaxPageOffset = 10_000;
+
     /// <summary>
     /// get_index_usage's caller-optional <c>limit</c> DEFAULT — the same Darling uses (#2636 made it optional;
     /// #4198 sizes what it falls back to). 200 rows measured 69,290 bytes at default arguments on a busy
@@ -30,24 +33,31 @@ public sealed class McpObjectStatsTools
     /// </summary>
     private const int ObjectLockingTop = 75;
 
-    [McpServerTool(Name = "get_table_index_sizes"), Description("Gets the 100 largest tables with per-table size, growth (7d/30d/daily rate), and row counts from the latest daily snapshot. Indexes are rolled up per table. Use to find storage hot-spots and fast-growing tables for capacity planning. Growth is measured only over history the store actually holds: each baseline is the snapshot nearest 7 or 30 days ago within a day, named in the history block (baseline_7d_snapshot / baseline_30d_snapshot, null when none lies that near) with the days of snapshots held and whether each is reachable; growth_7d_mb / growth_30d_mb / growth_pct_30d are null (with the reason in growth_note) when no snapshot lies within a day of the mark or its span to the latest snapshot is not 6 to 8 or 29 to 31 days, never re-labelled from another, and growth_over_available_history_* always spans exactly growth_window_days. A table absent from a baseline snapshot (created since) reports null growth for that window, not 0. tables_returned and truncated bound the page.")]
+    [McpServerTool(Name = "get_table_index_sizes"), Description("Gets the 100 largest tables with per-table size, growth (7d/30d/daily rate), and row counts from the latest daily snapshot. Indexes are rolled up per table. Use to find storage hot-spots and fast-growing tables for capacity planning. Growth is measured only over history the store actually holds: each baseline is the snapshot nearest 7 or 30 days ago within a day, named in the history block (baseline_7d_snapshot / baseline_30d_snapshot, null when none lies that near) with the days of snapshots held and whether each is reachable; growth_7d_mb / growth_30d_mb / growth_pct_30d are null (with the reason in growth_note) when no snapshot lies within a day of the mark or its span to the latest snapshot is not 6 to 8 or 29 to 31 days, never re-labelled from another, and growth_over_available_history_* always spans exactly growth_window_days. A table absent from a baseline snapshot (created since) reports null growth for that window, not 0. tables_returned and truncated bound the page: truncated is true when more tables follow it, and next_offset is then the offset that reads on. The page is also held to the 32,768-byte response budget, whole tables only: budget_truncated = true says tables were left off the end for the budget, and budget_note says how many of how many fit.")]
     public static async Task<string> GetTableIndexSizes(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
+        [Description("Tables to skip, largest first (a page start). Default 0; use next_offset when truncated is true.")] int offset = 0,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
+        if (offset < 0 || offset > MaxPageOffset)
+        {
+            return McpHelpers.Refusal("offset", $"Invalid offset value '{offset}'. Must be 0-{MaxPageOffset}.");
+        }
+
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            /* Over-fetch by one so truncation is observed, not inferred from a full page (#3541 A3's rule). */
+            /* Over-fetch by one so truncation is observed, not inferred from a full page (#3541 A3's rule). The read is
+               largest first with a full tie-break, so the tables before the offset are the ones earlier pages listed. */
             /* #5244: database_name appended LAST (H1). A blank is "no filter"; any other value is kept exactly (no trim). The cap and the
                over-fetch row follow the filter, so the page is the largest tables of the chosen database; the history block stays the
                server's own span. */
             var names = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
-            var rows = await dataService.GetObjectSizeGrowthAsync(resolved.ServerId, TableSizesTop + 1, names);
+            var rows = await dataService.GetObjectSizeGrowthAsync(resolved.ServerId, offset + TableSizesTop + 1, names);
             if (rows.Count == 0)
             {
                 /* A filter that matches no table is a different answer from a server that collects no index stats (Darling's twin
@@ -68,6 +78,15 @@ public sealed class McpObjectStatsTools
                     ?? await HealthyEmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, "table size rows", McpDatabaseSelection.Describe(names))
                     ?? McpHelpers.StatusForDatabase("unavailable", "No object size data available. Index/object stats are collected daily.", McpDatabaseSelection.Describe(names));
             }
+
+            if (offset >= rows.Count)
+            {
+                return McpHelpers.StatusForDatabase(
+                    "empty", $"offset {offset} is past the {CountText.Plural(rows.Count, "table")} this read lists.", McpDatabaseSelection.Describe(names));
+            }
+
+            /* The tables from the offset on: the page starts at the first of them. */
+            rows = rows.Skip(offset).ToList();
 
             var truncated = rows.Count > TableSizesTop;
             var page = rows.Take(TableSizesTop).ToList();
@@ -101,9 +120,11 @@ public sealed class McpObjectStatsTools
                 growth_window_days = r.DaysOfData,
                 daily_growth_rate_mb = McpHelpers.RoundTo(r.DailyGrowthRateMb, 2),
                 growth_note = GrowthNote(r),
-            });
+            }).ToList();
 
-            return JsonSerializer.Serialize(new
+            /* #8655: the first `kept` tables of the page, as many whole tables as fit the response budget, as Darling's twin
+               keeps them. The count, both flags and next_offset are worked out from the tables the answer really lists. */
+            string Reply(int kept) => JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 database_name = McpDatabaseSelection.Describe(names),
@@ -121,10 +142,19 @@ public sealed class McpObjectStatsTools
                     covers_30d = covers30d,
                     note = HistoryNote(span),
                 },
-                tables_returned = page.Count,
-                truncated,
-                tables = result
+                offset,
+                tables_returned = kept,
+                truncated = truncated || kept < page.Count,
+                budget_truncated = kept < page.Count,
+                budget_note = kept < page.Count
+                    ? McpResponseBudget.PageCutNote(page.Count, kept, "largest first", "tables",
+                        $"Call again with offset {offset + kept} for the next page, or narrow the tables with database_name.")
+                    : null,
+                next_offset = truncated || kept < page.Count ? offset + kept : (int?)null,
+                tables = result.Take(kept)
             }, McpHelpers.JsonOptions);
+
+            return McpResponseBudget.FitPrefix(page.Count, Reply).Json;
         }
         catch (Exception ex)
         {

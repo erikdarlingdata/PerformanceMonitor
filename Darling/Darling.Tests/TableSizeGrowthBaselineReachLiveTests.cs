@@ -63,7 +63,7 @@ public sealed class TableSizeGrowthBaselineReachLiveTests
                snapshot is two hours before the 30-day cutoff and is the 30-day baseline. */
             await SeedAsync(connection, ct, latest, Enumerable.Range(0, 85).Where(age => age < 5 || age >= 30));
 
-            using (var doc = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, ServerName, Db, ct)))
+            using (var doc = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, ServerName, database_name: Db, cancellationToken: ct)))
             {
                 var history = doc.RootElement.GetProperty("history");
                 Assert.False(history.GetProperty("covers_7d").GetBoolean());
@@ -97,7 +97,7 @@ public sealed class TableSizeGrowthBaselineReachLiveTests
             await DeleteRowsAsync(connection, ct, keepServer: true);
             await SeedAsync(connection, ct, latest, Enumerable.Range(0, 85));
 
-            using (var doc = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, ServerName, Db, ct)))
+            using (var doc = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, ServerName, database_name: Db, cancellationToken: ct)))
             {
                 var history = doc.RootElement.GetProperty("history");
                 Assert.True(history.GetProperty("covers_7d").GetBoolean());
@@ -122,7 +122,7 @@ public sealed class TableSizeGrowthBaselineReachLiveTests
             await DeleteRowsAsync(connection, ct, keepServer: true);
             await SeedAsync(connection, ct, latest, Enumerable.Range(0, 3));
 
-            using (var doc = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, ServerName, Db, ct)))
+            using (var doc = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, ServerName, database_name: Db, cancellationToken: ct)))
             {
                 var history = doc.RootElement.GetProperty("history");
                 Assert.False(history.GetProperty("covers_7d").GetBoolean());
