@@ -20,7 +20,7 @@
  * inert. The chart SVG lives entirely in charts.js (one SVG_NS occurrence, the air-gap allowlist); this file has no SVG.
  */
 
-import { el, mount, loadingStrip, waitingStrip, retryButton, retryOnceWhenBusy, busyRetryStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtMs, fmtNum, fmtSize, tickDecimals, apiSendRead, noticeStrip, parseUtc, windowNoteText } from "./util.js";
+import { el, mount, pinRangeLabel, loadingStrip, waitingStrip, retryButton, retryOnceWhenBusy, busyRetryStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtMs, fmtNum, fmtSize, tickDecimals, apiSendRead, noticeStrip, parseUtc, windowNoteText } from "./util.js";
 import { renderLineChart, zoomChip, getChartHidden, setChartHidden, nextHiddenKeys, chartZoomScope, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
 import { navigateServer, gridTable } from "./panels.js";
 import { getCatalog } from "./views-api.js";
@@ -169,29 +169,8 @@ function pinBadge(panelSpec) {
   });
 }
 
-/** A normalized pin's display label ("last 2 days" / "8/21/26, 12:00 AM → 8/22/26, 12:00 AM") — shared with
- *  the notebook editor's pin strip so the two surfaces describe a pin identically. */
-export function pinRangeLabel(range) {
-  return range.windowStart ? pinWindowLabel(range.windowStart, range.windowEnd) : "last " + pinHoursLabel(range.hours);
-}
-
-/** The badge's window text for an absolute pin — compact local date+time, "start → end". */
-function pinWindowLabel(startIso, endIso) {
-  const from = new Date(startIso);
-  const to = new Date(endIso);
-  if (isNaN(from.getTime()) || isNaN(to.getTime())) return "custom window";
-  const opts = { dateStyle: "short", timeStyle: "short" };
-  return from.toLocaleString(undefined, opts) + " → " + to.toLocaleString(undefined, opts);
-}
-
-/** The badge's window text for a relative pin (whole days render as days, mirroring the range picker's labels). */
-function pinHoursLabel(hours) {
-  if (hours % 24 === 0 && hours >= 24) {
-    const d = hours / 24;
-    return d + (d === 1 ? " day" : " days");
-  }
-  return hours + (hours === 1 ? " hour" : " hours");
-}
+/* The pin label helpers live in util.js (#8577) so panels.js can name a read's pinned window with the same text; re-exported for notebook.js. */
+export { pinRangeLabel };
 
 /* The drill and zoom each composed panel holds (#7923), at MODULE scope so the poll's rebuild of the grid draws them again.
    Keyed by composedPanelId (slot, title or id, server), so each server's panel has its own entry. Each entry remembers the
