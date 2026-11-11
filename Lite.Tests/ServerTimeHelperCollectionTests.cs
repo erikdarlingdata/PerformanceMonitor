@@ -27,6 +27,11 @@ namespace PerformanceMonitorLite.Tests;
 /// <c>ConvertForDisplay</c> and the like) needs the same collection: if it formats one time twice, a writer running
 /// between the two calls makes the two texts differ. <c>QueryWindowTruncationTests</c> did exactly that and failed
 /// by a 4 hour difference.
+///
+/// <para>A class carries one collection. One that reads or writes the settings and also belongs in another collection
+/// that runs alone (<c>credential-manager</c>, for a class that reaches the real Credential Manager) carries that one:
+/// xunit runs each <c>DisableParallelization</c> collection by itself, after the parallel classes, so no writer runs
+/// beside it there either. Which collections run alone is read from this assembly's collection definitions.</para>
 /// </summary>
 public sealed class ServerTimeHelperCollectionTests
 {
@@ -37,12 +42,14 @@ public sealed class ServerTimeHelperCollectionTests
     /// <c>ActiveServerClock</c> and <c>UtcOffsetMinutes</c> are the server clock itself, read and written.
     /// The conversion <c>ConvertForDisplay</c> and <c>GetTimezoneLabel</c> read it, in the modes that use it, and
     /// <c>FormatServerTime</c> and <c>FormatServerClock</c> read the display mode as well.
+    /// <c>DisplayModeChanged</c> is raised by a write of the display mode, and <c>WithServerZoneLabel</c> words a clock's
+    /// offset through <c>GetTimezoneLabel</c>.
     /// The pattern cannot tell an overload that takes a <c>ServerClock</c> as an argument (<c>ConvertForDisplay</c>)
     /// from the one that reads the shared clock: the explicit overload reads no setting, so a file that calls only
     /// that goes in <c>NamesWithoutReading</c>.
     /// </summary>
     private static readonly Regex ReadsTheSettings = new(
-        @"ServerTimeHelper\s*\.\s*(ActiveServerClock|UtcOffsetMinutes|CurrentDisplayMode|ConvertForDisplay|GetTimezoneLabel|FormatServerTime|FormatServerClock)\b",
+        @"ServerTimeHelper\s*\.\s*(ActiveServerClock|UtcOffsetMinutes|CurrentDisplayMode|DisplayModeChanged|ConvertForDisplay|GetTimezoneLabel|WithServerZoneLabel|FormatServerTime|FormatServerClock)\b",
         RegexOptions.CultureInvariant);
 
     private static readonly Regex Comments = new(
@@ -97,9 +104,28 @@ public sealed class ServerTimeHelperCollectionTests
             + $"[Collection(\"{CollectionName}\")]: {string.Join(", ", unnamed)}.");
     }
 
+    /// <summary>
+    /// The collections xunit runs by themselves, after the parallel classes: each <c>[CollectionDefinition]</c> in this
+    /// assembly that sets <c>DisableParallelization</c>. No class runs beside a member of one, so a member is as safe from
+    /// a writer of the settings as a member of <c>server-time-helper</c>, which is one of them.
+    /// </summary>
+    private static List<string> CollectionsThatRunAlone() =>
+        typeof(ServerTimeHelperCollectionTests).Assembly.GetTypes()
+            .Select(type => type.GetCustomAttribute<CollectionDefinitionAttribute>())
+            .Where(definition => definition is { DisableParallelization: true, Name: not null })
+            .Select(definition => definition!.Name!)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
     [Fact]
     public void EveryTestFileThatReadsTheSettings_CarriesTheCollection()
     {
+        var runAlone = CollectionsThatRunAlone();
+        Assert.True(
+            runAlone.Contains(CollectionName, StringComparer.Ordinal),
+            $"The {CollectionName} collection must run alone (DisableParallelization), or its members run beside the classes "
+            + "that read the settings it changes.");
+
         var thisFile = ThisFile();
         var testsDirectory = Path.GetDirectoryName(thisFile)!;
         var offenders = new List<string>();
@@ -123,7 +149,7 @@ public sealed class ServerTimeHelperCollectionTests
             }
 
             filesThatRead++;
-            if (!code.Contains($"[Collection(\"{CollectionName}\")]", StringComparison.Ordinal))
+            if (!runAlone.Exists(name => code.Contains($"[Collection(\"{name}\")]", StringComparison.Ordinal)))
             {
                 offenders.Add(relative);
             }
@@ -136,7 +162,8 @@ public sealed class ServerTimeHelperCollectionTests
         Assert.True(
             offenders.Count == 0,
             "These test files use ServerTimeHelper's shared settings without "
-            + $"[Collection(\"{CollectionName}\")], so a class that changes them can run between two of their reads: "
+            + $"[Collection(\"{CollectionName}\")] or another collection that runs alone ({string.Join(", ", runAlone)}), "
+            + "so a class that changes them can run between two of their reads: "
             + string.Join(", ", offenders));
     }
 

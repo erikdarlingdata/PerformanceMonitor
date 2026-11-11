@@ -82,12 +82,13 @@ public sealed class ViewerFinOpsRowClockTests : IDisposable
         /* 14:30Z is 10:30 in US Eastern (the row's server) and 20:00 in India (the active tab's). */
         var row = Inventory(Utc(2026, 7, 1, 14, 30), Utc(2026, 7, 1, 14, 30), Eastern);
         Assert.Equal("2026-07-01 10:30", row.InventoryAsOfText);
-        Assert.Equal("2026-07-01 10:30", row.LastCollectedText);
+        /* Last Collected names the offset of the clock it is worded on: the grid lists every server, each on its own. */
+        Assert.Equal("2026-07-01 10:30 (UTC-04:00)", row.LastCollectedText);
 
         ViewerTimeHelper.ActiveServerClock = Eastern;
         var indian = Inventory(Utc(2026, 7, 1, 14, 30), Utc(2026, 7, 1, 14, 30), India);
         Assert.Equal("2026-07-01 20:00", indian.InventoryAsOfText);
-        Assert.Equal("2026-07-01 20:00", indian.LastCollectedText);
+        Assert.Equal("2026-07-01 20:00 (UTC+05:30)", indian.LastCollectedText);
     }
 
     [Fact]

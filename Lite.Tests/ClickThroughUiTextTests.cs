@@ -53,7 +53,8 @@ public sealed class ClickThroughUiTextTests : IDisposable
 
         var text = ServerSummaryItem.FormatLastCollect(Utc(2026, 1, 15, 20, 30, 15), TimeDisplayMode.ServerTime, Pacific, now);
 
-        Assert.Equal("12:30:15", text);
+        /* In Server Time each card is on its own server's clock, so the text names that clock's offset. */
+        Assert.Equal("12:30:15 (UTC-08:00)", text);
     }
 
     [Fact]
@@ -83,7 +84,7 @@ public sealed class ClickThroughUiTextTests : IDisposable
         /* LITE/01-start.png: five cards at launch read "19:25:47 (stopped)" for a collection nine days old. */
         var text = ServerSummaryItem.FormatLastCollect(Utc(2026, 1, 6, 20, 30, 15), TimeDisplayMode.ServerTime, Pacific, Utc(2026, 1, 15, 21, 0));
 
-        Assert.Equal("2026-01-06 12:30:15", text);
+        Assert.Equal("2026-01-06 12:30:15 (UTC-08:00)", text);
     }
 
     [Fact]
@@ -94,7 +95,7 @@ public sealed class ClickThroughUiTextTests : IDisposable
         var now = Utc(2026, 1, 16, 3, 0);
         var collected = Utc(2026, 1, 16, 2, 0);
 
-        Assert.Equal("18:00:00", ServerSummaryItem.FormatLastCollect(collected, TimeDisplayMode.ServerTime, Pacific, now));
+        Assert.Equal("18:00:00 (UTC-08:00)", ServerSummaryItem.FormatLastCollect(collected, TimeDisplayMode.ServerTime, Pacific, now));
         Assert.Equal("2026-01-16 02:00:00", ServerSummaryItem.FormatLastCollect(collected, TimeDisplayMode.UTC, Pacific, Utc(2026, 1, 17, 3, 0)));
     }
 
