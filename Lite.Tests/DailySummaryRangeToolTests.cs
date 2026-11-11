@@ -194,6 +194,71 @@ public sealed class DailySummaryRangeToolTests : IClassFixture<SharedDuckDbFixtu
             StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #8682: the span grew with days_back and passed the 32,768-byte response budget with no word of it. It now keeps the newest
+    /// days that fit and says what it left out with the shared budget keys, as Darling's twin does. A 30-day answer is whole.
+    /// </summary>
+    [Fact]
+    public async Task WideRange_FitsTheBudget_KeepsTheNewestDays_AndTheNoteReadsOnToTheRest_ButThirtyDaysAreWhole()
+    {
+        const int seeded = 150;
+        var service = new LocalDataService(_duckDb);
+        var today = DateTime.UtcNow.Date;
+        for (var back = 0; back < seeded; back++)
+        {
+            await SeedRunAsync(today.AddDays(-back).AddHours(1), "wait_stats", "SUCCESS", error: null);
+        }
+
+        static string Day(DateTime day) => day.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+
+        var thirtyJson = await McpHealthTools.GetDailySummaryRange(service, _serverManager, ServerName, 30);
+        var thirty = Root(thirtyJson);
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(thirtyJson) <= McpResponseBudget.DefaultBytes);
+        Assert.Equal(30, thirty.GetProperty("day_count").GetInt32());
+        Assert.Equal(30, thirty.GetProperty("days").GetArrayLength());
+        Assert.False(thirty.GetProperty("budget_truncated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, thirty.GetProperty("budget_note").ValueKind);
+
+        var wideJson = await McpHealthTools.GetDailySummaryRange(service, _serverManager, ServerName, 366);
+        var wide = Root(wideJson);
+        var bytes = System.Text.Encoding.UTF8.GetByteCount(wideJson);
+        Assert.True(bytes <= McpResponseBudget.DefaultBytes, $"get_daily_summary_range 366 was {bytes:N0} bytes, over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
+        Assert.True(wide.GetProperty("budget_truncated").GetBoolean());
+        var days = wide.GetProperty("days").EnumerateArray().Select(d => d.GetProperty("summary_date").GetString()!).ToList();
+        Assert.Equal(days.Count, wide.GetProperty("day_count").GetInt32());
+        Assert.InRange(days.Count, 31, seeded - 1);
+        Assert.Equal(Day(today), days[^1]);
+        for (var i = 0; i < days.Count; i++)
+        {
+            Assert.Equal(Day(today.AddDays(i - (days.Count - 1))), days[i]);
+        }
+
+        var note = wide.GetProperty("budget_note").GetString()!;
+        Assert.Contains("32,768-byte response budget", note, StringComparison.Ordinal);
+        Assert.Contains($"{seeded} days were read; only {days.Count} fit", note, StringComparison.Ordinal);
+
+        /* Following the note page by page holds every seeded day exactly once. */
+        var seen = days.ToList();
+        var pageNote = note;
+        var pages = 1;
+        while (pageNote is not null)
+        {
+            var next = System.Text.RegularExpressions.Regex.Match(pageNote, @"as_of (\d{4}-\d{2}-\d{2}) and days_back (\d+)");
+            Assert.True(next.Success, pageNote);
+            Assert.Equal(Day(DateTime.ParseExact(seen[0], "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture).AddDays(-1)), next.Groups[1].Value);
+            var olderJson = await McpHealthTools.GetDailySummaryRange(
+                service, _serverManager, ServerName, int.Parse(next.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture), next.Groups[1].Value);
+            Assert.True(System.Text.Encoding.UTF8.GetByteCount(olderJson) <= McpResponseBudget.DefaultBytes);
+            var older = Root(olderJson);
+            seen.InsertRange(0, older.GetProperty("days").EnumerateArray().Select(d => d.GetProperty("summary_date").GetString()!));
+            pageNote = older.GetProperty("budget_note").GetString();
+            Assert.InRange(++pages, 2, 6);
+        }
+
+        Assert.Equal(seeded, seen.Count);
+        Assert.Equal(seeded, seen.Distinct().Count());
+    }
+
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
 
     private static DateTime Truncate(DateTime value) =>
