@@ -661,8 +661,9 @@ ORDER BY t.cpu DESC, t.database_name, t.sql_handle, t.query_text";
     /// </summary>
     public static string ExpensiveQueriesSqlFor(ExpensiveQueriesRoute route)
     {
-        var ceiling = $"TIMESTAMP '{route.CeilingHourUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
-        var trailing = $"TIMESTAMP '{route.TrailingStartUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var ceiling = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{route.CeilingHourUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
+        var trailing = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{route.TrailingStartUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
 
         return $@"
 WITH parts AS (
