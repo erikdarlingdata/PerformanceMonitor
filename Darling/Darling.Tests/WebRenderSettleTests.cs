@@ -229,4 +229,18 @@ public sealed class WebRenderSettleTests
         Assert.Equal(first, failed);
         Assert.True(recovered > first);
     }
+
+    /// <summary>#8633: app.js tells util.js which page render is the poll's, so only that render may take the fleet roll-up the sidebar
+    /// read a moment before. The first (navigation) render is not, the poll's is while its reads are out, and neither is once it settles.</summary>
+    [Fact]
+    public void OnlyThePollsRender_IsMarkedAsAPollRender_ForTheSharedFleetRead()
+    {
+        if (!TryRun("pollFlag", out var run)) return;
+
+        Assert.False(run.GetProperty("first").GetBoolean());
+        Assert.False(run.GetProperty("settledFirst").GetBoolean());
+        Assert.True(run.GetProperty("second").GetBoolean());
+        Assert.True(run.GetProperty("during").GetBoolean());
+        Assert.False(run.GetProperty("after").GetBoolean());
+    }
 }
