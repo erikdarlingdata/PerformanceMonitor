@@ -231,22 +231,33 @@ public sealed class DarlingMcpQueryFleetSummaryTools
             AND   d.bucket < $8
             GROUP BY d.server_id, d.database_name
         ),
+        mid_edges AS
+        (
+            SELECT m.server_id, m.database_name, m.executions, m.cpu_us, m.elapsed_us, m.first_day, m.last_day,
+                   EXISTS (SELECT 1 FROM edge_start AS es WHERE es.server_id = m.server_id AND es.database_name IS NOT DISTINCT FROM m.database_name) AS in_start,
+                   EXISTS (SELECT 1 FROM edge_end AS ee WHERE ee.server_id = m.server_id AND ee.database_name IS NOT DISTINCT FROM m.database_name) AS in_end
+            FROM mid AS m
+        ),
         probe AS
         (
-            SELECT m.server_id, m.database_name, m.executions, m.cpu_us, m.elapsed_us,
-                   (
-                       SELECT f.bucket FROM {hourlyRelation}
-                       WHERE f.query_hash = $1 AND f.server_id = m.server_id AND f.database_name IS NOT DISTINCT FROM m.database_name
-                       AND   f.bucket >= m.first_day AND f.bucket < m.first_day + interval '1 day'
-                       ORDER BY f.bucket LIMIT 1
-                   ) AS first_hour,
-                   (
-                       SELECT f.bucket FROM {hourlyRelation}
-                       WHERE f.query_hash = $1 AND f.server_id = m.server_id AND f.database_name IS NOT DISTINCT FROM m.database_name
-                       AND   f.bucket >= m.last_day AND f.bucket < m.last_day + interval '1 day'
-                       ORDER BY f.bucket DESC LIMIT 1
-                   ) AS last_hour
-            FROM mid AS m
+            SELECT m.server_id, m.database_name, m.executions, m.cpu_us, m.elapsed_us, fh.bucket AS first_hour, lh.bucket AS last_hour
+            FROM mid_edges AS m
+            LEFT JOIN LATERAL
+            (
+                SELECT f.bucket FROM {hourlyRelation}
+                WHERE NOT m.in_start
+                AND   f.query_hash = $1 AND f.server_id = m.server_id AND f.database_name IS NOT DISTINCT FROM m.database_name
+                AND   f.bucket >= m.first_day AND f.bucket < m.first_day + interval '1 day'
+                ORDER BY f.bucket LIMIT 1
+            ) AS fh ON true
+            LEFT JOIN LATERAL
+            (
+                SELECT f.bucket FROM {hourlyRelation}
+                WHERE NOT m.in_end
+                AND   f.query_hash = $1 AND f.server_id = m.server_id AND f.database_name IS NOT DISTINCT FROM m.database_name
+                AND   f.bucket >= m.last_day AND f.bucket < m.last_day + interval '1 day'
+                ORDER BY f.bucket DESC LIMIT 1
+            ) AS lh ON true
         ),
         tail AS
         (

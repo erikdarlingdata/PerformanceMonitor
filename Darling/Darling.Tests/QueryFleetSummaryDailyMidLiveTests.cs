@@ -139,7 +139,7 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
 
     private static Timeline NewTimeline()
     {
-        var now = DateTime.UtcNow;
+        var now = LiveClock.Now();
         var end = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
 
         /* Keep the start off midnight and the end off midnight so both edge days hold hours. */
