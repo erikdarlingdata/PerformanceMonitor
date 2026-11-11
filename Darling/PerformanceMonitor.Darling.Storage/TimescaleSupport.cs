@@ -17932,7 +17932,8 @@ public sealed class RollupCoverage
         }
 
         var columnList = string.Join(", ", columns);
-        var literal = $"TIMESTAMP '{boundary:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var literal = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{boundary:yyyy-MM-dd HH:mm:ss.ffffff}'");
 
         return "(SELECT " + columnList + " FROM collect." + legacy + " WHERE bucket < " + literal
             + " UNION ALL SELECT " + columnList + " FROM collect." + successor + " WHERE bucket >= " + literal
