@@ -281,6 +281,13 @@ LIMIT $3";
         /// normalized. The classified fields are an interpretation; this is the evidence, and it carries the
         /// server's own timestamp in the server's own <c>log_timezone</c> — uninterpreted, on purpose.</summary>
         [JsonPropertyName("sample_line")] public string? SampleLine { get; init; }
+
+        /// <summary>True when <see cref="SampleLine"/> is a preview of the stored entry (#8568): a logged plan or
+        /// statement runs to thousands of characters, and <c>full_text</c> returns it whole.</summary>
+        [JsonPropertyName("sample_line_truncated")] public bool SampleLineTruncated { get; init; }
+
+        /// <summary>The stored entry's whole length in characters, beside the preview.</summary>
+        [JsonPropertyName("sample_line_length")] public int? SampleLineLength { get; init; }
     }
 
     /// <summary>A class this build classifies into that had no rows in the window.</summary>
@@ -352,6 +359,15 @@ LIMIT $3";
         [JsonPropertyName("classes_not_seen")] public IReadOnlyList<AbsentClass> ClassesNotSeen { get; init; } = [];
 
         [JsonPropertyName("retained_events")] public IReadOnlyList<RetainedEvent> RetainedEvents { get; init; } = [];
+
+        /// <summary>How many rows <see cref="RetainedEvents"/> holds.</summary>
+        [JsonPropertyName("retained_events_returned")] public int RetainedEventsReturned => RetainedEvents.Count;
+
+        /// <summary>True when retained rows were left off the end to fit the response budget (#8568).</summary>
+        [JsonPropertyName("budget_truncated")] public bool BudgetTruncated { get; init; }
+
+        /// <summary>How many rows were read and how many fit the budget; null when none were left out.</summary>
+        [JsonPropertyName("budget_note")] public string? BudgetNote { get; init; }
 
         /// <summary>
         /// The sentence, DERIVED from the counts above rather than assigned — <c>deadlock_coverage</c>'s
@@ -534,6 +550,7 @@ LIMIT $3";
         DateTime windowStartUtc,
         DateTime windowEndUtc,
         int limit,
+        int? sampleLinePreviewLength,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<RetainedEvent>();
@@ -562,6 +579,9 @@ LIMIT $3";
                 continue;
             }
 
+            /* #8568: the evidence line is a preview when the caller gave a length; the message stays whole, because it is
+               what tells one row from another. */
+            var line = McpResponseBudget.Preview(sample, sampleLinePreviewLength ?? 0, whole: sampleLinePreviewLength is null);
             rows.Add(new RetainedEvent
             {
                 EventClass = eventClass,
@@ -570,7 +590,9 @@ LIMIT $3";
                 Occurrences = reader.GetInt64(3),
                 FirstCaptureAt = reader.IsDBNull(4) ? null : Iso(reader.GetDateTime(4)),
                 LastCaptureAt = reader.IsDBNull(5) ? null : Iso(reader.GetDateTime(5)),
-                SampleLine = sample,
+                SampleLine = line.Text,
+                SampleLineTruncated = line.Truncated,
+                SampleLineLength = line.Length,
             });
         }
 

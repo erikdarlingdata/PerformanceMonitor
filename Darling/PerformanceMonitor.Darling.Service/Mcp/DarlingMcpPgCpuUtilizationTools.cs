@@ -53,7 +53,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetPgCpuUtilization(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgCpuMaxPoints), logger, cancellationToken);
+        GetPgCpuUtilization(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgCpuMcpAutoPoints, TrendBuckets.PgCpuMaxPoints), logger, cancellationToken);
 
     /// <summary>
     /// get_pg_cpu_utilization under an explicit <paramref name="budget"/> (#4193): the MCP tool passes its own,

@@ -119,6 +119,17 @@ VALUES ($1, $2, $3, $4, 91.5, 80, TRUE, 'email', NULL, FALSE, FALSE, $5, NULL)",
 
             /* The span the page reports is the span of the rows it kept. */
             Assert.Equal(newest.AddMinutes(-(alerts.Count - 1)), ParseUtc(root.GetProperty("oldest_returned_alert_time").GetString()!));
+
+            /* full_text: the text whole, on fewer rows, with the same accounting. */
+            var whole = AssertWithinBudget("get_alert_history full_text", await DarlingMcpAlertTools.GetAlertHistory(postgres, ServerName, full_text: true));
+            var wholeRows = whole.GetProperty("alerts").EnumerateArray().ToList();
+            Assert.InRange(wholeRows.Count, 1, alerts.Count - 1);
+            AssertSaysItWasCutForBytes(whole, 50, wholeRows.Count);
+            for (var i = 0; i < wholeRows.Count; i++)
+            {
+                Assert.False(wholeRows[i].GetProperty("detail_text_truncated").GetBoolean());
+                Assert.Equal(DetailText(i, detailLength), wholeRows[i].GetProperty("detail_text").GetString());
+            }
         });
     }
 
@@ -204,6 +215,14 @@ SELECT $1 + g, $2, $3, $4, $5, g, g + 1000, '0x' || g::text, 'MANUAL', 0, NULL F
                 Assert.InRange(shown.Length, 1, 400 + "... (truncated)".Length);
             }
 
+            /* full_text: 2,000 characters a row, so the 20-row page no longer fits and says so. */
+            var longer = AssertWithinBudget("get_top_queries_by_cpu full_text", await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, full_text: true, cancellationToken: ct));
+            var longerRows = longer.GetProperty("queries").EnumerateArray().ToList();
+            Assert.InRange(longerRows.Count, 1, 19);
+            Assert.True(longer.GetProperty("truncated").GetBoolean());
+            Assert.Contains($"20 queries were read; only {longerRows.Count} fit", longer.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
+            Assert.All(longerRows, r => Assert.InRange(r.GetProperty("query_text").GetString()!.Length, 1900, 2000 + "... (truncated)".Length));
+
             /* A caller who asks for more rows than the budget holds gets the heaviest that fit, and is told. */
             var wide = AssertWithinBudget("get_top_queries_by_cpu top=120", await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, top: queries, cancellationToken: ct));
             var kept = wide.GetProperty("queries").EnumerateArray().ToList();
@@ -257,6 +276,24 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'client backend', 'idle in tran
 
             /* The counts above the rows cover the rows the answer lists, not the ones it left out. */
             Assert.Equal(rows.Count, root.GetProperty("horizon_holder_count").GetInt32());
+
+            /* Nothing is dropped: following next_offset reads every session exactly once, each page within the budget. */
+            var seen = new List<int>();
+            var page = root;
+            for (var calls = 0; calls < 50; calls++)
+            {
+                seen.AddRange(page.GetProperty("sessions").EnumerateArray().Select(r => r.GetProperty("pid").GetInt32()));
+                if (!page.GetProperty("truncated").GetBoolean())
+                {
+                    Assert.Equal(JsonValueKind.Null, page.GetProperty("next_offset").ValueKind);
+                    break;
+                }
+
+                page = AssertWithinBudget("get_pg_session_states", await DarlingMcpPgSessionStatesTools.GetPgSessionStates(
+                    postgres, ServerName, offset: page.GetProperty("next_offset").GetInt32(), cancellationToken: ct));
+            }
+
+            Assert.Equal(Enumerable.Range(0, sessions).Select(i => 20_000 + i), seen);
         });
     }
 
@@ -300,6 +337,24 @@ VALUES ($1, $2, $3, $4, $5, $6, 'kB', 'Resource Usage / Memory', 'sighup', 'inte
                 Assert.EndsWith(" before the server switches to temporary disk files.", r.GetProperty("description").GetString(), StringComparison.Ordinal);
             });
             Assert.Equal(rows.Count, rows.Select(r => r.GetProperty("name").GetString()).Distinct(StringComparer.Ordinal).Count());
+
+            /* Nothing is dropped: following next_offset reads every setting exactly once, each page within the budget. */
+            var seen = new List<string>();
+            var page = root;
+            for (var calls = 0; calls < 50; calls++)
+            {
+                seen.AddRange(page.GetProperty("settings").EnumerateArray().Select(r => r.GetProperty("name").GetString()!));
+                if (!page.GetProperty("truncated").GetBoolean())
+                {
+                    Assert.Equal(JsonValueKind.Null, page.GetProperty("next_offset").ValueKind);
+                    break;
+                }
+
+                page = AssertWithinBudget("get_pg_server_config", await DarlingMcpPgServerStateTools.GetPgServerConfig(
+                    postgres, ServerName, offset: page.GetProperty("next_offset").GetInt32(), cancellationToken: ct));
+            }
+
+            Assert.Equal(Enumerable.Range(0, settings).Select(SettingName), seen.OrderBy(name => name, StringComparer.Ordinal));
         });
     }
 
@@ -346,6 +401,19 @@ VALUES ($1, $2, $3, $4, $5, $6, 'kB', 'Resource Usage / Memory', 'sighup', 'inte
             {
                 Assert.Equal(plans, rows.Count);
             }
+
+            /* full_text: each row's evidence whole, so far fewer rows fit, and the answer says how many. */
+            var whole = AssertWithinBudget("get_store_log full_text", await DarlingMcpStoreLogTools.GetStoreLog(postgres, full_text: true, cancellationToken: ct));
+            var wholeRows = whole.GetProperty("retained_events").EnumerateArray().ToList();
+            Assert.InRange(wholeRows.Count, 1, rows.Count - 1);
+            Assert.True(whole.GetProperty("budget_truncated").GetBoolean());
+            Assert.Contains($"{plans} retained messages were read; only {wholeRows.Count} fit", whole.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
+            Assert.All(wholeRows, r =>
+            {
+                Assert.False(r.GetProperty("sample_line_truncated").GetBoolean());
+                Assert.Equal(r.GetProperty("sample_line_length").GetInt32(), r.GetProperty("sample_line").GetString()!.Length);
+            });
+            Assert.Equal(plans, whole.GetProperty("capture_summary").GetProperty("captures").GetInt64());
         });
     }
 

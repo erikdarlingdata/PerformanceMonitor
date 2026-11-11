@@ -93,25 +93,47 @@ public sealed class DarlingMcpFleetTools
         "with the widest window and derive, or sequence the calls. " +
         "detail defaults to \"summary\" (#4198): the rollup, band counts and worst_servers, WITHOUT the " +
         "per-server cards array, #4198 measured that array at 67-81 KB on a fleet this size, large enough " +
-        "that Claude Code refused it inline outright. Pass detail=\"cards\" for the full per-server detail " +
-        "this tool returned before #4198, once you already know which server needs it; cards_included says " +
-        "which shape you got, and a summary response's cards_note repeats the lever. worst_only and band " +
-        "narrow a detail=\"cards\" call back toward a manageable size instead of shipping every card: " +
+        "that Claude Code refused it inline outright. Pass detail=\"cards\" for the per-server cards, " +
+        "once you already know which server needs it; cards_included says " +
+        "which shape you got, and a summary response's cards_note repeats the lever. A cards answer is held " +
+        "to the 32,768-byte response budget (#8568): the cards are ordered worst first (the worst_servers " +
+        "ranking, then every other server), and as many whole cards as fit are returned. cards_total is how " +
+        "many cards the call selected, card_offset where this page starts, cards_returned how many it holds. " +
+        "When cards were left out, budget_truncated is true, budget_note says how many of how many fit, " +
+        "cards_left_out names the servers whose cards are not on this page (the first 100; " +
+        "cards_left_out_count is all of them), and next_card_offset is the card_offset that reads on from the " +
+        "first one left out. A card is never cut: one card wider than the budget is still returned whole. " +
+        "worst_only and band narrow a detail=\"cards\" call instead of paging through every card: " +
         "worst_only keeps only the cards already named in worst_servers, and band keeps only cards at one " +
-        "FleetHealthBand (healthy, warning, critical, offline). Both are ignored under detail=\"summary\", " +
-        "which never includes cards to filter.")]
-    public static async Task<string> GetFleetOverview(
+        "FleetHealthBand (healthy, warning, critical, offline). Both, and card_offset, are ignored under " +
+        "detail=\"summary\", which never includes cards to filter.")]
+    public static Task<string> GetFleetOverview(
         NpgsqlDataSource postgres,
         [Description("Hours of blocking/deadlock history the per-server cards and fleet totals window over. Default 1.")] int hours_back = 1,
-        [Description("\"summary\" (default): rollup, band counts, worst_servers, no cards array. \"cards\": adds every server's full card, this tool's shape before #4198. See tool guide.")] string detail = "summary",
+        [Description("\"summary\" (default): rollup, band counts, worst_servers, no cards array. \"cards\": adds the per-server cards that fit the response budget, worst first. See tool guide.")] string detail = "summary",
         [Description("Cards-only: keep only cards already in worst_servers (the needs-attention list). No effect under detail=\"summary\". Default false.")] bool worst_only = false,
         [Description("Cards-only filter: keep only cards at this FleetHealthBand, \"healthy\", \"warning\", \"critical\", or \"offline\" (case-insensitive). Ignored under detail=\"summary\". Omit for every band.")] string? band = null,
         MonitoredServerRegistryState? registryState = null,
         ILogger? logger = null,
-        CancellationToken cancellationToken = default)
+        [Description("Cards-only: cards to skip, worst first (a page start). Default 0; use next_card_offset when budget_truncated is true.")] int card_offset = 0,
+        CancellationToken cancellationToken = default) =>
+        GetFleetOverview(postgres, hours_back, detail, worst_only, card_offset, McpResponseBudget.DefaultBytes, band, registryState, logger, cancellationToken);
+
+    /// <summary>
+    /// get_fleet_overview under an explicit <paramref name="responseByteBudget"/> (#8568): the MCP tool passes
+    /// <see cref="McpResponseBudget.DefaultBytes"/> and pages its cards worst first, the web viewer's
+    /// <c>/api/read</c> mirror passes null and keeps every card in the reader's order.
+    /// </summary>
+    internal static async Task<string> GetFleetOverview(
+        NpgsqlDataSource postgres, int hours_back, string detail, bool worst_only, int card_offset, int? responseByteBudget,
+        string? band, MonitoredServerRegistryState? registryState, ILogger? logger, CancellationToken cancellationToken)
     {
         var validation = DarlingReadWindow.ValidateHoursBack(hours_back);
         if (validation != null) return validation;
+        if (card_offset < 0)
+        {
+            return McpHelpers.Refusal("card_offset", $"Invalid card_offset value '{card_offset}'. Must be 0 or more.");
+        }
 
         var wantsCards = string.Equals(detail, "cards", StringComparison.OrdinalIgnoreCase);
         if (!wantsCards && !string.Equals(detail, "summary", StringComparison.OrdinalIgnoreCase))
@@ -190,7 +212,9 @@ public sealed class DarlingMcpFleetTools
 
                 windowNotice?.AttachCards(node["cards"] as JsonArray);
                 node["cards_included"] = true;
-                return node.ToJsonString(DarlingFleetReader.JsonOptions);
+                return responseByteBudget is int budget
+                    ? PageCards(node, result.WorstServers.Select(w => w.ServerId).ToList(), card_offset, budget)
+                    : node.ToJsonString(DarlingFleetReader.JsonOptions);
             }
 
             /* #4198 summary mode: strip the heavy cards array — measured at 67-81 KB on a fleet this size,
@@ -209,6 +233,54 @@ public sealed class DarlingMcpFleetTools
         {
             return McpHelpers.FormatError("get_fleet_overview", ex);
         }
+    }
+
+    /// <summary>The most left-out servers a cards answer names (#8568); <c>cards_left_out_count</c> is all of them.</summary>
+    internal const int MaxCardsLeftOutNamed = 100;
+
+    /// <summary>
+    /// The cards page of a budgeted answer (#8568): <paramref name="node"/>'s <c>cards</c> ordered worst first (the
+    /// needs-attention ranking in <paramref name="worstServerIds"/>, then every other card in the order it was
+    /// read), started at <paramref name="cardOffset"/> and ended at the last whole card that fits
+    /// <paramref name="budgetBytes"/>. The answer counts what it selected and what it holds, names the servers left
+    /// out and gives the offset that reads on from them, so a card is paged to and never dropped.
+    /// </summary>
+    internal static string PageCards(JsonObject node, IReadOnlyList<int> worstServerIds, int cardOffset, int budgetBytes)
+    {
+        var rank = new Dictionary<int, int>();
+        for (var i = 0; i < worstServerIds.Count; i++)
+        {
+            rank.TryAdd(worstServerIds[i], i);
+        }
+
+        var cards = (node["cards"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().ToList();
+        var ordered = cards
+            .Select((card, index) => (card, index))
+            .OrderBy(x => x.card["server_id"] is JsonValue id && id.TryGetValue<int>(out var serverId) && rank.TryGetValue(serverId, out var at) ? at : int.MaxValue)
+            .ThenBy(x => x.index)
+            .Select(x => x.card)
+            .ToList();
+        var page = ordered.Skip(cardOffset).ToList();
+
+        string Reply(int kept)
+        {
+            var leftOut = page.Skip(kept).ToList();
+            node["cards"] = new JsonArray(page.Take(kept).Select(c => c.DeepClone()).ToArray());
+            node["cards_total"] = ordered.Count;
+            node["card_offset"] = cardOffset;
+            node["cards_returned"] = kept;
+            node["budget_truncated"] = leftOut.Count > 0;
+            node["budget_note"] = leftOut.Count > 0
+                ? McpResponseBudget.PageCutNote(page.Count, kept, "worst first", "cards",
+                    $"Call again with card_offset {cardOffset + kept} for the next page, or narrow the cards with worst_only or band.")
+                : null;
+            node["cards_left_out_count"] = leftOut.Count;
+            node["cards_left_out"] = new JsonArray(leftOut.Take(MaxCardsLeftOutNamed).Select(c => c["server_name"]?.DeepClone()).ToArray());
+            node["next_card_offset"] = leftOut.Count > 0 ? cardOffset + kept : null;
+            return node.ToJsonString(DarlingFleetReader.JsonOptions);
+        }
+
+        return McpResponseBudget.FitPrefix(page.Count, Reply, budgetBytes).Json;
     }
 
     /// <summary>The relations the cards' blocking and deadlock counts read (#7010): the XE blocked process reports, the DMV blocking snapshots

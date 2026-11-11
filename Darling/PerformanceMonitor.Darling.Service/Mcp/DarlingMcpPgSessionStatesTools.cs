@@ -274,8 +274,8 @@ public sealed class DarlingMcpPgSessionStatesTools
     }
 
     [McpServerTool(Name = "get_pg_session_states")]
-    [Description("Gets PostgreSQL sessions holding a transaction open: how long, and WHETHER they are pinning the xmin horizon. peak_horizon_age carries that, not duration; -1 means pinned NOTHING, not a small age. THIS IS A SAMPLE at the collection interval - a transaction that opened and closed between samples is invisible; captures_in_window is the denominator, and captures_in_window = 0 means unavailable, not a clean bill. Requires pg_monitor; without it a row's state columns come back NULL (state_was_redacted) rather than refused. last_query_text is the statement text. Window ends at as_of. <<GUIDE>> PostgreSQL sessions holding a transaction open - who is idle in transaction, for how long, and WHETHER THAT SESSION IS ACTUALLY PINNING THE XMIN HORIZON. That last part is the whole point and it is not the same question as the first two: measured on a live instance, an idle-in-transaction session under READ COMMITTED that has only read, or whose UPDATE matched zero rows, holds neither a snapshot nor a transaction id and starves VACUUM of nothing at all. Only a transaction that has written (holding backend_xid) or one under REPEATABLE READ (holding backend_xmin) pins anything. So peak_horizon_age, not the duration, is what supports a causal claim, and a peak_horizon_age of -1 means the session pinned NOTHING rather than something small. Pairs with get_pg_xmin_horizon, which names the CLASS of holder; this names the session. Critical (PINS THE XMIN HORIZON) needs a hold across the samples AND a peak_horizon_age of at least 10,000 transactions: a short writer seen as the oldest holder at every sample at an age of 1 or 2 pinned nothing worth a red, is named as such in its finding, and reads Healthy, or Warning when it is also long idle in transaction. Rolled up per backend across the window, horizon holders first, then longest transaction. THIS IS A SAMPLE at the collection interval, not an event log - PostgreSQL records nothing about session state unless something asks, so a transaction that opened and closed between samples is invisible; the capture counts are reported so 'nothing found' is distinguishable from 'nobody looked'. No raw query text is stored: pg_stat_activity.query carries literal parameter values, so the normalised query_id and a whitelisted command keyword are stored instead - last_query_text is that statement's normalised text with placeholders (a 400-character preview, last_query_text_truncated says it was cut, full_text: true returns it whole), null until the hourly statement capture reaches the id and always null for query id 0 and a null id; join last_query_id to get_pg_top_queries for its call counts. Requires pg_monitor on the target; without it PostgreSQL silently returns rows with every state column NULL, which the read reports rather than hides. This is what bounds the page - read truncated to know whether the window held more sessions than were returned; it is observed by fetching one row past this cap, never inferred from a full page.")]
-    public static async Task<string> GetPgSessionStates(
+    [Description("Gets PostgreSQL sessions holding a transaction open: how long, and WHETHER they are pinning the xmin horizon. peak_horizon_age carries that, not duration; -1 means pinned NOTHING, not a small age. THIS IS A SAMPLE at the collection interval - a transaction that opened and closed between samples is invisible; captures_in_window is the denominator, and captures_in_window = 0 means unavailable, not a clean bill. Requires pg_monitor; without it a row's state columns come back NULL (state_was_redacted) rather than refused. last_query_text is the statement text. Window ends at as_of. <<GUIDE>> PostgreSQL sessions holding a transaction open - who is idle in transaction, for how long, and WHETHER THAT SESSION IS ACTUALLY PINNING THE XMIN HORIZON. That last part is the whole point and it is not the same question as the first two: measured on a live instance, an idle-in-transaction session under READ COMMITTED that has only read, or whose UPDATE matched zero rows, holds neither a snapshot nor a transaction id and starves VACUUM of nothing at all. Only a transaction that has written (holding backend_xid) or one under REPEATABLE READ (holding backend_xmin) pins anything. So peak_horizon_age, not the duration, is what supports a causal claim, and a peak_horizon_age of -1 means the session pinned NOTHING rather than something small. Pairs with get_pg_xmin_horizon, which names the CLASS of holder; this names the session. Critical (PINS THE XMIN HORIZON) needs a hold across the samples AND a peak_horizon_age of at least 10,000 transactions: a short writer seen as the oldest holder at every sample at an age of 1 or 2 pinned nothing worth a red, is named as such in its finding, and reads Healthy, or Warning when it is also long idle in transaction. Rolled up per backend across the window, horizon holders first, then longest transaction. THIS IS A SAMPLE at the collection interval, not an event log - PostgreSQL records nothing about session state unless something asks, so a transaction that opened and closed between samples is invisible; the capture counts are reported so 'nothing found' is distinguishable from 'nobody looked'. No raw query text is stored: pg_stat_activity.query carries literal parameter values, so the normalised query_id and a whitelisted command keyword are stored instead - last_query_text is that statement's normalised text with placeholders (a 400-character preview, last_query_text_truncated says it was cut, full_text: true returns it whole), null until the hourly statement capture reaches the id and always null for query id 0 and a null id; join last_query_id to get_pg_top_queries for its call counts. Requires pg_monitor on the target; without it PostgreSQL silently returns rows with every state column NULL, which the read reports rather than hides. This is what bounds the page - read truncated to know whether the window held more sessions than were returned; it is observed by fetching one row past this cap, never inferred from a full page. offset skips that many sessions (a page start). The page is also held to the 32,768-byte response budget, whole rows only: budget_truncated = true says sessions were left off the end for the budget (truncated is then true as well), budget_note says how many of how many fit, and next_offset is the offset that reads on.")]
+    public static Task<string> GetPgSessionStates(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
@@ -283,7 +283,18 @@ public sealed class DarlingMcpPgSessionStatesTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Return each row's full last_query_text instead of a 400-character preview. Default false.")] bool full_text = false,
         ILogger? logger = null,
-        CancellationToken cancellationToken = default)
+        [Description("Sessions to skip before the page (a page start). Default 0; use next_offset when truncated is true.")] int offset = 0,
+        CancellationToken cancellationToken = default) =>
+        GetPgSessionStates(postgres, server_name, hours_back, limit, as_of, full_text, logger, offset, McpResponseBudget.DefaultBytes, cancellationToken);
+
+    /// <summary>
+    /// get_pg_session_states under an explicit <paramref name="responseByteBudget"/> (#8568): the MCP tool passes
+    /// <see cref="McpResponseBudget.DefaultBytes"/> and keeps the rows that fit it, the web viewer's <c>/api/read</c>
+    /// mirror passes null and keeps its page exactly.
+    /// </summary>
+    internal static async Task<string> GetPgSessionStates(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, int limit, string? as_of, bool full_text, ILogger? logger,
+        int offset, int? responseByteBudget, CancellationToken cancellationToken)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -292,6 +303,10 @@ public sealed class DarlingMcpPgSessionStatesTools
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
+        if (offset < 0 || offset > DarlingMcpPgServerStateTools.MaxPageOffset)
+        {
+            return McpHelpers.Refusal("offset", $"Invalid offset value '{offset}'. Must be 0-{DarlingMcpPgServerStateTools.MaxPageOffset}.");
+        }
 
         try
         {
@@ -301,8 +316,14 @@ public sealed class DarlingMcpPgSessionStatesTools
                (the #3594 dialect), replacing `limit_reached = sessions.Count >= limit` — which read a window of
                exactly `limit` sessions as a cut page. */
             var fetched = await DarlingPgSessionStatesReader.GetPgSessionStatesAsync(
-                postgres, resolved.ServerId, start, end, limit + 1, cancellationToken);
-            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
+                postgres, resolved.ServerId, start, end, offset + limit + 1, cancellationToken);
+            if (offset > 0 && fetched.Count > 0 && fetched.Count <= offset)
+            {
+                return McpHelpers.Status("empty", $"offset {offset} is past the {CountText.Plural(fetched.Count, "session")} this window holds for {resolved.DisplayName}.");
+            }
+
+            var fromOffset = offset > 0 ? fetched.Skip(offset).ToList() : fetched;
+            var (rows, truncated) = McpHelpers.BoundPage(fromOffset, limit);
 
             /* Fetched whether or not there are rows. On a surface where zero rows is the healthy answer, the
                denominator is not an error path - it is what makes a healthy answer believable. */
@@ -317,16 +338,6 @@ public sealed class DarlingMcpPgSessionStatesTools
             /* #4966: decided after the empty branch, whose not-collected answer carries no notice. */
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_session_states", resolved.ServerName, start, end, emptyAnswer: false, logger, cancellationToken);
-
-            var holders = rows.Count(r => r.HorizonHolderSamples > 0 && !r.StateWasRedacted);
-            var idleHolders = rows.Count(r => r.HorizonHolderSamples > 0 && r.IdleInTransactionSamples > 0
-                                              && !r.StateWasRedacted);
-            var idleWithoutHorizon = rows.Count(r => r.IdleInTransactionSamples > 0 && r.PeakHorizonAge < 0
-                                                     && !r.StateWasRedacted);
-            var redacted = rows.Count(r => r.StateWasRedacted);
-            /* The collector's per-capture cap, a SOURCE-side fact carried per row as capture_was_truncated — a
-               different cut from the page's `truncated` above, and named apart from it on purpose. */
-            var captureWasTruncated = rows.Any(r => r.CaptureWasTruncated);
 
             var sessions = rows.Select(r => new
             {
@@ -393,49 +404,81 @@ public sealed class DarlingMcpPgSessionStatesTools
             })
             .ToList();
 
-            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
+            /* #8568: the answer for the first `kept` rows of the page, horizon holders first. Under a response budget that
+               is as many whole rows as fit it, and every count below covers exactly the rows the answer lists. Its
+               `truncated` is the page's: true when the window held more sessions than the answer lists, whether the
+               limit or the budget ended it. */
+            string Reply(int kept, bool truncated)
             {
-                server = resolved.DisplayName,
-                hours_back,
-                /* #4966: the window floor, right after hours_back. */
-                effective_start = notice.EffectiveStart,
-                window_truncated = notice.WindowTruncated,
-                truncation_note = notice.TruncationNote,
-                status = "session_states",
-                /* The page's count under the page's name (#3594). */
-                sessions_returned = sessions.Count,
-                horizon_holder_count = holders,
-                idle_in_transaction_holder_count = idleHolders,
-                /* Reported as its own number because it is the correction this tool exists to make: these
-                   sessions look exactly like the harmful ones and are not. */
-                idle_in_transaction_pinning_nothing = idleWithoutHorizon,
-                /* The denominator, always, on a sampled surface. */
-                captures_in_window = captures.CapturesTotal,
-                captures_with_sessions = captures.CapturesWithSessions,
-                first_capture_at = captures.FirstCaptureAt?.ToString("o"),
-                last_capture_at = captures.LastCaptureAt?.ToString("o"),
-                redacted_row_count = redacted,
-                truncated,
-                note = "This is a SAMPLE taken every collection cycle, not an event log. PostgreSQL records "
-                     + "nothing about session state unless something asks it, so a transaction that opened "
-                     + "and closed between two samples left no trace - "
-                     + $"{captures.CapturesWithSessions} of {CountText.Plural(captures.CapturesTotal, "capture")} in this "
-                     + "window found any reportable session at all. Duration alone is NOT evidence that a "
-                     + "session is starving VACUUM: read peak_horizon_age, where -1 means the session pinned "
-                     + "nothing."
-                     + IdleWithoutHorizonSentence(idleWithoutHorizon)
-                     + RedactedSentence(redacted)
-                     + (captureWasTruncated
-                         ? " At least one capture hit the collector's per-capture row cap, so the stored "
-                         + "rows for it are a worst-first sample of a larger set - compare "
-                         + "reportable_sessions_on_instance against the rows returned."
-                         : string.Empty)
-                     + (truncated
-                         ? $" TRUNCATED: the window held more sessions than the {limit} returned, so the counts "
-                         + "above cover only the sessions returned. Raise limit for the full picture."
-                         : string.Empty),
-                sessions,
-            }, McpHelpers.JsonOptions), notice);
+                var budgetCut = kept < rows.Count;
+                var shown = rows.Take(kept).ToList();
+                var holders = shown.Count(r => r.HorizonHolderSamples > 0 && !r.StateWasRedacted);
+                var idleHolders = shown.Count(r => r.HorizonHolderSamples > 0 && r.IdleInTransactionSamples > 0
+                                                  && !r.StateWasRedacted);
+                var idleWithoutHorizon = shown.Count(r => r.IdleInTransactionSamples > 0 && r.PeakHorizonAge < 0
+                                                         && !r.StateWasRedacted);
+                var redacted = shown.Count(r => r.StateWasRedacted);
+                /* The collector's per-capture cap, a SOURCE-side fact carried per row as capture_was_truncated — a
+                   different cut from the page's `truncated` above, and named apart from it on purpose. */
+                var captureWasTruncated = shown.Any(r => r.CaptureWasTruncated);
+
+                return JsonSerializer.Serialize(new
+                {
+                    server = resolved.DisplayName,
+                    hours_back,
+                    /* #4966: the window floor, right after hours_back. */
+                    effective_start = notice.EffectiveStart,
+                    window_truncated = notice.WindowTruncated,
+                    truncation_note = notice.TruncationNote,
+                    status = "session_states",
+                    /* The page's count under the page's name (#3594). */
+                    sessions_returned = kept,
+                    horizon_holder_count = holders,
+                    idle_in_transaction_holder_count = idleHolders,
+                    /* Reported as its own number because it is the correction this tool exists to make: these
+                       sessions look exactly like the harmful ones and are not. */
+                    idle_in_transaction_pinning_nothing = idleWithoutHorizon,
+                    /* The denominator, always, on a sampled surface. */
+                    captures_in_window = captures.CapturesTotal,
+                    captures_with_sessions = captures.CapturesWithSessions,
+                    first_capture_at = captures.FirstCaptureAt?.ToString("o"),
+                    last_capture_at = captures.LastCaptureAt?.ToString("o"),
+                    redacted_row_count = redacted,
+                    truncated,
+                    offset,
+                    next_offset = truncated ? offset + kept : (int?)null,
+                    budget_truncated = budgetCut,
+                    budget_note = budgetCut
+                        ? McpResponseBudget.PageCutNote(rows.Count, kept, "horizon holders first, then longest transaction", "sessions",
+                            $"The counts above cover only the sessions returned. Call again with offset {offset + kept} for the next page.")
+                        : null,
+                    note = "This is a SAMPLE taken every collection cycle, not an event log. PostgreSQL records "
+                         + "nothing about session state unless something asks it, so a transaction that opened "
+                         + "and closed between two samples left no trace - "
+                         + $"{captures.CapturesWithSessions} of {CountText.Plural(captures.CapturesTotal, "capture")} in this "
+                         + "window found any reportable session at all. Duration alone is NOT evidence that a "
+                         + "session is starving VACUUM: read peak_horizon_age, where -1 means the session pinned "
+                         + "nothing."
+                         + IdleWithoutHorizonSentence(idleWithoutHorizon)
+                         + RedactedSentence(redacted)
+                         + (captureWasTruncated
+                             ? " At least one capture hit the collector's per-capture row cap, so the stored "
+                             + "rows for it are a worst-first sample of a larger set - compare "
+                             + "reportable_sessions_on_instance against the rows returned."
+                             : string.Empty)
+                         + (truncated && !budgetCut
+                             ? $" TRUNCATED: the window held more sessions than the {limit} returned, so the counts "
+                             + "above cover only the sessions returned. Raise limit for the full picture."
+                             : string.Empty),
+                    sessions = sessions.Take(kept),
+                }, McpHelpers.JsonOptions);
+            }
+
+            return DarlingMcpWindowNotice.Finish(
+                responseByteBudget is int budget
+                    ? McpResponseBudget.FitPrefix(rows.Count, kept => Reply(kept, truncated || kept < rows.Count), budget).Json
+                    : Reply(rows.Count, truncated),
+                notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

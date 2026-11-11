@@ -280,6 +280,30 @@ public sealed class McpFleetResponseBudgetLivePostgresTests
                 Assert.Equal(worst.Take(lead.Count), lead);
             }
 
+            /* Nothing is dropped: following next_card_offset reads every seeded server's card exactly once, each page within the budget. */
+            var seenCards = new System.Collections.Generic.List<string>();
+            var nextCardOffset = 0;
+            for (var calls = 0; calls < 200; calls++)
+            {
+                var pageJson = await DarlingMcpFleetTools.GetFleetOverview(postgres, hours_back: 1, detail: "cards", card_offset: nextCardOffset);
+                Assert.True(Encoding.UTF8.GetByteCount(pageJson) <= McpResponseBudget.DefaultBytes,
+                    $"detail=cards at card_offset {nextCardOffset} was {Encoding.UTF8.GetByteCount(pageJson):N0} bytes, over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
+                using var pageDoc = JsonDocument.Parse(pageJson);
+                Assert.Equal(nextCardOffset, pageDoc.RootElement.GetProperty("card_offset").GetInt32());
+                seenCards.AddRange(pageDoc.RootElement.GetProperty("cards").EnumerateArray().Select(c => c.GetProperty("server_name").GetString()!));
+                if (!pageDoc.RootElement.GetProperty("budget_truncated").GetBoolean())
+                {
+                    Assert.Equal(JsonValueKind.Null, pageDoc.RootElement.GetProperty("next_card_offset").ValueKind);
+                    break;
+                }
+
+                nextCardOffset = pageDoc.RootElement.GetProperty("next_card_offset").GetInt32();
+            }
+
+            Assert.Equal(
+                Enumerable.Range(0, ByteFleetIds.Length).Select(i => $"zz-m2b-byte-{i:D3}"),
+                seenCards.Where(name => name.StartsWith("zz-m2b-byte-", StringComparison.Ordinal)).OrderBy(name => name, StringComparer.Ordinal));
+
             bodySucceeded = true;
         }
         finally

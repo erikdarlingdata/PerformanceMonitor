@@ -150,6 +150,34 @@ public static class McpResponseBudget
             $"TRUNCATED: {rowsInScope:#,0} {noun} were read; only {rowsReturned:#,0} fit the {DefaultBytes:#,0}-byte response budget ({order}). Lower the row count asked for, or narrow the window or database, to see the rest.");
 
     /// <summary>
+    /// <see cref="PageCutNote(int, int, string, string)"/> with the read's own way to the rows left out (#8568): a
+    /// page that has an <c>offset</c>, a filter or a narrower window names it in <paramref name="remedy"/>, a whole
+    /// sentence.
+    /// </summary>
+    public static string PageCutNote(int rowsInScope, int rowsReturned, string order, string noun, string remedy) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"TRUNCATED: {rowsInScope:#,0} {noun} were read; only {rowsReturned:#,0} fit the {DefaultBytes:#,0}-byte response budget ({order}), so {rowsInScope - rowsReturned:#,0} were left out. {remedy}");
+
+    /// <summary>
+    /// A long text field cut to a preview for the response budget (#8568): the text to print, whether it was cut, and
+    /// the whole text's length in characters, so a row says how much of its field the caller is not looking at. The
+    /// cut lands on a whole text element (<see cref="McpHelpers.Truncate"/>'s rule) and carries no marker of its
+    /// own, because the row's <c>*_truncated</c> flag and <c>*_length</c> are the marker. <paramref name="whole"/>
+    /// keeps the text exactly, for a caller who asked for it.
+    /// </summary>
+    public static (string? Text, bool Truncated, int? Length) Preview(string? value, int maxLength, bool whole = false)
+    {
+        if (value is null)
+        {
+            return (null, false, null);
+        }
+
+        return whole || value.Length <= maxLength
+            ? (value, false, value.Length)
+            : (value[..McpHelpers.TextElementCutLength(value, maxLength)], true, value.Length);
+    }
+
+    /// <summary>
     /// Cuts <paramref name="payload"/>'s <paramref name="arrayKey"/> array to the rows that fit <paramref name="budgetBytes"/> and says
     /// so (#6131): <c>truncated</c> (true when rows were left out, false when none were) and <c>budget_note</c> (the
     /// <see cref="PageCutNote"/> sentence, null when nothing was cut) are written onto the payload, and the answer is returned

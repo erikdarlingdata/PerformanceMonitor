@@ -306,7 +306,7 @@ public sealed class DarlingMcpTrendTools
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         [Description("One database, charted per file. Omit for every database.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
-        GetFileIoTrend(postgres, server_name, hours_back, as_of, bucket_minutes, DatabaseFilter.One(database_name), TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints), cancellationToken);
+        GetFileIoTrend(postgres, server_name, hours_back, as_of, bucket_minutes, DatabaseFilter.One(database_name), TrendBudget.Mcp(TrendBuckets.FileIoMcpAutoPoints, TrendBuckets.FileIoMaxPoints), cancellationToken);
 
     /// <summary>
     /// get_file_io_trend under an explicit <paramref name="budget"/> (#3897): the MCP tool above passes its own,

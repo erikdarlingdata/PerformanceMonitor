@@ -639,7 +639,7 @@ public sealed class DarlingMcpPgTrendTools
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetPgDatabaseTrend(postgres, server_name, database, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgDatabaseMaxPoints), logger, cancellationToken);
+        GetPgDatabaseTrend(postgres, server_name, database, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgDatabaseMcpAutoPoints, TrendBuckets.PgDatabaseMaxPoints), logger, cancellationToken);
 
     /// <summary>
     /// get_pg_database_trend under an explicit <paramref name="budget"/> (#3897): the MCP tool passes its own, the
