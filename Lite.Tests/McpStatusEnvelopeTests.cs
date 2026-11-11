@@ -396,7 +396,7 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
     {
         await SeedAgReplicaRoleAsync("Secondary");
 
-        var root = Parse(await McpConfigTools.GetQueryStoreHealth(_dataService, _serverManager));
+        var root = Parse(await McpConfigTools.GetQueryStoreHealth(_dataService, _serverManager, runTimes: new McpCollectorRunTimes(null, _serverManager)));
 
         Assert.Equal("not_collected", root.GetProperty("status").GetString());
         Assert.Contains("readable secondary", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
@@ -412,7 +412,7 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
         await SeedAgReplicaRoleAsync("Secondary");
         await SeedQueryStoreHealthAsync("tempdb", "OFF", readonlyReason: 0, captureTime: DateTime.UtcNow.AddMinutes(-5));
 
-        var root = Parse(await McpConfigTools.GetQueryStoreHealth(_dataService, _serverManager));
+        var root = Parse(await McpConfigTools.GetQueryStoreHealth(_dataService, _serverManager, runTimes: new McpCollectorRunTimes(null, _serverManager)));
 
         Assert.Equal("not_collected", root.GetProperty("status").GetString());
         Assert.Contains("readable secondary", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
@@ -425,7 +425,7 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
         await SeedAgReplicaRoleAsync("Primary");
         await SeedQueryStoreHealthAsync("tempdb", "OFF", readonlyReason: 0, captureTime: DateTime.UtcNow.AddMinutes(-5));
 
-        var json = await McpConfigTools.GetQueryStoreHealth(_dataService, _serverManager);
+        var json = await McpConfigTools.GetQueryStoreHealth(_dataService, _serverManager, runTimes: new McpCollectorRunTimes(null, _serverManager));
 
         Assert.DoesNotContain("readable secondary", json, StringComparison.Ordinal);
         Assert.Contains("tempdb", json, StringComparison.Ordinal);

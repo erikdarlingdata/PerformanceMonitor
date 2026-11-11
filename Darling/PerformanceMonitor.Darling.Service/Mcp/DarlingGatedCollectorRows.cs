@@ -178,8 +178,8 @@ internal static class DarlingGatedCollectorRows
     /// #8361: the readable-secondary sentence for this server under the same judgment the scheduler's gate applies
     /// (<see cref="DarlingQueryStoreReadableSecondary.Message"/>), or null when its last known role is not one or the store cannot say.
     /// Whether the <c>query_store_health</c> collector can refresh the capture is its effective schedule in the store's rows, as
-    /// <c>StoreConfigProvider.ResolveSchedule</c> reads them; disabled, the capture is frozen and only a PRIMARY or SECONDARY role
-    /// overrules it, so the row agrees with the gate after a failover and on a readable standby whose role carries no answer. The
+    /// <c>StoreConfigProvider.ResolveSchedule</c> reads them; disabled, the capture is frozen: the <c>query_store_hints</c> collector's own run that
+    /// captured no database keeps it counting (#8541), and otherwise only a PRIMARY or SECONDARY role overrules it, so the row agrees with the gate after a failover and on a readable standby whose role carries no answer. The
     /// Query Store reads' <c>not_collected</c> answer comes through here too (#8402).
     /// </summary>
     internal static async Task<string?> QueryStoreSecondaryMessageAsync(NpgsqlDataSource postgres, int serverId, string serverName, CancellationToken cancellationToken)
@@ -194,6 +194,29 @@ internal static class DarlingGatedCollectorRows
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return null;
+        }
+    }
+
+    /// <summary>
+    /// #8541: whether a collector's effective schedule runs it on this server, and the interval in minutes it runs it at, from the
+    /// store's schedule rows: enabled as <c>StoreConfigProvider.ResolveSchedule</c> reads them, the interval as
+    /// <see cref="DarlingCollectorCadence.Minutes"/> does. Enabled at the shipped interval when the store cannot say, so a read
+    /// that words itself by the answer keeps its enabled wording.
+    /// </summary>
+    internal static async Task<(bool Enabled, int IntervalMinutes)> CollectorScheduleAsync(
+        NpgsqlDataSource postgres, int serverId, string collectorName, CancellationToken cancellationToken)
+    {
+        var shippedMinutes = CollectorScheduleDefaults.All[collectorName].FrequencyMinutes;
+        try
+        {
+            var overrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, serverId, cancellationToken);
+            return (
+                StoreConfigProvider.ResolveSchedule(collectorName, serverId, overrides).Enabled,
+                DarlingCollectorCadence.Minutes(collectorName, serverId, overrides, shippedMinutes));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return (true, shippedMinutes);
         }
     }
 
