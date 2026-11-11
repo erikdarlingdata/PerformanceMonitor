@@ -343,11 +343,11 @@ public sealed class AlertNotebookAuthoredContextTests
     [Fact]
     public void NoContextFamily_HasNoContextBuilder_SoTheEndpointNeverCallsPrefetch()
     {
-        // "Blocking Detected" registers a plain BuildCells (no context) -- the endpoint's own guard is
+        // "Poison Wait" registers a plain BuildCells (no context) -- the endpoint's own guard is
         // `authored.BuildCellsWithContext is not null`, so an entry like this one is never routed into
         // PrefetchAsync at all. This asserts the precondition that guard depends on. (Deadlocks Detected was the
-        // example until #8553 gave it the engine context.)
-        var resolved = AlertNotebookEndpoint.ResolveAuthored("Blocking Detected");
+        // example until #8553 gave it the engine context, then Blocking Detected until #8584.)
+        var resolved = AlertNotebookEndpoint.ResolveAuthored("Poison Wait");
 
         Assert.NotNull(resolved);
         Assert.Null(resolved!.Value.Entry.BuildCellsWithContext);
@@ -449,7 +449,7 @@ public sealed class AlertNotebookAuthoredContextTests
     /* ═══════════════════════ zero pre-fetch for a no-context family (#4425) ═══════════════════════ */
 
     /// <summary>Drives the SAME decide-and-build step <see cref="AlertNotebookEndpoint.Map"/>'s handler calls
-    /// -- <see cref="AlertNotebookEndpoint.BuildCellsAsync"/> -- for "Blocking Detected", a registered
+    /// -- <see cref="AlertNotebookEndpoint.BuildCellsAsync"/> -- for "Poison Wait", a registered
     /// no-context family (<c>BuildCellsWithContext</c> is null, per
     /// <see cref="NoContextFamily_HasNoContextBuilder_SoTheEndpointNeverCallsPrefetch"/> above), and asserts
     /// <see cref="AlertNotebookEndpoint.PrefetchAsync"/> was called zero times via the process-wide
@@ -472,7 +472,7 @@ public sealed class AlertNotebookAuthoredContextTests
         }
 
         await AlertNotebookEndpoint.BuildCellsAsync(
-            metric: "Blocking Detected", serverName: "srv", asOf: AsOf, windowEnd: WindowEnd,
+            metric: "Poison Wait", serverName: "srv", asOf: AsOf, windowEnd: WindowEnd,
             serverId: null, anchor: WindowEnd, postgres: postgres, analysis: analysis,
             logger: null, notes: null, matchedIncident: null, matchedRow: null,
             status: "Unknown", lookbackHours: "24", ct: CancellationToken.None);
