@@ -222,7 +222,8 @@ public sealed class McpHostService : BackgroundService
     /// host register the SAME tools and the SAME policy production does, not a hand-built set.
     /// </summary>
     internal static void RegisterMcpServer(IServiceCollection services, bool allowWrites,
-        bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full, IPseudonymKeySource? pseudonymKeys = null)
+        bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full, IPseudonymKeySource? pseudonymKeys = null,
+        McpServing? serving = null)
     {
         /* #6066: Lite's pseudonym key (Credential Manager), for the data-detail filter and the brief composer at metadataOnly. None: logins are numbered per answer. */
         if (pseudonymKeys is not null) services.AddSingleton<IPseudonymKeySource>(pseudonymKeys);
@@ -238,7 +239,7 @@ public sealed class McpHostService : BackgroundService
         /* The write switch (McpWritePolicy): once the SDK has gathered every registered tool, drop the writes
            unless mcp_allow_writes is on and stamp the annotation hints. Registered here, ahead of AddMcpServer,
            so it is a PostConfigure over the SDK's own options and sees the full tool set. */
-        services.AddMcpWritePolicy(allowWrites);
+        services.AddMcpWritePolicy(allowWrites, serving);
 
         /* Register MCP server with all tool classes */
         services
@@ -446,7 +447,7 @@ public sealed class McpHostService : BackgroundService
 
             /* The write switch and the SDK's tool registration live in RegisterMcpServer, the method the tests that
                drive tools/call also use (see there). */
-            RegisterMcpServer(builder.Services, _serving.Writes, _serving.Investigations, _dataDetail, _pseudonymKeys);
+            RegisterMcpServer(builder.Services, _serving.Writes, _serving.Investigations, _dataDetail, _pseudonymKeys, _serving);
 
             _app = builder.Build();
 

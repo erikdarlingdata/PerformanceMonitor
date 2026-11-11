@@ -30,7 +30,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para><b>The gate is the force tools' gate.</b> The undo reads and writes the monitored server with that server's remediation login, so it
 /// needs that server's <c>force_plan</c> switch (the per-server opt-in of #5632) and an <c>env:</c> or <c>file:</c> remediation login, the two
 /// server-side conditions the undo checks, and it is served only under <c>mcp.allowWrites</c> with a token, as the force tools are. Unlike the
-/// four Level 2 and Level 3 tools it is not in <see cref="DarlingMcpWritePolicy.NeverAgentTools"/>: it is the way back from a change, not a new one.
+/// four Level 2 and Level 3 tools it is in <see cref="DarlingMcpWritePolicy.NeverAgentTools"/>, so an agent token is never served it
+/// under the investigations arm: it is the way back from a change, and an operator makes it.
 /// A refusal of the gate is journaled by the undo with the caller as <c>person:mcp</c> and the token by name or as <c>legacy token</c>.</para>
 ///
 /// <para><b>Show, then confirm.</b> The first call (confirm false) writes nothing: it answers the exact statement and the state it read. A

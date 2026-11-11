@@ -611,50 +611,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             {
                 /* The named-token lines further down say what is served. */
             }
-            else if (config.Mcp.AllowWrites)
-            {
-                if (!writes.Writes && writeTokenProblem is not null)
-                {
-                    _logger.LogCritical(
-                        "MCP bearer token (mcp.network.token / mcp.network.encryptedToken) {Problem}: the MCP write tools stay off.",
-                        writeTokenProblem);
-                }
-                else if (!writes.Writes)
-                {
-                    _logger.LogCritical(
-                        "{Setting} is on but no usable bearer token is available: the MCP write tools stay off. Set mcp.network.encryptedToken " +
-                        "(via --encrypt-password) or mcp.network.token, at least {MinimumLength} characters; every MCP request, loopback " +
-                        "included, must then present it.",
-                        DarlingMcpWritePolicy.WritesSetting,
-                        DarlingHostBinding.MinimumTokenLength);
-                }
-                else
-                {
-                    _logger.LogWarning(
-                        "MCP write tools are ON ({Setting}; add_servers/edit_server/remove_server {ServerAdmin}): every MCP request, " +
-                        "loopback included, must present the bearer token.",
-                        DarlingMcpWritePolicy.WritesSetting,
-                        writes.ServerAdmin ? "on via " + DarlingMcpWritePolicy.ServerAdminSetting : "off");
-
-                    if (writes.ServerAdmin && config.Mcp.AllowWindowsAuthOverUnverifiedTls)
-                    {
-                        _logger.LogWarning(
-                            "{Setting} is on: add_servers accepts Windows authentication with trust_server_certificate or " +
-                            "optional encryption, so a caller can point this service's own account at a server it cannot verify.",
-                            DarlingMcpAddServersPolicy.UnverifiedWindowsAuthSetting);
-                    }
-                }
-            }
             else
             {
-                /* One line at every start, because an install that used the write tools before the switch
-                   existed loses them on upgrade until the operator turns it on. */
-                _logger.LogInformation(
-                    "MCP write tools are off (the default): tools that change monitoring configuration are not served. " +
-                    "To serve them set {Setting}=true in darling.json plus a bearer token (mcp.network.encryptedToken or " +
-                    "mcp.network.token); add_servers/edit_server/remove_server also need {ServerAdminSetting}=true.",
-                    DarlingMcpWritePolicy.WritesSetting,
-                    DarlingMcpWritePolicy.ServerAdminSetting);
+                LogWritesGate(_logger, config.Mcp, writes, writeTokenProblem);
             }
 
             /* #5632 Phase A, ruling R2: the investigation tools (DarlingMcpWritePolicy.InvestigationTools:
@@ -1048,6 +1007,62 @@ public sealed class DarlingMcpHostService : BackgroundService
         });
         PinForwardedHeadersOff(builder.Services);
         return builder;
+    }
+
+    /// <summary>
+    /// The start's log lines for the write tools, one decision for the start and the tests. <c>mcp.allowWrites</c> on with a usable token:
+    /// one Warning that every request must present the token, naming the server admin tools (built from
+    /// <see cref="DarlingMcpWritePolicy.ServerAdminTools"/>, so one added to the set is named without an edit here) and whether they are on.
+    /// On with no usable token: a Critical line. Off: one Information line saying what to set.
+    /// </summary>
+    internal static void LogWritesGate(
+        ILogger logger, McpConfig mcp, DarlingMcpWritePolicy.Effective writes, string? writeTokenProblem)
+    {
+        if (mcp.AllowWrites)
+        {
+            if (!writes.Writes && writeTokenProblem is not null)
+            {
+                logger.LogCritical(
+                    "MCP bearer token (mcp.network.token / mcp.network.encryptedToken) {Problem}: the MCP write tools stay off.",
+                    writeTokenProblem);
+            }
+            else if (!writes.Writes)
+            {
+                logger.LogCritical(
+                    "{Setting} is on but no usable bearer token is available: the MCP write tools stay off. Set mcp.network.encryptedToken " +
+                    "(via --encrypt-password) or mcp.network.token, at least {MinimumLength} characters; every MCP request, loopback " +
+                    "included, must then present it.",
+                    DarlingMcpWritePolicy.WritesSetting,
+                    DarlingHostBinding.MinimumTokenLength);
+            }
+            else
+            {
+                logger.LogWarning(
+                    "MCP write tools are ON ({Setting}; add_servers/edit_server/remove_server {ServerAdmin}): every MCP request, " +
+                    "loopback included, must present the bearer token.",
+                    DarlingMcpWritePolicy.WritesSetting,
+                    writes.ServerAdmin ? "on via " + DarlingMcpWritePolicy.ServerAdminSetting : "off");
+
+                if (writes.ServerAdmin && mcp.AllowWindowsAuthOverUnverifiedTls)
+                {
+                    logger.LogWarning(
+                        "{Setting} is on: add_servers accepts Windows authentication with trust_server_certificate or " +
+                        "optional encryption, so a caller can point this service's own account at a server it cannot verify.",
+                        DarlingMcpAddServersPolicy.UnverifiedWindowsAuthSetting);
+                }
+            }
+        }
+        else
+        {
+            /* One line at every start, because an install that used the write tools before the switch
+               existed loses them on upgrade until the operator turns it on. */
+            logger.LogInformation(
+                "MCP write tools are off (the default): tools that change monitoring configuration are not served. " +
+                "To serve them set {Setting}=true in darling.json plus a bearer token (mcp.network.encryptedToken or " +
+                "mcp.network.token); add_servers/edit_server/remove_server also need {ServerAdminSetting}=true.",
+                DarlingMcpWritePolicy.WritesSetting,
+                DarlingMcpWritePolicy.ServerAdminSetting);
+        }
     }
 
     /// <summary>

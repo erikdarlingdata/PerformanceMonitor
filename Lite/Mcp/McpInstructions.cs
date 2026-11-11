@@ -28,7 +28,7 @@ internal static class McpInstructions
     /// the write switch, the same collection <c>tools/list</c> lists), and when that is fewer than
     /// <paramref name="catalog"/> (every registered tool) it says the write switch is off.
     /// </summary>
-    internal static string Build(IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served)
+    internal static string Build(IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served, McpHostService.McpServing? serving = null)
     {
         var count = served.Count;
         var total = catalog.Count;
@@ -40,7 +40,7 @@ internal static class McpInstructions
                 ? $"{total} tools"
                 : $"{total} tools (the {writeCount} write tools included: `{McpWritePolicy.WritesSetting}` is on)";
         else if (!served.Any(McpWritePolicy.IsWrite))
-            census = $"{count} tools ({total} in the catalog; `{McpWritePolicy.WritesSetting}` is off, so the {total - count} write tools are not served)";
+            census = $"{count} tools ({total} in the catalog; {WritesNotServedReason(serving)}, so the {total - count} write tools are not served)";
         else
             census = $"{count} tools ({total} in the catalog; the other {total - count} are not served in this configuration)";
 
@@ -54,6 +54,16 @@ internal static class McpInstructions
         if (!served.Any(McpInvestigationPolicy.IsInvestigationTool))
             tail = tail.Replace(InvestigationClaimFlow, "", StringComparison.Ordinal);
         return head + "\n\n" + census + tail;
+    }
+
+    /// <summary>Why the write tools are not served, in the census sentence. <paramref name="serving"/> is the start's decision
+    /// (<see cref="McpHostService.DecideServing"/>); without it (the reference rendering and the tests that build a census by hand) the
+    /// switch is taken to be off. With <c>mcp_allow_writes</c> on, the tools are still absent when the opt-out leaves no token or the token is
+    /// under the floor (<see cref="McpTokenStore.IsUsableToken"/>), and the text says which, so a client is not told the switch is off when it is on (#8610).</summary>
+    private static string WritesNotServedReason(McpHostService.McpServing? serving)
+    {
+        _ = serving;
+        return $"`{McpWritePolicy.WritesSetting}` is off";
     }
 
     private const string MuteTool = "mute_analysis_finding";

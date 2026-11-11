@@ -60,6 +60,10 @@ internal static class DarlingMcpWritePolicy
         "set_server_action",
     };
 
+    /// <summary>The server admin tools by name, in ordinal order and joined with "/", for the instructions and the start
+    /// logs (#8610): built from <see cref="ServerAdminTools"/>, so a tool added to the set is named without an edit to the text.</summary>
+    internal static string ServerAdminToolList => string.Join("/", ServerAdminTools.Order(StringComparer.Ordinal));
+
     /// <summary>
     /// Every registered tool that writes to the monitoring store's CONFIGURATION (the server registry, alert
     /// settings and routes, mute rules, custom alert rules, Custom Views, the analysis mute registry).
