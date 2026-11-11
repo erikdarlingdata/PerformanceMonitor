@@ -1385,6 +1385,8 @@ pre.code {
   font-size: 0.78rem;
 }
 .cell-pin-strip .pin-badge { margin-left: 0; }
+/* #8630: the label on a read cell whose tool has no end time to pin: muted, because nothing here is pinned. */
+.pin-badge.pin-badge-current { background: transparent; color: var(--muted); border-color: var(--border); }
 
 /* ─────────────────────────── availability groups (#991) ─────────────────────────── */
 

@@ -134,7 +134,7 @@ export function emptyHeadline(desc, res) {
  */
 export function panelEmptyStrip(desc, res) {
   /* #8577: a read pinned with `as_of` words its window in the message ("in the last 4 hours"), which says "ending now"; name the pinned one. */
-  const pin = readPinWindow(desc.params, res.keptHours != null ? res.keptHours : desc.windowHours);
+  const pin = desc.asOfIgnored ? null : readPinWindow(desc.params, res.keptHours != null ? res.keptHours : desc.windowHours);
   if (pin && typeof res.message === "string") res = { ...res, message: pinnedWindowText(res.message, pin) };
   if (emptyHeadline(desc, res) !== res.message) return emptyStrip(emptyHeadline(desc, res));
   /* A panel with `emptyLine` says that plain sentence for a true negative and keeps the tool's own text behind "More detail" (#7410). */
@@ -151,6 +151,13 @@ export function panelEmptyStrip(desc, res) {
 export function readPinStrip(desc, res) {
   const win = readPinWindow(desc.params, res && res.keptHours != null ? res.keptHours : desc.windowHours);
   if (!win) return null;
+  /* #8630: a read whose tool takes no `as_of` (`desc.asOfIgnored`, set where the catalog is at hand) answers for the present whatever
+     the cell names, so it says that instead of claiming the pinned window. */
+  if (desc.asOfIgnored) {
+    return el("div", { class: "cell-pin-strip" }, [
+      el("span", { class: "pin-badge pin-badge-current", title: "This read has no end time to pin. It shows the state now, not the state at the time of the alert.", text: "Current state, not pinned" }),
+    ]);
+  }
   const label = pinRangeLabel({ windowStart: new Date(win.windowStart).toISOString(), windowEnd: new Date(win.windowEnd).toISOString() });
   return el("div", { class: "cell-pin-strip" }, [
     el("span", { class: "pin-badge", title: "This cell reads the window that ends at its pinned time, not the last hours before now. Open live shows the window that ends now.", text: "Pinned: " + label }),
@@ -1662,7 +1669,7 @@ function vizLine(data, desc) {
      width is the panel's own `hours` param — `windowHours` when a fanout injects it (a fanout spec carries no
      params) or when loadPanelBody narrowed the read to the history it keeps, else desc.params.hours. Absent ⇒
      null ⇒ the chart keeps its data-extent domain, unchanged. */
-  const win = windowFromHours(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours, desc.params && desc.params.as_of);
+  const win = windowFromHours(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours, desc.asOfIgnored ? null : desc.params && desc.params.as_of);
   /* Drag-to-zoom over the loaded points (zoomableLineChart, charts.js). The zoom is held under this chart's
      identity (title, read and series) and the page's scope (server + tab + preset range), so the poll's rebuild
      draws it again and a different server, tab or range does not. */

@@ -698,7 +698,7 @@ export async function renderView(main, id, opts) {
   /* #6214: another person's personal view can be read but not changed, so Edit goes and Delete is disabled. */
   const access = viewAccess(view, session);
   const canEdit = !!session.can_edit && !access.readOnly;
-  const readSet = new Set((catalog.reads || []).map((r) => r.name));
+  const readsByName = new Map((catalog.reads || []).map((r) => [r.name, r]));
   const sourceSet = new Set(((catalog.compose || {}).measures || []).map((m) => m.source));
 
   const status = el("div", { class: "view-status" });
@@ -751,7 +751,7 @@ export async function renderView(main, id, opts) {
     if (scopeNote) scopeNote.textContent = panelServerNote(state, panelServer);
     if (panelRender) panelRender.end();
     const render = (panelRender = newPanelRender(ourHash));
-    return panels.map((p, i) => panelOrError(panelUnderScope(p, state, panelServer), readSet, sourceSet, currentScope(), undefined, i, render.gate));
+    return panels.map((p, i) => panelOrError(panelUnderScope(p, state, panelServer), readsByName, sourceSet, currentScope(), undefined, i, render.gate));
   }
   function renderGrid() {
     mount(gridBox, buildGrid());
@@ -842,7 +842,7 @@ export async function renderNotebookDoc(main, opts) {
      uses: a read the catalog lists must render, not fail as "Unknown read" (it did while this was always the
      empty catalog). The empty catalog is only what an alert-mode caller that passes none gets. */
   const catalog = isAlert ? (opts.catalog || { reads: [], compose: {} }) : opts.catalog;
-  const readSet = new Set((catalog.reads || []).map((r) => r.name));
+  const readsByName = new Map((catalog.reads || []).map((r) => [r.name, r]));
   const sourceSet = new Set(((catalog.compose || {}).measures || []).map((m) => m.source));
 
   /* #8555: a row that declares no notebook (the report rows) shows only the notes its caller drew: no "Alert notebook" header,
@@ -941,7 +941,7 @@ export async function renderNotebookDoc(main, opts) {
          return synchronously with the fetch outstanding, so the limiter gates ACQUIRING a slot before the cell
          node is even built, then releases it off renderPanel's onSettled callback. */
       const scope = currentScope();
-      return cells.map((cell, i) => renderAlertCell(cell, i, readSet, sourceSet, scope, opts, limiter));
+      return cells.map((cell, i) => renderAlertCell(cell, i, readsByName, sourceSet, scope, opts, limiter));
     }
     refreshScopeNote();
     /* #7257: a saved notebook starts its panel reads two at a time, and a new render (a scope change) ends the one before it. */
@@ -949,7 +949,7 @@ export async function renderNotebookDoc(main, opts) {
     const render = (panelRender = newPanelRender(ourHash));
     /* The cell's index is its slot: the identity under which a composed panel cell holds its zoom and drill (#7923), so the
        poll's rebuild of the cell draws them again. */
-    return cells.map((cell, i) => renderCell(cellUnderScope(cell), readSet, sourceSet, currentScope(), undefined, render.gate, i));
+    return cells.map((cell, i) => renderCell(cellUnderScope(cell), readsByName, sourceSet, currentScope(), undefined, render.gate, i));
   }
   function renderDoc() {
     mount(docBox, buildDoc());
@@ -1005,7 +1005,7 @@ class InFlightLimiter {
    markdown and panel cells (the templates' prose and charts) render through saved mode's own renderCell, so a
    cell looks and validates the same in an alert notebook and in a saved one; a kind with no renderer here gets
    a "not shown" card, never nothing. */
-function renderAlertCell(cell, index, readSet, sourceSet, scope, opts, limiter) {
+function renderAlertCell(cell, index, readsByName, sourceSet, scope, opts, limiter) {
   if (!cell || typeof cell !== "object") return null;
   if (cell.type === "header") {
     return renderAlertHeaderCell(cell, opts);
@@ -1017,14 +1017,14 @@ function renderAlertCell(cell, index, readSet, sourceSet, scope, opts, limiter) 
     ]);
   }
   if (cell.type === "read") {
-    if (!cell.read || !readSet.has(cell.read) || !cell.viz || !VIZ[cell.viz]) {
+    if (!cell.read || !readsByName.has(cell.read) || !cell.viz || !VIZ[cell.viz]) {
       return panelErrorCard(cell.title, "Unknown read '" + (cell.read || "") + "' or visualization '" + (cell.viz || "") + "'.");
     }
-    return gatedCell(opts, limiter, (release) => renderPanel(resolveReadTable(cell), release));
+    return gatedCell(opts, limiter, (release) => renderPanel(resolveReadTable(withAsOfSupport(cell, readsByName)), release));
   }
   /* A markdown cell is prose: no load, so no slot — the same air-gapped renderMarkdown a saved notebook uses. */
   if (cell.type === "markdown") {
-    return renderCell(cell, readSet, sourceSet, scope);
+    return renderCell(cell, readsByName, sourceSet, scope);
   }
   /* A composed panel cell (a chart): saved mode's own renderCell -> panelOrError -> renderComposedPanelCard path,
      scoped to the alert's server and windowed by the cell's own `range` (the scope's hours only apply once "Open
@@ -1037,7 +1037,7 @@ function renderAlertCell(cell, index, readSet, sourceSet, scope, opts, limiter) 
     if (!scope.server) {
       return notShownCard(cell.title, "This chart is not shown here: the alert link names no server to scope it to, or names one this service does not monitor.");
     }
-    return gatedCell(opts, limiter, (release) => renderCell(cell, readSet, sourceSet, scope, release));
+    return gatedCell(opts, limiter, (release) => renderCell(cell, readsByName, sourceSet, scope, release));
   }
   /* Any other kind has no renderer on this page. Say so: a cell that silently vanishes reads as evidence that
      does not exist. */
@@ -1168,19 +1168,19 @@ function openLiveButton(onOpenLive) {
    `onSettled` is optional and only the alert notebook passes it (its in-flight limiter's release): see panelOrError. */
 /* `slot` is the cell's index in a saved notebook: the stable identity a composed panel cell holds its zoom and drill under across
    the poll's rebuild (#7924). The alert notebook passes none, so its cells hold nothing, like the editor preview. */
-function renderCell(cell, readSet, sourceSet, scope, onSettled, gate = null, slot = null) {
+function renderCell(cell, readsByName, sourceSet, scope, onSettled, gate = null, slot = null) {
   if (!cell || typeof cell !== "object") return null;
   if (cell.type === "markdown") {
     return el("div", { class: "notebook-md markdown-body" }, [renderMarkdown(cell.text)]);
   }
   if (cell.type === "panel") {
-    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope, onSettled, slot, gate)]);
+    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readsByName, sourceSet, scope, onSettled, slot, gate)]);
   }
   /* A `read` cell (design D7, #4222) is a v1 read panel, FLAT like a panel cell: routed through the exact same
      panelOrError -> renderPanel path a dashboard read panel uses (its own fixed params, scope-independent).
      Minimal routing only; renderNotebookDoc's broader refactor is a later slice's job. */
   if (cell.type === "read") {
-    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope, onSettled, slot, gate)]);
+    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readsByName, sourceSet, scope, onSettled, slot, gate)]);
   }
   return null;
 }
@@ -1316,8 +1316,8 @@ function checkRow(label, checked, onToggle) {
    `onSettled` (optional; the alert notebook's in-flight limiter release, #4222) is called exactly once per call: by
    the renderer when its load ends, or right here when the panel cannot start a load and becomes an error card —
    so a bad cell cannot hold a limiter slot. Every other caller omits it. */
-function panelOrError(p, readSet, sourceSet, scope, onSettled, slot = null, gate = null) {
-  const bad = panelProblem(p, readSet, sourceSet);
+function panelOrError(p, readsByName, sourceSet, scope, onSettled, slot = null, gate = null) {
+  const bad = panelProblem(p, readsByName, sourceSet);
   if (bad) {
     if (onSettled) onSettled();
     return panelErrorCard(bad.title, bad.message);
@@ -1328,12 +1328,21 @@ function panelOrError(p, readSet, sourceSet, scope, onSettled, slot = null, gate
   /* #8492: a read table that carries its own columns takes the catalog's words and rules for the same keys (withCatalogWords), so a saved
      view's alert-history table shows a state-only row's stored zeros as the dash Alert History shows. A panel with no columns of its own
      is unchanged. */
-  return renderPanel(withCatalogWords(p), onSettled, gate);
+  return renderPanel(withCatalogWords(withAsOfSupport(p, readsByName)), onSettled, gate);
+}
+
+/* #8630: a read cell that names an `as_of` is drawn "Pinned" only when its tool takes one. The catalog lists each read's parameters, so a
+   read with no `as_of` of its own (get_server_summary, get_collection_health) is marked `asOfIgnored` and the cell says it shows the
+   current state. This covers a template cell and a custom notebook's alike, so no template has to drop its `as_of`. */
+function withAsOfSupport(cell, readsByName) {
+  const read = cell && cell.read ? readsByName.get(cell.read) : null;
+  if (!read || !cell.params || cell.params.as_of == null) return cell;
+  return (read.params || []).some((x) => x.name === "as_of") ? cell : { ...cell, asOfIgnored: true };
 }
 
 /* Why a panel cannot start a read (the catalog check), as {title, message}, or null when it can. A panel with a problem
    draws an error card and takes no limiter slot, and no Retry button, since running it again cannot fix it (#7257). */
-function panelProblem(p, readSet, sourceSet) {
+function panelProblem(p, readsByName, sourceSet) {
   if (!p || typeof p !== "object") {
     return { title: "Invalid panel", message: "This panel is not an object." };
   }
@@ -1349,7 +1358,7 @@ function panelProblem(p, readSet, sourceSet) {
     }
     return null;
   }
-  if (!p.read || !readSet.has(p.read)) {
+  if (!p.read || !readsByName.has(p.read)) {
     return { title: p.title, message: "Unknown read '" + (p.read || "") + "'. It may have been renamed or removed." };
   }
   if (!p.viz || !VIZ[p.viz]) {
