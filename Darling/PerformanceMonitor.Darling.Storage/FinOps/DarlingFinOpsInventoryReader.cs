@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -282,9 +283,11 @@ WHERE s.server_id <> 0";
     /// </summary>
     private static string IdleCoverageForCagg(string relationSql, DateTime watermarkUtc, DateTime idleCutoffUtc)
     {
-        var watermark = $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var watermark = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
         var floorHour = TimescaleSupport.AlignDown(idleCutoffUtc, TimescaleSupport.HourlyBucket);
-        var oldestBucketBefore = $"TIMESTAMP '{floorHour:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var oldestBucketBefore = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{floorHour:yyyy-MM-dd HH:mm:ss.ffffff}'");
 
         return $@"idle_coverage AS (
     SELECT d.server_id
@@ -331,8 +334,9 @@ WHERE s.server_id <> 0";
     /// </summary>
     private static string IdleActiveDbsForCagg(string relationSql, DateTime ceilingHourUtc, DateTime watermarkUtc)
     {
-        var ceiling = $"TIMESTAMP '{ceilingHourUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
-        var watermark = $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var ceiling = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{ceilingHourUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
+        var watermark = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
 
         return $@"active_dbs AS (
     SELECT DISTINCT server_id, database_name
