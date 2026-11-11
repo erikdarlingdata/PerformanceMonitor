@@ -148,19 +148,19 @@ public sealed partial class ViewerDataService
                than the window still names its module, which a bound would turn into 'ad hoc'.
                #8549: the newest row of each handle is found without sorting. This was a ROW_NUMBER over every row of the ranked
                handles, which sorts them (126,732 rows to keep 55 on a four-day rig, an external merge with temp files, 476 ms of a
-               959 ms statement). Now a hash aggregate takes the newest collection_time per ranked handle, and a lateral probe of
+               959 ms statement). Now a hash aggregate takes the newest collection_time per ranked handle, and a join back on
                idx_procedure_stats_time (server_id, collection_time) fetches each winner's row. The pass over the server's rows
                stays, because this table has no (server_id, sql_handle) index (#4247 dropped it for its WAL cost) and a handle
                with no row at all (an ad hoc statement) can only be proved absent by reading every row, but nothing is sorted
-               and the probe is one per ranked handle. Both columns of the sort key are NOT NULL, so no NULL ordering applies.
-               The probe's tie-break is the row collected last (the higher collection_id), the rule Lite's module lookup uses;
+               and the join back touches only the winners' rows. Both columns of the sort key are NOT NULL, so no NULL ordering applies.
+               The tie-break (DISTINCT ON over the few rows of a tied time) is the row collected last (the higher collection_id), the rule Lite's module lookup uses;
                the ROW_NUMBER left a tie unspecified. A module whose newest row has NULL names answers NULL, as before.
                idx_procedure_stats_time is part of the schema, not the tuning pass, so every store has it. */
-            SELECT
+            SELECT DISTINCT ON (w.sql_handle)
                 w.sql_handle,
-                m.object_name,
-                m.schema_name,
-                m.database_name
+                p.object_name,
+                p.schema_name,
+                p.database_name
             FROM
             (
                 SELECT
@@ -173,19 +173,11 @@ public sealed partial class ViewerDataService
                 AND   sql_handle IN (SELECT sql_handle FROM ranked)
                 GROUP BY sql_handle
             ) AS w
-            CROSS JOIN LATERAL
-            (
-                SELECT
-                    p.object_name,
-                    p.schema_name,
-                    p.database_name
-                FROM procedure_stats AS p
-                WHERE p.server_id = $1
-                AND   p.collection_time = w.newest
-                AND   p.sql_handle = w.sql_handle
-                ORDER BY p.collection_id DESC
-                LIMIT 1
-            ) AS m
+            JOIN procedure_stats AS p
+                ON  p.server_id = $1
+                AND p.collection_time = w.newest
+                AND p.sql_handle = w.sql_handle
+            ORDER BY w.sql_handle, p.collection_id DESC
         )
         """;
 
