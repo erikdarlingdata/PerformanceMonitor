@@ -554,6 +554,9 @@ export function drawStrips(strips, domain, width, onZoom) {
   return { node: root, crosshairAt, clearCrosshair };
 }
 
+/* #8554: the strips' trend reads that go through the heavy-read gate; the CPU, blocking and deadlock reads are small and go at once. */
+const GATED_STRIP_READS = new Set(["get_server_trend", "get_memory_trend", "get_file_io_trend"]);
+
 const READS = [
   ["cpu", "get_cpu_utilization", {}],
   ["waits", "get_server_trend", { metric: "total_waits" }],
@@ -576,14 +579,19 @@ export function fillOverviewStrips(body, server, ctx) {
        return and the band and markers are added when this one does. */
     let baselineRes = null;
     let onBaseline = null;
-    readTool("get_overview_baselines", { server, window_start: baselineStart }, ctx && ctx.signal)
+    /* #8554: the three trends and the baseline are the reads that took 4 to 10 s each on a server's first visit, all ending together.
+       They go through the page's heavy-read gate (two at a time, in the order asked), so the strips' own reads are asked for first and
+       the baseline after them: the strips draw from the trends, the baseline only adds the band. */
+    const stripReads = Promise.all(READS.map(([, tool, extra]) =>
+      readToolWithinKeptHistory(tool, { server, hours: ctx.hours, ...extra }, ctx && ctx.signal, GATED_STRIP_READS.has(tool) ? { heavy: true } : undefined)
+        .catch((e) => ({ kind: "error", message: String((e && e.message) || e) }))));
+    readTool("get_overview_baselines", { server, window_start: baselineStart }, ctx && ctx.signal, { heavy: true })
       .catch((e) => ({ kind: "error", message: String((e && e.message) || e) }))
       .then((res) => {
         baselineRes = res;
         if (onBaseline) onBaseline();
       });
-    const results = await Promise.all(READS.map(([, tool, extra]) =>
-      readToolWithinKeptHistory(tool, { server, hours: ctx.hours, ...extra }, ctx && ctx.signal).catch((e) => ({ kind: "error", message: String((e && e.message) || e) }))));
+    const results = await stripReads;
     /* #6793: the batch was cancelled (a redraw, or the user left the page). Nothing is drawn into a body nobody is looking at. */
     if (results.some((r) => r.kind === "aborted")) return;
     const reads = {};

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Linq;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
@@ -631,7 +632,8 @@ public static class DailySummarySql
         var successorFilter = TimescaleSupport.MaterializationHoleSourceFilterFor(successorTarget.CreateSql);
         var successorSourceFilter = successorFilter.Length == 0 ? string.Empty : $"\n          AND {successorFilter}";
         var boundaryDay = successorFloor == successorFloor.Date ? successorFloor : successorFloor.Date.AddDays(1);
-        var boundary = $"TIMESTAMP '{boundaryDay:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var boundary = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{boundaryDay:yyyy-MM-dd HH:mm:ss.ffffff}'");
         /* #7505: the partial ceiling day's raw rows carry the owning side's source filter. See QueriesCteForCagg. */
         var partialDaySuccessor = successorFilter.Length == 0 ? "TRUE" : $"({successorFilter})";
         var partialDayLegacy = legacyFilter.Length == 0 ? "TRUE" : $"({legacyFilter})";

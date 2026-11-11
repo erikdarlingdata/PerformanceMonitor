@@ -66,6 +66,19 @@ public static class QueryStoreSnapshotStaleness
     }
 
     /// <summary>
+    /// #8576: the age cue a Query Store health row's Collected cell carries ("20 days 21 hours old"), or null while the row is current.
+    /// A row is current while it is no older than two cycles of its collector (<paramref name="intervalMinutes"/>, the interval the
+    /// collector's schedule runs at on the server), the margin the health bands give a cycle that ran late. An interval of zero or less
+    /// is unknown, so no cue.
+    /// </summary>
+    public static string? AgeCue(DateTime capturedUtc, DateTime nowUtc, int intervalMinutes)
+    {
+        if (intervalMinutes <= 0) return null;
+        var age = nowUtc - capturedUtc;
+        return age > TimeSpan.FromMinutes(2.0 * intervalMinutes) ? Ago(age) + " old" : null;
+    }
+
+    /// <summary>
     /// The <c>unavailable</c> answer of <c>get_query_store_health</c> for a server the store holds no capture for, in both
     /// products. It names the cadence <paramref name="collectorName"/> is scheduled at on the server
     /// (<paramref name="intervalMinutes"/>, through <see cref="Cadence"/>).
@@ -90,7 +103,7 @@ public static class QueryStoreSnapshotStaleness
     }
 
     /// <summary>An age as whole days and hours ("19 days 4 hours"), or hours alone under a day.</summary>
-    private static string Ago(TimeSpan age)
+    public static string Ago(TimeSpan age)
     {
         var days = (int)age.TotalDays;
         var hours = age.Hours;
