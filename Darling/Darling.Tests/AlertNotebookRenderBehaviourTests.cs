@@ -160,6 +160,30 @@ public sealed class AlertNotebookRenderBehaviourTests
         Assert.Contains(Strings(r, "notices"), n => n.Contains("dismissed", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>#8555: a report row declares no notebook. The page draws only the caller's notes: no "Alert notebook" header, no
+    /// Open live button and no "no cells yet" line, which had nothing to act on and read as a broken notebook.</summary>
+    [Fact]
+    public void AReportRow_DrawsNoNotebookChrome()
+    {
+        if (!TryRun("noNotebook", out var r)) return;
+
+        Assert.Empty(Strings(r, "heads"));
+        Assert.Empty(Strings(r, "buttons"));
+        Assert.Empty(Strings(r, "empties"));
+        Assert.Empty(Strings(r, "errors"));
+    }
+
+    /// <summary>The counterpart of the report row: an ordinary alert whose notebook has no cells keeps its header, its button and its line.</summary>
+    [Fact]
+    public void AnOrdinaryAlertWithNoCells_KeepsTheNotebookHeaderAndTheEmptyLine()
+    {
+        if (!TryRun("emptyNotebook", out var r)) return;
+
+        Assert.Equal(new[] { "Alert notebook" }, Strings(r, "heads"));
+        Assert.Contains("Open live", Strings(r, "buttons"));
+        Assert.Equal(new[] { "This notebook has no cells yet." }, Strings(r, "empties"));
+    }
+
     /// <summary>The header card's labelled fields, label to value.</summary>
     private static Dictionary<string, string?> Fields(JsonElement node) =>
         node.GetProperty("fields").EnumerateArray().ToDictionary(f => f[0].GetString()!, f => f[1].GetString());

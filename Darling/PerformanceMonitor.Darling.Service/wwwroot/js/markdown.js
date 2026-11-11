@@ -20,7 +20,8 @@
  *
  * Supported (a deliberately small subset — enough to document an investigation, no more): ATX headings
  * (# … ######), paragraphs, **bold** / *italic* (and __ / _), `inline code`, ``` fenced code blocks ```, unordered
- * (- * +) and ordered (1. / 1)) lists, and [text](url) links. Everything else renders as its literal text.
+ * (- * +) and ordered (1. / 1)) lists, pipe tables (a header row, a |---| separator row, body rows), "> " block quotes, and
+ * [text](url) links. Everything else renders as its literal text.
  */
 
 import { el } from "./util.js";
@@ -32,7 +33,15 @@ import { el } from "./util.js";
  */
 export function renderMarkdown(text) {
   const frag = document.createDocumentFragment();
-  const lines = normalize(text).split("\n");
+  for (const node of renderBlocks(normalize(text).split("\n"))) {
+    frag.appendChild(node);
+  }
+  return frag;
+}
+
+/** The block nodes for an array of source lines. A block quote renders its own lines through this again. */
+function renderBlocks(lines) {
+  const out = [];
   let i = 0;
 
   while (i < lines.length) {
@@ -64,15 +73,49 @@ export function renderMarkdown(text) {
       /* An info string of "text" marks prose that must still show as typed (the alert notebook's finding story): the
          block is still verbatim, but it wraps and uses the body font instead of scrolling sideways in monospace. */
       const isProse = fence[2].trim() === "text";
-      frag.appendChild(el("pre", { class: isProse ? "md-pre md-pre-text" : "md-pre" }, [el("code", { text: body.join("\n") })]));
+      out.push(el("pre", { class: isProse ? "md-pre md-pre-text" : "md-pre" }, [el("code", { text: body.join("\n") })]));
       continue;
     }
 
     /* ATX heading: 1–6 leading #, a required space, optional trailing #'s stripped. */
     const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/);
     if (heading) {
-      frag.appendChild(el("h" + heading[1].length, { class: "md-h" }, parseInline(heading[2])));
+      out.push(el("h" + heading[1].length, { class: "md-h" }, parseInline(heading[2])));
       i++;
+      continue;
+    }
+
+    /* Pipe table: a header row, then a separator row ("|---|:---:|") with the same number of cells, then body rows. Every cell
+       is parsed as inline text, so a cell holds no markup beyond what a paragraph holds. */
+    if (isTableStart(lines, i)) {
+      const header = splitTableRow(line);
+      const aligns = splitTableRow(lines[i + 1]).map(cellAlign);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].trim() !== "" && lines[i].includes("|")) {
+        rows.push(splitTableRow(lines[i]));
+        i++;
+      }
+      const cell = (tag, text, c) => el(tag, { class: aligns[c] ? "md-al-" + aligns[c] : "" }, parseInline(text));
+      const head = el("thead", {}, [el("tr", {}, header.map((h, c) => cell("th", h, c)))]);
+      const body = el(
+        "tbody",
+        {},
+        rows.map((r) => el("tr", {}, header.map((_, c) => cell("td", r[c] ?? "", c))))
+      );
+      out.push(el("div", { class: "md-table-wrap" }, [el("table", { class: "md-table" }, [head, body])]));
+      continue;
+    }
+
+    /* Block quote: consecutive lines that start with ">" (an optional space after it). The lines with the marker removed are
+       rendered as blocks of their own, so a quote may hold a list, a code fence or another quote. */
+    if (QUOTE_LINE.test(line)) {
+      const inner = [];
+      while (i < lines.length && QUOTE_LINE.test(lines[i])) {
+        inner.push(lines[i].replace(QUOTE_LINE, ""));
+        i++;
+      }
+      out.push(el("blockquote", { class: "md-quote" }, renderBlocks(inner)));
       continue;
     }
 
@@ -83,7 +126,7 @@ export function renderMarkdown(text) {
         items.push(el("li", {}, parseInline(lines[i].replace(/^\s*[-*+]\s+/, ""))));
         i++;
       }
-      frag.appendChild(el("ul", { class: "md-ul" }, items));
+      out.push(el("ul", { class: "md-ul" }, items));
       continue;
     }
 
@@ -94,20 +137,20 @@ export function renderMarkdown(text) {
         items.push(el("li", {}, parseInline(lines[i].replace(/^\s*\d+[.)]\s+/, ""))));
         i++;
       }
-      frag.appendChild(el("ol", { class: "md-ol" }, items));
+      out.push(el("ol", { class: "md-ol" }, items));
       continue;
     }
 
     /* Paragraph: gather consecutive non-blank lines until the next block start; soft-wrap joins with a space. */
     const para = [];
-    while (i < lines.length && lines[i].trim() !== "" && !isBlockStart(lines[i])) {
+    while (i < lines.length && lines[i].trim() !== "" && !isBlockStart(lines[i]) && !isTableStart(lines, i)) {
       para.push(lines[i].trim());
       i++;
     }
-    frag.appendChild(el("p", { class: "md-p" }, parseInline(para.join(" "))));
+    out.push(el("p", { class: "md-p" }, parseInline(para.join(" "))));
   }
 
-  return frag;
+  return out;
 }
 
 /** Normalize source: CRLF/CR -> LF, tabs -> spaces, null-safe to "". */
@@ -130,8 +173,56 @@ function isBlockStart(line) {
     fenceOpen(line) !== null ||
     /^\s{0,3}#{1,6}\s+/.test(line) ||
     /^\s*[-*+]\s+/.test(line) ||
-    /^\s*\d+[.)]\s+/.test(line)
+    /^\s*\d+[.)]\s+/.test(line) ||
+    QUOTE_LINE.test(line)
   );
+}
+
+/** A block quote line: up to three spaces, ">", and one optional space (removed by the replace in the quote block). */
+const QUOTE_LINE = /^\s{0,3}>[ ]?/;
+
+/** A separator row cell: dashes with an optional colon at either end. */
+const TABLE_SEPARATOR_CELL = /^:?-+:?$/;
+
+/**
+ * The cells of a table row: a leading and a trailing pipe are dropped, "\|" is a literal pipe, and each cell is trimmed. A row
+ * with no pipe at all is one cell.
+ */
+function splitTableRow(line) {
+  let row = line.trim();
+  if (row.startsWith("|")) row = row.slice(1);
+  if (row.endsWith("|") && !row.endsWith("\\|")) row = row.slice(0, -1);
+  const cells = [];
+  let buf = "";
+  for (let j = 0; j < row.length; j++) {
+    if (row[j] === "\\" && row[j + 1] === "|") {
+      buf += "|";
+      j++;
+    } else if (row[j] === "|") {
+      cells.push(buf.trim());
+      buf = "";
+    } else {
+      buf += row[j];
+    }
+  }
+  cells.push(buf.trim());
+  return cells;
+}
+
+/** "right" for "---:", "center" for ":---:", "" otherwise: a separator cell's alignment. */
+function cellAlign(cell) {
+  const right = cell.endsWith(":");
+  const left = cell.startsWith(":");
+  return right && left ? "center" : right ? "right" : "";
+}
+
+/** Whether line `at` opens a table: it holds a pipe, and the next line is a separator row with the same number of cells. */
+function isTableStart(lines, at) {
+  if (at + 1 >= lines.length || !lines[at].includes("|") || !lines[at + 1].includes("|")) {
+    return false;
+  }
+  const sep = splitTableRow(lines[at + 1]);
+  return sep.every((c) => TABLE_SEPARATOR_CELL.test(c)) && sep.length === splitTableRow(lines[at]).length;
 }
 
 /* ─────────────────────────── inline parsing (the XSS-critical path) ─────────────────────────── */

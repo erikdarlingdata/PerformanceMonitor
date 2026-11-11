@@ -146,6 +146,9 @@ public partial class AlertsHistoryTab : UserControl
     /// <summary>Reloads the alert history (the shell calls this when the Alerts tab becomes visible / on the timer).</summary>
     public Task RefreshAlertsAsync() => LoadAlertsAsync();
 
+    /// <summary><see cref="RefreshAlertsAsync"/> on a load clock the caller owns, so a test reads the phases the load booked (#8549).</summary>
+    internal Task RefreshAlertsAsync(ViewerLoadTimer timer) => LoadAlertsAsync(timer);
+
     /// <summary>The distinct servers this tab's reads have listed. A list that has shown more than one server is a list of several
     /// servers for the rest of its life, whatever one read returns.</summary>
     private readonly HashSet<int> _serversSeen = new();
@@ -192,13 +195,15 @@ public partial class AlertsHistoryTab : UserControl
         return displayCount;
     }
 
-    private async Task LoadAlertsAsync()
+    /// <param name="loadTimer">The load's phase clock; null starts one that logs a slow load itself (#8549: the tab had no SlowLoad line).</param>
+    private async Task LoadAlertsAsync(ViewerLoadTimer? loadTimer = null)
     {
         if (_dataService == null)
         {
             return;
         }
 
+        var timer = loadTimer ?? new ViewerLoadTimer();
         var gen = _loads.Claim(nameof(LoadAlertsAsync));
 
         try
@@ -206,7 +211,7 @@ public partial class AlertsHistoryTab : UserControl
             var (sinceUtc, untilUtc, isLive) = GetSelectedWindow();
             int? serverId = GetSelectedServerId();
 
-            var alerts = await _dataService.GetAlertHistoryWindowAsync(sinceUtc, isLive ? null : untilUtc, serverId, RowCap);
+            var alerts = await ViewerServerTab.Timed(timer, "alert history read", _dataService.GetAlertHistoryWindowAsync(sinceUtc, isLive ? null : untilUtc, serverId, RowCap));
 
             /* #7211: nothing awaits between this check and the bind below, so an older read never lands over a newer one. */
             if (_loads.Superseded(nameof(LoadAlertsAsync), gen))
@@ -214,12 +219,12 @@ public partial class AlertsHistoryTab : UserControl
                 return;
             }
 
-            var displayCount = ShowAlerts(alerts);
+            var displayCount = timer.Step("alert grid bind", () => ShowAlerts(alerts));
 
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
 
-            PopulateServerFilter(alerts);
+            ViewerServerTab.ClientStep(timer, "server filter build", () => PopulateServerFilter(alerts));
             StatusChanged?.Invoke($"alert history — refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
@@ -228,6 +233,14 @@ public partial class AlertsHistoryTab : UserControl
             if (_loads.Superseded(nameof(LoadAlertsAsync), gen)) return;
 
             StatusChanged?.Invoke($"failed to load alert history: {ex.Message}");
+        }
+        finally
+        {
+            /* #8549: a slow load names the read or step that was slow. A caller that passed its own clock reads it and logs nothing. */
+            if (loadTimer is null)
+            {
+                timer.FinishAndLog("Alert History");
+            }
         }
     }
 

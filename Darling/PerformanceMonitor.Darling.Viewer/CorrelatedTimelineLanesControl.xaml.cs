@@ -179,7 +179,12 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     /// usual. The return value names the reads that failed (<see cref="OverviewLaneReadFailures.Summary"/>), so the host does not
     /// call the tab refreshed; null when all ten completed.</para>
     /// </summary>
-    public async Task<string?> RefreshAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    /// <param name="hoursBack">The preset window, in hours back from now.</param>
+    /// <param name="fromDate">A custom window's start, or null.</param>
+    /// <param name="toDate">A custom window's end, or null.</param>
+    /// <param name="timer">#8549: the load's phase clock. Each of the ten reads is booked on it by name, the lane drawing as client steps, so a slow
+    /// Overview's SlowLoad line says which read or which lane was slow. Null for a refresh that is not an inner-tab load.</param>
+    public async Task<string?> RefreshAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, ViewerLoadTimer? timer = null)
     {
         if (_dataService == null || _isRefreshing) return null;
         _isRefreshing = true;
@@ -200,19 +205,19 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                Declared here, before the first task, so every one of the ten inherits it. */
             using var readFanOut = ViewerReadFanOut.Of(10);
 
-            var cpuTask = _dataService.GetCpuUtilizationAsync(_serverId, startUtc, endUtc);
-            var waitTask = _dataService.GetTotalWaitTrendAsync(_serverId, startUtc, endUtc);
-            var blockingTask = _dataService.GetBlockingTrendAsync(_serverId, startUtc, endUtc);
-            var deadlockTask = _dataService.GetDeadlockTrendAsync(_serverId, startUtc, endUtc);
-            var memoryTask = _dataService.GetMemoryTrendAsync(_serverId, startUtc, endUtc);
-            var fileIoTask = _dataService.GetFileIoOverviewLatencyTrendAsync(_serverId, startUtc, endUtc);
+            var cpuTask = ViewerServerTab.Timed(timer, "CPU read", _dataService.GetCpuUtilizationAsync(_serverId, startUtc, endUtc));
+            var waitTask = ViewerServerTab.Timed(timer, "wait read", _dataService.GetTotalWaitTrendAsync(_serverId, startUtc, endUtc));
+            var blockingTask = ViewerServerTab.Timed(timer, "blocking read", _dataService.GetBlockingTrendAsync(_serverId, startUtc, endUtc));
+            var deadlockTask = ViewerServerTab.Timed(timer, "deadlock read", _dataService.GetDeadlockTrendAsync(_serverId, startUtc, endUtc));
+            var memoryTask = ViewerServerTab.Timed(timer, "memory read", _dataService.GetMemoryTrendAsync(_serverId, startUtc, endUtc));
+            var fileIoTask = ViewerServerTab.Timed(timer, "file I/O read", _dataService.GetFileIoOverviewLatencyTrendAsync(_serverId, startUtc, endUtc));
 
             // Fetch baselines for band rendering — chart-unit-matched metrics. #7644: each lane's band is one step per local
             // hour of the window (the web Overview's shape), and each point is judged against its own hour's step.
-            var cpuBaselineTask = _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.Cpu, startUtc, endUtc);
-            var waitBaselineTask = _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.WaitMsPerSec, startUtc, endUtc);
-            var ioBaselineTask = _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.IoLatencyChart, startUtc, endUtc);
-            var blockingBaselineTask = _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.BlockingPerMinute, startUtc, endUtc);
+            var cpuBaselineTask = ViewerServerTab.Timed(timer, "CPU baseline read", _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.Cpu, startUtc, endUtc));
+            var waitBaselineTask = ViewerServerTab.Timed(timer, "wait baseline read", _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.WaitMsPerSec, startUtc, endUtc));
+            var ioBaselineTask = ViewerServerTab.Timed(timer, "I/O baseline read", _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.IoLatencyChart, startUtc, endUtc));
+            var blockingBaselineTask = ViewerServerTab.Timed(timer, "blocking baseline read", _dataService.GetBaselineStepsForLaneAsync(_serverId, MetricNames.BlockingPerMinute, startUtc, endUtc));
 
             try
             {
@@ -242,15 +247,15 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var totalSeries = measuredTotals.Count == 0
                     ? sqlSeries
                     : measuredTotals.Select(d => (d.SampleTime.ToOADate(), d.TotalCpu!.Value)).ToList();
-                UpdateCpuLane(sqlSeries, totalSeries, cpuBaseline);
+                ViewerServerTab.ClientStep(timer, "CPU lane draw", () => UpdateCpuLane(sqlSeries, totalSeries, cpuBaseline));
             }
             else
                 ShowFailed(CpuChart, "CPU %");
 
             if (waitTask.IsCompletedSuccessfully)
-                UpdateLane(WaitStatsChart, "Wait ms/sec",
+                ViewerServerTab.ClientStep(timer, "wait lane draw", () => UpdateLane(WaitStatsChart, "Wait ms/sec",
                     waitTask.Result.Select(d => (d.CollectionTime.ToOADate(), d.WaitTimeMsPerSecond)).ToList(),
-                    "#FFB74D", baseline: waitBaseline, minAnomalyValue: 100);
+                    "#FFB74D", baseline: waitBaseline, minAnomalyValue: 100));
             else
                 ShowFailed(WaitStatsChart, "Wait ms/sec");
 
@@ -264,16 +269,16 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var blockingUnit = blockingTask.IsCompletedSuccessfully
                     ? PerformanceMonitor.Ui.BlockingTrendLabels.UnitFor(blockingTask.Result.Select(d => d.Source))
                     : PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit;
-                UpdateBlockingLane(blockingData, deadlockData, blockingBaseline, (endUtc - startUtc).TotalDays, blockingUnit);
+                ViewerServerTab.ClientStep(timer, "blocking lane draw", () => UpdateBlockingLane(blockingData, deadlockData, blockingBaseline, (endUtc - startUtc).TotalDays, blockingUnit));
                 /* The lane draws the series that read; a series that did not is not "no events", so the lane says so. */
                 if (!blockingTask.IsCompletedSuccessfully || !deadlockTask.IsCompletedSuccessfully)
                     MarkFailed(BlockingChart);
             }
 
             if (memoryTask.IsCompletedSuccessfully)
-                UpdateLane(MemoryChart, "Buffer Pool MB",
+                ViewerServerTab.ClientStep(timer, "memory lane draw", () => UpdateLane(MemoryChart, "Buffer Pool MB",
                     memoryTask.Result.Select(d => (d.CollectionTime.ToOADate(), d.BufferPoolMb)).ToList(),
-                    "#CE93D8");
+                    "#CE93D8"));
             else
                 ShowFailed(MemoryChart, "Memory MB");
 
@@ -288,8 +293,8 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var (ioReads, ioMinReads) = OverviewIoReadFloor.LaneInputs(
                     ioPoints.Select(d => (d.CollectionTime, d.Reads, d.BucketMinutes)).ToList(),
                     PgTargetScorer.IoBaselineBucketMinimumReads);
-                UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2,
-                    pointReads: ioReads, minPointReads: ioMinReads);
+                ViewerServerTab.ClientStep(timer, "I/O lane draw", () => UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2,
+                    pointReads: ioReads, minPointReads: ioMinReads));
             }
             else
                 ShowFailed(FileIoChart, "I/O ms");
@@ -297,7 +302,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             /* VLines must be re-attached before SyncXAxes so they're part of
                the render set when the chart refreshes. */
             _crosshairManager?.ReattachVLines();
-            SyncXAxes(hoursBack, fromDate, toDate);
+            ViewerServerTab.ClientStep(timer, "lane axis sync", () => SyncXAxes(hoursBack, fromDate, toDate));
 
             /* #4966: the blocking chart draws event counts, so an empty stretch reads as "nothing happened" and the chart says where
                its data starts. The note comes last, after the charts are drawn and synced, and on its own: the two coverage probes start only after the ten reads above have
@@ -306,7 +311,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             await ShowBlockingLaneDataStartAsync(
                 startUtc, endUtc,
                 blockingTask.IsCompletedSuccessfully ? blockingTask.Result.Select(d => d.Time) : [],
-                deadlockTask.IsCompletedSuccessfully ? deadlockTask.Result.Select(d => d.Time) : []);
+                deadlockTask.IsCompletedSuccessfully ? deadlockTask.Result.Select(d => d.Time) : [], timer);
 
             /* The reads that failed, named in lane order for the host's status line; null when every lane read. A failed baseline
                read alone is logged and is not a failed refresh: its lane drew, and only the band is missing. */
@@ -341,7 +346,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     /// (<see cref="ViewerServerTab.UpdateTruncationBanner"/>), so it uses the charts' own clock, to the second.
     /// </summary>
     private async Task ShowBlockingLaneDataStartAsync(
-        DateTime startUtc, DateTime endUtc, IEnumerable<DateTime> blockingBars, IEnumerable<DateTime> deadlockBars)
+        DateTime startUtc, DateTime endUtc, IEnumerable<DateTime> blockingBars, IEnumerable<DateTime> deadlockBars, ViewerLoadTimer? timer = null)
     {
         var probed = endUtc - startUtc > DurationTrendRouting.TruncationSlack;
         var blockingProbe = probed
@@ -350,6 +355,12 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         var deadlockProbe = probed
             ? _dataService!.GetDeadlocksDataStartAsync(_serverId, startUtc, endUtc)
             : Task.FromResult<DateTime?>(null);
+        /* #8549: the probes are store reads after the ten, so a slow one is named instead of counted as client work. */
+        if (probed)
+        {
+            _ = timer?.Track("blocking data start read", blockingProbe);
+            _ = timer?.Track("deadlock data start read", deadlockProbe);
+        }
 
         var start = await ViewerBlockingLaneDataStart.ChooseAsync(blockingProbe, deadlockProbe, blockingBars, deadlockBars);
         ViewerServerTab.UpdateTruncationBanner(BlockingLaneDataStartBanner, start, startUtc);

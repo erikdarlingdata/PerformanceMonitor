@@ -64,8 +64,9 @@ public partial class ViewerServerTab
 
     /// <summary>Loads the Active Queries sub-tab: every stored snapshot over the window (newest first)
     /// plus the hourly slicer. Mirrors Lite's Queries sub-tab-1 refresh.</summary>
-    private async Task LoadActiveQueriesAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadActiveQueriesAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
+        timer?.Surface = "Queries > Active Queries";
         /* Deep-link shield (aggregate-tab "Open in Active Queries"): opening this server tab triggers the
            tab-activation refresh, which lands here over the toolbar window and would clobber the targeted
            read. Honor a pending deep-link window instead so a concurrent activation load uses the SAME
@@ -76,6 +77,8 @@ public partial class ViewerServerTab
             _pendingActiveQueriesWindow = null;
             var pendingDataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, pending.FromUtc, pending.ToUtc);
             var pendingReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, pending.FromUtc, pending.ToUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
+            _ = timer?.Track("snapshot read", pendingReadTask);
+            _ = timer?.Track("snapshot data start read", pendingDataStartTask);
             await AwaitReadWatchingProbeAsync(pendingReadTask, pendingDataStartTask, "Active Queries");
             var (pendingTotalCount, pendingSnapshots) = pendingReadTask.Result;
             _querySnapshotsFilterMgr!.UpdateData(pendingSnapshots);
@@ -83,7 +86,7 @@ public partial class ViewerServerTab
                 ? $"{pending.Indicator} — Showing the newest 1,000 of {pendingTotalCount:N0}"
                 : pending.Indicator;
             UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(pendingDataStartTask, "Active Queries"), pending.FromUtc);
-            await LoadActiveQueriesSlicerAsync(pending.FromUtc.AddHours(-1), pending.ToUtc.AddHours(1));
+            await LoadActiveQueriesSlicerAsync(pending.FromUtc.AddHours(-1), pending.ToUtc.AddHours(1), timer);
             return;
         }
 
@@ -92,17 +95,19 @@ public partial class ViewerServerTab
            range as if it were the whole. */
         var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, startUtc, endUtc);
         var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
+        _ = timer?.Track("snapshot read", dataReadTask);
+        _ = timer?.Track("snapshot data start read", dataStartTask);
         await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Active Queries");
         var (totalCount, snapshots) = dataReadTask.Result;
-        _querySnapshotsFilterMgr!.UpdateData(snapshots);
+        ClientStep(timer, "snapshot grid bind", () => _querySnapshotsFilterMgr!.UpdateData(snapshots));
         LatestSnapshotIndicator.Text = snapshots.Count < totalCount ? $"Showing the newest 1,000 of {totalCount:N0}" : "";
         UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(dataStartTask, "Active Queries"), startUtc);
-        await LoadActiveQueriesSlicerAsync(startUtc, endUtc);
+        await LoadActiveQueriesSlicerAsync(startUtc, endUtc, timer);
     }
 
-    private async Task LoadActiveQueriesSlicerAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadActiveQueriesSlicerAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
-        var data = await _dataService.GetActiveQuerySlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
+        var data = await Timed(timer, "slicer read", _dataService.GetActiveQuerySlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor));
         _activeQueriesSlicerData = data;
         _activeQueriesSlicerMetric = "Sessions";
         if (data.Count == 0)

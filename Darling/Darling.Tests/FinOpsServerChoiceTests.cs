@@ -120,6 +120,22 @@ public sealed class FinOpsServerChoiceTests
         Assert.Null(FinOpsServerChoice.NotCollectedLine(null, crossServer: false));
     }
 
+    // ── Server Inventory with nothing to list (#8555) ──
+
+    [Fact]
+    public void InventoryEmptyText_StoreWithOnlyPostgresTargets_PromisesNoSnapshot()
+    {
+        Assert.Equal("Not collected for PostgreSQL", FinOpsServerChoice.InventoryEmptyText(new List<DarlingServer> { Pg(1), Pg(2) }));
+    }
+
+    [Fact]
+    public void InventoryEmptyText_StoreWithASqlServerTarget_KeepsTheYetSentence()
+    {
+        Assert.Equal("No server property data collected yet", FinOpsServerChoice.InventoryEmptyText(new List<DarlingServer> { Pg(1), Sql(2) }));
+        Assert.Equal("No server property data collected yet", FinOpsServerChoice.InventoryEmptyText(new List<DarlingServer>()));
+        Assert.Equal("No server property data collected yet", FinOpsServerChoice.InventoryEmptyText(null));
+    }
+
     // ── Show removed servers ──
 
     [Theory]
@@ -211,7 +227,7 @@ public sealed class FinOpsServerChoiceTests
     public void TheLoader_RunsNoReadForAPostgresTarget_ExceptServerInventory()
     {
         var loaders = ViewerFile("FinOpsTab.Loaders.cs");
-        var load = loaders[loaders.IndexOf("private async Task LoadFinOpsAsync()", StringComparison.Ordinal)..];
+        var load = loaders[loaders.IndexOf("private async Task LoadFinOpsAsync(ViewerLoadTimer? timer = null)", StringComparison.Ordinal)..];
         var gate = load.IndexOf("FinOpsServerChoice.NotCollectedLine(", StringComparison.Ordinal);
         var firstRead = load.IndexOf("switch (FinOpsSubTabControl.SelectedIndex)", StringComparison.Ordinal);
         Assert.True(gate >= 0, "LoadFinOpsAsync must ask the helper whether the selected server's reads apply");

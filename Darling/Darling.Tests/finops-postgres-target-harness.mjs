@@ -147,6 +147,12 @@ const scenarios = {
     const strips = all(main, (n) => /\bstrip\b/.test(String(n.className))).map((n) => n.textContent);
     return { strips };
   },
+  /* #8555: the headings and strips of a tab in page order, so a test can tell which heading a strip sits under. */
+  outline: async () => {
+    const main = await render(process.env.HARNESS_SERVER, process.env.HARNESS_TAB);
+    const nodes = all(main, (n) => n.tag === "h3" || /\bstrip\b/.test(String(n.className))).map((n) => (n.tag === "h3" ? "h3: " : "strip: ") + n.textContent);
+    return { nodes };
+  },
 };
 
 const chosen = scenarios[scenario];

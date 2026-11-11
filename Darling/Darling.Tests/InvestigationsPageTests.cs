@@ -89,6 +89,13 @@ public sealed class InvestigationsPageTests
         Assert.Contains("SUMMARY <img src=x onerror=alert(1)>", text);
         Assert.Contains("<script>x</script>", text);
         Assert.Equal(0, picked.GetProperty("createdImgOrScript").GetInt32());
+        // #8555: an evidence item's key_numbers string that holds JSON is drawn as the object, with no second layer of escapes.
+        Assert.Contains("\"sql_cpu\": \"17.9% average, 32% peak\"", text);
+        Assert.Contains("\"path\": \"a->b\"", text);
+        Assert.DoesNotContain("\\\"sql_cpu\\\"", text);
+        Assert.DoesNotContain("u003E", text);
+        // A key_numbers string that is not JSON is drawn as plain text on its own line.
+        Assert.Contains("key_numbers: head blocker 412 s", text);
         // The journal keeps the read's order (newest first). The claim time's mapping (the claimed event, not the row) is pinned zone-independently by claimedAt below; the rendered text depends on the runner's zone, so it is not asserted.
         var journal = picked.GetProperty("journalRows").EnumerateArray().Select(Strings).ToArray();
         Assert.Equal(new[] { "reported", "claimed", "opened" }, journal.Select(r => r[1]));

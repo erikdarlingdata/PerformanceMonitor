@@ -284,6 +284,41 @@ public sealed class GridRowsArrivingAtAnEmptyGridTests
         Assert.True(built.Containers < built.Rows, $"Query Store by Duration built a row container for each of its {built.Rows} rows, where about {built.RowsInView} are in view");
     }
 
+    /// <summary>
+    /// #8549: Queries > Active Queries (the Viewer's twin, ViewerGridRowsArrivingAtAnEmptyGridTests). The grid is wide, so it is empty and scrolling by
+    /// pixel when the read lands. It builds the rows in view, not every row of the read.
+    /// </summary>
+    [Fact]
+    public void ActiveQueries_BuildsOnlyTheRowsInView_WhenSnapshotsArriveAtTheEmptyGrid()
+    {
+        var rows = Enumerable.Range(0, 1000).Select(i => new QuerySnapshotRow
+        {
+            SessionId = 50 + (i % 200),
+            CollectionTime = new DateTime(2026, 11, 10, 12, 0, 0).AddSeconds(-i),
+            DatabaseName = "db" + (i % 7),
+            LoginName = "login" + (i % 5),
+            HostName = "host" + (i % 9),
+            ProgramName = "app" + (i % 4),
+            Status = "running",
+            ElapsedTimeFormatted = "00:00:03",
+            CpuTimeMs = 1500 + i,
+            TotalElapsedTimeMs = 3000 + i,
+            LogicalReads = 90_000 + i,
+            Reads = 1_000 + i,
+            Writes = i % 50,
+            WaitType = "PAGEIOLATCH_SH",
+            WaitTimeMs = 20 + i,
+            QueryText = "SELECT o.order_id, o.status FROM dbo.orders AS o WHERE o.customer_id = " + i,
+            HasQueryPlan = true,
+            HasLiveQueryPlan = i % 2 == 0,
+        }).ToList();
+
+        var built = OnTheServerTab("QuerySnapshotsGrid", rows);
+
+        AssertBuiltOnlyTheRowsInView(built, "Queries > Active Queries at 900x600");
+        Assert.True(built.Containers < built.Rows, $"Active Queries built a row container for each of its {built.Rows} rows, where about {built.RowsInView} are in view");
+    }
+
     /// <summary>The named grid of a real server tab in a 900x600 window, shown empty on its own sub-tab and then handed <paramref name="rows"/>.</summary>
     private static Built OnTheServerTab(string gridName, System.Collections.IList rows, bool whileItsTabIsDeselected = false)
     {
