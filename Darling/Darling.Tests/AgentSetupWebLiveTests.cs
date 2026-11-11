@@ -272,12 +272,12 @@ public sealed class AgentSetupWebLiveTests
             /* Delete clears every other route's fallback to it, then removes it; a second delete is a 404. */
             Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, $"{{\"fallback_route_id\":{id}}}")).Status);
             Assert.Equal(id.ToString(CultureInfo.InvariantCulture), await ScalarAsync(owner, $"SELECT fallback_route_id FROM config_notification_routes WHERE route_id = {seeded}", ct));
-            var deleted = await Send("DELETE", $"/api/notification-routes/{id}", null);
+            var deleted = await Send("DELETE", $"/api/notification-routes/{id}", Json);
             Assert.Equal(200, deleted.Status);
             Assert.Equal("deleted", (string)deleted.Body!["status"]!);
             Assert.Equal("0", await ScalarAsync(owner, $"SELECT count(*) FROM config_notification_routes WHERE route_id = {id}", ct));
             Assert.Equal("", await ScalarAsync(owner, $"SELECT fallback_route_id FROM config_notification_routes WHERE route_id = {seeded}", ct));
-            Assert.Equal(404, (await Send("DELETE", $"/api/notification-routes/{id}", null)).Status);
+            Assert.Equal(404, (await Send("DELETE", $"/api/notification-routes/{id}", Json)).Status);
             Assert.Equal(404, (await Send("PUT", $"/api/notification-routes/{id}", Json, "{\"agent_level\":1}")).Status);
         });
     }
@@ -480,7 +480,7 @@ public sealed class AgentSetupWebLiveTests
                 ("PUT", "/api/environment-profiles", "{\"profile_text\":\"changed\"}"),
             })
             {
-                var answer = await Send(method, path, method == "DELETE" ? null : Json, json);
+                var answer = await Send(method, path, Json, json);
                 Assert.Equal(403, answer.Status);
                 Assert.Equal(DarlingWebAgentSetup.RefusedMessage(false), (string)answer.Body!["error"]!);
             }
@@ -510,7 +510,7 @@ public sealed class AgentSetupWebLiveTests
                 ("PUT", "/api/environment-profiles", "{\"profile_text\":\"changed\"}"),
             })
             {
-                var answer = await Send(method, path, method == "DELETE" ? null : Json, json);
+                var answer = await Send(method, path, Json, json);
                 Assert.Equal(403, answer.Status);
                 var said = (string)answer.Body!["error"]!;
                 Assert.Equal(DarlingWebAgentSetup.RefusedMessage(managedStore, adminWritesOff: managedStore), said);
@@ -592,7 +592,7 @@ public sealed class AgentSetupWebLiveTests
             Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"agent_level\":3}")).Status);
             var created = await Send("POST", "/api/notification-routes", Json, "{\"metric_match\":\"blocking\",\"agent_level\":1}");
             Assert.Equal(200, created.Status);
-            Assert.Equal(200, (await Send("DELETE", $"/api/notification-routes/{(int)created.Body!["route_id"]!}", null)).Status);
+            Assert.Equal(200, (await Send("DELETE", $"/api/notification-routes/{(int)created.Body!["route_id"]!}", Json)).Status);
 
             Assert.Equal("person:alice", await ScalarAsync(owner, "SELECT modified_by FROM config.agent_environment_profiles", ct));
             Assert.Equal("1", await ScalarAsync(owner, "SELECT count(*) FROM config.investigation_journal WHERE event = 'route_agent_changed' AND actor = 'person:alice' AND route_id = " + seeded, ct));
@@ -666,7 +666,7 @@ public sealed class AgentSetupWebLiveTests
             var profile = await Send("PUT", "/api/environment-profiles", Json, "{\"profile_text\":\"fleet: OLTP\"}");
             var edit = await Send("PUT", $"/api/notification-routes/{seeded}", Json, "{\"agent_level\":3}");
             var create = await Send("POST", "/api/notification-routes", Json, "{\"metric_match\":\"blocking\"}");
-            var delete = await Send("DELETE", $"/api/notification-routes/{seeded}", null);
+            var delete = await Send("DELETE", $"/api/notification-routes/{seeded}", Json);
             foreach (var answer in new[] { profile, edit, create, delete })
             {
                 Assert.Equal(400, answer.Status);
@@ -696,7 +696,7 @@ public sealed class AgentSetupWebLiveTests
                 ("PUT", "/api/environment-profiles", "{\"profile_text\":\"changed\"}"),
             })
             {
-                var answer = await Send(method, path, method == "DELETE" ? null : Json, json);
+                var answer = await Send(method, path, Json, json);
                 Assert.Equal(403, answer.Status);
                 Assert.Equal(DarlingWebEndpoints.ReadOnlyAccountText, (string)answer.Body!["error"]!);
             }
@@ -727,7 +727,7 @@ public sealed class AgentSetupWebLiveTests
                 ("PUT", "/api/environment-profiles", "{\"profile_text\":\"changed\"}"),
             })
             {
-                var answer = await Send(method, path, method == "DELETE" ? null : Json, json);
+                var answer = await Send(method, path, Json, json);
                 Assert.Equal(403, answer.Status);
                 Assert.Equal("Sign in to the web as an admin to make this change, or use the Viewer.", (string)answer.Body!["error"]!);
             }
@@ -862,7 +862,7 @@ public sealed class AgentSetupWebLiveTests
                 + "FROM config.investigation_journal WHERE event = 'route_agent_changed' ORDER BY journal_id DESC LIMIT 1", ct));
             Assert.Equal(200, (await Send("PUT", $"/api/notification-routes/{off}", Json, "{\"enabled\":true}")).Status);
             Assert.Equal("2", await ScalarAsync(owner, Journal, ct));
-            Assert.Equal(200, (await Send("DELETE", $"/api/notification-routes/{off}", null)).Status);
+            Assert.Equal(200, (await Send("DELETE", $"/api/notification-routes/{off}", Json)).Status);
             Assert.Equal($"person:alice|{off}|deleted route|{ServerId}|0", await ScalarAsync(owner,
                 "SELECT actor || '|' || route_id || '|' || reason || '|' || server_id || '|' || (detail->'before'->>'agent_level') "
                 + "FROM config.investigation_journal WHERE event = 'route_agent_changed' ORDER BY journal_id DESC LIMIT 1", ct));

@@ -181,12 +181,25 @@ public sealed class McpHostService : BackgroundService
             return;
         }
 
+        /* #8611: one log line per refusal, as Darling's MCP host writes, rate-limited the same way. Created here, per started server, so a
+           restart starts with a clean budget. The line says which of three client states was refused, never the token or any part of it. */
+        var refusals = new McpTokenRefusalLog();
+        var clock = utcNow ?? (() => DateTime.UtcNow);
+        var write = log ?? (message => AppLogger.Warn("MCP", message));
+
         app.Use(async (context, next) =>
         {
             /* currentToken: the host's live token, which New token replaces while the server runs. Empty never authorizes. */
             var expected = currentToken?.Invoke() ?? token;
-            if (!McpTokenStore.IsAuthorized(context.Request.Headers.Authorization.ToString(), expected))
+            var authorization = context.Request.Headers.Authorization.ToString();
+            if (!McpTokenStore.IsAuthorized(authorization, expected))
             {
+                if (refusals.TryLog(clock(), out var held))
+                {
+                    write("MCP refused a request (HTTP 401): the access token gate rejected it, " + DescribeBearerRefusal(authorization)
+                        + (held > 0 ? $". {held} further refusal(s) were not logged in the last {(int)McpTokenRefusalLog.DefaultWindow.TotalMinutes} minute(s)." : "."));
+                }
+
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                 context.Response.Headers.WWWAuthenticate = "Bearer";
                 return;
@@ -194,6 +207,25 @@ public sealed class McpHostService : BackgroundService
 
             await next(context);
         });
+    }
+
+    /// <summary>Which of three client states a refused request was in, as Darling's MCP host says it (<c>DescribeBearerRefusal</c>): no
+    /// header, a header that is not a well-formed Bearer, or a Bearer that does not match. Never says what the token is.</summary>
+    internal static string DescribeBearerRefusal(string? authorizationHeaderValue)
+    {
+        if (string.IsNullOrWhiteSpace(authorizationHeaderValue))
+        {
+            return "no 'Authorization: Bearer <token>' header was presented";
+        }
+
+        var value = authorizationHeaderValue.Trim();
+        const string prefix = "Bearer ";
+        if (!value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || value[prefix.Length..].Trim().Length == 0)
+        {
+            return "an Authorization header WAS presented but is not a 'Bearer <token>' (wrong scheme, or an empty token after 'Bearer')";
+        }
+
+        return "the presented bearer token does not match the MCP token";
     }
 
     /// <summary>

@@ -1078,11 +1078,25 @@ public sealed class DarlingMcpHostService : BackgroundService
             else
             {
                 logger.LogWarning(
-                    "MCP investigation tools are ON ({Setting}): claim_investigation_request and submit_investigation_report " +
-                    "write investigation state; every MCP request, loopback included, must present the bearer token.",
-                    DarlingMcpWritePolicy.InvestigationsSetting);
+                    "MCP investigation tools are ON ({Setting}): {Tools} write investigation state; every MCP request, loopback included, " +
+                    "must present the bearer token.",
+                    DarlingMcpWritePolicy.InvestigationsSetting,
+                    DescribeInvestigationArmTools(served));
             }
         }
+    }
+
+    /// <summary>
+    /// What the start line says the investigations arm serves (#8611), built from the policy's own sets so it cannot drift from the gate: every
+    /// state-changing investigation tool by name (<see cref="DarlingMcpWritePolicy.InvestigationTools"/>), then the Level 2 agent action tools the
+    /// arm offers (<see cref="DarlingMcpWritePolicy.AgentActionTools"/> through <c>served.Offers</c>) as a counted family, not 16 names. The four
+    /// mute rule tools are among those action tools: the arm also serves them without an agent_action, which the line says in a clause.
+    /// </summary>
+    internal static string DescribeInvestigationArmTools(DarlingMcpWritePolicy.Effective served)
+    {
+        var actionCount = DarlingMcpWritePolicy.AgentActionTools.Count(served.Offers);
+        return string.Join(", ", DarlingMcpWritePolicy.InvestigationTools.OrderBy(t => t, StringComparer.Ordinal))
+            + $", and {actionCount} agent action tools (each with an agent_action; the mute rule tools also work without one)";
     }
 
     /// <summary>

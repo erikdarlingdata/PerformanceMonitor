@@ -333,6 +333,14 @@ public static partial class DarlingWebEndpoints
 
         app.MapDelete("/api/notification-routes/{id:int}", async (HttpContext context, int id) =>
         {
+            /* #8611: the other agent setup writes refuse a request without a JSON content type (AgentSetupRunAsync), and so do the mute
+               routes. A DELETE has no body to type, so without this check a cross-site form or a no-cors fetch could send it; a JSON
+               content type forces a preflight the dashboard never answers. The dashboard's own call (apiWrite) always sends it. */
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
             var stopwatch = Stopwatch.StartNew();
             if (!DarlingWebSeat.IsSignedInAdmin(context))
             {

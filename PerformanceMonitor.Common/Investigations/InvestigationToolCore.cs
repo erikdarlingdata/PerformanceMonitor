@@ -71,6 +71,15 @@ internal static class InvestigationToolCore
     /// <summary>The agent a submit refusal is journaled under when its claim_id resolves to no claim holder.</summary>
     internal const string UnclaimedAgent = "unclaimed";
 
+    /// <summary>The two names a refusal row is journaled under when no agent made the call: <see cref="InvestigationRules.InvalidAgentId"/> (an
+    /// agent_id that was refused) and <see cref="UnclaimedAgent"/> (a claim_id no claim holds). An agent or a token carrying either name would make
+    /// its own rows read as those placeholders, so both apps refuse them (#8611; Darling's token names and legacy-token agent_id, Lite's claim).</summary>
+    internal static readonly string[] ReservedAgentIds = { InvestigationRules.InvalidAgentId, UnclaimedAgent };
+
+    /// <summary>True when <paramref name="agentId"/> is one of <see cref="ReservedAgentIds"/>, compared case-insensitively.</summary>
+    internal static bool IsReservedAgentId(string? agentId) =>
+        agentId is not null && ReservedAgentIds.Contains(agentId, StringComparer.OrdinalIgnoreCase);
+
     /// <summary>The longest <c>agent_action.reason</c> (#5912), as a note.</summary>
     internal const int MaxActionReasonChars = 2000;
 

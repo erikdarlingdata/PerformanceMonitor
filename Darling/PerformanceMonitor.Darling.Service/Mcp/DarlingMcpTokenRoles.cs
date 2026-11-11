@@ -167,11 +167,11 @@ internal sealed class DarlingMcpTokenSet
 
     /// <summary>The two names a refusal row is journaled under when no agent made the call: <c>invalid</c> (an agent_id that was refused)
     /// and <c>unclaimed</c> (a claim_id no claim holds). A token with either name would make its own rows read as those placeholders.</summary>
-    internal static readonly string[] ReservedNames = { InvestigationRules.InvalidAgentId, InvestigationToolCore.UnclaimedAgent };
+    internal static readonly string[] ReservedNames = InvestigationToolCore.ReservedAgentIds;
 
     /// <summary>True when <paramref name="name"/> is a reserved placeholder actor, compared case-insensitively.</summary>
     internal static bool IsReservedName(string? name) =>
-        name is not null && ReservedNames.Contains(name, StringComparer.OrdinalIgnoreCase);
+        InvestigationToolCore.IsReservedAgentId(name);
 
     /// <summary>The one <see cref="Check"/> sentence that is advice about a supported setup, not a token left unserved: the start logs it
     /// at Warning, every other sentence at Critical.</summary>
