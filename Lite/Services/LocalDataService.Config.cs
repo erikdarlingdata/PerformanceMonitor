@@ -370,6 +370,12 @@ public class QueryStoreHealthRow
     /// <summary>#4966: when this row's snapshot was captured, to the second, in the display zone (the grid's Collected column,
     /// which sorts by <see cref="CaptureTime"/>). Query Store health is captured hourly, so this is how old the shown value can be.</summary>
     public string CaptureTimeLocal => ServerTimeHelper.FormatServerTime(CaptureTime);
+
+    /// <summary>The interval in minutes the collector runs at on this server.</summary>
+    public int CollectorIntervalMinutes { get; set; }
+
+    /// <summary><see cref="CaptureTimeLocal"/> as of <paramref name="nowUtc"/>.</summary>
+    public string CollectedText(DateTime nowUtc) => CaptureTimeLocal;
     public string DatabaseName { get; set; } = "";
     public string ActualState { get; set; } = "";
     public string DesiredState { get; set; } = "";

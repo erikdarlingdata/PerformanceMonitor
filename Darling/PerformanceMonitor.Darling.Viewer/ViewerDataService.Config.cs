@@ -371,8 +371,14 @@ public class QueryStoreHealthRow
     /// <summary>#4966: when this row's snapshot was captured (UTC); every row of one snapshot shares it. The grid's Collected column sorts on it.</summary>
     public DateTime CaptureTime { get; set; }
 
+    /// <summary>The interval in minutes the collector runs at on this server.</summary>
+    public int CollectorIntervalMinutes { get; set; }
+
     /// <summary>#4966: <see cref="CaptureTime"/> to the second, in the display zone (the grid's Collected column).</summary>
     public string CaptureTimeLocal => ViewerTimeHelper.FormatForDisplay(CaptureTime, "yyyy-MM-dd HH:mm:ss");
+
+    /// <summary><see cref="CaptureTimeLocal"/> as of <paramref name="nowUtc"/>.</summary>
+    public string CollectedText(DateTime nowUtc) => CaptureTimeLocal;
 
     public string DatabaseName { get; set; } = "";
     public string ActualState { get; set; } = "";
