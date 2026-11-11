@@ -392,17 +392,18 @@ internal static partial class AlertNotebookEndpoint
             StatusCell(status),
         };
 
-        /* #8553: the Deadlocks Cleared notebook is mechanical (the alias shares Deadlocks Detected's SQL Server reads), so
-           it learns the resolved server's engine here, as the firing template does through its context (#8323's pattern):
-           a PostgreSQL target gets the PostgreSQL deadlock cells and no SQL Server read, an engine that cannot be resolved
-           gets both. Only this metric pays the registry read; a SQL Server target's cells are exactly what they were.
+        /* #8553, #8584: the Deadlocks, Blocking and Long-Running Queries Cleared notebooks are mechanical (the alias shares the
+           firing metric's SQL Server reads), so they learn the resolved server's engine here, as the firing templates do
+           through their context (#8323's pattern): a PostgreSQL target gets the PostgreSQL cells and no SQL Server read, an
+           engine that cannot be resolved gets both. Only these metrics pay the registry read; a SQL Server target's cells
+           are exactly what they were.
            #8555: the CPU Resolved notebook does the same, so a SQL Server target has no Instance CPU (Performance Insights) cell
            and a PostgreSQL target has no SQL Server CPU read. */
         var resolvedFiring = trimmedMetric is null ? null : ResolvedMetricOf(trimmedMetric);
-        var isDeadlockResolution = string.Equals(resolvedFiring, DeadlocksFiringMetric, StringComparison.Ordinal);
+        var enginePickedMetric = EnginePickedResolutionMetric(resolvedFiring);
         var isCpuResolution = string.Equals(resolvedFiring, CpuFiringMetric, StringComparison.Ordinal);
         CollectorTargetEngine? resolutionEngine = null;
-        if ((isDeadlockResolution || isCpuResolution) && serverId is { } resolutionServerId)
+        if ((enginePickedMetric is not null || isCpuResolution) && serverId is { } resolutionServerId)
         {
             resolutionEngine = MonitoredEngineKind.EngineOf(await ReadEngineKindAsync(postgres, resolutionServerId, logger, ct));
         }
@@ -411,7 +412,7 @@ internal static partial class AlertNotebookEndpoint
            per-server read could answer for: the page keeps the alert's own card and status and draws no read cell. */
         var noServerReads = serverId is null && IsExternalMetric(trimmedMetric);
 
-        if (!noServerReads && (!isDeadlockResolution || resolutionEngine is null or CollectorTargetEngine.SqlServer))
+        if (!noServerReads && (enginePickedMetric is null || resolutionEngine is null or CollectorTargetEngine.SqlServer))
         {
             foreach (var section in sections)
             {
@@ -424,9 +425,9 @@ internal static partial class AlertNotebookEndpoint
             }
         }
 
-        if (isDeadlockResolution && resolutionEngine is null or CollectorTargetEngine.PostgreSql)
+        if (!noServerReads && enginePickedMetric is not null && resolutionEngine is null or CollectorTargetEngine.PostgreSql)
         {
-            PgDeadlockCells(mechanicalCells, serverName, asOf, listHours: "4");
+            PgResolutionCells(mechanicalCells, enginePickedMetric!, serverName, asOf);
         }
 
         if (isCpuResolution && resolutionEngine is CollectorTargetEngine.PostgreSql)
@@ -439,9 +440,44 @@ internal static partial class AlertNotebookEndpoint
         return (mechanicalCells, "mechanical/" + (trimmedMetric ?? "default"), MechanicalTemplateVersion);
     }
 
+    /// <summary>#8553, #8584: the firing metric a mechanical Cleared notebook's engine pick keys on, or null when the resolved
+    /// metric has no PostgreSQL cells of its own. The alert engine's recovery title resolves through
+    /// <see cref="ResolvedMetricOf"/> to the firing metric, and only these firing metrics have an authored PostgreSQL read
+    /// set: Deadlocks Detected, Blocking Detected, Blocking Wait Time and Long-Running Query.</summary>
+    private static string? EnginePickedResolutionMetric(string? resolvedMetric)
+    {
+        foreach (var candidate in new[] { DeadlocksFiringMetric, "Blocking Detected", "Blocking Wait Time", "Long-Running Query" })
+        {
+            if (string.Equals(resolvedMetric, candidate, StringComparison.Ordinal))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>#8553, #8584: the PostgreSQL cells a Cleared notebook carries for <paramref name="firingMetric"/>, over the 4h
+    /// window the mechanical sections use.</summary>
+    private static void PgResolutionCells(JsonArray cells, string firingMetric, string? serverName, string? asOf)
+    {
+        if (string.Equals(firingMetric, DeadlocksFiringMetric, StringComparison.Ordinal))
+        {
+            PgDeadlockCells(cells, serverName, asOf, listHours: "4");
+        }
+        else if (string.Equals(firingMetric, "Long-Running Query", StringComparison.Ordinal))
+        {
+            PgLongRunningQueryCells(cells, serverName, asOf, hours: "4");
+        }
+        else
+        {
+            PgBlockingCells(cells, serverName, asOf, chainHours: "4", sessionHours: "4");
+        }
+    }
+
     /// <summary>#8323: the registry's engine kind for <paramref name="serverId"/>, or null when the registry has not
     /// stamped one or the read fails (logged at Debug: the notebook still builds, engine-blind).</summary>
-    private static async Task<string?> ReadEngineKindAsync(NpgsqlDataSource postgres, int serverId, ILogger? logger, CancellationToken ct)
+    internal static async Task<string?> ReadEngineKindAsync(NpgsqlDataSource postgres, int serverId, ILogger? logger, CancellationToken ct)
     {
         try
         {
@@ -642,7 +678,7 @@ internal static partial class AlertNotebookEndpoint
     internal static readonly (string[] Metrics, AuthoredTemplateEntry Entry)[] s_authoredTemplates =
     {
         (new[] { "Blocking Detected", "Blocking Wait Time" },
-            new AuthoredTemplateEntry("authored/blocking", BlockingTemplateVersion, BuildBlockingCells)),
+            new AuthoredTemplateEntry("authored/blocking", BlockingTemplateVersion, BuildCells: null, BuildCellsWithContext: BuildBlockingCells)),
         (new[] { "Collection Stopped", "Capture Down", "Collector Cost Regression" },
             new AuthoredTemplateEntry("authored/self-monitor", SelfMonitorTemplateVersion, BuildSelfMonitorCells)),
         (new[] { "Deadlocks Detected" },
@@ -654,7 +690,7 @@ internal static partial class AlertNotebookEndpoint
         (new[] { "High CPU" },
             new AuthoredTemplateEntry("authored/cpu", CpuTemplateVersion, BuildCells: null, BuildCellsWithContext: BuildCpuCells)),
         (new[] { "Long-Running Query" },
-            new AuthoredTemplateEntry("authored/long-running-query", LongRunningQueryTemplateVersion, BuildLongRunningQueryCells)),
+            new AuthoredTemplateEntry("authored/long-running-query", LongRunningQueryTemplateVersion, BuildCells: null, BuildCellsWithContext: BuildLongRunningQueryCells)),
         (new[] { "Poison Wait" },
             new AuthoredTemplateEntry("authored/poison-wait", PoisonWaitTemplateVersion, BuildPoisonWaitCells)),
         (new[] { "PostgreSQL Replication Slot Retention" },

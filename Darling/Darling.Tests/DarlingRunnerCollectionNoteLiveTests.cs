@@ -74,7 +74,55 @@ public sealed class DarlingRunnerCollectionNoteLiveTests
         Assert.NotNull(result.Note);
     }
 
-    private static async Task<CollectorRunResult> RunAsync<TRow>(ICollectorDefinition<TRow> definition, object[][][] defaultSets)
+    /// <summary>The one row the <c>query_store_hints</c> payload returns for a database whose Query Store is a readable secondary's.</summary>
+    private static readonly object[][][] SecondarySentinel =
+    {
+        new object[][]
+        {
+            new object[] { DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, QueryStoreHintsCollector.ReadableSecondarySentinel },
+        },
+    };
+
+    /// <summary>The all-NULL marker row the payload returns first for a database it captures.</summary>
+    private static readonly object[][][] CapturedMarker =
+    {
+        new object[][]
+        {
+            new object[] { DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value },
+        },
+    };
+
+    [Fact]
+    public async Task AQueryStoreHintsRun_WhoseEveryDatabaseReturnsTheSecondarySentinel_StoresNoRow_AndCarriesTheAllSecondaryNote()
+    {
+        /* #8541: the enumeration lists two databases and the payload answers each with the sentinel row. The collector's reader counts
+           both on the run's context and hands the store nothing, so the run ends with no row and the note the readable-secondary
+           judgment reads from the run's collection_log row. */
+        var result = await RunAsync(
+            QueryStoreHintsCollector.Instance,
+            new[] { new object[][] { new object[] { "alpha" }, new object[] { "beta" } } },
+            _ => SecondarySentinel);
+
+        Assert.Equal(0, result.Rows);
+        Assert.Equal(CollectorRuntimePrecondition.QueryStoreAllSecondaryRunNote, result.Note);
+    }
+
+    [Fact]
+    public async Task AQueryStoreHintsRun_ThatCapturesOneDatabaseBesideASecondary_StoresItsRow_AndCarriesNoSecondaryNote()
+    {
+        /* #8541: one database answers with the sentinel and the other with its marker row. The sentinel is not stored and the marker
+           is, so the run is not one where every database was a secondary, and it says nothing of the kind. */
+        var result = await RunAsync(
+            QueryStoreHintsCollector.Instance,
+            new[] { new object[][] { new object[] { "alpha" }, new object[] { "beta" } } },
+            text => text.Contains("[alpha]", StringComparison.Ordinal) ? SecondarySentinel : CapturedMarker);
+
+        Assert.Equal(1, result.Rows);
+        Assert.Null(result.Note);
+    }
+
+    private static async Task<CollectorRunResult> RunAsync<TRow>(
+        ICollectorDefinition<TRow> definition, object[][][] defaultSets, Func<string, object[][][]>? itemSets = null)
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
@@ -94,7 +142,7 @@ public sealed class DarlingRunnerCollectionNoteLiveTests
         var bodySucceeded = false;
         try
         {
-            runner.TargetProviderOverrideForTests = _ => new FakeTargetProvider(defaultSets);
+            runner.TargetProviderOverrideForTests = _ => new FakeTargetProvider(defaultSets, itemSets);
             var server = new ServerRuntime
             {
                 Config = new MonitoredServer { Name = "t", Host = "h" },
@@ -117,7 +165,7 @@ public sealed class DarlingRunnerCollectionNoteLiveTests
 
     private static async Task DeleteAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        foreach (var table in new[] { "database_scoped_config", "database_size_stats" })
+        foreach (var table in new[] { "database_scoped_config", "database_size_stats", "query_store_hints" })
         {
             using var command = new NpgsqlCommand(
                 $"DELETE FROM {table} WHERE server_id = {LiveServerId.ToString(CultureInfo.InvariantCulture)}", connection);
@@ -126,14 +174,14 @@ public sealed class DarlingRunnerCollectionNoteLiveTests
         }
     }
 
-    private sealed class FakeTargetProvider(object[][][] defaultSets) : ITargetProvider
+    private sealed class FakeTargetProvider(object[][][] defaultSets, Func<string, object[][][]>? itemSets) : ITargetProvider
     {
         public CollectorTargetEngine Engine => CollectorTargetEngine.SqlServer;
 
         public DbConnection CreateConnection(string connectionString) => new FakeConnection(connectionString);
 
         public DbCommand CreateCommand(CollectorQuery query, DbConnection connection, int commandTimeoutSeconds) =>
-            new FakeCommand(query.Text, (FakeConnection)connection, defaultSets);
+            new FakeCommand(query.Text, (FakeConnection)connection, defaultSets, itemSets);
 
         public CollectorTargetFault Classify(Exception exception, bool yieldsOnLockTimeout) => CollectorTargetFault.Unclassified;
 
@@ -162,7 +210,7 @@ public sealed class DarlingRunnerCollectionNoteLiveTests
         protected override DbCommand CreateDbCommand() => throw new NotSupportedException();
     }
 
-    private sealed class FakeCommand(string text, FakeConnection owner, object[][][] defaultSets) : DbCommand
+    private sealed class FakeCommand(string text, FakeConnection owner, object[][][] defaultSets, Func<string, object[][][]>? itemSets) : DbCommand
     {
         [System.Diagnostics.CodeAnalysis.AllowNull]
         public override string CommandText { get; set; } = text;
@@ -185,7 +233,7 @@ public sealed class DarlingRunnerCollectionNoteLiveTests
         /* The per-item query is the EXECUTE [db].sys.sp_executesql form; everything else that reads a reader gets the
            result sets the test chose (an enumeration, or a payload plus its optional trailing failure set). */
         private DbDataReader Open() => CommandText.TrimStart().StartsWith("EXECUTE [", StringComparison.Ordinal)
-            ? new Reader(new[] { new object[][] { new object[] { "MAXDOP", "0", DBNull.Value } } })
+            ? new Reader(itemSets?.Invoke(CommandText) ?? new[] { new object[][] { new object[] { "MAXDOP", "0", DBNull.Value } } })
             : new Reader(defaultSets);
     }
 
