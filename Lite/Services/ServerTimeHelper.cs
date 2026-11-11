@@ -66,7 +66,24 @@ public static class ServerTimeHelper
     /// <summary>
     /// The current display mode preference. Read from App settings at startup.
     /// </summary>
-    public static TimeDisplayMode CurrentDisplayMode { get; set; } = TimeDisplayMode.ServerTime;
+    public static TimeDisplayMode CurrentDisplayMode
+    {
+        get => _currentDisplayMode;
+        set
+        {
+            if (_currentDisplayMode == value) return;
+            _currentDisplayMode = value;
+            DisplayModeChanged?.Invoke(null, EventArgs.Empty);
+        }
+    }
+
+    private static TimeDisplayMode _currentDisplayMode = TimeDisplayMode.ServerTime;
+
+    /// <summary>
+    /// Raised after <see cref="CurrentDisplayMode"/> changes, on the thread that set it. A grid whose rows word their own times
+    /// (computed text with no change notification) listens and refreshes, so its cells follow the setting at once.
+    /// </summary>
+    public static event EventHandler? DisplayModeChanged;
 
     /// <summary>
     /// Converts a server DateTime for display based on the selected display mode.
@@ -146,6 +163,19 @@ public static class ServerTimeHelper
         TimeDisplayMode.UTC => "UTC",
         _ => OffsetLabel(clock.OffsetMinutesAt(naiveUtc))
     };
+
+    /// <summary>
+    /// <paramref name="text"/>, a time worded on <paramref name="clock"/>, with that clock's offset at <paramref name="naiveUtc"/>
+    /// after it in Server Time, "09:30 (UTC-08:00)": a list or a row of cards shows several servers, each on its own clock, and the
+    /// label says which. UTC and Local Time are one zone for every server and carry none. A time in the hour that repeats after a
+    /// daylight saving change already ends with its offset and is left as it is.
+    /// </summary>
+    public static string WithServerZoneLabel(string text, TimeDisplayMode mode, ServerClock clock, DateTime naiveUtc)
+    {
+        if (mode != TimeDisplayMode.ServerTime || text.Length == 0) return text;
+        var label = GetTimezoneLabel(mode, clock, naiveUtc);
+        return label.Length > 3 && text.EndsWith(label[3..], StringComparison.Ordinal) ? text : text + " (" + label + ")";
+    }
 
     private static string LocalZoneName(DateTime naiveUtc)
     {

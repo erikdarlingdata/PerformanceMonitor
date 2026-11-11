@@ -137,7 +137,7 @@ try {
       "export const chartCalls = [];\n" +
       "export function normalizeColor(color) { return color; }\n" +
       "export function renderLineChart(opts) {\n" +
-      "  chartCalls.push({ windowStart: opts.windowStart, windowEnd: opts.windowEnd, points: (opts.points || []).length });\n" +
+      "  chartCalls.push({ windowStart: opts.windowStart, windowEnd: opts.windowEnd, points: (opts.points || []).length, times: (opts.points || []).map((pt) => Date.parse(pt[opts.xKey])) });\n" +
       "  return el('div', { class: 'chart-stub' });\n" +
       "}\n" +
       "export function zoomableLineChart(opts) { return renderLineChart(opts); }\n" +
@@ -826,6 +826,28 @@ Object.assign(scenarios, {
     found = { readsBeforeRelease, builds, reads, distinct: new Set(reads).size };
     return [holder, again];
   },
+  // #8577: a read cell with an `as_of` draws the window that ends there. The value is "pinned" (two days back), "future" (15 minutes ahead,
+  // an alert opened within minutes of firing) or "live" (no `as_of`); the line cell has one point an hour before the window's end.
+  pinnedReadLine: () => {
+    const HOUR = 3600000;
+    const now = Date.now();
+    const asOfMs = scenarioValue === "pinned" ? now - 48 * HOUR : scenarioValue === "future" ? now + 15 * 60000 : null;
+    const endMs = asOfMs != null && asOfMs < now ? asOfMs : now;
+    const params = { server: "SRV1", hours: 4 };
+    if (asOfMs != null) params.as_of = new Date(asOfMs).toISOString();
+    answer = () => data({ samples: [{ sample_time: new Date(endMs - HOUR).toISOString(), cpu: 5 }, { sample_time: new Date(endMs - 2 * HOUR).toISOString(), cpu: 7 }] });
+    found = { asOfMs, endMs, now };
+    return [modules.panels.renderPanel({ ...cpuPanel, params })];
+  },
+  // #8577: the empty answer's own "in the last 4 hour(s)" sentence names the pinned window when the cell carries an `as_of`.
+  pinnedReadEmpty: () => {
+    const asOfMs = scenarioValue === "pinned" ? Date.now() - 48 * 3600000 : null;
+    const params = { server: "SRV1", hours: 4 };
+    if (asOfMs != null) params.as_of = new Date(asOfMs).toISOString();
+    answer = () => data({ status: "empty", message: "No active query snapshots on SRV1 in the last 4 hour(s) matched blocking_only." });
+    found = { asOfMs };
+    return [modules.panels.renderPanel({ ...waitingTasksPanel, params })];
+  },
 });
 
 const chosen = scenarios[scenario];
@@ -881,5 +903,8 @@ console.log(JSON.stringify({
   notes,
   found,
   chartPoints: modules.charts.chartCalls.map((c) => c.points),
+  chartWindows: modules.charts.chartCalls.map((c) => [c.windowStart == null ? null : c.windowStart, c.windowEnd == null ? null : c.windowEnd]),
+  chartPointTimes: modules.charts.chartCalls.map((c) => c.times),
+  pins: root.all((n) => n.className === "pin-badge").map((n) => n.textContent),
   rejections,
 }));

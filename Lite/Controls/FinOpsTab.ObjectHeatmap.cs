@@ -164,9 +164,11 @@ public partial class FinOpsTab : UserControl
                 ObjectGrowthHeatmapChart,
                 _objHeatmapMatrix,
                 "Reserved (MB)",
-                $"{databaseName} — Object Reserved Footprint",
+                $"{databaseName}: Object Reserved Footprint",
                 _objHeatmapHandle);
             _objHeatmapPlottable = _objHeatmapHandle.Plottable;
+            /* The hover reads the matrix the chart drew, whose columns include the days with no sample. */
+            _objHeatmapMatrix = _objHeatmapHandle.Matrix ?? _objHeatmapMatrix;
         }
         catch (Exception ex)
         {
@@ -257,15 +259,24 @@ public partial class FinOpsTab : UserControl
         }
 
         double mb = _objHeatmapMatrix.Intensities[row, col];
+        var day = _objHeatmapMatrix.Days[col];
         if (mb <= 0)
         {
-            _objHeatmapPopup.IsOpen = false;
-            return;
-        }
+            /* A blank cell on a day some object has a sample for says nothing. A day with no sample for any object is a
+               collection gap, and the popup says so. */
+            if (!FinOpsHeatmapBuilder.IsGapDay(_objHeatmapMatrix, col))
+            {
+                _objHeatmapPopup.IsOpen = false;
+                return;
+            }
 
-        var label = row < _objHeatmapMatrix.RowLabels.Length ? _objHeatmapMatrix.RowLabels[row] : "?";
-        var day = _objHeatmapMatrix.Days[col];
-        _objHeatmapPopupText.Text = $"{label}  |  {day:M/d}  |  {mb:N1} MB reserved";
+            _objHeatmapPopupText.Text = $"{day:M/d}  |  no sample collected";
+        }
+        else
+        {
+            var label = row < _objHeatmapMatrix.RowLabels.Length ? _objHeatmapMatrix.RowLabels[row] : "?";
+            _objHeatmapPopupText.Text = $"{label}  |  {day:M/d}  |  {mb:N1} MB reserved";
+        }
 
         _objHeatmapPopup.HorizontalOffset = pos.X + 15;
         _objHeatmapPopup.VerticalOffset = pos.Y + 15;
