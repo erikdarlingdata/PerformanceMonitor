@@ -211,7 +211,7 @@ public sealed class FinOpsServerChoiceTests
     public void TheLoader_RunsNoReadForAPostgresTarget_ExceptServerInventory()
     {
         var loaders = ViewerFile("FinOpsTab.Loaders.cs");
-        var load = loaders[loaders.IndexOf("private async Task LoadFinOpsAsync()", StringComparison.Ordinal)..];
+        var load = loaders[loaders.IndexOf("private async Task LoadFinOpsAsync(ViewerLoadTimer? timer = null)", StringComparison.Ordinal)..];
         var gate = load.IndexOf("FinOpsServerChoice.NotCollectedLine(", StringComparison.Ordinal);
         var firstRead = load.IndexOf("switch (FinOpsSubTabControl.SelectedIndex)", StringComparison.Ordinal);
         Assert.True(gate >= 0, "LoadFinOpsAsync must ask the helper whether the selected server's reads apply");

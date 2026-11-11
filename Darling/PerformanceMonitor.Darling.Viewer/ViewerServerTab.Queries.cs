@@ -157,10 +157,10 @@ public partial class ViewerServerTab
         switch (QueriesSubTabControl.SelectedIndex)
         {
             case PerformanceTrendsSubTabIndex:
-                await LoadPerformanceTrendsAsync(startUtc, endUtc, tierNowUtc);
+                await LoadPerformanceTrendsAsync(startUtc, endUtc, tierNowUtc, timer);
                 break;
             case ActiveQueriesSubTabIndex:
-                await LoadActiveQueriesAsync(startUtc, endUtc);
+                await LoadActiveQueriesAsync(startUtc, endUtc, timer);
                 break;
             case CurrentActiveQueriesSubTabIndex:
                 /* LIVE, on-demand only — never auto-fetch on tab selection or a toolbar-range refresh (a live
@@ -197,6 +197,22 @@ public partial class ViewerServerTab
     /// so a read that starts outside that load (a Daily Summary drill, a slicer drag) passes null and is the task itself: it can
     /// not land in another load's line or rename it.</summary>
     internal static Task<T> Timed<T>(ViewerLoadTimer? timer, string phase, Task<T> read) => timer?.Track(phase, read) ?? read;
+
+    /// <summary><see cref="Timed{T}"/> for a task with no result (a join of several reads, or a read the caller awaits for effect).</summary>
+    internal static Task Timed(ViewerLoadTimer? timer, string phase, Task read) => timer?.Track(phase, read) ?? read;
+
+    /// <summary>#8549: runs a stretch of client work (a grid build, a chart draw) as a named step on the load's clock, so a slow load's line says
+    /// which step kept the UI thread busy. With no clock (a refresh that is not an inner-tab load) it is just the work.</summary>
+    internal static void ClientStep(ViewerLoadTimer? timer, string step, Action work)
+    {
+        if (timer is null)
+        {
+            work();
+            return;
+        }
+
+        timer.Step(step, work);
+    }
 
     private async Task LoadTopQueriesAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {

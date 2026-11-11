@@ -64,7 +64,7 @@ public partial class ViewerServerTab
     /// <c>SafeQueryAsync</c> wraps a read (<see cref="ReadOrEmptyAsync{T}"/>), so it blanks the chart and nothing else. What the
     /// tab draws once its reads are in, and in which order, is <see cref="ShowCollectionHealthAsync"/>.
     /// </summary>
-    private async Task LoadHealthAsync()
+    private async Task LoadHealthAsync(ViewerLoadTimer? timer = null)
     {
         /* Health Summary stays Lite's fixed 7-day per-collector rollup (its staleness banding needs a
            stable horizon regardless of the toolbar window). The Collection Log + Duration Trends honor the
@@ -81,6 +81,12 @@ public partial class ViewerServerTab
            and leave both grids, the note and the caveats undrawn. */
         var durationTask = ReadOrEmptyAsync(() => _dataService.GetCollectorDurationTrendAsync(_server.ServerId, startUtc, endUtc), "Collection Health duration chart");
         var caveatsTask = _dataService.GetCollectionCaveatsAsync(_server.ServerId);
+        /* #8549: each read is booked by name (Track hands the task back unchanged), so a slow Collection Health says which read it was. */
+        _ = timer?.Track("health summary read", healthTask);
+        _ = timer?.Track("collection log data start read", dataStartTask);
+        _ = timer?.Track("collection log read", logTask);
+        _ = timer?.Track("duration trend read", durationTask);
+        _ = timer?.Track("caveats read", caveatsTask);
         await AwaitReadWatchingProbeAsync(Task.WhenAll(healthTask, logTask, durationTask, caveatsTask), dataStartTask, "Collection Log");
 
         /* The four reads are done: end the declared width here, before the data-start note below awaits its probe (#4966), so that
@@ -94,8 +100,9 @@ public partial class ViewerServerTab
 
         ShowServerConnectionState();
         ShowConnectionFailures(healthTask.Result);
-        await ShowSkippedCyclesAsync();
-        await ShowSweepPressureAsync();
+        /* #8549: the two reads that follow the join are store reads too, so they are named rather than counted as client work. */
+        await Timed(timer, "skipped slots read", ShowSkippedCyclesAsync());
+        await Timed(timer, "sweep pressure read", ShowSweepPressureAsync());
     }
 
     /// <summary>
