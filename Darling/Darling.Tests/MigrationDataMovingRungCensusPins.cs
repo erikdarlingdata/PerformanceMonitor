@@ -460,6 +460,9 @@ public sealed class MigrationDataMovingRungCensusPins
             + "idx_oversized_plan_backlog_server_bytes (server_id, observed_bytes) and idx_oversized_plan_backlog_collector_bytes "
             + "(collector_name, observed_bytes), the two narrow columns the median reads walk. Each build reads the heap once. Measured on a 3,000,000-row, 827 MB table: 7.2 s and 10.8 s on a busy laptop, 90 MB and 115 MB of index, one rung well inside one command timeout. "
             + "Not CONCURRENTLY, inside the ladder's transaction. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            261,
+            SetsTheFloor: false,
             "#7988: the Viewer-managed web access groups. The three UPDATE statements the scan sees are all on the control-plane singleton "
             + "config.config_service (id = 1, created V17), V62's and V137's shape, and each sits inside a function body (manage_web_access_group, "
             + "activate_web_access_group and the web_access_tag_deleted trigger) that runs only when an administrator changes a group later; the "
