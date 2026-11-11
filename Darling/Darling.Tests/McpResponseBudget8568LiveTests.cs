@@ -32,7 +32,8 @@ namespace Darling.Tests;
 /// <c>query_text</c>), <c>get_pg_session_states</c>, <c>get_pg_server_config</c> (100 settings) and
 /// <c>get_store_log</c> (every retained row with its whole <c>sample_line</c>). Each test seeds a store whose
 /// default answer is over the budget, calls the tool as a caller would, and holds the answer to the budget, to
-/// whole rows, and to saying what it left out. The fleet cards are covered in
+/// whole rows, and to saying what it left out. <c>get_table_index_sizes</c> (#8655, its 100-table page) is held to
+/// the same rule here. The fleet cards are covered in
 /// <see cref="McpFleetResponseBudgetLivePostgresTests"/> and the four trend reads in
 /// <see cref="TrendPayloadBudgetLiveTests"/>.
 /// </summary>
@@ -682,6 +683,95 @@ VALUES ($1, $2, $3, $4, 91.5, 80, TRUE, 'email', NULL, FALSE, FALSE, $5, NULL)",
             var billing = AssertWithinBudget("get_top_queries_by_cpu Billing", await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, top: queries, database_name: "Billing", cancellationToken: ct));
             Assert.Contains(billing.GetProperty("queries").EnumerateArray().Select(r => r.GetProperty("query_hash").GetString()!), hash => !held.Contains(hash));
         });
+    }
+
+    /// <summary>
+    /// #8655: <c>get_table_index_sizes</c> answered its 100-table page whole, which is over the budget on a server whose
+    /// rows carry a growth note, and its <c>truncated</c> was the 100-table cap alone. A default call over 130 tables
+    /// fits the budget and says what it left out, and following <c>next_offset</c> reads every table exactly once,
+    /// largest first. The web route's read names no budget and keeps the 100-table page.
+    /// </summary>
+    [Fact]
+    public async Task TableIndexSizes_Default_OverOneHundredTables_FitsTheBudget_AndPagesToEveryTable()
+    {
+        await WithStoreAsync(async (connection, postgres, ct) =>
+        {
+            /* One daily snapshot, so every row carries its growth note. Table_001 is the largest. */
+            const int tables = 130;
+            var at = DarlingMcpTestData.Naive(DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddHours(-2));
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"INSERT INTO index_object_stats
+(collection_id, collection_time, server_id, server_name, database_name, schema_name, object_id, table_name, index_id, index_name, index_type_desc,
+ reserved_mb, used_mb, total_rows, user_seeks, user_scans, user_lookups, user_updates, row_lock_wait_count, row_lock_wait_in_ms,
+ page_lock_wait_count, page_lock_wait_in_ms, index_lock_promotion_count, page_latch_wait_in_ms, page_io_latch_wait_in_ms)
+SELECT $1 + g, $2, $3, $4, $5, 'dbo', g, 'Table_' || lpad(g::text, 3, '0'), 1, 'PK_Table_' || lpad(g::text, 3, '0'), 'CLUSTERED',
+       5000 - g, 4999 - g, 1000, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0
+FROM generate_series(1, $6::int) AS g",
+                CollectionIdGenerator.Next() + 1_000_000, at, ServerId, ServerName, "BigDb", tables);
+
+            var root = AssertWithinBudget("get_table_index_sizes", await ReadTableIndexSizesAsync(postgres, offset: 0, ct));
+            var listed = root.GetProperty("tables").GetArrayLength();
+            Assert.InRange(listed, 1, 99);
+            Assert.Equal(listed, root.GetProperty("tables_returned").GetInt32());
+            Assert.True(root.GetProperty("truncated").GetBoolean());
+            Assert.Equal(listed, root.GetProperty("next_offset").GetInt32());
+            AssertSaysItWasCutForBytes(root, 100, listed);
+            Assert.Contains($"offset {listed}", root.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
+
+            /* Nothing is dropped: following next_offset reads every table exactly once, largest first, each page within the budget. */
+            var seen = new List<string>();
+            var page = root;
+            for (var calls = 0; calls < 50; calls++)
+            {
+                seen.AddRange(page.GetProperty("tables").EnumerateArray().Select(t => t.GetProperty("table_name").GetString()!));
+                if (!page.GetProperty("truncated").GetBoolean())
+                {
+                    Assert.False(page.GetProperty("budget_truncated").GetBoolean());
+                    Assert.Equal(JsonValueKind.Null, page.GetProperty("next_offset").ValueKind);
+                    break;
+                }
+
+                page = AssertWithinBudget("get_table_index_sizes", await ReadTableIndexSizesAsync(postgres, page.GetProperty("next_offset").GetInt32(), ct));
+            }
+
+            Assert.Equal(Enumerable.Range(1, tables).Select(i => $"Table_{i:D3}"), seen);
+
+            /* An offset past the last table is an empty answer, and a negative one is refused. */
+            using (var past = JsonDocument.Parse(await ReadTableIndexSizesAsync(postgres, tables, ct)))
+            {
+                Assert.Equal("empty", past.RootElement.GetProperty("status").GetString());
+            }
+
+            using (var negative = JsonDocument.Parse(await ReadTableIndexSizesAsync(postgres, -1, ct)))
+            {
+                Assert.Equal("invalid", negative.RootElement.GetProperty("status").GetString());
+            }
+
+            /* The web route's read names no budget: the 100-table page, whole, with the cap as its only cut. */
+            using var web = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, ServerName, DatabaseFilter.All, ct));
+            Assert.Equal(100, web.RootElement.GetProperty("tables").GetArrayLength());
+            Assert.True(web.RootElement.GetProperty("truncated").GetBoolean());
+            Assert.False(web.RootElement.GetProperty("budget_truncated").GetBoolean());
+            Assert.Equal(100, web.RootElement.GetProperty("next_offset").GetInt32());
+        });
+    }
+
+    /// <summary>Calls get_table_index_sizes by its parameter names, so the call reads the same whether or not the tool
+    /// takes <c>offset</c>: a tool without the parameter answers from its first table.</summary>
+    private static Task<string> ReadTableIndexSizesAsync(NpgsqlDataSource postgres, int offset, CancellationToken ct)
+    {
+        var method = typeof(DarlingMcpObjectStatsTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(m => m.Name == nameof(DarlingMcpObjectStatsTools.GetTableIndexSizes));
+        var supplied = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["postgres"] = postgres,
+            ["server_name"] = ServerName,
+            ["offset"] = offset,
+            ["cancellationToken"] = ct,
+        };
+        var args = method.GetParameters()
+            .Select(p => supplied.TryGetValue(p.Name!, out var value) ? value : p.HasDefaultValue ? p.DefaultValue : null)
+            .ToArray();
+        return McpReadToolBudgetLiveTests.InvokeAsync(method, args);
     }
 
     private static DateTime ParseUtc(string value) =>

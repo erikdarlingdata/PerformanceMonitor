@@ -259,7 +259,7 @@ VALUES ($1::bigint, $2::timestamp, $3::integer, $4::text, $5::text, $6::text,
             /* Table & Index Sizes vs get_table_index_sizes' tables, with and without a database filter. */
             foreach (var filter in new string?[] { null, "otherdb" })
             {
-                using var doc = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, ServerName, filter, ct));
+                using var doc = JsonDocument.Parse(await DarlingMcpObjectStatsTools.GetTableIndexSizes(postgres, ServerName, database_name: filter, cancellationToken: ct));
                 var web = doc.RootElement.GetProperty("tables").EnumerateArray().ToList();
                 var rows = await viewer.GetTableSizesAsync(ServerId, filter is null ? null : new[] { filter }, ct);
                 Assert.Equal(web.Count, rows.Count);

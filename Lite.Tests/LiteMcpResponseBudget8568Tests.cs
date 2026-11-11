@@ -27,7 +27,8 @@ namespace PerformanceMonitorLite.Tests;
 /// #8568: Lite's <c>get_alert_history</c> and <c>get_top_queries_by_cpu</c> answer the same shape as the service's,
 /// so a default call over long <c>detail_text</c> or long <c>query_text</c> was over the shared 32,768-byte response
 /// budget here too. Each test seeds a store whose default answer is over the budget, calls the tool as a caller
-/// would, and holds the answer to the budget, to whole rows, and to saying what it cut.
+/// would, and holds the answer to the budget, to whole rows, and to saying what it cut. <c>get_table_index_sizes</c>
+/// (#8655, its 100-table page) is held to the same rule here.
 /// </summary>
 public sealed class LiteMcpResponseBudget8568Tests : IDisposable
 {
@@ -246,6 +247,95 @@ public sealed class LiteMcpResponseBudget8568Tests : IDisposable
         /* One database's page holds queries the wide page left out. */
         var billing = AssertWithinBudget("get_top_queries_by_cpu Billing", await McpQueryTools.GetTopQueriesByCpu(_service, _serverManager, ServerName, top: queries, database_name: "Billing"));
         Assert.Contains(billing.GetProperty("queries").EnumerateArray().Select(r => r.GetProperty("query_hash").GetString()!), hash => !held.Contains(hash));
+    }
+
+    /// <summary>
+    /// #8655: Lite's <c>get_table_index_sizes</c> answers the same 100-table page as the service's, which is over the
+    /// budget on a server whose rows carry a growth note. A default call over 130 tables fits the budget and says what
+    /// it left out, and following <c>next_offset</c> reads every table exactly once, largest first.
+    /// </summary>
+    [Fact]
+    public async Task TableIndexSizes_Default_OverOneHundredTables_FitsTheBudget_AndPagesToEveryTable()
+    {
+        /* One daily snapshot, so every row carries its growth note. Table_001 is the largest. */
+        const int tables = 130;
+        using (var connection = _duckDb.CreateConnection())
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            for (var i = 1; i <= tables; i++)
+            {
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText =
+                    "INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, sqlserver_start_time, database_name, database_id, schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, user_seeks, user_scans, user_lookups, user_updates, row_lock_wait_in_ms, index_lock_promotion_count) "
+                    + "VALUES ($1, $2, $3, $4, $5, 'BigDb', 7, 'dbo', $6, $7, 1, $8, 'CLUSTERED', $9, $9, 1000, 1, 1, 1, 1, 0, 0)";
+                foreach (var value in new object[] { (long)i, _now.AddHours(-2), _serverId, ServerName, _now.AddDays(-12), i, $"Table_{i:D3}", $"PK_Table_{i:D3}", 5000m - i })
+                {
+                    cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = value });
+                }
+
+                await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            }
+        }
+
+        var root = AssertWithinBudget("get_table_index_sizes", await ReadTableIndexSizesAsync(offset: 0));
+        var listed = root.GetProperty("tables").GetArrayLength();
+        Assert.InRange(listed, 1, 99);
+        Assert.Equal(listed, root.GetProperty("tables_returned").GetInt32());
+        Assert.True(root.GetProperty("truncated").GetBoolean());
+        Assert.True(root.GetProperty("budget_truncated").GetBoolean());
+        Assert.Equal(listed, root.GetProperty("next_offset").GetInt32());
+        var note = root.GetProperty("budget_note").GetString();
+        Assert.Contains("32,768-byte response budget", note, StringComparison.Ordinal);
+        Assert.Contains($"100 tables were read; only {listed} fit", note, StringComparison.Ordinal);
+        Assert.Contains($"{100 - listed} were left out", note, StringComparison.Ordinal);
+        Assert.Contains($"offset {listed}", note, StringComparison.Ordinal);
+
+        /* Nothing is dropped: following next_offset reads every table exactly once, largest first, each page within the budget. */
+        var seen = new List<string>();
+        var page = root;
+        for (var calls = 0; calls < 50; calls++)
+        {
+            seen.AddRange(page.GetProperty("tables").EnumerateArray().Select(t => t.GetProperty("table_name").GetString()!));
+            if (!page.GetProperty("truncated").GetBoolean())
+            {
+                Assert.False(page.GetProperty("budget_truncated").GetBoolean());
+                Assert.Equal(JsonValueKind.Null, page.GetProperty("next_offset").ValueKind);
+                break;
+            }
+
+            page = AssertWithinBudget("get_table_index_sizes", await ReadTableIndexSizesAsync(page.GetProperty("next_offset").GetInt32()));
+        }
+
+        Assert.Equal(Enumerable.Range(1, tables).Select(i => $"Table_{i:D3}"), seen);
+
+        /* An offset past the last table is an empty answer, and a negative one is refused. */
+        using (var past = JsonDocument.Parse(await ReadTableIndexSizesAsync(tables)))
+        {
+            Assert.Equal("empty", past.RootElement.GetProperty("status").GetString());
+        }
+
+        using (var negative = JsonDocument.Parse(await ReadTableIndexSizesAsync(-1)))
+        {
+            Assert.Equal("invalid", negative.RootElement.GetProperty("status").GetString());
+        }
+    }
+
+    /// <summary>Calls get_table_index_sizes by its parameter names, so the call reads the same whether or not the tool
+    /// takes <c>offset</c>: a tool without the parameter answers from its first table.</summary>
+    private Task<string> ReadTableIndexSizesAsync(int offset)
+    {
+        var method = typeof(McpObjectStatsTools).GetMethod(nameof(McpObjectStatsTools.GetTableIndexSizes))!;
+        var supplied = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["dataService"] = _service,
+            ["serverManager"] = _serverManager,
+            ["server_name"] = ServerName,
+            ["offset"] = offset,
+        };
+        var args = method.GetParameters()
+            .Select(p => supplied.TryGetValue(p.Name!, out var value) ? value : p.HasDefaultValue ? p.DefaultValue : null)
+            .ToArray();
+        return (Task<string>)method.Invoke(null, args)!;
     }
 
     private static string DetailText(int i, int length)
