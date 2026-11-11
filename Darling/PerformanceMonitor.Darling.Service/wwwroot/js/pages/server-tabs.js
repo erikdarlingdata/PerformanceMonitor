@@ -1661,7 +1661,7 @@ export const POSTGRES_TABS = [
           stats: PG_XMIN_STATS,
           span: 2,
           emptyText:
-            "Nothing held the xmin horizon back in this window — the healthy state. Vacuum can reclaim everything it finds.",
+            "Nothing held the xmin horizon back in this window. That is the healthy state. Vacuum can reclaim everything it finds.",
         },
         {
           title: "Horizon Holders",

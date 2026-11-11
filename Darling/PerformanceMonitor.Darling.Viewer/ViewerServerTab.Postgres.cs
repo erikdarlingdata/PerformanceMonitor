@@ -1138,7 +1138,7 @@ public partial class ViewerServerTab
         PgXminHorizonGrid.ItemsSource = xminCurrent.Select(r => PgDisplay.Xmin(r, xminCapturesInWindow)).ToList();
         ShowNote(PgXminNote, PanelNoteParts("pg_xmin_horizon", xminCurrent.Count,
             "Nothing held the xmin horizon back in this window.",
-            "Nothing held the xmin horizon back in this window — no long-running transaction, replication "
+            "Nothing held the xmin horizon back in this window: no long-running transaction, replication "
             + "slot, standby feedback or prepared transaction pinned an old xmin. Zero rows is the healthy "
             + "answer here, not a missing read.",
             ClearedRows.Xmin(xminRows.Count - xminCurrent.Count)));

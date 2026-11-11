@@ -105,6 +105,24 @@ export function valueText(v) {
   }
 }
 
+/**
+ * The text of one evidence item. An agent sends key_numbers as a string, and the string is often JSON of its own, so printing the
+ * item as JSON shows it with a second layer of escapes ("{\"sql_cpu\":...}", "-\u003E"). A key_numbers string that parses to an
+ * object or an array is drawn as that object. One that does not parse is drawn as plain text on its own line, as typed.
+ */
+export function evidenceText(item) {
+  if (item == null || typeof item !== "object" || Array.isArray(item) || typeof item.key_numbers !== "string") return valueText(item);
+  let parsed = null;
+  try {
+    parsed = JSON.parse(item.key_numbers);
+  } catch {
+    parsed = null;
+  }
+  if (parsed !== null && typeof parsed === "object") return valueText({ ...item, key_numbers: parsed });
+  const { key_numbers: typed, ...rest } = item;
+  return valueText(rest) + "\nkey_numbers: " + typed;
+}
+
 /** When the request was claimed: the newest "claimed" event of its journal, or null when it was never claimed. */
 export function claimedAt(journal, requestId) {
   let best = null;
@@ -248,7 +266,7 @@ function reportBlock(rep) {
   for (const [title, list] of evidenceLists) {
     const items = Array.isArray(list) ? list : [];
     if (items.length) {
-      parts.push(el("div", {}, [el("strong", { text: title + " (" + items.length + "): " }), ...items.map((e) => el("pre", { class: "jh-detail-message", text: valueText(e) }))]));
+      parts.push(el("div", {}, [el("strong", { text: title + " (" + items.length + "): " }), ...items.map((e) => el("pre", { class: "jh-detail-message", text: evidenceText(e) }))]));
     }
   }
   const queries = Array.isArray(rep.queries_run) ? rep.queries_run : [];

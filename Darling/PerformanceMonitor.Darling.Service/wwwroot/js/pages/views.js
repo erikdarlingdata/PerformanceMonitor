@@ -256,8 +256,8 @@ function firstRunHero(canEdit, servers) {
     el("div", {
       class: "hero-pitch",
       text:
-        "Build a DASHBOARD — pick a metric, aggregate it, group and filter it, and chart it as a line, bar, pie, " +
-        "stacked area, or stat — or a NOTEBOOK that mixes markdown notes with those same charts into a guided " +
+        "Build a DASHBOARD: pick a metric, aggregate it, group and filter it, and chart it as a line, bar, pie, " +
+        "stacked area, or stat. Or build a NOTEBOOK that mixes markdown notes with those same charts into a guided " +
         "investigation. Both save for every seat and re-scope live by server and time range. No SQL to write.",
     }),
     el("div", { class: "hero-ctas" }, [

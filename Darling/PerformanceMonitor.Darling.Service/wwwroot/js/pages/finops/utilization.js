@@ -138,7 +138,8 @@ function loadUtilization(body, server, ctx) {
       const res = await readTool("get_finops", { server, view: "utilization" }, ctx && ctx.signal);
       if (res.kind === "aborted" || res.kind === "auth") return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-      if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
+      /* #8555: the strip carries its panel's title, so it says which data it stands for. */
+      if (res.kind === "empty") return mount(body, [el("h3", { text: SUMMARY_TITLE }), gatedEmptyStrip(res, ctx)]);
       const data = res.data || {};
       const hasCost = data.monthly_cost_usd != null;
       const view = {
@@ -184,7 +185,7 @@ function loadTopDatabases(body, server, ctx) {
       const res = await readTool("get_finops", { server, view: "database_resources", hours: TOP_HOURS, limit: TOP_LIMIT }, ctx && ctx.signal);
       if (res.kind === "aborted" || res.kind === "auth") return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-      if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
+      if (res.kind === "empty") return mount(body, [el("h3", { text: "Top Databases by CPU" }), gatedEmptyStrip(res, ctx)]);
       const data = res.data || {};
       mount(body, [
         el("h3", { text: "Top Databases by Total CPU" }),
