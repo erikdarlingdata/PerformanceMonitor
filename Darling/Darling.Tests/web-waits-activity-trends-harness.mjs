@@ -151,8 +151,8 @@ const LATCHES = ["LATCH_A", "LATCH_B", "LATCH_C", "LATCH_D", "LATCH_E", "LATCH_F
 const SPINS = ["SPIN_A", "SPIN_B", "SPIN_C"];
 /* #6359: the MCP callers' notes as TrendBuckets.AggregateNote / LevelNote write them (field names, bucket_minutes advice). The page
    must not print them, so the harness serves them and the tests read what the panel drew instead. */
-const MCP_SUMMED = "Each point summarizes the collections in one 1-hour bucket and is stamped at the bucket's start. Counts are summed across the bucket, and rates are recomputed from those sums, so a bucket the window cuts short holds smaller counts but a true rate. peak_* and worst_* are the single most extreme collection inside the bucket. The width was chosen to keep this answer near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.";
-const MCP_LEVEL = "Each point averages the samples in one 1-hour bucket and is stamped at the bucket's start. A level is averaged, never summed, and peak_* is the highest single sample inside the bucket. The width was chosen to keep this answer near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.";
+const MCP_SUMMED = "Each point summarizes the collections in one 1-hour bucket and is stamped at the bucket's start. Counts are summed across the bucket, and rates are recomputed from those sums, so a bucket the window cuts short holds smaller counts but a true rate. peak_* and worst_* are the single most extreme collection inside the bucket. The width was chosen to keep this answer near 1,500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.";
+const MCP_LEVEL = "Each point averages the samples in one 1-hour bucket and is stamped at the bucket's start. A level is averaged, never summed, and peak_* is the highest single sample inside the bucket. The width was chosen to keep this answer near 1,500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.";
 const pts = (f) => [{ time: ago(10), ...f(1) }, { time: ago(5), ...f(2) }];
 let mode = "data";
 let missing = null;
