@@ -374,9 +374,35 @@ public sealed partial class ViewerDataService
         ranked AS (
             SELECT
         {{QueryStoreTopRankedColumns}}
-            FROM deduped
+            FROM
+            (
+                /* #8549: the kept keys' rows are fetched by key, not found by reading the window again. A semi-join on KeyMatch could
+                   only hash, so this pass read every row of the window a second time: on a seeded store of 1.73 million intervals it
+                   was 5.7 s of a 10.3 s read, and on a cold field store it doubled the wide heap pages the first read loads. The plain
+                   equalities let each key probe the (server_id, database_name, query_id, first_execution_time) index; KeyMatch stays the
+                   exact NULL-safe test. A key with a NULL database_name or query_id cannot match a plain equality, so the second branch
+                   reads the window for those keys only, and only when such a key was kept (the uncorrelated EXISTS runs once, before
+                   the scan). Each row matches at most one key, so no row is read twice. */
+                SELECT
+                    deduped.*
+                FROM keys AS k
+                CROSS JOIN LATERAL
+                (
+                    SELECT
+                        *
+                    FROM deduped
+                    WHERE deduped.database_name = k.database_name
+                    AND   deduped.query_id = k.query_id
+                ) AS deduped
+                WHERE {{KeyMatch}}
+                UNION ALL
+                SELECT
+                    deduped.*
+                FROM deduped
+                WHERE EXISTS (SELECT 1 FROM keys AS n WHERE n.database_name IS NULL OR n.query_id IS NULL)
+                AND   EXISTS (SELECT 1 FROM keys AS k WHERE (k.database_name IS NULL OR k.query_id IS NULL) AND {{KeyMatch}})
+            ) AS deduped
             WHERE rn = 1
-            AND   EXISTS (SELECT 1 FROM keys AS k WHERE {{KeyMatch}})
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
         ),
         """;
