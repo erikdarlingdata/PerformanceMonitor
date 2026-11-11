@@ -180,6 +180,40 @@ LEFT JOIN query_plan_dim AS d
         return xml.Contains("UsePlan=\"1\"", StringComparison.Ordinal) ? (PlanKind.Variant, null) : (PlanKind.Plain, null);
     }
 
+    internal const string ForcesReadOnlySql = "SET TRANSACTION READ ONLY";
+
+    /// <summary>
+    /// #8570, the field cause: <c>collect.query_store_forced_plans</c> is a plain table whose statistics lag (autoanalyze about every two days on a busy
+    /// store). While the read's window lies past the end of the <c>collection_time</c> histogram, the planner estimates every window scan at one row
+    /// and builds nested loops: the absence step re-ran an index scan of the window 4,656 times and the first-seen step re-ran once per force, 33.5 s
+    /// for one read of 274 forces. The same statement with nested loops off took 45 ms, and a window inside the histogram took 44 ms. Neither index
+    /// leads with <c>collection_time</c>, so the planner cannot probe the real maximum past the histogram. This statement reads the window rows a few
+    /// times and joins them in memory, so a hash or merge join is right at every size, and the plan is made independent of the window estimate by
+    /// setting this with <c>SET LOCAL</c> in the transaction the statement runs in. It leaves no setting on the pooled connection.
+    /// </summary>
+    internal const string ForcesNoNestLoopSql = "SET LOCAL enable_nestloop = off";
+
+    /// <summary>The transaction <see cref="ForcesSql(DatabaseFilter, int)"/> runs in: read-only, with <see cref="ForcesNoNestLoopSql"/> set for its length.</summary>
+    internal static async Task<NpgsqlTransaction> BeginForcesTransactionAsync(NpgsqlConnection connection, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            foreach (var setting in new[] { ForcesReadOnlySql, ForcesNoNestLoopSql })
+            {
+                await using var set = new NpgsqlCommand(setting, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
+                await set.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            return transaction;
+        }
+        catch
+        {
+            await transaction.DisposeAsync();
+            throw;
+        }
+    }
+
     /// <summary>
     /// The newest collector capture of each force, read from the window, with the row cap given. $1 server, $2 start, $3 end, $4 database filter,
     /// $5 query_id or NULL, $6 plan_id or NULL (#6560: both narrow the read itself, before the cap, so a force past the cap is still found). The cap cuts the LAST rows of this order: a force that fails (a failure count or
@@ -570,7 +604,11 @@ LIMIT 50";
                     counts[countReader.GetString(0)] = checked((int)countReader.GetInt64(1));
             }
 
-            await using var command = postgres.CreateCommand(ForcesSql(databases, maxForces));
+            /* #8570: the force list runs in a short read-only transaction with nested loops off. SET LOCAL ends with the transaction, which is
+               disposed with this block, so the pooled connection goes back to its own settings. See ForcesNoNestLoopSql. */
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await BeginForcesTransactionAsync(connection, commandTimeoutSeconds, cancellationToken);
+            await using var command = new NpgsqlCommand(ForcesSql(databases, maxForces), connection, transaction);
             command.CommandTimeout = commandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, from);

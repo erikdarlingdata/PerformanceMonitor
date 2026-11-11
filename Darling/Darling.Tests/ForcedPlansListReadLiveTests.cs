@@ -160,6 +160,44 @@ LIMIT 2001";
             Assert.Contains(actual, r => r.Split('|')[1] == "1099" && r.Split('|')[7] != "<null>");
         });
 
+    /// <summary>
+    /// #8570, the field cause: the force list is planned with nested loops off, so stale statistics on the window (a window past the end of the
+    /// <c>collection_time</c> histogram is estimated at one row) cannot send it into nested loops over the window rows (33.5 s in the field, 45 ms with
+    /// nested loops off). The setting is <c>SET LOCAL</c> in a read-only transaction of the read's own, so the pooled connection must come back as it was.
+    /// The pool is held to ONE connection, so the check after the read runs on the very connection the read used.
+    /// </summary>
+    [Fact]
+    public Task TheForceListRuns_ReadOnlyWithNestedLoopsOff_AndLeavesThePooledConnectionAsItWas() =>
+        WithSeedAsync(async (connection, serverId, from, to, connectionString, ct) =>
+        {
+            var builder = new NpgsqlConnectionStringBuilder(connectionString) { MaxPoolSize = 1 };
+            await using var dataSource = NpgsqlDataSource.Create(builder.ConnectionString);
+
+            async Task<(string NestLoop, string ReadOnly)> SettingsAsync(NpgsqlConnection onConnection, NpgsqlTransaction? transaction)
+            {
+                await using var command = new NpgsqlCommand("SELECT current_setting('enable_nestloop'), current_setting('transaction_read_only')", onConnection, transaction);
+                await using var reader = await command.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                return (reader.GetString(0), reader.GetString(1));
+            }
+
+            await using (var inside = await dataSource.OpenConnectionAsync(ct))
+            {
+                await using (var transaction = await DarlingForcedPlanStateReader.BeginForcesTransactionAsync(inside, 30, ct))
+                {
+                    Assert.Equal(("off", "on"), await SettingsAsync(inside, transaction));
+                }
+
+                Assert.Equal(("on", "off"), await SettingsAsync(inside, null));
+            }
+
+            var read = await DarlingForcedPlanStateReader.ReadAsync(dataSource, serverId, DatabaseFilter.All, null, from, to, cancellationToken: ct);
+            Assert.Equal(Forces, read.Plans.Count);
+
+            await using var after = await dataSource.OpenConnectionAsync(ct);
+            Assert.Equal(("on", "off"), await SettingsAsync(after, null));
+        });
+
     private static async Task<List<string>> RowsAsync(NpgsqlConnection connection, string sql, int serverId, DateTime from, DateTime to, long? queryId, long? planId, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
@@ -218,7 +256,10 @@ LIMIT 2001";
     /// 0 present in every capture, 1 first captured 100 minutes ago, 2 missing from the captures 50 to 60 minutes ago, 3 removed 20 minutes ago (its newest
     /// row is the capture before). Every seventh force has a failure count and reason, which moves it up the order.
     /// </summary>
-    private static async Task WithSeedAsync(Func<NpgsqlConnection, int, DateTime, DateTime, CancellationToken, Task> body)
+    private static Task WithSeedAsync(Func<NpgsqlConnection, int, DateTime, DateTime, CancellationToken, Task> body) =>
+        WithSeedAsync((connection, serverId, from, to, _, ct) => body(connection, serverId, from, to, ct));
+
+    private static async Task WithSeedAsync(Func<NpgsqlConnection, int, DateTime, DateTime, string, CancellationToken, Task> body)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live plan tests (each mints its own scratch database).");
@@ -254,7 +295,7 @@ LIMIT 2001";
                 CollectionIdGenerator.Next(), to.AddMinutes(-1), serverId, Captures);
             await ExecAsync(connection, ct, "ANALYZE collect.query_store_forced_plans");
 
-            await body(connection, serverId, from, to, ct);
+            await body(connection, serverId, from, to, connectionString, ct);
             succeeded = true;
         }
         finally
