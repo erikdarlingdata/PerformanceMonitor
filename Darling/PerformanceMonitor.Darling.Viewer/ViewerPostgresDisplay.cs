@@ -1354,7 +1354,7 @@ internal static class PgDisplay
             StatementText = r.LastQueryId is null or 0 ? "" : r.LastQueryText ?? "(statement text not captured yet)",
             PeakHorizonAge = r.PeakHorizonAge < 0
                 ? PinsNothingText
-                : string.Create(CultureInfo.CurrentCulture, $"{r.PeakHorizonAge:N0} transactions"),
+                : CountText.Plural(r.PeakHorizonAge, "transaction"),
             /* These two keep the ordinary dash. They are the components of the horizon age above, and an
                absent one is the narrower statement "this session held no snapshot" / "no transaction id" —
                which the horizon column has already said in words. */
@@ -1943,6 +1943,35 @@ internal static class PgDisplay
         public string PendingRestart { get; init; } = "";
     }
 
+    /* #8664: the audit's wording is shared with the MCP reply, which names its own tools and fields. The Viewer has none of
+       those, so each is swapped for the tab or column that shows the same thing. The settings grid sits above the audit on
+       the same Overview tab. */
+    private static readonly (string Tool, string Place)[] s_viewerPlaces =
+    [
+        ("get_pg_server_config's pending_restart_settings", "the settings grid above"),
+        ("get_pg_server_config", "the settings grid above"),
+        ("get_pg_plan_capture_readiness", "Vacuum panel 5"),
+        ("get_pg_top_queries", "Activity > Query Shapes"),
+        ("get_pg_blocking", "Activity > Blocking"),
+        ("get_pg_write_stats", "the I/O tab"),
+        ("get_pg_database_stats", "the per-database counters on Activity > Query Shapes"),
+        ("get_pg_database_trend", "Activity > Trends"),
+        ("get_pg_autovacuum_health", "Vacuum panel 3"),
+        ("get_pg_log_events", "the log events read"),
+        ("cost_note", "the Cost column"),
+    ];
+
+    /// <summary>The audit's text as the Viewer shows it: the MCP tool and field names it carries become the Viewer's own places.</summary>
+    internal static string ViewerWording(string text)
+    {
+        foreach (var (tool, place) in s_viewerPlaces)
+        {
+            text = text.Replace(tool, place, StringComparison.Ordinal);
+        }
+
+        return text;
+    }
+
     internal static LoggingAuditRow LoggingAudit(DarlingPgLoggingAudit.Facet f) => new()
     {
         Setting = f.Setting,
@@ -1951,11 +1980,11 @@ internal static class PgDisplay
         Unit = f.Unit,
         Source = f.Source,
         ChangeNeeds = f.ChangeNeeds,
-        Unlocks = f.Unlocks,
-        Recommended = f.Recommended,
-        CostNote = f.CostNote,
-        Remedy = f.Remedy,
-        PendingRestart = f.PendingRestart ? (f.RestartNote ?? "yes") : string.Empty,
+        Unlocks = ViewerWording(f.Unlocks),
+        Recommended = ViewerWording(f.Recommended),
+        CostNote = ViewerWording(f.CostNote),
+        Remedy = ViewerWording(f.Remedy),
+        PendingRestart = f.PendingRestart ? ViewerWording(f.RestartNote ?? "yes") : string.Empty,
     };
 
     /// <summary>One relation of the Buffer Usage grid. All rows are one collection, so the time is the same on each.</summary>
