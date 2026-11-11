@@ -760,7 +760,8 @@ public sealed class MigrationDataMovingRungCensusPins
     /// </summary>
     /* V259 (#8549) is V255's shape for the daily wait totals: a DO block that reads the catalog for the hypertable and creates the empty
        aggregate or the plain view through EXECUTE. Catalog-only, no row of wait_stats is read or written. */
-    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204, 246, 255, 259];
+    /* V263 (#8549) is V259's shape for the oldest-run rollup under the Job History note: a DO block that reads the catalog for the hypertable and creates the empty aggregate or the plain view through EXECUTE. Catalog-only, no row of job_history is read or written. */
+    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204, 246, 255, 259, 263];
 
     /// <summary>
     /// The scan is textual, so dynamic SQL would hide a data-moving statement from it completely. The
