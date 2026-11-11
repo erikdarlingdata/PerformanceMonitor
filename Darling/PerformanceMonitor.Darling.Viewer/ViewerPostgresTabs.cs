@@ -177,8 +177,8 @@ internal static class ViewerPostgresTabs
             /* pg_database_size_stats (V136, #3691) is PLACED here and not yet DRAWN: the per-database size series
                is the Storage tab's question ("where is the space going") asked over time, and its panel lands
                with the object-growth slice. Placing it now keeps the placement census truthful about which
-               screen owns it; the note below tells the operator it is collected and not yet shown, so the
-               registry does not claim a panel that is not there. It comes off in the same PR as the panel. */
+               screen owns it. The tab's note does not mention it (#8564: a development note read as noise
+               above the grids). */
             new[] { "pg_table_bloat_stats", "pg_index_usage_stats", "pg_index_bloat", "pg_column_stats", "pg_predicate_stats", "pg_database_size_stats" },
             /* One tab, because both panels answer the same question — where is the space going and is it
                earning its keep — and the two remedies compete for the same maintenance window. Bloat is
@@ -190,14 +190,10 @@ internal static class ViewerPostgresTabs
                Bloat sits above index usage because it is the more urgent of the two and the more
                dangerous to act on: a bloat percentage is an ESTIMATE and the panel has to say so before
                anyone reads a number off it. */
-            "Where the space went, and whether it is earning its keep. The bloat figures are ESTIMATES "
-            + "computed from column-width statistics — the table itself is never read — so confirm one with "
-            + "pgstattuple before rewriting anything. An index nothing scans is a candidate, never a "
-            + "conclusion: check the constraint and validity columns beside it first. The column-statistics "
-            + "panel is the INPUT those bloat estimates are computed from, and it answers a different "
-            + "question of its own: why the planner chose what it chose. The hourly per-database size series "
-            + "(pg_database_size_stats) is collected for this tab and not yet drawn — its growth panel lands "
-            + "with the object-growth work."),
+            "Where the space went, and whether it is earning its keep. An index nothing scans is a candidate, "
+            + "never a conclusion: check the constraint and validity columns beside it first. The "
+            + "column-statistics panel holds the figures the bloat numbers are computed from, and it answers a "
+            + "different question of its own: why the planner chose what it chose."),
     };
 
     /// <summary>The first PostgreSQL tab's index — what a PostgreSQL server's tab strip selects, since

@@ -99,6 +99,10 @@ const scenarios = {
     cells: [header, { type: "read", read: "get_alert_history", viz: "table", title: "Alert history", params: { server: "SRV1", hours: "24" } }],
     opts: { alert, catalog: { reads: [{ name: "get_alert_history" }], compose: { measures: [] } }, scopeServer: "SRV1" },
   },
+  // #8555: a report row declares no notebook; its caller shows the note, and the page draws nothing of its own.
+  noNotebook: { cells: [], opts: { alert: null, catalog, noNotebook: true } },
+  // An ordinary alert with no cells: the notebook header, its buttons and the empty line stay.
+  emptyNotebook: { cells: [], opts: { alert: null, catalog } },
   // A cell kind the page has no renderer for must say so.
   unknownKind: { cells: [header, { type: "sparkline", title: "Mystery cell" }], opts: { alert, catalog } },
   // Three panels that cannot start a load, then a read: if a bad panel held its limiter slot the read never draws.
@@ -173,10 +177,23 @@ const walkFields = (n) => {
   n.kids.forEach(walkFields);
 };
 walkFields(main);
+// The page's own heading and button texts (the notebook header and its Save as notebook / Open live buttons).
+const heads = [];
+const buttons = [];
+const walkChrome = (n) => {
+  if (!n || typeof n !== "object") return;
+  if (n.tag === "h2") heads.push(n.text);
+  if (n.tag === "button") buttons.push(n.text);
+  n.kids.forEach(walkChrome);
+};
+walkChrome(main);
 
 console.log(JSON.stringify({
   errors: strips("error"),
   notices: strips("notice"),
+  empties: strips("empty"),
+  heads,
+  buttons,
   loading: strips("loading").length,
   titles,
   fields,

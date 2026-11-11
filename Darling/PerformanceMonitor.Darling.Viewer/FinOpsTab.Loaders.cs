@@ -650,6 +650,7 @@ public partial class FinOpsTab
         }
 
         _finopsServerInventoryFilterMgr!.UpdateData(servers);
+        FinOpsNoServerInventoryMessage.Text = FinOpsServerChoice.InventoryEmptyText((ServerSelector.ItemsSource as IEnumerable<DarlingServer>)?.ToList());
         FinOpsNoServerInventoryMessage.Visibility = servers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         FinOpsServerInventoryCountIndicator.Text = FinOpsServerChoice.InventoryCountText(servers.Count, includeRemoved);
     }

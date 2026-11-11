@@ -231,7 +231,7 @@ public static class CollectorRuntimePrecondition
     private const string PreconditionEpilogue =
         "This is a runtime PRECONDITION, not a permanent engine capability gap and not a collection outage: " +
         "it can be satisfied on the monitored server, and this read re-derives it on EVERY call rather than " +
-        "deciding it once at connect time — so the first collection cycle after it is satisfied is the one " +
+        "deciding it once at connect time, so the first collection cycle after it is satisfied is the one " +
         "this read starts answering from, with nothing to restart on the monitoring side.";
 
     /// <summary>
@@ -248,7 +248,7 @@ public static class CollectorRuntimePrecondition
     private const string ConnectScopedEpilogue =
         "This is a runtime PRECONDITION, not a permanent engine capability gap and not a collection outage: " +
         "it can be satisfied on the monitored server. But unlike most preconditions this one is NOT " +
-        "re-derived every cycle — it is read once when the service connects to this server and cached for " +
+        "re-derived every cycle: it is read once when the service connects to this server and cached for " +
         "that connection's life, so satisfying it is not enough on its own: the service has to reconnect " +
         "(restart it, or change this server's configuration, which drops the cached connection) before " +
         "collection resumes. Retrying this read before that will return exactly this answer again.";
@@ -288,7 +288,7 @@ public static class CollectorRuntimePrecondition
     /// <c>runtimePreconditionText</c> in plain-text.js.
     /// </summary>
     public const string DegradedClientSentence =
-        "Act on that sentence — it is what the monitored server itself answered, and it distinguishes the states this " +
+        "Act on that sentence: it is what the monitored server itself answered, and it distinguishes the states this " +
         "one status carries: a grant the login was refused, a source object that does not exist " +
         "on this target, and a feature the platform does not implement or has switched off.";
 
@@ -314,7 +314,7 @@ public static class CollectorRuntimePrecondition
                    $"collector reads: its last run{observed} recorded {CaptureSessionMissingStatus}, so " +
                    $"{CapturePathOf(collectorName)} is not being captured at all.{said} The app creates " +
                    "its capture sessions when it connects to a server and ensures them again at least once an hour, " +
-                   "so it creates a missing session and starts a stopped one within the hour — if the " +
+                   "so it creates a missing session and starts a stopped one within the hour, if the " +
                    "session is still missing after that, check that the monitoring login holds " +
                    "ALTER ANY EVENT SESSION, because the create needs it. " +
                    PreconditionEpilogue;
@@ -325,7 +325,7 @@ public static class CollectorRuntimePrecondition
             return $"The {collectorName} collector is running against {serverName} but the PostgreSQL " +
                    $"extension it reads is not installed there: its last run{observed} was recorded as a " +
                    $"named non-fatal skip, so nothing from {CapturePathOf(collectorName)} is being stored.{said} " +
-                   "The stored sentence names the extension and the database to create it in — installing " +
+                   "The stored sentence names the extension and the database to create it in. Installing " +
                    "it is the remedy, and no grant will change this. An optional extension left " +
                    "uninstalled is also a legitimate resting state; the skip simply keeps that choice " +
                    "visible. " +
@@ -901,7 +901,7 @@ public static class CollectorRuntimePrecondition
                    "READ_WRITE and ALTER DATABASE [name] SET QUERY_STORE = ON is already in effect and will " +
                    "not repair it. Run sys.sp_query_store_consistency_check inside the affected database " +
                    "first; if that does not clear it, ALTER DATABASE [name] SET QUERY_STORE CLEAR, or cycle " +
-                   "it OFF and back ON — both of which discard the Query Store data already held. " +
+                   "it OFF and back ON, both of which discard the Query Store data already held. " +
                    PreconditionEpilogue;
         }
 

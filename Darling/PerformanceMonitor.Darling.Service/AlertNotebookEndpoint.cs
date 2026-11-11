@@ -111,6 +111,7 @@ internal static partial class AlertNotebookEndpoint
 
             var fleetLevelStore = DarlingTriageEndpoint.IsFleetLevelStoreServer(serverQuery)
                 || DarlingTriageEndpoint.IsFleetLevelStoreMetric(metric);
+            var isExternal = IsExternalMetric(metric);
 
             int? serverId = null;
             string? serverName = serverQuery;
@@ -131,6 +132,13 @@ internal static partial class AlertNotebookEndpoint
                         notes.Add((JsonNode)(DarlingWebFailureLog.IsStatementTimeoutSentence(error)
                             ? DarlingWebFailureLog.TimeoutMessage
                             : DarlingWebFailureLog.GenericMessage));
+                    }
+                    else if (isExternal)
+                    {
+                        /* #8555: an External:<source>:<key> alert's server is whatever its submitter named. When that is not a monitored
+                           server the row sits in the no-server bucket: no per-server cell can answer for it and the resolver's "Could not
+                           resolve server" is no news, so the page keeps the alert's own card, the way a store self-alert does (#2768). */
+                        fleetLevelStore = true;
                     }
                     else
                     {
@@ -388,25 +396,45 @@ internal static partial class AlertNotebookEndpoint
            firing metric's SQL Server reads), so they learn the resolved server's engine here, as the firing templates do
            through their context (#8323's pattern): a PostgreSQL target gets the PostgreSQL cells and no SQL Server read, an
            engine that cannot be resolved gets both. Only these metrics pay the registry read; a SQL Server target's cells
-           are exactly what they were. */
-        var enginePickedMetric = trimmedMetric is null ? null : EnginePickedResolutionMetric(ResolvedMetricOf(trimmedMetric));
+           are exactly what they were.
+           #8555: the CPU Resolved notebook does the same, so a SQL Server target has no Instance CPU (Performance Insights) cell
+           and a PostgreSQL target has no SQL Server CPU read. */
+        var resolvedFiring = trimmedMetric is null ? null : ResolvedMetricOf(trimmedMetric);
+        var enginePickedMetric = EnginePickedResolutionMetric(resolvedFiring);
+        var isCpuResolution = string.Equals(resolvedFiring, CpuFiringMetric, StringComparison.Ordinal);
         CollectorTargetEngine? resolutionEngine = null;
-        if (enginePickedMetric is not null && serverId is { } resolutionServerId)
+        if ((enginePickedMetric is not null || isCpuResolution) && serverId is { } resolutionServerId)
         {
             resolutionEngine = MonitoredEngineKind.EngineOf(await ReadEngineKindAsync(postgres, resolutionServerId, logger, ct));
         }
 
-        if (enginePickedMetric is null || resolutionEngine is null or CollectorTargetEngine.SqlServer)
+        /* #8555: an External:<source>:<key> alert with no resolved server (its source is not a monitored server) has nothing a
+           per-server read could answer for: the page keeps the alert's own card and status and draws no read cell. */
+        var noServerReads = serverId is null && IsExternalMetric(trimmedMetric);
+
+        if (!noServerReads && (enginePickedMetric is null || resolutionEngine is null or CollectorTargetEngine.SqlServer))
         {
             foreach (var section in sections)
             {
+                if (isCpuResolution && resolutionEngine is not null && !CpuSectionAppliesTo(section, resolutionEngine.Value))
+                {
+                    continue;
+                }
+
                 mechanicalCells.Add(ReadCell(section, serverName, asOf, lookbackHours));
             }
         }
 
-        if (enginePickedMetric is not null && resolutionEngine is null or CollectorTargetEngine.PostgreSql)
+        if (!noServerReads && enginePickedMetric is not null && resolutionEngine is null or CollectorTargetEngine.PostgreSql)
         {
             PgResolutionCells(mechanicalCells, enginePickedMetric!, serverName, asOf);
+        }
+
+        if (isCpuResolution && resolutionEngine is CollectorTargetEngine.PostgreSql)
+        {
+            /* The PostgreSQL target's drill-down the High CPU template draws (pg_stat_statements has no CPU column). */
+            mechanicalCells.Add(AuthoredReadCell("get_pg_top_queries", "Top queries by execution time", serverName, asOf,
+                ("hours", "24"), ("limit", "10")));
         }
 
         return (mechanicalCells, "mechanical/" + (trimmedMetric ?? "default"), MechanicalTemplateVersion);
@@ -1247,7 +1275,21 @@ internal static partial class AlertNotebookEndpoint
         ("AG Database Suspended", "AG Data Movement Resumed"),
         ("AG Sync Fell Behind", "AG Sync Recovered"),
         ("Server Unreachable", "Server Restored"),
+        /* #8555: the self-monitor pair. A capture that comes back writes "Capture Restored", and one that is cleared without its
+           session coming back (the engine does not run it, or its collector is off) writes "Capture Cleared"; both close the
+           "Capture Down" that fired. "Collection Resumed" closes "Collection Stopped" the same way. */
+        ("Capture Down", "Capture Restored"),
+        ("Capture Down", "Capture Cleared"),
+        ("Collection Stopped", "Collection Resumed"),
     };
+
+    /// <summary>The suffix an external alert's resolution row carries after its fire's name (<see cref="ExternalAlertDrain.ResolvedMetricNameFor"/>).</summary>
+    private const string ExternalResolvedSuffix = " Resolved";
+
+    /// <summary>#8555: is this an <c>External:&lt;source&gt;:&lt;key&gt;</c> alert, the name a submitter's alert is delivered and recorded under?</summary>
+    internal static bool IsExternalMetric(string? metric) =>
+        !string.IsNullOrWhiteSpace(metric)
+        && metric.TrimStart().StartsWith(AlertFamily.ExternalMetricPrefix, StringComparison.Ordinal);
 
     /// <summary>The stored <c>metric_name</c>s that resolve <paramref name="metric"/> (#4755): every alias in
     /// <see cref="DarlingTriageEndpoint.ResolutionAliases"/> whose canonical name is this metric, plus the
@@ -1277,6 +1319,13 @@ internal static partial class AlertNotebookEndpoint
             {
                 names.Add(recovery);
             }
+        }
+
+        /* #8555: an external alert's clear is recorded under its fire's name and " Resolved" (ExternalAlertDrain.ResolvedMetricNameFor),
+           a name no table lists because the source and key are the submitter's. */
+        if (IsExternalMetric(trimmedMetric) && !trimmedMetric.EndsWith(ExternalResolvedSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            names.Add(trimmedMetric + ExternalResolvedSuffix);
         }
 
         return names;

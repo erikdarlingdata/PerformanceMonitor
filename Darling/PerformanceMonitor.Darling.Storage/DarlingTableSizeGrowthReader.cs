@@ -104,18 +104,67 @@ public static class DarlingTableSizeGrowthReader
     /// resolved once, in <c>span</c> (the newest within the tolerance at or before each cutoff and the oldest within it
     /// after, by <c>FILTER</c>) and <c>boundaries</c> (the nearer of the two), so the baseline CTEs and the projected
     /// snapshot times cannot disagree about which capture was used.</para>
+    /// <para><b>#8570: each of the six snapshot times is one index probe, not an aggregate.</b> <c>span</c> used to take them as
+    /// <c>MIN</c>/<c>MAX</c> (with <c>FILTER</c>) over every <c>index_object_stats</c> row of the server, so it read every index row of
+    /// every retained snapshot to find six timestamps: 7 seconds on a first call against a server with a year of snapshots.
+    /// Each time is now the first row of an ordered read of <c>idx_index_object_stats_server_time (server_id, collection_time DESC)</c>,
+    /// newest first for the latest and the "before" side of a cutoff, oldest first for the earliest and the "after" side, bounded by the
+    /// cutoff and the tolerance. The values are the same: <c>collection_time</c> is the table's time dimension, so it is never NULL and
+    /// the descending order cannot put a NULL first.</para>
     /// </summary>
     public const string Sql = """
         WITH span AS (
             SELECT
-                MAX(collection_time) AS latest_time,
-                MIN(collection_time) AS earliest_time,
-                MAX(collection_time) FILTER (WHERE collection_time <= $2::timestamp AND collection_time >= $2::timestamp - make_interval(secs => $6)) AS before_7d,
-                MIN(collection_time) FILTER (WHERE collection_time > $2::timestamp AND collection_time <= $2::timestamp + make_interval(secs => $6)) AS after_7d,
-                MAX(collection_time) FILTER (WHERE collection_time <= $3::timestamp AND collection_time >= $3::timestamp - make_interval(secs => $6)) AS before_30d,
-                MIN(collection_time) FILTER (WHERE collection_time > $3::timestamp AND collection_time <= $3::timestamp + make_interval(secs => $6)) AS after_30d
-            FROM v_index_object_stats
-            WHERE server_id = $1
+            (
+                SELECT collection_time
+                FROM v_index_object_stats
+                WHERE server_id = $1
+                ORDER BY collection_time DESC
+                LIMIT 1
+            ) AS latest_time,
+            (
+                SELECT collection_time
+                FROM v_index_object_stats
+                WHERE server_id = $1
+                ORDER BY collection_time ASC
+                LIMIT 1
+            ) AS earliest_time,
+            (
+                SELECT collection_time
+                FROM v_index_object_stats
+                WHERE server_id = $1
+                AND   collection_time <= $2::timestamp
+                AND   collection_time >= $2::timestamp - make_interval(secs => $6)
+                ORDER BY collection_time DESC
+                LIMIT 1
+            ) AS before_7d,
+            (
+                SELECT collection_time
+                FROM v_index_object_stats
+                WHERE server_id = $1
+                AND   collection_time > $2::timestamp
+                AND   collection_time <= $2::timestamp + make_interval(secs => $6)
+                ORDER BY collection_time ASC
+                LIMIT 1
+            ) AS after_7d,
+            (
+                SELECT collection_time
+                FROM v_index_object_stats
+                WHERE server_id = $1
+                AND   collection_time <= $3::timestamp
+                AND   collection_time >= $3::timestamp - make_interval(secs => $6)
+                ORDER BY collection_time DESC
+                LIMIT 1
+            ) AS before_30d,
+            (
+                SELECT collection_time
+                FROM v_index_object_stats
+                WHERE server_id = $1
+                AND   collection_time > $3::timestamp
+                AND   collection_time <= $3::timestamp + make_interval(secs => $6)
+                ORDER BY collection_time ASC
+                LIMIT 1
+            ) AS after_30d
         ),
         boundaries AS (
             SELECT

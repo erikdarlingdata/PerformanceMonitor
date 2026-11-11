@@ -221,4 +221,76 @@ public sealed class WebMarkdownTests
         Assert.Equal(spans, CodeSpans(block));
         Assert.Equal(shown, ShownText(block));
     }
+
+    private static JsonElement[] Rows(JsonElement section) =>
+        section.GetProperty("kids").EnumerateArray().SelectMany(g => g.GetProperty("kids").EnumerateArray()).ToArray();
+
+    /// <summary>
+    /// #8555: a header row, a separator row and body rows are drawn as a table, not as one paragraph of pipes. The separator's
+    /// colons set each column's alignment, an escaped pipe stays in its cell, a short row is padded, and a cell is inline text.
+    /// </summary>
+    [Fact]
+    public void APipeTable_RendersAsATable_WithAlignmentEscapedPipesAndPaddedRows()
+    {
+        var block = Assert.Single(Render("| # | name | hours |\n|---|:---:|---:|\n| 1 | `a\\|b` | 76.6 |\n| 2 | **x** |").EnumerateArray());
+
+        Assert.Equal("div", block.GetProperty("tag").GetString());
+        var table = Assert.Single(block.GetProperty("kids").EnumerateArray());
+        Assert.Equal("table", table.GetProperty("tag").GetString());
+        var rows = Rows(table);
+        Assert.Equal(3, rows.Length);
+        string[] Cells(JsonElement row) => row.GetProperty("kids").EnumerateArray().Select(ShownText).ToArray();
+        Assert.Equal(new[] { "#", "name", "hours" }, Cells(rows[0]));
+        Assert.Equal(new[] { "1", "a|b", "76.6" }, Cells(rows[1]));
+        Assert.Equal(new[] { "2", "x", "" }, Cells(rows[2]));
+        Assert.Equal(new[] { "th", "th", "th" }, rows[0].GetProperty("kids").EnumerateArray().Select(c => c.GetProperty("tag").GetString()!));
+        Assert.Equal(new[] { "td", "td", "td" }, rows[1].GetProperty("kids").EnumerateArray().Select(c => c.GetProperty("tag").GetString()!));
+        Assert.Equal(new[] { "", "md-al-center", "md-al-right" }, rows[1].GetProperty("kids").EnumerateArray().Select(c => c.GetProperty("cls").GetString()!));
+        Assert.True(HasTag(rows[2], "strong"));
+    }
+
+    [Fact]
+    public void ATableCell_IsInertText_SoMarkupInItIsNeverBuiltIntoElements()
+    {
+        var blocks = Render("| a | b |\n|---|---|\n| <script>alert(1)</script> | <img src=x onerror=alert(1)> |").EnumerateArray().ToArray();
+
+        var shown = string.Concat(blocks.Select(PlainText));
+        Assert.Contains("<script>alert(1)</script>", shown);
+        Assert.Contains("<img src=x onerror=alert(1)>", shown);
+        Assert.DoesNotContain(blocks, b => HasTag(b, "script", "img"));
+    }
+
+    [Theory]
+    [InlineData("a | b\nsome text")]
+    [InlineData("| a | b |\n| c | d |")]
+    [InlineData("| a | b |\n|---|\n| c | d |")]
+    public void PipesThatAreNotATable_StayAParagraph(string markdown)
+    {
+        var block = Assert.Single(Render(markdown).EnumerateArray());
+
+        Assert.Equal("p", block.GetProperty("tag").GetString());
+    }
+
+    /// <summary>#8555: lines that start with "&gt; " are a block quote around the rest of the line, and the quote may hold blocks of its own.</summary>
+    [Fact]
+    public void ABlockQuote_RendersAsAQuote_WithoutTheMarker_AndHoldsItsOwnBlocks()
+    {
+        var blocks = Render("> first <b>line</b>\n> second\n> - item\nafter").EnumerateArray().ToArray();
+
+        Assert.Equal(new[] { "blockquote", "p" }, blocks.Select(b => b.GetProperty("tag").GetString()!));
+        var inner = blocks[0].GetProperty("kids").EnumerateArray().ToArray();
+        Assert.Equal(new[] { "p", "ul" }, inner.Select(b => b.GetProperty("tag").GetString()!));
+        Assert.Equal("first <b>line</b> second", PlainText(inner[0]));
+        Assert.False(HasTag(blocks[0], "b"));
+        Assert.Equal("after", PlainText(blocks[1]));
+    }
+
+    [Fact]
+    public void ANestedBlockQuote_IsAQuoteInsideTheQuote()
+    {
+        var quote = Assert.Single(Render("> outer\n>\n> > inner").EnumerateArray());
+
+        var inner = quote.GetProperty("kids").EnumerateArray().ToArray();
+        Assert.Equal(new[] { "p", "blockquote" }, inner.Select(b => b.GetProperty("tag").GetString()!));
+    }
 }
