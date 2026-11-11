@@ -463,6 +463,15 @@ public partial class JobHistoryTab : UserControl
     /// <summary>When the choices are read again: for a different window or server, or after <see cref="ChoicesLifetime"/>.</summary>
     private readonly JobHistoryChoicesFreshness _choicesFreshness = new(ChoicesLifetime);
 
+    /// <summary>How long a category list stays current for its window and server (#8549); a category that appears later still reaches
+    /// the drop-down through the runs the grid reads.</summary>
+    private static readonly TimeSpan CategoriesLifetime = TimeSpan.FromMinutes(30);
+
+    /// <summary>The category lists read this session, per window and server, with one read in flight per key (#8549): a load superseded
+    /// while the read ran, a refresh after <see cref="ChoicesLifetime"/> and a return to a window already read take the same answer
+    /// instead of running the statement again.</summary>
+    private readonly JobHistoryCategoryCache _categoryCache = new(CategoriesLifetime);
+
     /// <summary>The configured servers the job history collector runs on, by the name the grid's Server column speaks (the shell's
     /// snapshot, <see cref="LocalDataService.BuildJobHistoryChoiceMap"/>). A disabled server or an Azure SQL Database cannot have job
     /// history, so it is not offered unless it has rows in the window (the rows add it).</summary>
@@ -480,7 +489,8 @@ public partial class JobHistoryTab : UserControl
         var service = _dataService!;
         try
         {
-            var categories = await System.Threading.Tasks.Task.Run(() => service.GetJobHistoryCategoriesAsync(startUtc, endUtc, serverId));
+            var categories = await _categoryCache.GetAsync(key, DateTime.UtcNow,
+                () => System.Threading.Tasks.Task.Run(() => service.GetJobHistoryCategoriesAsync(startUtc, endUtc, serverId)));
             _choicesFailures.Succeeded("categories");
             return categories;
         }
