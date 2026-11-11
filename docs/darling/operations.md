@@ -49,12 +49,14 @@ not the content was kept.
 `collect.oversized_plan_backlog` is where those plans are eventually collected, by an out-of-band sweep
 that fetches one plan at a time, ten per server every fifteen minutes. Its `plan_xml` column is
 **plain text, never gzip** — the content never passes through the plan dimension. A row with
-`plan_xml IS NULL` has not been fetched yet; `expired_at` means the plan handle stopped resolving before
-the sweep reached it. `get_plan_xml` and the `analyze_*_plan` tools read this table automatically, so
+`plan_xml IS NULL` has not been fetched yet; `expired_at` with a `last_attempt_at` means the plan handle
+stopped resolving before the sweep reached it, and `expired_at` with no `last_attempt_at` means the sweep
+dropped the row unfetched: a newer sighting of the same query is waiting in its place, or the server was past
+its pending cap. A dropped row is removed a day later. `get_plan_xml` and the `analyze_*_plan` tools read this table automatically, so
 asking the product remains the shortest route.
 
 `get_oversized_plan_backlog` reports the table itself rather than one plan out of it: per server the
-pending / captured / expired counts, the newest capture and expiry instants, and `observed_bytes`
+pending / captured / expired / dropped counts, the newest capture and expiry instants, and `observed_bytes`
 min/median/max, with an optional per-server row listing that carries each plan's claim key,
 `database_name` and `query_hash`. That is where a `query_hash` worth passing to `get_plan_xml` comes
 from, and it is also the read that answers whether the sweep's fetch half has ever succeeded on a given
