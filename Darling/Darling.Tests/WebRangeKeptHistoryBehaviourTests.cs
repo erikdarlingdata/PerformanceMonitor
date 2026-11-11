@@ -415,4 +415,20 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         Assert.Contains("in the last 4 hours matched", Assert.Single(Strings(live, "empties")), StringComparison.Ordinal);
         Assert.Empty(Strings(live, "pins"));
     }
+
+    /// <summary>#8630: an alert notebook for an alert a day old carries <c>as_of</c> on every read cell. A read whose tool takes no <c>as_of</c>
+    /// (the server summary, the collection health) shows the present, so its cell says so and draws no "Pinned" badge. A read that takes one
+    /// (CPU utilization) keeps its badge.</summary>
+    [Fact]
+    public void AnAlertNotebookCell_WhoseReadTakesNoAsOf_SaysCurrentState_AndNeverPinned()
+    {
+        if (!TryRun("alertNotebookPins", out var r)) return;
+
+        var cells = r.GetProperty("found").GetProperty("cells").EnumerateArray()
+            .ToDictionary(c => c.GetProperty("read").GetString()!, c => Strings(c, "badges"));
+        Assert.Equal(new[] { "Current state, not pinned" }, cells["get_server_summary"]);
+        Assert.Equal(new[] { "Current state, not pinned" }, cells["get_collection_health"]);
+        var pin = Assert.Single(cells["get_cpu_utilization"]);
+        Assert.StartsWith("Pinned: ", pin, StringComparison.Ordinal);
+    }
 }
