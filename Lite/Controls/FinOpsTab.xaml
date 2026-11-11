@@ -112,11 +112,18 @@
         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,6,10,0">
             <TextBlock Text="Server:" VerticalAlignment="Center" Margin="0,0,6,0"
                        FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
-            <ComboBox x:Name="ServerSelector" Width="260" DisplayMemberPath="DisplayNameWithIntent"
+            <ComboBox x:Name="ServerSelector" Width="260"
+                      ToolTip="{Binding SelectedItem.DisplayNameWithIntent, RelativeSource={RelativeSource Self}}"
                       AutomationProperties.Name="Server"
                       ItemContainerStyle="{DynamicResource ServerSelectorItemStyle}"
                       SelectionChanged="ServerSelector_SelectionChanged">
                 <!-- A screen reader announces each item (and the selection) by the server's name, not the model's type name. -->
+                <!-- #8564: a long hostname trims with an ellipsis instead of running under the drop-down arrow, and the whole name is the tooltip. -->
+                <ComboBox.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding DisplayNameWithIntent}" TextTrimming="CharacterEllipsis" ToolTip="{Binding DisplayNameWithIntent}"/>
+                    </DataTemplate>
+                </ComboBox.ItemTemplate>
             </ComboBox>
         </StackPanel>
 
@@ -3062,7 +3069,7 @@
                               RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Binding="{Binding ServerName}" Width="120" ElementStyle="{StaticResource TrimmedCell}">
+                            <DataGridTextColumn Binding="{Binding ServerName}" Width="220" ElementStyle="{StaticResource TrimmedCell}">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ServerName" Click="FilterButton_Click" Margin="0,0,4,0"/>

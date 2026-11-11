@@ -258,6 +258,7 @@
             <TextBlock Text="Server:" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,6,0"/>
             <ComboBox x:Name="ServerSelector" Width="260" VerticalAlignment="Center"
                       Style="{StaticResource DarkCombo}"
+                      ToolTip="{Binding SelectedItem.PickerLabel, RelativeSource={RelativeSource Self}}"
                       AutomationProperties.Name="Server"
                       SelectionChanged="ServerSelector_SelectionChanged">
                 <!-- A screen reader announces each item (and the selection) by the server's name, not the model's type name. -->
@@ -268,7 +269,7 @@
                 </ComboBox.ItemContainerStyle>
                 <ComboBox.ItemTemplate>
                     <DataTemplate>
-                        <TextBlock Text="{Binding PickerLabel}"/>
+                        <TextBlock Text="{Binding PickerLabel}" TextTrimming="CharacterEllipsis" ToolTip="{Binding PickerLabel}"/>
                     </DataTemplate>
                 </ComboBox.ItemTemplate>
             </ComboBox>
@@ -1054,7 +1055,7 @@
                         <Grid Grid.Row="1" Margin="10,0,10,10">
                             <DataGrid x:Name="FinOpsServerInventoryDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" HorizontalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Binding="{Binding ServerName}" Width="120" ElementStyle="{StaticResource TrimmedCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ServerName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Server" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding ServerName}" Width="220" ElementStyle="{StaticResource TrimmedCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ServerName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Server" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding Edition}" Width="Auto" MinWidth="140" ElementStyle="{StaticResource TrimmedCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Edition" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Edition" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding ProductVersion}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource TrimmedCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ProductVersion" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Version" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding HostOsVersion}" Width="Auto" MinWidth="140" ElementStyle="{StaticResource TrimmedCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="HostOsVersion" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Host OS" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -1184,17 +1185,17 @@
                                     <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="230"/>
                                     <DataGridTextColumn Header="Tables" Binding="{Binding TablesAnalyzed, StringFormat=N0}" Width="Auto" MinWidth="70" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Indexes" Binding="{Binding IndexCount, StringFormat=N0}" Width="Auto" MinWidth="75" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Size GB" Binding="{Binding TotalSizeGb, StringFormat=#\,##0.00####}" Width="Auto" MinWidth="80" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Size GB" Binding="{Binding TotalSizeGb, StringFormat=#\,##0.00}" Width="Auto" MinWidth="80" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Rows" Binding="{Binding TotalRows, StringFormat=N0}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="To Disable" Binding="{Binding IndexesToDisable, StringFormat=N0}" Width="Auto" MinWidth="80" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="To Merge" Binding="{Binding IndexesToMerge, StringFormat=N0}" Width="Auto" MinWidth="80" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Compressible" Binding="{Binding CompressableIndexes, StringFormat=N0}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Unused" Binding="{Binding UnusedIndexes, StringFormat=N0}" Width="Auto" MinWidth="70" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Disable GB" Binding="{Binding UnusedSizeGb, StringFormat=#\,##0.00####}" Width="Auto" MinWidth="90" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Compress Min GB" Binding="{Binding CompressionMinSavingsGb, StringFormat=#\,##0.00####}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Compress Max GB" Binding="{Binding CompressionMaxSavingsGb, StringFormat=#\,##0.00####}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Total Min GB" Binding="{Binding TotalMinSavingsGb, StringFormat=#\,##0.00####}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Total Max GB" Binding="{Binding TotalMaxSavingsGb, StringFormat=#\,##0.00####}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Disable GB" Binding="{Binding UnusedSizeGb, StringFormat=#\,##0.00}" Width="Auto" MinWidth="90" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Compress Min GB" Binding="{Binding CompressionMinSavingsGb, StringFormat=#\,##0.00}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Compress Max GB" Binding="{Binding CompressionMaxSavingsGb, StringFormat=#\,##0.00}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Total Min GB" Binding="{Binding TotalMinSavingsGb, StringFormat=#\,##0.00}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Total Max GB" Binding="{Binding TotalMaxSavingsGb, StringFormat=#\,##0.00}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
                                     <!-- Workload-impact columns (sp_IndexCleanup #index_reporting_stats parity): pre-formatted strings,
                                          'N/A' on the overall row; numeric SortMemberPath keys keep sorting correct. Reads shows the
                                          seeks/scans/lookups breakdown (left-aligned text, like Lite). -->
@@ -1222,7 +1223,7 @@
                                     <DataGridTextColumn Binding="{Binding SchemaName}" Width="90"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SchemaName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Schema" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding TableName}" Width="170"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TableName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Table" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding IndexName}" Width="200"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IndexName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Index" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                    <DataGridTextColumn Header="Size GB" Binding="{Binding IndexSizeGb, StringFormat=#\,##0.00####}" Width="Auto" MinWidth="80" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Size GB" Binding="{Binding IndexSizeGb, StringFormat=#\,##0.00}" Width="Auto" MinWidth="80" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Rows" Binding="{Binding IndexRows, StringFormat=N0}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Reads" Binding="{Binding IndexReads, StringFormat=N0}" Width="Auto" MinWidth="90" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Writes" Binding="{Binding IndexWrites, StringFormat=N0}" Width="Auto" MinWidth="90" ElementStyle="{StaticResource NumericCell}"/>

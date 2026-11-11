@@ -434,6 +434,7 @@
                            Margin="2,8,2,0"
                            Visibility="Collapsed"/>
                 <ui:InvokableListBox x:Name="ServerList" AutomationProperties.AutomationId="ServerPicker"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                          Style="{DynamicResource {x:Type ListBox}}"
                          ItemInvoked="ServerList_ItemInvoked"
                          Background="{DynamicResource BackgroundDarkBrush}"
@@ -613,6 +614,7 @@
                                     <!-- Server name -->
                                     <TextBlock Grid.Column="1" Grid.Row="0"
                                                Text="{Binding Server.DisplayName}"
+                                               TextTrimming="CharacterEllipsis"
                                                ToolTip="{Binding Server.SameMachineTooltip}"
                                                FontSize="13" FontWeight="SemiBold"
                                                Foreground="{DynamicResource ForegroundBrush}"/>

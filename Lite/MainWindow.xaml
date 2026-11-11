@@ -134,6 +134,7 @@
                         <StackPanel Grid.Column="1" Grid.RowSpan="2" VerticalAlignment="Center"
                                     Visibility="{DynamicResource SidebarRowLabelVisibility}">
                             <TextBlock Text="{Binding Server.Connection.DisplayNameWithIntent}"
+                                       TextTrimming="CharacterEllipsis"
                                        FontSize="13"
                                        FontWeight="SemiBold"
                                        Foreground="{DynamicResource ForegroundBrush}"/>

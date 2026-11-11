@@ -453,6 +453,24 @@ public sealed class ViewerPostgresTabsTests
     }
 
     /// <summary>
+    /// #8564: one labelled duration format in a column, from milliseconds to days. The clock-style text it replaced ("02:05", "1.08:23:10")
+    /// sat beside "41 ms" in the Backend Age column and read as hours and minutes as easily as minutes and seconds.
+    /// </summary>
+    [Theory]
+    [InlineData(41L, "41 ms")]
+    [InlineData(999L, "999 ms")]
+    [InlineData(1_000L, "1s")]
+    [InlineData(59_999L, "59s")]
+    [InlineData(125_000L, "2m 5s")]
+    [InlineData(3_600_000L, "1h 0m")]
+    [InlineData(3_900_000L, "1h 5m")]
+    [InlineData(116_590_000L, "1d 8h 23m")]
+    public void Milliseconds_ReadsInOneLabelledFormat(long ms, string expected)
+    {
+        Assert.Equal(expected, PgDisplay.Milliseconds(ms));
+    }
+
+    /// <summary>
     /// A size never renders expressed in its own next unit. The unit is chosen against the quotient and the
     /// quotient is then ROUNDED, so one byte short of a megabyte would otherwise print "1024.0 KB" — a
     /// number that reads as a typo rather than as a size, on every column built over bytes.
