@@ -38,7 +38,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// server, or one the heavy-read gate refused, is tried again after <see cref="RetryDelayFor"/>, never later than the
 /// next due pass. No pass runs while the service is paused,
 /// while a materialization repair is rebuilding the rollups, while neither the web host nor the MCP host is on (nothing
-/// reads the block then), or while <c>dailySummaryWarmerEnabled</c> is off in the config file.</para>
+/// reads the block then), or while <c>dailySummaryWarmerEnabled</c> is off in the config file; it looks again every
+/// <see cref="DeferredRecheck"/> and logs one line when it first defers (#8554).</para>
 ///
 /// <para><b>Load.</b> One server at a time, each read under the read-admission gate (<see cref="ReadAdmission"/>) as the
 /// <c>7d+</c> web read it stands in for, so it takes one of <c>reads.maxHeavyReads</c> slots and queues behind a
@@ -59,9 +60,14 @@ public sealed class DailySummaryWarmer
     /// <summary>Added to the day boundary so the pass lands after the Overview's key has moved, never a clock tick before.</summary>
     internal static readonly TimeSpan PassMargin = TimeSpan.FromMinutes(1);
 
-    /// <summary>The wait after a failed or refused pass, doubled per consecutive failure up to <see cref="MaxRetryDelay"/>;
-    /// also how often an idle warmer looks again while nothing reads the cache.</summary>
+    /// <summary>The wait after a failed or refused pass, doubled per consecutive failure up to <see cref="MaxRetryDelay"/>.</summary>
     internal static readonly TimeSpan RetryDelay = TimeSpan.FromMinutes(15);
+
+    /// <summary>How often a warmer that is switched off for now (the service is paused, a materialization repair is rebuilding the
+    /// rollups, no host reads the cache, or the knob is off) looks again (#8554). It was <see cref="RetryDelay"/>, so a start whose
+    /// repair outlasted the two-minute start delay found its first pass up to 15 minutes after the repair ended, and a server opened
+    /// in that gap paid the cold read. The check is one delegate call.</summary>
+    internal static readonly TimeSpan DeferredRecheck = TimeSpan.FromMinutes(1);
 
     internal static readonly TimeSpan MaxRetryDelay = TimeSpan.FromHours(2);
 
@@ -134,6 +140,7 @@ public sealed class DailySummaryWarmer
     {
         var delay = StartDelay;
         var consecutiveFailures = 0;
+        var deferredLogged = false;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -153,10 +160,19 @@ public sealed class DailySummaryWarmer
             var now = _clock();
             if (!_enabled())
             {
-                delay = Min(RetryDelay, NextPassUtc(now) - now);
+                /* #8554: said once per stretch, so the log shows why no pass line follows the start delay. */
+                if (!deferredLogged)
+                {
+                    deferredLogged = true;
+                    _logger.LogInformation(
+                        "Daily summary warm pass deferred: the service is paused, a materialization repair is rebuilding the rollups, no host reads the cache, or the warmer is off. It is checked again every minute");
+                }
+
+                delay = Min(DeferredRecheck, NextPassUtc(now) - now);
                 continue;
             }
 
+            deferredLogged = false;
             var passDay = now.Date;
             DailySummaryWarmPass pass;
             try

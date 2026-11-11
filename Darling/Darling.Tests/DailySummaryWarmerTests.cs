@@ -119,14 +119,37 @@ public sealed class DailySummaryWarmerTests
     }
 
     [Fact]
-    public async Task RunAsync_SkipsThePassWhileNothingReadsTheCache_AndLooksAgainAfterTheRetryDelay()
+    public async Task RunAsync_SkipsThePassWhileNothingReadsTheCache_AndLooksAgainWithinAMinute()
     {
         var harness = new Harness(Start) { StopAfterDelays = 2, Enabled = false };
 
         await Warmers.RunAsync(harness.Build(TwoServers), harness.Cts.Token);
 
         Assert.Empty(harness.Warmed);
-        Assert.Equal(Warmers.RetryDelay, harness.Delays[1]);
+        Assert.True(harness.Delays[1] <= TimeSpan.FromMinutes(1), $"a warmer that is off looks again after {harness.Delays[1]}");
+    }
+
+    /// <summary>#8554: a start whose materialization repair is still running when the two-minute start delay ends. The first pass
+    /// used to wait for the next 15-minute look, so a server opened in that gap read its closed days cold.</summary>
+    [Fact]
+    public async Task RunAsync_WarmsWithinAFewMinutesOfARepairEnding_NotAQuarterOfAnHourLater()
+    {
+        var harness = new Harness(Start) { StopAfterDelays = 6, Enabled = false };
+        var repairEndsAt = Start + Warmers.StartDelay + TimeSpan.FromMinutes(3);
+        harness.BeforeDelay = () =>
+        {
+            if (harness.Now >= repairEndsAt)
+            {
+                harness.Enabled = true;
+            }
+        };
+
+        await Warmers.RunAsync(harness.Build(TwoServers), harness.Cts.Token);
+
+        Assert.NotEmpty(harness.Warmed);
+        Assert.True(harness.Warmed[0].At - repairEndsAt <= TimeSpan.FromMinutes(2),
+            $"the first pass ran {harness.Warmed[0].At - repairEndsAt} after the repair ended");
+        Assert.Equal(2, harness.Warmed.Count(w => w.At == harness.Warmed[0].At));
     }
 
     [Fact]
@@ -261,7 +284,8 @@ public sealed class DailySummaryWarmerTests
         public List<(int ServerId, string Name, DateTime At)> Warmed { get; } = new();
         public CancellationTokenSource Cts { get; } = new();
         public int StopAfterDelays { get; init; } = int.MaxValue;
-        public bool Enabled { get; init; } = true;
+        public bool Enabled { get; set; } = true;
+        public Action? BeforeDelay { get; set; }
         public ReadAdmission? Admission { get; init; }
         public Func<int, string, CancellationToken, Task>? WarmOverride { get; set; }
 
@@ -284,6 +308,7 @@ public sealed class DailySummaryWarmerTests
         private async Task DelayAsync(TimeSpan delay, CancellationToken ct)
         {
             Delays.Add(delay);
+            BeforeDelay?.Invoke();
             if (Delays.Count >= StopAfterDelays)
             {
                 Cts.Cancel();
