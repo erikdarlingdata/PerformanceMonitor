@@ -62,6 +62,7 @@ public partial class AddMultipleServersDialog : Window
         _serverManager = serverManager;
         _profileManager = profileManager;
         PreviewGrid.ItemsSource = _rows;
+        _rows.CollectionChanged += (_, _) => NoRowsMessage.Visibility = _rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         PopulateProfilePicker();
     }
 

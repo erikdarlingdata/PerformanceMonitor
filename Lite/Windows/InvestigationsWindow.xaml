@@ -39,7 +39,9 @@
                        Foreground="{DynamicResource ForegroundDimBrush}"/>
         </StackPanel>
 
-        <DataGrid Grid.Row="3" x:Name="RequestsGrid"
+        <!-- #8645: an empty list says so, as Credential Profiles does. -->
+        <Grid Grid.Row="3">
+        <DataGrid x:Name="RequestsGrid"
                   AutoGenerateColumns="False"
                   IsReadOnly="True"
                   SelectionMode="Single"
@@ -61,6 +63,9 @@
                 <DataGridTextColumn Header="Route" Binding="{Binding RouteId}" ElementStyle="{StaticResource NumericCell}" Width="60"/>
             </DataGrid.Columns>
         </DataGrid>
+        <TextBlock x:Name="NoRequestsMessage" Style="{DynamicResource EmptyHint}" Margin="0,30,0,0" VerticalAlignment="Top"
+                   Text="No investigation requests to show. Change the State or Family filter to see others."/>
+        </Grid>
 
         <TextBlock Grid.Row="4" x:Name="DetailHead" TextWrapping="Wrap" Margin="0,10,0,6" FontWeight="SemiBold"
                    Foreground="{DynamicResource ForegroundBrush}" Text="Pick a request to see its reports and journal."/>
@@ -121,6 +126,8 @@
                         <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" Width="*"/>
                     </DataGrid.Columns>
                 </DataGrid>
+                <TextBlock x:Name="NoJournalMessage" Style="{DynamicResource EmptyHint}" Margin="0,8,0,8"
+                           Text="No journal rows for this request."/>
             </StackPanel>
         </ScrollViewer>
     </Grid>

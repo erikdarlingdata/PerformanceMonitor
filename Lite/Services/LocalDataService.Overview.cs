@@ -698,7 +698,7 @@ public class ServerSummaryItem
     /// else its open tab's, else the machine's (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>),
     /// the chain Alert History and Job History use. <see cref="LastCollectionDisplay"/> converts on it in Server
     /// mode, so the card reads the same wall clock as that server's alert and job rows. Null on a hand-built item,
-    /// which then takes the active server's clock.
+    /// which then takes the machine's clock (#8645), never the active server tab's.
     /// </summary>
     public ServerClock? Clock { get; set; }
 
@@ -712,7 +712,7 @@ public class ServerSummaryItem
     /// </summary>
     internal static string FormatLastCollect(DateTime lastCollectionUtc, TimeDisplayMode mode, ServerClock? clock, DateTime nowUtc)
     {
-        var onClock = clock ?? ServerTimeHelper.ActiveServerClock;
+        var onClock = clock ?? ServerTimeHelper.ClockForServer(null, null); /* #8645: never the last-opened server tab's clock */
         var zone = ServerTimeHelper.DisplayZoneFor(mode, onClock);
         var isToday = DisplayZone.ToDisplay(lastCollectionUtc, zone).Date == DisplayZone.ToDisplay(nowUtc, zone).Date;
         var text = ServerTimeHelper.FormatInstant(lastCollectionUtc, zone, isToday ? "HH:mm:ss" : "yyyy-MM-dd HH:mm:ss");

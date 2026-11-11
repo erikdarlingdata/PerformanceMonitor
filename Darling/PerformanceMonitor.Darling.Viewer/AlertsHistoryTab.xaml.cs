@@ -76,9 +76,7 @@ public partial class AlertsHistoryTab : UserControl
         /* #6136: each column is at least as wide as its own header ("Channel" was cut to "Channe"). */
         Loaded += (_, _) => DataGridHeaderFit.Apply(this);
         /* #5562: the shared picker; the old combo defaulted to the last 24 hours. */
-        TimeRangePickerControl.ZoneProvider = () => ListSpansServers
-            ? MultiServerTime.MixedZone(ViewerTimeHelper.CurrentDisplayMode)
-            : ViewerTimeHelper.CurrentDisplayZone();
+        TimeRangePickerControl.ZoneProvider = PickerZone;
         TimeRangePickerControl.Value = TimeRangePresets.Find("1d")!;
         /* #5562 R8: the old list's "All" is one choice again, the span the alert table keeps (90 days), not a year. */
         TimeRangePickerControl.SetLongestChoice(ViewerTimeRangeWindow.AlertHistoryLongestChoice, "All");
@@ -160,11 +158,28 @@ public partial class AlertsHistoryTab : UserControl
     /// </summary>
     internal bool ListSpansServers => GetSelectedServerId() is null && _serversSeen.Count > 1;
 
+    /// <summary>The clock each server's rows carried in the reads so far (#8645), so the picker words a range in the zone the rows beside it use.</summary>
+    private readonly Dictionary<int, PerformanceMonitor.Analysis.Baselines.ServerClock> _rowClocks = new();
+
+    /// <summary>The zone the range picker reads typed times in, and the window is worked out in (#8645): the picked server's clock, else the one
+    /// server every read so far listed, else the clock a view of several servers reads on. Never the active server tab's
+    /// (<see cref="ViewerTimeHelper.ListZoneFor"/>).</summary>
+    private TimeZoneInfo PickerZone()
+    {
+        int? serverId = ListSpansServers ? null : GetSelectedServerId() ?? (_serversSeen.Count == 1 ? _serversSeen.First() : null);
+        return ViewerTimeHelper.ListZoneFor(ViewerTimeHelper.CurrentDisplayMode, serverId, _rowClocks, TimeZoneInfo.Local);
+    }
+
     /// <summary>Puts one read's rows on the grid and writes the empty message, the clock header and the count text. Returns how many
     /// rows the grid shows. Split out of the load so a test can drive it with rows.</summary>
     internal int ShowAlerts(List<ViewerAlertRow> alerts)
     {
         _serversSeen.UnionWith(alerts.Select(a => a.ServerId));
+        foreach (var row in alerts)
+        {
+            if (row.Clock is { } rowClock) _rowClocks[row.ServerId] = rowClock;
+        }
+
         if (ListSpansServers)
         {
             /* One read of a list of several servers may hold one server's rows: they still draw on the list's clock. */
@@ -312,7 +327,7 @@ public partial class AlertsHistoryTab : UserControl
     /// <summary>The picker's window now (#5562): start, end and whether the end slides with now. Both the grid read and
     /// Dismiss All use it, so Dismiss All touches exactly the rows the grid shows.</summary>
     private (DateTime StartUtc, DateTime EndUtc, bool IsLive) GetSelectedWindow()
-        => ViewerTimeRangeWindow.Window(TimeRangePickerControl.Value, DateTime.UtcNow, ViewerTimeHelper.CurrentDisplayZone());
+        => ViewerTimeRangeWindow.Window(TimeRangePickerControl.Value, DateTime.UtcNow, PickerZone());
 
     /// <summary>The window's span as whole hours back (at least one), for the dismissal log line.</summary>
     private int GetSelectedHoursBack()

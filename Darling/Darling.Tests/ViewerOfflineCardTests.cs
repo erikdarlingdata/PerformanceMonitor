@@ -36,8 +36,9 @@ public sealed class ViewerOfflineCardTests
     private static string Hex(Brush? brush) =>
         brush is SolidColorBrush { Color: var c } ? $"#{c.R:X2}{c.G:X2}{c.B:X2}" : "(not a solid colour)";
 
-    private static ServerSummaryItem OfflineCard() => new()
+    private static ServerSummaryItem OfflineCard(ServerClock? clock = null) => new()
     {
+        Clock = clock,
         ServerId = 1,
         ServerName = "dark",
         DisplayName = "dark",
@@ -120,20 +121,20 @@ public sealed class ViewerOfflineCardTests
     [Fact]
     public void TheDatedLastCollectValue_FitsInsideTheCard()
     {
-        /* Server Time on a named clock: the stamp then carries its date and the clock's offset, the longest text the row shows. */
+        /* Server Time on the card's own named clock (the active tab's clock differs and is ignored): the stamp then carries its date and the clock's offset, the longest text the row shows. */
         var savedMode = ViewerTimeHelper.CurrentDisplayMode;
         var savedClock = ViewerTimeHelper.ActiveServerClock;
-        ViewerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(-300);
+        ViewerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(120);
         ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
         string text;
         System.Collections.Generic.List<string> clipped;
         double rightEdge, cardWidth, slot, width;
         try
         {
-            (text, clipped, rightEdge, cardWidth, slot, width) = Shown(OfflineCard(), card =>
+            (text, clipped, rightEdge, cardWidth, slot, width) = Shown(OfflineCard(ServerClock.FixedOffset(-300)), card =>
             {
                 /* The shell the template is read from seeds the mode from the app settings; the card is drawn in the one named here. */
-                ViewerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(-300);
+                ViewerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(120);
                 ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
                 var value = Row(card, "Last Collect:").Value;
                 value.GetBindingExpression(TextBlock.TextProperty)?.UpdateTarget();
