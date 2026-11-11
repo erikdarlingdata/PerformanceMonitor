@@ -138,6 +138,74 @@ public sealed class DuckDbMemoryDiagnosticsTests : IDisposable
         Assert.Empty(log.Entries);
     }
 
+    /// <summary>Holds the store's write lock on its own thread (the lock is thread-affine) until the returned action is called.</summary>
+    private static Action HoldWriteLockOnAnotherThread(DuckDbInitializer initializer)
+    {
+        var held = new ManualResetEventSlim(false);
+        var release = new ManualResetEventSlim(false);
+        var thread = new Thread(() =>
+        {
+            using var writeLock = initializer.AcquireWriteLock(LockHangGuard);
+            held.Set();
+            release.Wait(LockHangGuard);
+        })
+        { IsBackground = true };
+        thread.Start();
+        Assert.True(held.Wait(LockHangGuard), "the writer thread never took the store lock");
+        return () =>
+        {
+            release.Set();
+            Assert.True(thread.Join(LockHangGuard), "the writer thread never released the store lock");
+        };
+    }
+
+    [Fact]
+    public async Task LogServerTabMemoryAsync_WhileAWriterHoldsTheStoreForTheWholeBound_StillWritesTheLineWithABusyNote()
+    {
+        var (initializer, log) = await OpenStoreAsync();
+        var before = log.Entries.Count;
+        var releaseWriter = HoldWriteLockOnAnotherThread(initializer);
+        try
+        {
+            var line = await initializer.LogServerTabMemoryAsync(
+                DuckDbInitializer.ServerTabEventName("Alpha", opened: false),
+                bound: TimeSpan.FromMilliseconds(300), delay: TimeSpan.FromMilliseconds(20));
+
+            var entry = Assert.Single(log.Entries.Skip(before));
+            Assert.Equal(LogLevel.Information, entry.Level);
+            Assert.StartsWith("Server tab closed (Alpha): ", entry.Message, StringComparison.Ordinal);
+            Assert.Contains("local database was busy", entry.Message, StringComparison.Ordinal);
+            Assert.Contains("Process private bytes ", entry.Message, StringComparison.Ordinal);
+            Assert.Contains("gc heap ", entry.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("DuckDB holds", entry.Message, StringComparison.Ordinal);
+            Assert.Contains("local database was busy", line, StringComparison.Ordinal);
+        }
+        finally
+        {
+            releaseWriter();
+        }
+    }
+
+    [Fact]
+    public async Task LogServerTabMemoryAsync_WhenTheWriterLetsGoWithinTheBound_WritesTheFullLine()
+    {
+        var (initializer, log) = await OpenStoreAsync();
+        var before = log.Entries.Count;
+        var releaseWriter = HoldWriteLockOnAnotherThread(initializer);
+
+        var pending = initializer.LogServerTabMemoryAsync(
+            DuckDbInitializer.ServerTabEventName("Alpha", opened: false),
+            bound: LockHangGuard, delay: TimeSpan.FromMilliseconds(20));
+        await Task.Delay(150);
+        Assert.Empty(log.Entries.Skip(before));
+        releaseWriter();
+
+        await pending;
+        var entry = Assert.Single(log.Entries.Skip(before));
+        Assert.StartsWith("Server tab closed (Alpha): DuckDB holds ", entry.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("busy", entry.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task RunMemoryTrimCycle_UnderTheThreshold_WritesNothingAndDoesNotTrim()
     {
