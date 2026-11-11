@@ -2908,6 +2908,40 @@ BEGIN
 END $$;";
 
     /// <summary>
+    /// V263 (#8549): the oldest-run rollup, <c>collect.job_history_oldest_daily</c>, created where the store can hold it at migration time
+    /// so the Job History time range picker's "Data starts" note can read each server's first run from one small row per server per day
+    /// instead of sorting every compressed <c>job_history</c> chunk. Per server, per UTC day of collection: the smallest <c>run_datetime</c>.
+    /// V259's shape. On a TimescaleDB store whose <c>job_history</c> is already a hypertable (every upgrading store) it is the continuous
+    /// aggregate, <c>WITH NO DATA</c>, which is catalog-only and transaction-safe; the ensure sweep that follows on the same start finds it
+    /// and gives it the daily refresh policy, and the start-up backfill fills the closed days from raw (not here: it reads every row of
+    /// the table). Elsewhere (no TimescaleDB, or a fresh store whose table is not yet a hypertable here) it is the plain view over
+    /// <c>collect.job_history</c>, which the sweep drops for the aggregate once the table is a hypertable. Idempotent. An older build
+    /// ignores the relation and reads the oldest run from raw <c>job_history</c> as before. <b>No Lite twin:</b> Lite reads its oldest
+    /// run from a columnar DuckDB table.
+    /// </summary>
+    /* Declared before the Scripts array on purpose: a static readonly is null until its initializer runs, and the array reads it. */
+    private static readonly string V263Sql = @"
+DO $$
+DECLARE
+    v_hypertable boolean := false;
+BEGIN
+    /* timescaledb_information only exists once the extension has been created; to_regclass probes it without raising, and
+       the hypertable read goes through EXECUTE so the reference is parsed only when it runs. */
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NOT NULL THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = ''collect'' AND hypertable_name = ''job_history'')'
+        INTO v_hypertable;
+    END IF;
+
+    /* The relation exists from this rung on, whatever shape the store is in, so the viewer's probe reads the rung. A store that
+       already holds the relation (a rerun) keeps it. */
+    IF v_hypertable THEN
+        EXECUTE '" + TimescaleSupport.CreateJobHistoryOldestDailySql.Replace("'", "''") + @"';
+    ELSIF to_regclass('collect.job_history_oldest_daily') IS NULL THEN
+        EXECUTE '" + TimescaleSupport.CreateJobHistoryOldestDailyFallbackViewSql.Replace("'", "''") + @"';
+    END IF;
+END $$;";
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -3425,6 +3459,7 @@ $rung$;";
         new Migration(258, "oversized-plan-backlog-dropped-index", V258Sql),
         new Migration(259, "wait-stats-daily-rollup", V259Sql),
         new Migration(260, "oversized-plan-backlog-median-indexes", V260Sql),
+        new Migration(263, "job-history-oldest-daily-rollup", V263Sql),
     };
 
     /* V256 (#7643): schema tracking. Versioned table and view definitions, kept by the schema_objects collector (Darling only).

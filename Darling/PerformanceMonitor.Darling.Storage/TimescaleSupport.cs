@@ -594,6 +594,13 @@ public static partial class TimescaleSupport
     /// TimescaleDB store, a plain view over the same select elsewhere. OFF the hourly phase grid: see <see cref="OffGridAggregates"/>.</summary>
     public const string WaitStatsDailyView = "wait_stats_daily";
 
+    /// <summary>The oldest run per server per UTC day of collection (#8549): <c>min(run_datetime)</c> of <c>job_history</c> by
+    /// <c>time_bucket('1 day', collection_time)</c>. Read by the Job History time range picker's "Data starts" note for every day it
+    /// holds, so the note no longer sorts every compressed chunk to find each server's first run. A continuous aggregate (materialized
+    /// only) where <c>job_history</c> is a hypertable, a plain view elsewhere. OFF the hourly phase grid: see <see cref="OffGridAggregates"/>.
+    /// Its buckets are dropped with the raw chunks, by the same retention pass (<c>DarlingRetention</c>).</summary>
+    public const string JobHistoryOldestDailyView = "job_history_oldest_daily";
+
     /// <summary>
     /// The SUPERSEDED perfmon and wait-stats baseline supplies (#1757 shape, replaced by #3653's interval-honest
     /// pair). Not registered: they are no longer in <see cref="BaselineAggregates"/>, so the ensure sweep never
@@ -822,6 +829,48 @@ GROUP BY server_id, date_trunc('day', collection_time), wait_type";
     public static string AddWaitStatsDailyRefreshPolicySql()
         => AddContinuousAggregatePolicySql(
             WaitStatsDailyView,
+            DailyRefreshStartOffset,
+            HourlyRefreshScheduleInterval,
+            HourlyRefreshScheduleInterval,
+            phaseMinutes: null,
+            bucketsPerBatch: DailyRefreshBucketsPerBatch);
+
+    /// <summary>The oldest-run rollup (#8549), <see cref="JobHistoryOldestDailyView"/>. Key (server_id, bucket); the one value is the
+    /// smallest <c>run_datetime</c> (the server's wall clock as stored, NULLs ignored as the note's ordered read puts them last) among
+    /// that server's rows collected that UTC day. A first collection copies the history msdb holds, so the run a day's rows hold can be
+    /// months older than the day: the bucket is the collection's day and the value reaches back. <c>materialized_only = true</c>: the note
+    /// takes the rollup for the closed days it holds and raw for every other day (the open day, and any day the rollup has not reached),
+    /// so a real-time branch would only add a second read of the open day. Created <c>WITH NO DATA</c>: the refresh policy and the
+    /// backfill come from the ensure sweep.</summary>
+    public const string CreateJobHistoryOldestDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.job_history_oldest_daily
+WITH (timescaledb.continuous, timescaledb.materialized_only = true) AS
+SELECT
+    server_id,
+    time_bucket('1 day', collection_time) AS bucket,
+    min(run_datetime) AS oldest_run_datetime
+FROM collect.job_history
+GROUP BY server_id, bucket
+WITH NO DATA";
+
+    /// <summary>The plain view <see cref="JobHistoryOldestDailyView"/> is on a store whose <c>job_history</c> is not a hypertable (no
+    /// TimescaleDB, or a fresh store before its conversion). Nothing reads it for the note there: the note's reader finds a plain view
+    /// by its catalog entry and reads the ordered one-row probe on <c>idx_job_history_server_run</c>, which is exact and fast on an
+    /// uncompressed table. The ensure sweep drops it for the aggregate once the table is a hypertable.</summary>
+    public const string CreateJobHistoryOldestDailyFallbackViewSql = @"CREATE OR REPLACE VIEW collect.job_history_oldest_daily AS
+SELECT
+    server_id,
+    date_trunc('day', collection_time) AS bucket,
+    min(run_datetime) AS oldest_run_datetime
+FROM collect.job_history
+GROUP BY server_id, date_trunc('day', collection_time)";
+
+    /// <summary><see cref="JobHistoryOldestDailyView"/>'s refresh policy (#8549): <see cref="WaitStatsDailyView"/>'s windows exactly (four
+    /// days back, the hourly interval as both schedule and end offset), for the same reason: a day is materialized once it is whole and
+    /// closed, the open day is never in the rollup, and a row that arrives for an already materialized day inside the four days
+    /// invalidates its bucket for the next run.</summary>
+    public static string AddJobHistoryOldestDailyRefreshPolicySql()
+        => AddContinuousAggregatePolicySql(
+            JobHistoryOldestDailyView,
             DailyRefreshStartOffset,
             HourlyRefreshScheduleInterval,
             HourlyRefreshScheduleInterval,
@@ -1083,18 +1132,28 @@ WITH NO DATA";
     /// open on every start. <see cref="BaselineBackfillProbeSql(string, string, (string, string)?)"/>'s hour floor is the wrong grain here.
     /// </summary>
     public static string WaitStatsDailyBackfillProbeSql((string Schema, string Name)? materialization)
+        => DailyBackfillProbeSql(WaitStatsDailyView, "wait_stats", materialization);
+
+    /// <summary>The probe behind <see cref="WaitStatsDailyBackfillProbeSql"/> and <see cref="JobHistoryOldestDailyBackfillProbeSql"/>:
+    /// the same three columns for any daily aggregate over <paramref name="source"/>'s <c>collection_time</c>.</summary>
+    private static string DailyBackfillProbeSql(string view, string source, (string Schema, string Name)? materialization)
     {
         var coverage = materialization is { } m
             ? $"{QuoteIdentifier(m.Schema)}.{QuoteIdentifier(m.Name)}"
-            : $"collect.{WaitStatsDailyView}";
+            : $"collect.{view}";
 
         return $@"
 SELECT
-    (SELECT min(collection_time) FROM collect.wait_stats) AS source_oldest,
+    (SELECT min(collection_time) FROM collect.{source}) AS source_oldest,
     (SELECT min(bucket) FROM {coverage}) AS coverage_oldest,
     (SELECT CASE WHEN o = date_trunc('day', o) THEN o ELSE date_trunc('day', o) + INTERVAL '1 day' END
-     FROM (SELECT GREATEST((SELECT min(collection_time) FROM collect.wait_stats), $1) AS o) AS x) AS need_from";
+     FROM (SELECT GREATEST((SELECT min(collection_time) FROM collect.{source}), $1) AS o) AS x) AS need_from";
     }
+
+    /// <summary>The coverage probe for <see cref="JobHistoryOldestDailyView"/>'s backfill (#8549). The same three columns as
+    /// <see cref="WaitStatsDailyBackfillProbeSql"/>, over <c>job_history</c>.</summary>
+    public static string JobHistoryOldestDailyBackfillProbeSql((string Schema, string Name)? materialization)
+        => DailyBackfillProbeSql(JobHistoryOldestDailyView, "job_history", materialization);
 
     /// <summary>
     /// Backfills <see cref="WaitStatsDailyView"/> from raw over the days it does not cover yet (#8549), once, on the start that finds the
@@ -1105,8 +1164,35 @@ SELECT
     /// a failure is logged and the Daily Summary reads those days from raw, exactly but slower.
     /// </summary>
     /// <returns>True when it ran a refresh.</returns>
-    public static async Task<bool> BackfillWaitStatsDailyAsync(
+    public static Task<bool> BackfillWaitStatsDailyAsync(
         NpgsqlConnection connection, ILogger? logger, DateTime utcNow, CancellationToken cancellationToken = default)
+        => BackfillDailyAsync(
+            connection, logger, utcNow, WaitStatsDailyView, WaitStatsDailyBackfillProbeSql, BaselineRetentionSpan, sliceDays: null,
+            "the Daily Summary reads those closed days from it", "the Daily Summary reads the days it does not hold from raw wait_stats, exactly but slower",
+            cancellationToken);
+
+    /// <summary>
+    /// Backfills <see cref="JobHistoryOldestDailyView"/> from raw over the days it does not cover yet (#8549), as
+    /// <see cref="BackfillWaitStatsDailyAsync"/> does, with two differences. The horizon is all of raw (the rollup's buckets are dropped with the
+    /// raw chunks, so there is no shorter span to cap at), and the refresh runs in <see cref="JobHistoryBackfillSliceDays"/>-day slices from the
+    /// newest end back, so one refresh never decompresses the whole table in one transaction and a failure part way leaves contiguous
+    /// coverage from today back to the last finished slice, which is what the note's reader needs: it reads raw for every day the rollup does not hold.
+    /// </summary>
+    /// <returns>True when it ran a refresh.</returns>
+    public static Task<bool> BackfillJobHistoryOldestDailyAsync(
+        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, CancellationToken cancellationToken = default)
+        => BackfillDailyAsync(
+            connection, logger, utcNow, JobHistoryOldestDailyView, JobHistoryOldestDailyBackfillProbeSql, TimeSpan.FromDays(36500), JobHistoryBackfillSliceDays,
+            "the Job History time range picker reads those closed days from it", "the picker's Data starts note reads the days it does not hold from raw job_history, exactly but slower",
+            cancellationToken);
+
+    /// <summary>The slice <see cref="BackfillJobHistoryOldestDailyAsync"/> refreshes per call: seven days, so a month of a large store is five short transactions.</summary>
+    public const int JobHistoryBackfillSliceDays = 7;
+
+    private static async Task<bool> BackfillDailyAsync(
+        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, string view,
+        Func<(string Schema, string Name)?, string> probeSql, TimeSpan horizon, int? sliceDays,
+        string servesText, string failureText, CancellationToken cancellationToken)
     {
         if (connection is null)
         {
@@ -1115,7 +1201,7 @@ SELECT
 
         try
         {
-            var materialization = await ResolveMaterializationAsync(connection, WaitStatsDailyView, cancellationToken);
+            var materialization = await ResolveMaterializationAsync(connection, view, cancellationToken);
             if (materialization is null)
             {
                 return false;
@@ -1123,9 +1209,9 @@ SELECT
 
             DateTime? coverageOldest = null;
             DateTime? needFrom = null;
-            using (var probe = new NpgsqlCommand(WaitStatsDailyBackfillProbeSql(materialization), connection) { CommandTimeout = SetupTimeoutSeconds })
+            using (var probe = new NpgsqlCommand(probeSql(materialization), connection) { CommandTimeout = SetupTimeoutSeconds })
             {
-                probe.Parameters.AddWithValue(DateTime.SpecifyKind(utcNow - BaselineRetentionSpan, DateTimeKind.Unspecified));
+                probe.Parameters.AddWithValue(DateTime.SpecifyKind(utcNow - horizon, DateTimeKind.Unspecified));
                 await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
                 if (await reader.ReadAsync(cancellationToken))
                 {
@@ -1141,27 +1227,33 @@ SELECT
             }
 
             var clock = Stopwatch.StartNew();
-            using (var refresh = new NpgsqlCommand(
-                $"CALL refresh_continuous_aggregate('collect.{WaitStatsDailyView}'::regclass, $1::timestamp, $2::timestamp)", connection)
+            var sliceEnd = windowEnd;
+            while (sliceEnd > needFrom.Value)
             {
-                CommandTimeout = BackfillTimeoutSeconds,
-            })
-            {
-                refresh.Parameters.AddWithValue(needFrom.Value);
-                refresh.Parameters.AddWithValue(windowEnd);
+                var sliceStart = sliceDays is int days && sliceEnd.AddDays(-days) > needFrom.Value
+                    ? sliceEnd.AddDays(-days)
+                    : needFrom.Value;
+                using var refresh = new NpgsqlCommand(
+                    $"CALL refresh_continuous_aggregate('collect.{view}'::regclass, $1::timestamp, $2::timestamp)", connection)
+                {
+                    CommandTimeout = BackfillTimeoutSeconds,
+                };
+                refresh.Parameters.AddWithValue(sliceStart);
+                refresh.Parameters.AddWithValue(sliceEnd);
                 await refresh.ExecuteNonQueryAsync(cancellationToken);
+                sliceEnd = sliceStart;
             }
 
             logger?.LogInformation(
-                "TimescaleDB: backfilled {View} from {NeedFrom} to {WindowEnd} in {Seconds:F1} s (#8549); the Daily Summary reads those closed days from it.",
-                WaitStatsDailyView, needFrom, windowEnd, clock.Elapsed.TotalSeconds);
+                "TimescaleDB: backfilled {View} from {NeedFrom} to {WindowEnd} in {Seconds:F1} s (#8549); {Serves}.",
+                view, needFrom, windowEnd, clock.Elapsed.TotalSeconds, servesText);
             return true;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(
-                "Could not backfill {View} (#8549) - the Daily Summary reads the days it does not hold from raw wait_stats, exactly but slower; the next start retries: {Message}",
-                WaitStatsDailyView, ex.Message);
+                "Could not backfill {View} (#8549) - {Failure}; the next start retries: {Message}",
+                view, failureText, ex.Message);
             return false;
         }
     }
@@ -2406,6 +2498,7 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
         PerfmonIntervalBaselineView => "perfmon_stats",
         WaitStatsCadenceBaselineView => "wait_stats",
         WaitStatsDailyView => "wait_stats",
+        JobHistoryOldestDailyView => "job_history",
         WaitStatsIntervalBaselineView => "wait_stats",
         /* The superseded pair reads the same raw tables; named so the retirement fixture and any coverage probe
            over a legacy relation resolve without a second map. */
@@ -6950,7 +7043,7 @@ WITH NO DATA";
            would quietly do nothing against them, leaving the store permanently on raw scans, so the stale
            fallback is dropped first. Guarded to never touch a real continuous aggregate, and isolated per
            view — this is a transition path, and failing it must not stop the sweep. */
-        foreach (var view in BaselineAggregates.Select(a => a.View).Append(WaitStatsDailyView))
+        foreach (var view in BaselineAggregates.Select(a => a.View).Append(WaitStatsDailyView).Append(JobHistoryOldestDailyView))
         {
             try
             {
@@ -13991,6 +14084,8 @@ WITH NO DATA";
         /* #8549: the daily wait totals, off the grid for the reason the entry above is: a grid member costs the heaviest refresh
            window lead time, and its refresh only works once a day. The daily policy has no grid minute. */
         (CreateWaitStatsDailySql, WaitStatsDailyView, AddWaitStatsDailyRefreshPolicySql),
+        /* #8549: the oldest-run rollup under the Job History note, off the grid for the same reason as the daily wait totals. */
+        (CreateJobHistoryOldestDailySql, JobHistoryOldestDailyView, AddJobHistoryOldestDailyRefreshPolicySql),
     };
 
     /// <summary>

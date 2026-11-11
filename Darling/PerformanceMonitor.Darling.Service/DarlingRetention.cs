@@ -572,6 +572,13 @@ public static class DarlingRetention
                         {
                             tablesPurged++;
                             totalChunksDropped += dropped.Value;
+
+                            /* #8549: the oldest-run rollup is dropped with the raw chunks it summarizes, at the same horizon. */
+                            if (string.Equals(definition.TargetTable, "job_history", StringComparison.Ordinal))
+                            {
+                                await DropJobHistoryOldestDailyAsync(postgres, retentionDays, logger, cancellationToken);
+                            }
+
                             continue;
                         }
 
@@ -2171,6 +2178,47 @@ WHERE NOT EXISTS
     /// </summary>
     internal static string DropChunksSqlFor(string table, int retentionDays)
         => $"SELECT drop_chunks('{table}', older_than => make_interval(days => {retentionDays}))";
+
+    /// <summary>
+    /// <c>drop_chunks</c> for <c>collect.job_history_oldest_daily</c> (#8549), at <c>job_history</c>'s own horizon, so the rollup keeps no
+    /// bucket the raw table has aged out of for long (its reader does not trust the bucket on raw's oldest day, but the rollup should not grow
+    /// past the table it summarizes). A no-op where the relation is absent or the plain view a store without a hypertable carries: the DO block
+    /// asks the catalog first, as <see cref="TimescaleSupport.DropBaselineFallbackViewSql"/> does, so a plain store logs no failed drop on every
+    /// sweep. A failure is logged and never fails the purge: a bucket kept longer is never read past raw's edge day.
+    /// </summary>
+    private static async Task DropJobHistoryOldestDailyAsync(
+        NpgsqlDataSource postgres, int retentionDays, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            using var command = new NpgsqlCommand(DropJobHistoryOldestDailySql(retentionDays), connection) { CommandTimeout = DeleteTimeoutSeconds };
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning("Could not drop the aged buckets of {View} (#8549): {Message}", TimescaleSupport.JobHistoryOldestDailyView, ex.Message);
+        }
+    }
+
+    /// <summary>The statement <see cref="DropJobHistoryOldestDailyAsync"/> runs. <paramref name="retentionDays"/> is the clamped integer the raw
+    /// purge's own <see cref="DropChunksSqlFor(string, int)"/> interpolates.</summary>
+    internal static string DropJobHistoryOldestDailySql(int retentionDays) => $@"DO $do$
+DECLARE
+    is_continuous_aggregate boolean := false;
+BEGIN
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NOT NULL
+    THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM timescaledb_information.continuous_aggregates WHERE view_schema = ''collect'' AND view_name = ''{TimescaleSupport.JobHistoryOldestDailyView}'')'
+        INTO is_continuous_aggregate;
+    END IF;
+
+    IF is_continuous_aggregate
+    THEN
+        PERFORM drop_chunks('collect.{TimescaleSupport.JobHistoryOldestDailyView}', older_than => make_interval(days => {retentionDays}));
+    END IF;
+END
+$do$";
 
     /// <summary>
     /// One table's drop_chunks; returns the number of chunks dropped, or null when it failed
