@@ -1234,13 +1234,14 @@ namespace PerformanceMonitor.Common
             : null;
 
         /// <summary>#7616: the reason text for a PostgreSQL blocking band, <c>Blocking 5 captures (25.0/hr)</c>. The rate is left off
-        /// when there are too few captures to rate.</summary>
+        /// when there are too few captures to rate, and is written by <see cref="DailyHealthBandCalculator.RatePerHourText"/>,
+        /// so a positive rate never reads as "0.0".</summary>
         public static string PostgresBlockingReason(long capturesWithBlocking, long capturesTaken)
         {
             var rate = PostgresBlockingRatePerHour(capturesWithBlocking, capturesTaken);
             return "Blocking " + capturesWithBlocking.ToString(CultureInfo.InvariantCulture)
                 + (capturesWithBlocking == 1 ? " capture" : " captures")
-                + (rate.HasValue ? " (" + rate.Value.ToString("0.0", CultureInfo.InvariantCulture) + "/hr)" : "");
+                + (rate.HasValue ? " (" + DailyHealthBandCalculator.RatePerHourText(rate.Value) + "/hr)" : "");
         }
 
         /// <summary>#7444: what each of the band's three arms read, so the band and the reason text that names
@@ -1328,7 +1329,7 @@ namespace PerformanceMonitor.Common
 
             if (arms.RatePerHour.HasValue && arms.Rate >= best && (qualifier is null || arms.Rate > best))
             {
-                qualifier = arms.RatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture) + " waits/hr";
+                qualifier = DailyHealthBandCalculator.RatePerHourText(arms.RatePerHour.Value) + " waits/hr";
             }
 
             return qualifier is null ? head : head + " (" + qualifier + ")";

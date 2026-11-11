@@ -1219,7 +1219,10 @@
                                                         <TextBlock Text="{Binding DatabaseStateDetail}" ToolTip="{Binding DatabaseStateDetail}" Background="Transparent" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
                                                     </DockPanel>
                                                     <TextBlock Grid.Row="10" Grid.Column="1" Text="Last Collect:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
-                                                    <TextBlock Grid.Row="10" Grid.Column="2" Text="{Binding LastCollectionDisplay}" FontSize="11" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
+                                                    <!-- The value spans the value and detail columns and wraps: a dated stamp with its Server Time offset,
+                                                         "2026-11-07 14:48:55 (UTC-05:00)", is wider than the room beside the label, and a span keeps it
+                                                         from widening the value column every other row shares. -->
+                                                    <TextBlock Grid.Row="10" Grid.Column="2" Grid.ColumnSpan="2" Text="{Binding LastCollectionDisplay}" FontSize="11" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="0,2,8,2" TextWrapping="Wrap"/>
                                                 </Grid>
                                             </StackPanel>
                                             <!-- An offline card carries no overlay (#8304): the status line under the name already says Offline, the

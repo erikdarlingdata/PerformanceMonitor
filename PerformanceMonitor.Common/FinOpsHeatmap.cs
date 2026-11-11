@@ -22,7 +22,8 @@ namespace PerformanceMonitor.Common
     /// <summary>
     /// A long-form series pivoted into the dense matrix the heatmap renderer consumes. Row index 0 is the
     /// BOTTOM row (matching the query-heatmap renderer's <c>FlipVertically = true</c>), so callers pass row
-    /// keys bottom-to-top. Columns are the distinct sample days, ascending left-to-right.
+    /// keys bottom-to-top. Columns are days, ascending left-to-right: the distinct sample days as <see cref="FinOpsHeatmapBuilder.BuildMatrix"/>
+    /// pivots them, or every calendar day between the first and the last after <see cref="FinOpsHeatmapBuilder.WithEveryCalendarDay"/>.
     /// </summary>
     public sealed class FinOpsHeatmapMatrix
     {
@@ -106,6 +107,53 @@ namespace PerformanceMonitor.Common
                 RowLabels = rowKeysBottomToTop.ToArray(),
                 Days = days
             };
+        }
+
+        /// <summary>
+        /// <paramref name="matrix"/> with a column for every calendar day from its first day to its last. A day the matrix has no
+        /// column for (no object had a sample that day: a collection gap) gets a blank one, so a day axis drawn from the result
+        /// reads as a calendar and the gap shows as empty columns. A matrix with no missing day is returned as it is.
+        /// </summary>
+        public static FinOpsHeatmapMatrix WithEveryCalendarDay(FinOpsHeatmapMatrix matrix)
+        {
+            if (matrix == null) throw new ArgumentNullException(nameof(matrix));
+            if (matrix.IsEmpty) return matrix;
+
+            var first = matrix.Days[0].Date;
+            int span = (matrix.Days[^1].Date - first).Days + 1;
+            if (span <= matrix.Days.Length) return matrix;
+
+            int rows = matrix.Intensities.GetLength(0);
+            var cells = new double[rows, span];
+            for (int c = 0; c < matrix.Days.Length; c++)
+            {
+                int at = (matrix.Days[c].Date - first).Days;
+                if (at < 0 || at >= span) continue;
+                for (int r = 0; r < rows; r++)
+                    cells[r, at] += matrix.Intensities[r, c];
+            }
+
+            return new FinOpsHeatmapMatrix
+            {
+                Intensities = cells,
+                RowLabels = matrix.RowLabels,
+                Days = Enumerable.Range(0, span).Select(i => first.AddDays(i)).ToArray()
+            };
+        }
+
+        /// <summary>True when column <paramref name="column"/> of <paramref name="matrix"/> holds no value in any row: a day no object
+        /// had a sample on, which is a collection gap and not one object's missing day.</summary>
+        public static bool IsGapDay(FinOpsHeatmapMatrix matrix, int column)
+        {
+            if (matrix == null) throw new ArgumentNullException(nameof(matrix));
+            if (column < 0 || column >= matrix.Intensities.GetLength(1)) return false;
+
+            for (int r = 0; r < matrix.Intensities.GetLength(0); r++)
+            {
+                if (matrix.Intensities[r, column] > 0) return false;
+            }
+
+            return true;
         }
 
         /// <summary>

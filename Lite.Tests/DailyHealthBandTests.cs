@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using PerformanceMonitor.Common;
 using Xunit;
 
@@ -507,7 +508,7 @@ public class DailyHealthBandTests
         Assert.Contains("120 deadlocks (5.0/hr)", DailyHealthBandCalculator.BuildReasons(day));
 
         // A single deadlock still reads singular, rate beside it.
-        Assert.Contains("1 deadlock (0.0/hr)", DailyHealthBandCalculator.Describe(Signals(deadlocks: 1, window: Day)));
+        Assert.Contains("1 deadlock (<0.1/hr)", DailyHealthBandCalculator.Describe(Signals(deadlocks: 1, window: Day)));
     }
 
     [Fact]
@@ -518,6 +519,60 @@ public class DailyHealthBandTests
         var described = DailyHealthBandCalculator.Describe(Signals(deadlocks: 2));
         Assert.Contains("2 deadlocks", described);
         Assert.DoesNotContain("/hr", described);
+    }
+
+    /// <summary>
+    /// #8532: a count that happened never reads as a zero rate. One deadlock in a day is 0.04/hr, which one
+    /// decimal place writes as "0.0": a count of one beside a rate of none. A positive rate below the first
+    /// figure one decimal place can write says "&lt;0.1" instead; from there up the rate is the rounded number.
+    /// </summary>
+    [Fact]
+    public void DeadlockLine_SaysLessThanATenth_WhenAPositiveRateRoundsToZero()
+    {
+        var day = Signals(deadlocks: 1, window: Day); // 0.04/hr
+        Assert.Contains("1 deadlock (<0.1/hr)", DailyHealthBandCalculator.Describe(day));
+        Assert.Contains("1 deadlock (<0.1/hr)", DailyHealthBandCalculator.BuildReasons(day));
+
+        // 0.08/hr rounds to the first writable figure, so it is written as that figure.
+        Assert.Contains("2 deadlocks (0.1/hr)", DailyHealthBandCalculator.BuildReasons(Signals(deadlocks: 2, window: Day)));
+    }
+
+    /// <summary>#8532: the blocking line's rate follows the deadlock line's rule, for the wait count's rate and
+    /// for the report rows' rate alike, and with a peak beside it.</summary>
+    [Fact]
+    public void BlockingLine_SaysLessThanATenth_WhenAPositiveRateRoundsToZero()
+    {
+        var waits = Signals(blocking: 1, window: Day); // 0.04/hr
+        Assert.Contains("1 blocking event (<0.1 waits/hr)", DailyHealthBandCalculator.Describe(waits));
+        Assert.Contains("1 blocking event (<0.1 waits/hr)", DailyHealthBandCalculator.BuildReasons(waits));
+        Assert.Contains(
+            "1 blocking event (<0.1 waits/hr, peak block 15.0 s)",
+            DailyHealthBandCalculator.BuildReasons(waits, peakBlockMs: 15_000));
+
+        var reports = waits with { BlockingReports = 1 };
+        Assert.Contains("1 blocking event (<0.1 reports/hr)", DailyHealthBandCalculator.BuildReasons(reports));
+
+        // 0.125/hr is written as the figure.
+        Assert.Contains("3 blocking events (0.1 waits/hr)", DailyHealthBandCalculator.BuildReasons(Signals(blocking: 3, window: Day)));
+    }
+
+    /// <summary>#8532: the rate is written in the convention of the count beside it on every desktop, so a
+    /// German desktop reads "1,234 deadlocks (51.4/hr)" and "&lt;0.1", never "51,4" or "&lt;0,1".</summary>
+    [Fact]
+    public void RateText_OnAGermanDesktop_IsWrittenInTheCountsConvention()
+    {
+        var saved = CultureInfo.CurrentCulture;
+        CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("de-DE");
+        try
+        {
+            Assert.Contains("1,234 deadlocks (51.4/hr)", DailyHealthBandCalculator.BuildReasons(Signals(deadlocks: 1234, window: Day)));
+            Assert.Contains("1 deadlock (<0.1/hr)", DailyHealthBandCalculator.BuildReasons(Signals(deadlocks: 1, window: Day)));
+            Assert.Contains("1 blocking event (<0.1 waits/hr)", DailyHealthBandCalculator.BuildReasons(Signals(blocking: 1, window: Day)));
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = saved;
+        }
     }
 
     [Fact]

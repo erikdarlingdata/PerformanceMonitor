@@ -131,6 +131,16 @@ public sealed class PostgresBlockingBandTests
         Assert.Equal("Blocking 2 captures", ServerHealthClassifier.PostgresBlockingReason(2, 2));
     }
 
+    /// <summary>#8532: a capture that saw blocking never reads as a zero rate. One capture of 2,000 is 0.03/hr, which
+    /// one decimal place writes as "0.0"; the reason says "&lt;0.1" there, the daily calendar's rule. From the first
+    /// figure one decimal place can write, the rate is the rounded number.</summary>
+    [Fact]
+    public void TheReason_SaysLessThanATenth_WhenAPositiveRateRoundsToZero()
+    {
+        Assert.Equal("Blocking 1 capture (<0.1/hr)", ServerHealthClassifier.PostgresBlockingReason(1, 2000));
+        Assert.Equal("Blocking 2 captures (0.1/hr)", ServerHealthClassifier.PostgresBlockingReason(2, 2000)); // 0.06/hr
+    }
+
     [Fact]
     public void TheMetricsBand_ReadsTheSameShareAsTheClassifier()
     {

@@ -897,7 +897,7 @@ public sealed class FleetRollup
                fleet card uses, so the two surfaces read alike. An unrateable window prints the count
                alone, which is exactly what the band had to go on. */
             parts.Add(s.DeadlockRatePerHour.HasValue
-                ? $"Deadlocks {s.DeadlockCount} ({s.DeadlockRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr)"
+                ? $"Deadlocks {s.DeadlockCount} ({DailyHealthBandCalculator.RatePerHourText(s.DeadlockRatePerHour.Value)}/hr)"
                 : $"Deadlocks {s.DeadlockCount}");
         }
         if (s.CollectorSeverity >= HealthSeverity.Warning)

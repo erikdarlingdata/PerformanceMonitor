@@ -50,14 +50,16 @@ public sealed class FinOpsInventoryViewerFiguresTests
         Assert.Equal(expected, FinOpsInventoryFigures.LicenseWarning(edition, 2, cpus, memoryMb));
     }
 
-    /// <summary>L5 (#5542): the inventory score is a dash both with no CPU sample and with no memory sample, so the dash's note names both reasons.</summary>
+    /// <summary>L5 (#5542): the inventory has no score both with no CPU sample and with no memory sample, and the note names the one
+    /// that applies. A server with no verdict has no CPU sample; a server with a verdict has one, so it lacks the memory sample.</summary>
     [Fact]
-    public void NoScoreNote_NamesTheMissingMemorySampleAsWellAsTheCpuSample()
+    public void NoScoreNote_NamesTheInputThatIsMissing()
     {
-        var row = new ServerPropertyRow { HealthScore = null };
-        Assert.Equal(FinOpsHealthCalculator.NoInventoryScoreNote, row.HealthScoreNote);
-        Assert.Contains("CPU sample", row.HealthScoreNote, System.StringComparison.Ordinal);
-        Assert.Contains("memory sample", row.HealthScoreNote, System.StringComparison.Ordinal);
+        var noCpu = new ServerPropertyRow { HealthScore = null };
+        Assert.Equal("No health score: the last 24 hours hold no CPU sample", noCpu.HealthScoreNote);
+
+        var noMemory = new ServerPropertyRow { ProvisioningStatus = PerformanceMonitor.Common.ProvisioningVerdict.RightSized, HealthScore = null };
+        Assert.Equal("No health score: no memory sample has been collected", noMemory.HealthScoreNote);
     }
 
     [Fact]
