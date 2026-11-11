@@ -88,6 +88,12 @@ public partial class DuckDbInitializer : IDisposable
     /// </summary>
     internal TimeSpan TrimLockWaitForTests = TimeSpan.Zero;
 
+    /// <summary>
+    /// #8535: a test's way to make the lowering fail, since the real target is built to be accepted. When set, the trim lowers
+    /// <c>memory_limit</c> to this instead of <see cref="TrimTargetFor"/>. Null outside tests.
+    /// </summary>
+    internal string? TrimTargetOverrideForTests;
+
     /* #5650: a busy-skipped trim cycle used to log only at Debug. RecordTrimSkip counts both skip paths and writes
        one Information line at most an hour, counted from the first skip; the line resets the count and the hour. */
     private static readonly TimeSpan TrimSkipLogInterval = TimeSpan.FromHours(1);
@@ -691,7 +697,7 @@ public partial class DuckDbInitializer : IDisposable
     }
 
     /// <summary>
-    /// Checks the sentinel's current memory usage and, if it is over <see cref="TrimThresholdBytes"/>,
+    /// Checks the sentinel's current memory usage less the memory a trim cannot free (#8535) and, if that is over <see cref="TrimThresholdBytes"/>,
     /// cycles <c>memory_limit</c> down to <see cref="TrimTargetMemoryLimit"/> and back up to force DuckDB's
     /// buffer manager to release cached pages (#4262 round 1 finding 1). Internal so a test can call this
     /// directly instead of waiting on <see cref="_trimTimer"/>'s real interval.
@@ -722,9 +728,11 @@ public partial class DuckDbInitializer : IDisposable
         var readHoldId = StoreLockHolders.Register(nameof(RunMemoryTrimCycle), "DuckDbInitializer.cs", write: false);
 
         double? beforeBytes;
+        IReadOnlyList<MemoryTag>? beforeTags = null;
         try
         {
             beforeBytes = ReadSentinelMemoryUsageBytes(sentinel);
+            beforeTags = TryReadMemoryTags(sentinel);
         }
         catch (Exception ex)
         {
@@ -737,7 +745,11 @@ public partial class DuckDbInitializer : IDisposable
             StoreLockHolders.Unregister(readHoldId);
         }
 
-        if (beforeBytes is null || beforeBytes < TrimThresholdBytes)
+        /* #8535: the threshold counts only what a trim can free. The pinned tags (ART indexes and the rest) stay resident through a
+           limit change, so a store whose indexes alone pass the threshold would trip the trim every minute, and each trim empties the
+           two caches the tabs then read again, for no memory gained. A tick under the threshold writes no line: the open and close
+           lines carry the numbers, and a line a minute that says "nothing" only buries the ticks that did something. */
+        if (beforeBytes is null || ReclaimableBytes(beforeBytes.Value, beforeTags) < TrimThresholdBytes)
             return;
 
         /* Never wait — a reader must never block behind the trim (#4262 round 1 finding 1). If the write
@@ -754,6 +766,7 @@ public partial class DuckDbInitializer : IDisposable
                 _logger?.LogDebug(
                     "Trim cycle: skipped, write lock unavailable ({BeforeMb:F0} MiB in use)",
                     beforeBytes.Value / (1024.0 * 1024.0));
+                LogTrimTick(beforeTags, $"Over the {Mb(TrimThresholdBytes)} MB trim threshold, but the local database was busy, so the trim was skipped.");
                 return;
             }
         }
@@ -774,15 +787,36 @@ public partial class DuckDbInitializer : IDisposable
 
             var configuredMemoryLimit = ConfiguredMemoryLimit;
 
-            using (var cmd = lockedSentinel.CreateCommand())
+            /* #8535: the target sits above the memory the buffer manager cannot give up (ART indexes, the object cache and the
+               other tags that are not a cache of the database file), because DuckDB refuses a limit below what it holds
+               that cannot be evicted. A 64 MB target failed every minute once the indexes alone held more than that, and the
+               failure only reached a Debug line, so the trim never ran and nothing said so. */
+            var target = TrimTargetOverrideForTests ?? TrimTargetFor(TryReadMemoryTags(lockedSentinel));
+            string? lowerFailure = null;
+            try
             {
-                cmd.CommandText = $"SET memory_limit='{TrimTargetMemoryLimit}'";
-                cmd.ExecuteNonQuery();
+                using var lower = lockedSentinel.CreateCommand();
+                lower.CommandText = $"SET memory_limit='{target}'";
+                lower.ExecuteNonQuery();
             }
-            using (var cmd = lockedSentinel.CreateCommand())
+            catch (DuckDBException ex)
             {
-                cmd.CommandText = $"SET memory_limit='{configuredMemoryLimit}'";
-                cmd.ExecuteNonQuery();
+                lowerFailure = ex.Message.Split('\n')[0].Trim();
+            }
+            finally
+            {
+                /* The limit goes back whether or not it came down: DuckDB keeps the old limit when a lowering fails, and
+                   putting it back anyway costs nothing and never leaves a trim's limit behind. */
+                using var restore = lockedSentinel.CreateCommand();
+                restore.CommandText = $"SET memory_limit='{configuredMemoryLimit}'";
+                restore.ExecuteNonQuery();
+            }
+
+            if (lowerFailure is not null)
+            {
+                LogTrimTick(TryReadMemoryTags(lockedSentinel),
+                    $"Over the {Mb(TrimThresholdBytes)} MB trim threshold, but DuckDB would not lower memory_limit to {target}: {lowerFailure}");
+                return;
             }
 
             /* #4262 round 3: only incremented once both SET statements above actually ran, so a test can
@@ -800,8 +834,11 @@ public partial class DuckDbInitializer : IDisposable
                 beforeBytes.Value / (1024.0 * 1024.0),
                 (afterBytes ?? 0) / (1024.0 * 1024.0),
                 stopwatch.ElapsedMilliseconds,
-                TrimTargetMemoryLimit,
+                target,
                 configuredMemoryLimit);
+            LogTrimTick(TryReadMemoryTags(lockedSentinel),
+                $"Trimmed from {Mb((long)beforeBytes.Value)} MB to {Mb((long)(afterBytes ?? 0))} MB in {stopwatch.ElapsedMilliseconds} ms " +
+                $"(memory_limit {target}, then {configuredMemoryLimit}).");
         }
         finally
         {
