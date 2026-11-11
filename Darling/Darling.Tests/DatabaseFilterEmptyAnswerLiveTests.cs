@@ -70,13 +70,15 @@ public sealed class DatabaseFilterEmptyAnswerLiveTests
         {
             var filtered = await DarlingMcpLongQueryTools.GetLongQueryCompletions(
                 postgres, serverName, 24, 10, null, DatabaseFilter.Of(new[] { "DbA", "DbB" }), null, ct);
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(filtered));
-            Assert.Contains("opt-in", Message(filtered), StringComparison.Ordinal);
+            /* #8571: no row and no logged run is the never-ran state: not_collected, which says it is off by default and how to turn it on. */
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(filtered));
+            Assert.Contains("has never run for it", Message(filtered), StringComparison.Ordinal);
             Assert.Equal(DatabaseFilter.ManyDatabasesDescription, Echo(filtered));
 
             var unfiltered = await DarlingMcpLongQueryTools.GetLongQueryCompletions(
                 postgres, serverName, 24, 10, null, DatabaseFilter.All, null, ct);
-            Assert.Contains("opt-in", Message(unfiltered), StringComparison.Ordinal);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(unfiltered));
+            Assert.Contains("has never run for it", Message(unfiltered), StringComparison.Ordinal);
             Assert.Null(Echo(unfiltered));
         }, Cleanup);
 

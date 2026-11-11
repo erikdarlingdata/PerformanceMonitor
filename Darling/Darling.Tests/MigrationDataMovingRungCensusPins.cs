@@ -445,6 +445,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "because a compressed chunk's B-tree holds only its uncompressed rows and the cost is the day or two of rows not yet compressed. "
             + "Not CONCURRENTLY (TimescaleDB refuses it on a hypertable), inside the ladder's transaction like V150. Does not move the "
             + "MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            258,
+            SetsTheFloor: false,
+            "#8567: one CREATE INDEX IF NOT EXISTS over the populated collect.oversized_plan_backlog (created V121), a plain table: "
+            + "idx_oversized_plan_backlog_dropped (server_id, expired_at), partial to the rows dropped unfetched, the rows the sweep's purge "
+            + "deletes. The build reads the heap once and keeps the rows its predicate admits, which is none on a store whose sweep has not "
+            + "dropped a row yet. Measured on a 2,000,000-row, 401 MB table holding 100,000 dropped rows: 58 ms, 704 kB. Not CONCURRENTLY, "
+            + "inside the ladder's transaction. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
     ];
 
     /// <summary>
