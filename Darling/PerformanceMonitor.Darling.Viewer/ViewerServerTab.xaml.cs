@@ -343,6 +343,9 @@ public partial class ViewerServerTab : UserControl
         /* Compare works on three Queries sub-tabs only; off everywhere else (walk finding V10b). */
         UpdateCompareDropdownState();
 
+        /* #8647: the sub-tab just picked says "Loading..." where its empty-state sentence goes until its first read returns. */
+        ShowFirstPaintLoading();
+
         /* A drill-down navigation switches the inner tab programmatically and runs its own targeted read;
            skip the generic loader so it doesn't race that (mirrors the sub-tab handlers' guard). */
         if (_suppressDrillDownAutoRefresh)
@@ -414,6 +417,7 @@ public partial class ViewerServerTab : UserControl
                 do
                 {
                     loadedTab = InnerTabs.SelectedIndex;
+                    ShowFirstPaintLoading(); // #8647: also the landing sub-tab of the first open, which has no selection event
                     /* L3: a tab switched to during this load changes the page on screen, so its note is set here too, not only
                        at the top of the pass. */
                     await Timed(open, "collection interval read", UpdateSampleIntervalAsync());
@@ -421,6 +425,8 @@ public partial class ViewerServerTab : UserControl
                        (the reader switched tabs mid-load) is an ordinary load on its own clock. */
                     await LoadInnerTabAsync(loadedTab, open);
                     open = null;
+                    /* #8647: whatever on the sub-tab still says "Loading..." after its read was never filled; it must not outlive the read. */
+                    if (InnerTabs.SelectedIndex == loadedTab) FirstPaint.Resolve((InnerTabs.SelectedItem as TabItem)?.Content as DependencyObject);
                 }
                 while (InnerTabs.SelectedIndex != loadedTab);
             }

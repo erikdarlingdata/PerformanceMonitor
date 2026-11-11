@@ -73,7 +73,7 @@
         </ItemsControl>
 
         <!-- Row 2: day cells -->
-        <ItemsControl Grid.Row="2" ItemsSource="{Binding Cells, ElementName=Root}">
+        <ItemsControl Grid.Row="2" x:Name="DayCells" ItemsSource="{Binding Cells, ElementName=Root}">
             <ItemsControl.ItemsPanel>
                 <ItemsPanelTemplate>
                     <UniformGrid Columns="7"/>
@@ -163,6 +163,7 @@
                 </DataTemplate>
             </ItemsControl.ItemTemplate>
         </ItemsControl>
+        <TextBlock x:Name="CalendarLoadingText" Grid.Row="2" Text="Loading..." Visibility="Collapsed" Panel.ZIndex="5" IsHitTestVisible="False" Style="{DynamicResource EmptyHint}"/>
 
         <!--
           Row 3: the day-detail panel. Shown when a day is clicked (replacing the old one-row Daily Summary
