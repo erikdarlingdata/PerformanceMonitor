@@ -112,11 +112,6 @@ public sealed class DarlingMcpQueryFleetSummaryTools
         """;
     }
 
-    /// <summary>#8570: OFF until the per-pair LIMIT 1 probes of <see cref="BuildMidSql"/> stop at the first index row. On a 12-server uncompressed seed
-    /// the statement reads about 7,600 pages against the old statement's 2,000 (the probes read a day of heap pages each), so the tool keeps the old
-    /// statement. The route, its guards and its equality tests are in place and run through <see cref="PlanDailyMid"/> directly.</summary>
-    public const bool MidRouteEnabled = false;
-
     /// <summary>#8570: the fewest whole closed days the daily tier must hold before the mid route is worth its probes. Below it the
     /// two partial edge days are most of the window and the old statement is the same read.</summary>
     public const int MinMidDays = 2;
@@ -136,13 +131,17 @@ public sealed class DarlingMcpQueryFleetSummaryTools
     /// day the two tiers disagree about (the day holding the stitch floor takes its hours from both sides).</item>
     /// <item>The daily tier has a measured ceiling, and so does the hourly one. A day is read from the daily only when it ends at or
     /// before both ceilings, so a daily that trails the hourly (the daily refresh runs a day behind) leaves those days to the hourly edge.</item>
+    /// <item>A day is read from the daily only when it ended before <c>now - DailyRefreshStartSpan</c> (<paramref name="now"/> cut to its day): the daily
+    /// policy re-reads the newer days at its next runs, and a late hourly change to one of them (a repair refreshing the hourly over a late hour) is not in
+    /// the daily until then. The hourly edge reads those days, so the reply is the old statement's between the repair and the daily's next run.</item>
     /// <item>At least <see cref="MinMidDays"/> whole days remain.</item>
     /// </list>
     /// The remaining guard, no whole-day hole in the daily across <c>[DStart, DEnd)</c>, needs the store and is
     /// <see cref="DailyHasNoHoleAsync"/>. The daily policy re-reads only <see cref="TimescaleSupport.DailyRefreshStartSpan"/> of days, so
     /// a day the daily never wrote is never written later: that hole check is what stops a day with no daily row being read as an empty day.
+    /// A late change older than that window is the repair pass's to chase into the daily (it does so right after the hourly repair).
     /// </summary>
-    internal static DailyMidPlan? PlanDailyMid(RollupCoverage coverage, string hourlyRelation, DateTime start, DateTime windowEnd, DateTime? hourlyCeiling)
+    internal static DailyMidPlan? PlanDailyMid(RollupCoverage coverage, string hourlyRelation, DateTime start, DateTime windowEnd, DateTime? hourlyCeiling, DateTime now)
     {
         if (hourlyCeiling is not DateTime hourlyEnd
             || coverage.StitchFloor(TimescaleSupport.QueryStatsHourlyView, RollupCoverage.StitchTier.Hourly, start) is not null)
@@ -170,8 +169,11 @@ public sealed class DarlingMcpQueryFleetSummaryTools
             return null;
         }
 
-        var limit = new[] { windowEnd, hourlyEnd, dailyEnd }.Min();
-        var dEnd = limit.Date;
+        /* A day inside the daily policy's re-read window can still change: the policy re-reads it at its next runs, and a repair that refreshes
+           the hourly over a late hour of that day leaves the daily stale until then. Those days stay on the hourly edge. */
+        var settled = (now - TimescaleSupport.DailyRefreshStartSpanFor(dailyView)).Date;
+        var limit = new[] { windowEnd, hourlyEnd, dailyEnd, settled }.Min();
+        var dEnd = DateTime.SpecifyKind(limit.Date, DateTimeKind.Unspecified);
         return (dEnd - dStart).TotalDays >= MinMidDays ? new DailyMidPlan(dailyRelation, dailyView, dStart, dEnd) : null;
     }
 
@@ -472,7 +474,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                     /* #8570: whole closed days come from the daily tier. The hourly rollup reads one heap page per row on a cold cache
                        (and decompresses a day's batches on a compressed chunk), the daily rollup 24 times fewer rows. Any guard that
                        fails leaves the hourly read alone. */
-                    mid = MidRouteEnabled ? PlanDailyMid(coverage, hourlyRelation, start, windowEnd, ceiling) : null;
+                    mid = PlanDailyMid(coverage, hourlyRelation, start, windowEnd, ceiling, DateTime.UtcNow);
                     if (mid is not null && !await DailyHasNoHoleAsync(postgres, mid, cancellationToken))
                     {
                         mid = null;

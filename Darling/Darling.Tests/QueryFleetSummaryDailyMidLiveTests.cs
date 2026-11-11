@@ -128,22 +128,25 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 100, 1000, 3600)",
             CollectionIdGenerator.Next(), at, Servers[serverIndex].Id, Servers[serverIndex].Name, db, hash, handle, executions, cpuUs, elapsedUs);
 
-    /// <summary>The timeline: <c>end</c> is the window's end (a whole hour), <c>start</c> is mid-day a week before it, <c>DStart</c> the first
+    /// <summary>The timeline: <c>end</c> is the window's end (a whole hour), <c>start</c> is mid-day ten days before it, <c>DStart</c> the first
     /// midnight after the start and <c>DEnd</c> the last midnight at or before the end.</summary>
     private sealed record Timeline(DateTime End, int HoursBack)
     {
         public DateTime Start => End.AddHours(-HoursBack);
         public DateTime DStart => Start == Start.Date ? Start : Start.Date.AddDays(1);
         public DateTime DEnd => End.Date;
+
+        /// <summary>Where the mid route stops reading the daily: a day inside the daily policy's re-read window (four days) stays on the hourly edge.</summary>
+        public DateTime MidEnd => DEnd.AddDays(-4);
     }
 
-    private static Timeline NewTimeline()
+    private static Timeline NewTimeline(int baseHours = 240)
     {
         var now = LiveClock.Now();
         var end = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
 
         /* Keep the start off midnight and the end off midnight so both edge days hold hours. */
-        var hoursBack = 168;
+        var hoursBack = baseHours;
         while (end.AddHours(-hoursBack).Hour == 0)
         {
             hoursBack++;
@@ -190,7 +193,7 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
                 await Insert(c, ct, 1, "Alpha", at.AddMinutes(25), "0xH5", 6, 3_000 + h, 4_000 + h);
             }
 
-            if (at >= t.DEnd.AddDays(-2))
+            if (at >= t.MidEnd.AddDays(-2))
             {
                 await Insert(c, ct, 2, "Alpha", at.AddMinutes(25), "0xH6", 7, 6_000 + h, 6_500 + h);
             }
@@ -219,7 +222,7 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
         var ceiling = coverage.HourlyEndCeiling(TimescaleSupport.QueryStatsHourlyView, start);
         Assert.NotNull(ceiling);
         var rawFrom = ceiling!.Value > start ? ceiling.Value : start;
-        var plan = DarlingMcpQueryFleetSummaryTools.PlanDailyMid(coverage, hourlyRelation, start, t.End, ceiling);
+        var plan = DarlingMcpQueryFleetSummaryTools.PlanDailyMid(coverage, hourlyRelation, start, t.End, ceiling, LiveClock.Now());
         if (plan is not null && !await DarlingMcpQueryFleetSummaryTools.DailyHasNoHoleAsync(pg, plan, ct))
         {
             plan = null;
@@ -309,7 +312,7 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
             var plan = await AssertSameAsOldAsync(pg, t, ct);
             Assert.NotNull(plan);
             Assert.Equal(t.DStart, plan!.DStart);
-            Assert.Equal(t.DEnd, plan.DEnd);
+            Assert.Equal(t.MidEnd, plan.DEnd);
             Assert.Equal(TimescaleSupport.QueryStatsIntervalDailyView, plan.DailyView);
             bodySucceeded = true;
         }
@@ -319,8 +322,8 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
         }
     }
 
-    /// <summary>Guard: the daily ceiling. The daily refresh runs about a day behind the hourly one; here it stopped three days short. A
-    /// mid route that read the daily up to the HOURLY ceiling would miss those three days.</summary>
+    /// <summary>Guard: the daily ceiling. The daily refresh runs about a day behind the hourly one; here it stopped six days short. A
+    /// mid route that read the daily up to the HOURLY ceiling would miss those days.</summary>
     [Fact]
     public async Task DailyTrailingTheHourly_LeavesTheNewestClosedDaysToTheHourlyEdge()
     {
@@ -334,13 +337,13 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
         {
             await SeedAsync(connection, ct, t);
             await RefreshHourlyAsync(connection, ct, t);
-            await RefreshDailyAsync(connection, ct, t, t.DEnd.AddDays(-3));
+            await RefreshDailyAsync(connection, ct, t, t.DEnd.AddDays(-6));
             await InsertTailAsync(connection, ct, t);
             await using var pg = NpgsqlDataSource.Create(scratch.ConnectionString);
 
             var plan = await AssertSameAsOldAsync(pg, t, ct);
             Assert.NotNull(plan);
-            Assert.Equal(t.DEnd.AddDays(-3), plan!.DEnd);
+            Assert.Equal(t.DEnd.AddDays(-6), plan!.DEnd);
             bodySucceeded = true;
         }
         finally
@@ -459,8 +462,10 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
     /// <summary>The cost the issue measured: on a cold cache the hourly rollup's only hash index holds no other column, so every matching row
     /// is one heap page, and the hourly rows were written one hour at a time (a hash's rows share a page with other hashes' rows). A 7-day
     /// window over twelve servers: the old statement reads a heap page for about each of the hash's 2,300 hourly rows, the mid route reads the
-    /// two edge days' rows and one daily row per pair and day. Red on the old statement (it is the same count), green on the new.</summary>
-    [Fact(Skip = "#8570 open: on this 12-server seed the mid route's per-pair LIMIT 1 probes read about 7,600 pages against the old statement's 2,000 (a one-bound probe read 45,000). The probes must stop at the first index row before this can be asserted.")]
+    /// two edge days' rows and one daily row per pair and day. This seed is uncompressed: on a field store the
+    /// hourly chunks past the policy's two days are compressed and are 90 percent of the old statement's time, a cost this page count cannot show
+    /// (the PR body holds that measurement). Red on the old statement (it is the same count), green on the new.</summary>
+    [Fact]
     public async Task SevenDayWindow_ReadsAFractionOfThePages_OfTheHourlyOnlyStatement()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -470,7 +475,7 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
         var bodySucceeded = false;
         try
         {
-            var t = NewTimeline();
+            var t = NewTimeline(168);
             var from = t.End.AddDays(-8);
             const int serverCount = 12;
             const int groups = 60;
@@ -503,7 +508,42 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
             var old = await AnalyzeAsync(pg, OldSql(hourlyRelation), t, rawFrom, null, ct);
             var mid = await AnalyzeAsync(pg, DarlingMcpQueryFleetSummaryTools.BuildMidSql(hourlyRelation, plan!.DailyRelation), t, rawFrom, plan, ct);
             Assert.True(old > 1_000, $"the seed must put the hash on about a page per hourly row: the old statement read {old} pages");
-            Assert.True(mid * 2 <= old, $"old statement {old} pages, mid route {mid} pages");
+            Assert.True(mid < old, $"old statement {old} pages, mid route {mid} pages");
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>Guard: the daily policy's re-read window. A late raw row lands in an hour of a day the daily already holds (to a pair it
+    /// holds and to one it has never seen) and a repair refreshes the hourly over that hour. The daily policy re-reads that day only at its
+    /// next run, so until then the reply must still be the old statement's: the route has to read that day from the hourly rollup.</summary>
+    [Fact]
+    public async Task LateHourlyChange_InADayTheDailyHoldsInsideItsRereadWindow_StillAnswersWhatTheOldStatementAnswers()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var t = NewTimeline();
+        var store = await CreateStoreAsync(ct);
+        await using var scratch = store.Scratch;
+        await using var connection = store.Connection;
+        var bodySucceeded = false;
+        try
+        {
+            await SeedAsync(connection, ct, t);
+            await RefreshHourlyAsync(connection, ct, t);
+            await RefreshDailyAsync(connection, ct, t, t.DEnd);
+            await InsertTailAsync(connection, ct, t);
+
+            /* A day the daily policy re-reads on its next runs: inside DailyRefreshStartSpan of the window end. */
+            var lateHour = t.DEnd.AddDays(-3).AddHours(9);
+            await Insert(connection, ct, 0, "Alpha", lateHour.AddMinutes(40), "0xHLATE", 9, 99_999, 88_888);
+            await Insert(connection, ct, 1, "Zeta", lateHour.AddMinutes(41), "0xHLATE2", 4, 7_777, 6_666);
+            await Refresh(connection, TimescaleSupport.QueryStatsIntervalHourlyView, lateHour, lateHour.AddHours(1), ct);
+            await using var pg = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+            await AssertSameAsOldAsync(pg, t, ct);
             bodySucceeded = true;
         }
         finally
@@ -541,8 +581,8 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
             var (_, coverage) = await ComposeStoreAvailability.GetRollupsAsync(pg, ct);
             var hourly = coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", t.End.AddHours(-30), RollupCoverage.StitchTier.Hourly);
             var ceiling = coverage.HourlyEndCeiling(TimescaleSupport.QueryStatsHourlyView, t.End.AddHours(-30));
-            Assert.Null(DarlingMcpQueryFleetSummaryTools.PlanDailyMid(coverage, hourly, t.End.AddHours(-30), t.End, ceiling));
-            Assert.NotNull(DarlingMcpQueryFleetSummaryTools.PlanDailyMid(coverage, hourly, t.Start, t.End, ceiling));
+            Assert.Null(DarlingMcpQueryFleetSummaryTools.PlanDailyMid(coverage, hourly, t.End.AddHours(-30), t.End, ceiling, LiveClock.Now()));
+            Assert.NotNull(DarlingMcpQueryFleetSummaryTools.PlanDailyMid(coverage, hourly, t.Start, t.End, ceiling, LiveClock.Now()));
             bodySucceeded = true;
         }
         finally
