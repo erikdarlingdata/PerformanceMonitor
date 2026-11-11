@@ -809,8 +809,8 @@ public sealed class ForcePlanBotPolicyTests
         Assert.False(projected.Eligible);
         var guidance = projected.Guidance!;
         Assert.Contains("is currently Reverted (VerificationForcedQueryRecompile) for query 42 via plan 7 (the plan proposed here)", guidance, StringComparison.Ordinal);
-        Assert.Contains("the engine has backed out of it, so a manual force here is yours to decide", guidance, StringComparison.Ordinal);
-        Assert.Contains("This target is not eligible: forcing_failed_on_this_plan (", guidance, StringComparison.Ordinal);
+        Assert.Contains("the engine has backed out of it, but this target is not eligible: forcing_failed_on_this_plan (", guidance, StringComparison.Ordinal);
+        Assert.DoesNotContain("yours to decide", guidance, StringComparison.Ordinal);
         Assert.DoesNotContain("intervene only if", guidance, StringComparison.Ordinal);
     }
 

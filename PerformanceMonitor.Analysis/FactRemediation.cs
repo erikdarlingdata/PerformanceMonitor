@@ -1317,10 +1317,13 @@ public static class FactRemediation
                     /* #8628: Reverted and Expired are the engine withdrawing, so "intervene only if it reverts or
                        expires" would tell the reader to wait for what already happened. The engine has let go; a
                        manual force is the reader's call, and a blocker that still stands is named beside it. */
-                    sb.Append("the engine has backed out of it, so a manual force here is yours to decide.");
-                    if (blockers.Count > 0)
+                    if (blockers.Count == 0)
                     {
-                        sb.Append(" This target is not eligible:");
+                        sb.Append("the engine has backed out of it, so a manual force here is yours to decide.");
+                    }
+                    else
+                    {
+                        sb.Append("the engine has backed out of it, but this target is not eligible:");
                         foreach (var blocker in blockers)
                         {
                             sb.Append($" {blocker.Name} ({OneLine(blocker.Evidence)});");

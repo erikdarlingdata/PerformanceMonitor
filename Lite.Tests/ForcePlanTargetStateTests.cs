@@ -165,8 +165,8 @@ public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixtur
         Assert.False(projected.Eligible);
         Assert.DoesNotContain(ForcePlanBlockerNames.ApcOwnsIt, projected.Blockers);
         Assert.Contains(ForcePlanBlockerNames.ForcingFailedOnThisPlan, projected.Blockers);
-        Assert.Contains("the engine has backed out of it, so a manual force here is yours to decide", projected.Guidance, StringComparison.Ordinal);
-        Assert.Contains("This target is not eligible: forcing_failed_on_this_plan (", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("the engine has backed out of it, but this target is not eligible: forcing_failed_on_this_plan (", projected.Guidance, StringComparison.Ordinal);
+        Assert.DoesNotContain("yours to decide", projected.Guidance, StringComparison.Ordinal);
         Assert.DoesNotContain("intervene only if", projected.Guidance, StringComparison.Ordinal);
     }
 
