@@ -137,6 +137,19 @@ a:hover { text-decoration: underline; }
    views leave. The minimum is about five rows. */
 .server-list-header, .server-search { flex: 0 0 auto; }
 #server-list { flex: 1 1 0; min-height: 11.5rem; overflow-y: auto; }
+/* #8631: on a desktop-width window the 15rem cap above was a cap at every height, so most of the sixteen page links sat behind a
+   scroll on a 1080-high window. Here the page links take their own height and every entry shows whenever the sidebar has room for
+   all of them and five server rows. Only when it has not does space come out: first from the views list (a shrink factor of 100
+   against the page block's 1 takes nearly all of a shortfall first, down to about two rows, and the list scrolls inside that), then
+   from the page block, which shrinks with the window (the sidebar is as tall as the window) down to the button and five entries, so
+   Alert History stays in view at 1280x720. The server list keeps five rows (12rem at 32 px a row). The phone-width menu below
+   768 px keeps the rules above. */
+@media (min-width: 769px) {
+  .nav { max-height: none; }
+  #sidebar > .nav-block:has(> .nav:not([hidden])) { min-height: 14rem; }
+  #server-list { min-height: 12rem; }
+  #sidebar > #view-list { flex: 0 100 auto; min-height: 4.5rem; overflow-y: auto; }
+}
 .server-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* #5243: the sidebar's search box + group-by-tag toggle, and its collapsible tag-group headers. */
