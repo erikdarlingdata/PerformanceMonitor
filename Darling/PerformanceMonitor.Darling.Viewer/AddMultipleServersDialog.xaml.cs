@@ -118,7 +118,7 @@ public partial class AddMultipleServersDialog : Window
         {
             AddButton.IsEnabled = false;
             TestAllButton.IsEnabled = false;
-            StatusText.Text = "Not connected to a Darling store — server changes are unavailable.";
+            StatusText.Text = "Not connected to a Darling store: server changes are unavailable.";
         }
         else if (_dataService.IsReadOnly)
         {
@@ -735,7 +735,7 @@ public partial class AddMultipleServersDialog : Window
     {
         if (result is null)
         {
-            return "Still running on the service — try again in a moment.";
+            return "Still running on the service. Try again in a moment.";
         }
 
         if (result.Status == ViewerDataService.StatusSucceeded)
@@ -784,7 +784,7 @@ public partial class AddMultipleServersDialog : Window
             }
 
             /* #6254: the Query Store replica's own result, after the primary's. */
-            return string.Join(" — ", parts) + "." + (ViewerDataService.ProbeReplicaNote(root) is { } replicaNote ? " " + replicaNote : "") + (ViewerDataService.ProbeMissingGrantsNote(root) is { } grantsNote ? " " + grantsNote : "");
+            return string.Join(", ", parts) + "." + (ViewerDataService.ProbeReplicaNote(root) is { } replicaNote ? " " + replicaNote : "") + (ViewerDataService.ProbeMissingGrantsNote(root) is { } grantsNote ? " " + grantsNote : "");
         }
         catch (JsonException)
         {

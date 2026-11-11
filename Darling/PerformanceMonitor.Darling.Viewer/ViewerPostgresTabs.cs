@@ -88,8 +88,8 @@ internal static class ViewerPostgresTabs
                fake SUCCESS rows a day), so a grid built from the log alone would show a PostgreSQL
                operator one row short and never mention the missing collector. Derived from the catalog, it
                appears with the reason it is missing. */
-            "Every PostgreSQL collector for this server: when it last ran, what it returned, and — for a "
-            + "collector this engine cannot run at all — why it never will. The extension panel below is the "
+            "Every PostgreSQL collector for this server: when it last ran, what it returned, and, for a "
+            + "collector this engine cannot run at all, why it never will. The extension panel below is the "
             + "third capability axis (#2545) and the only one that is ACTIONABLE: engine kind and edition "
             + "are walls, but an extension that is available and not installed is one command away."),
 
@@ -103,7 +103,7 @@ internal static class ViewerPostgresTabs
                makes no sense from its row count usually spilled, and pg_stat_database's temp counters are
                the only evidence of that we collect. */
             "What ran, what waited on what, and what it cost. Blocking is a periodic SAMPLE rather than an "
-            + "event log, so the capture counts above the grid are its denominator — three chains means "
+            + "event log, so the capture counts above the grid are its denominator: three chains means "
             + "something different in 60 captures than in 4."),
 
         new ViewerPostgresTab(
@@ -129,7 +129,7 @@ internal static class ViewerPostgresTabs
             "One story in four panels: a session holds a transaction open, that transaction holds the xmin "
             + "horizon, the horizon starves vacuum, and vacuum falling behind ends in wraparound. Read on "
             + "their own each of these looks survivable. Only the first panel can name the session, and "
-            + "only it says whether that session pins anything at all — an open transaction that holds no "
+            + "only it says whether that session pins anything at all: an open transaction that holds no "
             + "snapshot and no transaction id costs vacuum nothing, however long it has been idle."),
 
         new ViewerPostgresTab(

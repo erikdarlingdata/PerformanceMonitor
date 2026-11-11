@@ -178,7 +178,7 @@ internal static class FleetSweepsRows
         var departed = NameList(changes["departed_servers"]);
         if (Bool(report, "no_previous_sweep", false))
         {
-            return "First sweep — there is no previous sweep to diff against, so this document states absolutes.";
+            return "First sweep: there is no previous sweep to diff against, so this document states absolutes.";
         }
 
         if (transitions == 0 && newServers.Length == 0 && departed.Length == 0)
@@ -222,9 +222,9 @@ internal static class FleetSweepsRows
             "Verdict: " + (Bool(detail, "instruments_alive", true) ? "alive" : "DEAD"),
             "Service started: " + Local(Str(lv, "service_started_at")),
         };
-        if (Bool(lv, "baseline_reset", false)) lines.Add("Pass-counter baseline: reset by restart — advance not judgeable this sweep");
+        if (Bool(lv, "baseline_reset", false)) lines.Add("Pass-counter baseline: reset by restart: advance not judgeable this sweep");
         var previous = lv["alert_passes_previous"] is JsonValue ? $" (previous {Num(Int(lv, "alert_passes_previous"))})" : " (no baseline)";
-        var advancing = lv["alert_passes_advancing"] is JsonValue av && av.TryGetValue<bool>(out var ab) ? (ab ? " — advancing" : " — frozen") : "";
+        var advancing = lv["alert_passes_advancing"] is JsonValue av && av.TryGetValue<bool>(out var ab) ? (ab ? ", advancing" : ", frozen") : "";
         lines.Add("Alert passes: " + Num(Int(lv, "alert_passes_total")) + previous + advancing);
         lines.Add("Alert read failures: " + Num(Int(lv, "alert_read_failures_total")));
         var faults = Objects(lv["server_read_faults"]).ToList();

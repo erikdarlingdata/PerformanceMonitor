@@ -67,7 +67,7 @@ public partial class FleetSweepsTab : UserControl
     {
         if (_timelineLoaded && _detailLoaded && _watchItemsLoaded)
         {
-            StatusChanged?.Invoke($"fleet sweeps — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+            StatusChanged?.Invoke($"fleet sweeps: refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
     }
 
@@ -113,7 +113,7 @@ public partial class FleetSweepsTab : UserControl
                 _binding = false;
             }
 
-            NoRunsMessage.Text = "No sweeps in this span. Widen the span, or check that fleet_sweep.enabled is on — a gap in this timeline is a missed sweep, with its cause on the service log.";
+            NoRunsMessage.Text = "No sweeps in this span. Widen the span, or check that fleet_sweep.enabled is on: a gap in this timeline is a missed sweep, with its cause on the service log.";
             NoRunsMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.RefreshedStamp();
             _timelineLoaded = true;

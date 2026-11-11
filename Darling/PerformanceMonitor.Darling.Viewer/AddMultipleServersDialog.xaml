@@ -80,7 +80,7 @@
                 <TextBlock Text="Password" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
                 <PasswordBox x:Name="PasswordBox"/>
                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,6,0,0"
-                           Text="The password is encrypted with the service host's machine key (DPAPI-LocalMachine), so it can be decrypted only on the machine running the Darling service — the supported single-box deploy."/>
+                           Text="The password is encrypted with the service host's machine key (DPAPI-LocalMachine), so it can be decrypted only on the machine running the Darling service, the supported single-box deploy."/>
             </StackPanel>
 
             <!-- Service Principal Credentials (one client id + secret stamped on every row — a single Entra app

@@ -94,7 +94,7 @@
                                            TextWrapping="Wrap" Margin="24,2,0,0"/>
                                 <CheckBox x:Name="QueryStoreBackfillCheckBox" Content="Query Store history backfill (all servers)" Margin="0,12,0,0"
                                           Foreground="{DynamicResource ForegroundBrush}"/>
-                                <TextBlock Text="Fill Query Store history gaps (outages, newly added or freshly restored databases) in bounded background slices. Disable to stop a heavy catch-up — for example after restoring a large database onto a monitored server — live collection is unaffected; re-enabling resumes where it left off."
+                                <TextBlock Text="Fill Query Store history gaps (outages, newly added or freshly restored databases) in bounded background slices. Disable to stop a heavy catch-up (for example after restoring a large database onto a monitored server); live collection is unaffected; re-enabling resumes where it left off."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            TextWrapping="Wrap" Margin="24,2,0,0"/>
                                 <Grid Margin="0,12,0,0">
@@ -111,7 +111,7 @@
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.LabeledBy="{Binding ElementName=MaxConcurrentSweepsLabel}" x:Name="MaxConcurrentSweepsTextBox" Grid.Column="3" Margin="8,0,0,0"/>
                                 </Grid>
-                                <TextBlock Text="Collector memory bounds. The text budget caps how much query and plan text one database ships per collection pass (4-256, default 64); a smaller budget means shorter statements on the monitored server and slower history catch-up, never lost data — lower it when the fleet is a network hop away. Sweeps is how many servers collect at once (1-16, default 4); raise it when a large fleet queues behind collection on a host with headroom. Peak memory is roughly the two multiplied."
+                                <TextBlock Text="Collector memory bounds. The text budget caps how much query and plan text one database ships per collection pass (4-256, default 64); a smaller budget means shorter statements on the monitored server and slower history catch-up, never lost data. Lower it when the fleet is a network hop away. Sweeps is how many servers collect at once (1-16, default 4); raise it when a large fleet queues behind collection on a host with headroom. Peak memory is roughly the two multiplied."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            TextWrapping="Wrap" Margin="0,4,0,0"/>
                                 <Grid Margin="0,8,0,0">
@@ -134,7 +134,7 @@
                             <StackPanel>
                                 <TextBlock Text="Collection Schedule" FontSize="14" FontWeight="SemiBold"
                                            Foreground="{DynamicResource ForegroundBrush}"/>
-                                <TextBlock Text="Tune how often the Darling service collects each metric and how long it keeps it — fleet-wide or per server. Blank overrides fall back to the built-in defaults; presets bulk-set frequencies."
+                                <TextBlock Text="Tune how often the Darling service collects each metric and how long it keeps it, fleet-wide or per server. Blank overrides fall back to the built-in defaults; presets bulk-set frequencies."
                                            FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,6,0,0" TextWrapping="Wrap"/>
                                 <Button x:Name="EditSchedulesButton" Content="E_dit Collector Schedules..." HorizontalAlignment="Left"
                                         Padding="12,4" Margin="0,8,0,0" Click="EditSchedulesButton_Click"/>
@@ -181,7 +181,7 @@
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="36,4,0,0"
-                                            ToolTip="0 = off. A healthy redo queue size is workload-specific, so this ships off — set it once you know your own baseline.">
+                                            ToolTip="0 = off. A healthy redo queue size is workload-specific, so this ships off. Set it once you know your own baseline.">
                                     <TextBlock TextWrapping="Wrap" Text="…or its redo queue reaches" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.Name="Alert when redo queue reaches, KB" x:Name="AgRedoQueueAlertKbBox" Width="95" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
@@ -453,7 +453,7 @@
                                      that reason: a deployment with alerting switched off still renders bands. -->
                                 <TextBlock Text="Server Health Bands" FontWeight="SemiBold" FontSize="12"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,14,0,4"/>
-                                <TextBlock Text="Card and fleet-roll-up colours, not alert delivery — these stay in effect with alerting switched off."
+                                <TextBlock Text="Card and fleet-roll-up colours, not alert delivery. These stay in effect with alerting switched off."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,4" TextWrapping="Wrap"/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,0,0,0">
@@ -895,7 +895,7 @@
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,8,4"/>
                                     <TextBox AutomationProperties.LabeledBy="{Binding ElementName=GenericWebhookHeadersLabel}" Grid.Row="1" Grid.Column="1" x:Name="GenericWebhookHeadersBox" Margin="0,0,0,4"
                                              AcceptsReturn="True" TextWrapping="Wrap" MinHeight="44" VerticalScrollBarVisibility="Auto"
-                                             ToolTip="A JSON object of request headers. Held as a secret in the control plane — it carries your token."/>
+                                             ToolTip="A JSON object of request headers. Held as a secret in the control plane: it carries your token."/>
 
                                     <TextBlock x:Name="GenericWebhookBodyLabel" Grid.Row="2" Grid.Column="0" Text="Body (JSON):" VerticalAlignment="Top"
                                                Foreground="{DynamicResource ForegroundBrush}" Margin="0,4,8,4"/>
@@ -1081,7 +1081,7 @@
                                     <TextBlock x:Name="AnalysisUncorroboratedRouteLabel" TextWrapping="Wrap" Text="Route a lone uncorroborated finding to" VerticalAlignment="Center" Margin="0,0,8,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <ComboBox AutomationProperties.LabeledBy="{Binding ElementName=AnalysisUncorroboratedRouteLabel}" x:Name="AnalysisUncorroboratedRouteBox" Width="380" VerticalAlignment="Center"
-                                              ToolTip="A finding with ONE fact in its chain and no matched co-fire check. Digest: recorded (Alert History status Digest), shown on the web and MCP surfaces the moment it fires, and named once a day in the Daily Digest — never a page. Page: the pre-#3712 behaviour, every finding at or above the severity floor pages. Use the service's darling.json value: clears the store column so analysis.uncorroboratedRoute in the service's file decides (its shipped default is Digest). Digest or Page set here wins over the file and reaches the running service within one collection sweep; a corroborated finding pages whichever you choose. Escalation is the corroboration event: a digest-routed single that later gains a fact pages then, as a new firing.">
+                                              ToolTip="A finding with ONE fact in its chain and no matched co-fire check. Digest: recorded (Alert History status Digest), shown on the web and MCP surfaces the moment it fires, and named once a day in the Daily Digest, never a page. Page: the pre-#3712 behaviour, every finding at or above the severity floor pages. Use the service's darling.json value: clears the store column so analysis.uncorroboratedRoute in the service's file decides (its shipped default is Digest). Digest or Page set here wins over the file and reaches the running service within one collection sweep; a corroborated finding pages whichever you choose. Escalation is the corroboration event: a digest-routed single that later gains a fact pages then, as a new firing.">
                                         <ComboBoxItem Content="Digest: recorded and shown, never paged (recommended)" Tag="digest"/>
                                         <ComboBoxItem Content="Page: every notify-worthy finding pages (pre-#3712)" Tag="page"/>
                                         <ComboBoxItem Content="Use the service's darling.json value (store column cleared)" Tag=""/>
@@ -1099,7 +1099,7 @@
                                      which is the muted-mode contract's whole point. -->
                                 <TextBlock Text="Fleet Sweep Reports" FontWeight="SemiBold" FontSize="12"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,14,0,4"/>
-                                <TextBlock Text="Periodically sweep the whole fleet into a stateful report: per-server health verdicts, changes since the previous sweep, and watch items. Runs even when alerts are disabled — a muted fleet still gets a readable ledger of what would have paged."
+                                <TextBlock Text="Periodically sweep the whole fleet into a stateful report: per-server health verdicts, changes since the previous sweep, and watch items. Runs even when alerts are disabled: a muted fleet still gets a readable ledger of what would have paged."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,4" TextWrapping="Wrap"/>
                                 <CheckBox x:Name="FleetSweepEnabledCheckBox" Content="Enable fleet sweep reports"

@@ -571,7 +571,7 @@ public partial class ViewerServerTab : UserControl
                so it does not stamp "refreshed" over a header that already says the new range. The queued load stamps. */
             if (ViewerRangeRefreshStatus.StampsRefreshed(_refreshRequested))
             {
-                StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+                StatusChanged?.Invoke($"{_server.DisplayName}: refreshed {ViewerTimeHelper.RefreshedStamp()}");
             }
         }
         catch (Exception ex)

@@ -125,7 +125,7 @@ public partial class ExcludedDatabasesDialog : Window
 
         StatusText.Text = collectedCount > 0
             ? $"{CountText.Plural(collectedCount, "collected database")}, {existing.Count} currently excluded."
-            : $"No collected databases for this server yet — add names to exclude. {existing.Count} currently excluded.";
+            : $"No collected databases for this server yet. Add names to exclude. {existing.Count} currently excluded.";
     }
 
     /// <summary>
@@ -204,7 +204,7 @@ public partial class ExcludedDatabasesDialog : Window
         {
             /* Already listed (collected or previously added) — just tick it. */
             match.IsExcluded = true;
-            StatusText.Text = $"'{name}' is already in the list — marked excluded.";
+            StatusText.Text = $"'{name}' is already in the list; marked excluded.";
         }
         else
         {

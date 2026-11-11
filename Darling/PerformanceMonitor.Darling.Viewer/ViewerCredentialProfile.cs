@@ -72,5 +72,5 @@ public sealed class ViewerCredentialProfile
     public string PickerDisplay =>
         string.IsNullOrEmpty(Id) || Id.Length < 8
             ? $"{Name} ({AuthTypeDisplay})"
-            : $"{Name} ({AuthTypeDisplay}) — {Id[..8]}";
+            : $"{Name} ({AuthTypeDisplay}), {Id[..8]}";
 }

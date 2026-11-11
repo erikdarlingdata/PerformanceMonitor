@@ -1322,7 +1322,7 @@ internal static class PgDisplay
         var caveats = new List<string>();
         if (r.StateWasRedacted)
         {
-            caveats.Add("state columns REDACTED — the monitoring login lacks pg_monitor here");
+            caveats.Add("state columns REDACTED: the monitoring login lacks pg_monitor here");
         }
 
         if (r.CaptureWasTruncated)
@@ -1474,10 +1474,10 @@ internal static class PgDisplay
                 "Cleaning rounds that stopped early because bgwriter_lru_maxpages was reached. Sustained "
                 + "non-zero means the background writer is CAPPED rather than idle."),
             Metric("Background Writer", "Buffers Allocated", row.BuffersAlloc,
-                "Buffers handed out — the denominator for how hard the pool is being churned."),
+                "Buffers handed out: the denominator for how hard the pool is being churned."),
             Metric("Background Writer", "Buffers Written By Backends", row.BuffersBackend,
                 "Queries writing their own buffers because nothing else kept up. Blank on PostgreSQL 17+, "
-                + "which moved this to pg_stat_io — see the grid above, not a zero here."),
+                + "which moved this to pg_stat_io; see the grid above, not a zero here."),
             Metric("Background Writer", "Backend fsyncs", row.BuffersBackendFsync,
                 "Blank on PostgreSQL 17+ for the same reason."),
             Metric("WAL", "Records", row.WalRecords, "WAL records generated."),
