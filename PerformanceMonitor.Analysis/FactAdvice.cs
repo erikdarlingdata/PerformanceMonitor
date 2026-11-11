@@ -1157,6 +1157,20 @@ public static class FactAdvice
     internal static string Plural(double n, string noun) =>
         $"{n:N0} {PluralNoun(noun, Math.Abs(n - 1) < 0.5)}";
 
+    /// <summary><see cref="Plural"/> with the count in the invariant convention, for a count written beside a
+    /// per-hour rate: <see cref="PerHourClause"/> writes the rate invariant, so "1,234 deadlocks this window, about
+    /// 7.3 per hour" reads in one convention on every desktop.</summary>
+    private static string InvariantPlural(double n, string noun) =>
+        $"{n.ToString("N0", CultureInfo.InvariantCulture)} {PluralNoun(noun, Math.Abs(n - 1) < 0.5)}";
+
+    /// <summary>The rate that follows a count: ", about 7.3 per hour", with one optional decimal place. A positive
+    /// rate too small for that place reads ", under 0.1 per hour": the bound is exact, so it takes no "about".</summary>
+    private static string PerHourClause(double perHour)
+    {
+        var rate = PerformanceMonitor.Common.DailyHealthBandCalculator.RatePerHourText(perHour, "0.#");
+        return rate.StartsWith('<') ? $", under {rate[1..]} per hour" : $", about {rate} per hour";
+    }
+
     /// <summary>The irregular half of <see cref="Plural"/>: a noun ending in a consonant immediately before a
     /// trailing "y" pluralizes to "ies", not "ys" ("query" → "queries", not "querys"). A vowel before the "y"
     /// ("day") keeps the plain "s" rule, which is every other noun <see cref="Plural"/>'s callers pass.</summary>
@@ -1335,9 +1349,10 @@ public static class FactAdvice
         var maxWait = FactMeta(facts, "BLOCKING_EVENTS", "max_wait_time_ms");
         var sleepers = FactMeta(facts, "BLOCKING_EVENTS", "sleeping_blocker_count");
 
-        var inv = new StringBuilder($"{Plural(count.Value, "blocking event")} this window");
+        var counted = InvariantPlural(count.Value, "blocking event");
+        var inv = new StringBuilder($"{counted} this window");
         if (perHour is > 0)
-            inv.Append($", about {perHour.Value:0.#} per hour");
+            inv.Append(PerHourClause(perHour.Value));
         inv.Append('.');
         // #7537: say what is counted. A blocked process report row is not a wait; the spike anomaly counts rows.
         inv.Append(" Each is one wait: a blocked session waiting on one blocker counts once, however many blocked process reports it produced.");
@@ -1362,7 +1377,7 @@ public static class FactAdvice
 
         return fallback with
         {
-            Headline = $"{Plural(count.Value, "blocking event")} this window: sessions stalled waiting on locks others held",
+            Headline = $"{counted} this window: sessions stalled waiting on locks others held",
             Investigation = inv.ToString(),
             Remediation = rem.ToString()
         };
@@ -1383,13 +1398,14 @@ public static class FactAdvice
 
         var perHour = FactMeta(facts, "DEADLOCKS", "deadlocks_per_hour");
         var peakHour = FactMeta(facts, "DEADLOCKS", "peak_1h_deadlock_count");
-        var inv = new StringBuilder($"{Plural(count.Value, "deadlock")} this window");
+        var counted = InvariantPlural(count.Value, "deadlock");
+        var inv = new StringBuilder($"{counted} this window");
         if (perHour is > 0)
-            inv.Append($", about {perHour.Value:0.#} per hour");
+            inv.Append(PerHourClause(perHour.Value));
         /* The busiest hour is what the fact grades, so it is named whenever it stands above the average (by more than
            the average's one-decimal rounding); a steady rate would only repeat the figure before it. */
         if (peakHour is > 0 && peakHour.Value > (perHour ?? 0) + 0.05)
-            inv.Append($", up to {peakHour.Value:N0} in the busiest hour");
+            inv.Append($", up to {peakHour.Value.ToString("N0", CultureInfo.InvariantCulture)} in the busiest hour");
         inv.Append(". A deadlock is two sessions each holding a lock the other needs; SQL Server kills the cheaper one as the victim and rolls it back. This reports a window that has already passed: the deadlock graphs were captured at the time, so the work now is stopping the recurrence.");
 
         var rem = new StringBuilder(
@@ -1400,7 +1416,7 @@ public static class FactAdvice
 
         return fallback with
         {
-            Headline = $"{Plural(count.Value, "deadlock")} this window: sessions killed and rolled back over circular lock waits",
+            Headline = $"{counted} this window: sessions killed and rolled back over circular lock waits",
             Investigation = inv.ToString(),
             Remediation = rem.ToString()
         };
