@@ -13,6 +13,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
@@ -450,6 +451,153 @@ public sealed class FinOpsServerInventoryTests : IDisposable
         Assert.Equal(listed.DisplayName, only.ServerName);
         Assert.Equal(35m, only.AvgCpuPct);
         Assert.DoesNotContain(rows, r => r.ServerName == removed.DisplayName);
+    }
+
+    private static Task<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>> Overlay(Dictionary<int, LocalDataService.ServerMetricsRow> metrics) =>
+        Task.FromResult<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>(metrics);
+
+    /// <summary>A live row whose own read brought a storage total, as the live inventory read does.</summary>
+    private static Task<ServerPropertyRow> LiveWithStorage(ServerConnection server) =>
+        Task.FromResult(new ServerPropertyRow { Edition = "Enterprise Edition", CpuCount = 8, StorageTotalGb = 500m });
+
+    /// <summary>What a row shows from the collected overlay: its five values, and the words and tooltips of its Status and Health cells.</summary>
+    private static string OverlayCells(ServerPropertyRow row) =>
+        $"{row.ServerName}: cpu={row.AvgCpuPct?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "(none)"}"
+        + $", storage={row.StorageTotalGb?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "(none)"}"
+        + $", idle={row.IdleDbCount?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "(none)"}"
+        + $", status=\"{row.ProvisioningDisplay}\" ({row.ProvisioningNote ?? "no tooltip"})"
+        + $", health=\"{row.HealthDisplay}\" ({row.HealthScoreNote ?? "no tooltip"})";
+
+    /// <summary>A row with a verdict and a score, then a good re-read whose entry for the server has neither (its last CPU sample
+    /// left the 24-hour window): the Status and Health cells read "Not collected", and the average CPU is gone with them.</summary>
+    [Fact]
+    public async Task AGoodReRead_WhoseEntryHasNoStatusOrScore_ReadsNotCollected()
+    {
+        var server = Server("inv-reread-aged-out");
+        var rows = (await FinOpsServerInventory.BuildAsync(new[] { server }, Live, NoCollected, () => Overlay(new()
+        {
+            [IdOf(server)] = new(AvgCpuPct: 42m, StorageTotalGb: 7m, IdleDbCount: 3, ProvisioningStatus: ProvisioningVerdict.RightSized, HealthScore: 88),
+        }))).Rows;
+        var row = Assert.Single(rows);
+        Assert.Equal(ProvisioningVerdict.StatusLabel(ProvisioningVerdict.RightSized), row.ProvisioningDisplay);
+        Assert.Equal("88", row.HealthDisplay);
+
+        FinOpsServerInventory.ReapplyCollectedMetrics(rows, new Dictionary<int, LocalDataService.ServerMetricsRow>
+        {
+            [IdOf(server)] = new(AvgCpuPct: null, StorageTotalGb: 7m, IdleDbCount: 3, ProvisioningStatus: null, HealthScore: null),
+        });
+
+        Assert.Equal("Not collected", row.ProvisioningDisplay);
+        Assert.Equal("Not collected", row.HealthDisplay);
+        Assert.Null(row.ProvisioningStatus);
+        Assert.Null(row.HealthScore);
+        Assert.Null(row.AvgCpuPct);
+        Assert.Equal(7m, row.StorageTotalGb);
+        Assert.Equal(3, row.IdleDbCount);
+        Assert.False(row.OverlayReadFailed);
+    }
+
+    /// <summary>A good re-read with no entry at all for a server lays its row as a load does: none of the overlay's values, and
+    /// Status and Health cells that read "Not collected".</summary>
+    [Fact]
+    public async Task AGoodReRead_WithNoEntryForTheServer_ReadsNotCollected()
+    {
+        var server = Server("inv-reread-no-entry");
+        var rows = (await FinOpsServerInventory.BuildAsync(new[] { server }, Live, NoCollected, () => Overlay(new()
+        {
+            [IdOf(server)] = new(AvgCpuPct: 42m, StorageTotalGb: 7m, IdleDbCount: 3, ProvisioningStatus: ProvisioningVerdict.RightSized, HealthScore: 88),
+        }))).Rows;
+        var row = Assert.Single(rows);
+
+        FinOpsServerInventory.ReapplyCollectedMetrics(rows, new Dictionary<int, LocalDataService.ServerMetricsRow>());
+
+        Assert.Equal("Not collected", row.ProvisioningDisplay);
+        Assert.Equal("Not collected", row.HealthDisplay);
+        AssertOverlayBlank(row);
+        Assert.Null(row.HealthScore);
+        Assert.False(row.OverlayReadFailed);
+    }
+
+    /// <summary>After a good re-read every row shows what a load over the same overlay shows it. Four servers, each with every
+    /// value at first: one whose newer entry holds nothing, one with no newer entry, one built from the store whose newer entry
+    /// has a verdict and no score or storage total, and one whose newer entry changes every value. A live row whose newer entry
+    /// has no storage total reads the total its own read brought, as a load shows it.</summary>
+    [Fact]
+    public async Task AGoodReRead_ShowsEachRowWhatALoadOverTheSameOverlayShows()
+    {
+        var emptied = Server("inv-reread-emptied");
+        var dropped = Server("inv-reread-dropped");
+        var offline = Server("inv-reread-offline");
+        var changed = Server("inv-reread-changed");
+        var servers = new[] { emptied, dropped, offline, changed };
+
+        Task<ServerPropertyRow> ReadLive(ServerConnection server) =>
+            server == offline ? throw new InvalidOperationException("planted live failure") : LiveWithStorage(server);
+        Task<ServerPropertiesRow?> ReadCollected(ServerConnection server) =>
+            Task.FromResult<ServerPropertiesRow?>(server == offline ? Collected() : null);
+
+        var earlier = servers.ToDictionary(IdOf, _ => new LocalDataService.ServerMetricsRow(
+            AvgCpuPct: 42m, StorageTotalGb: 7m, IdleDbCount: 3, ProvisioningStatus: ProvisioningVerdict.RightSized, HealthScore: 88));
+        var newer = new Dictionary<int, LocalDataService.ServerMetricsRow>
+        {
+            [IdOf(emptied)] = new(AvgCpuPct: null, StorageTotalGb: null, IdleDbCount: null, ProvisioningStatus: null),
+            [IdOf(offline)] = new(AvgCpuPct: 12m, StorageTotalGb: null, IdleDbCount: 1, ProvisioningStatus: ProvisioningVerdict.OverProvisioned),
+            [IdOf(changed)] = new(AvgCpuPct: 55m, StorageTotalGb: 9m, IdleDbCount: 0, ProvisioningStatus: ProvisioningVerdict.OverProvisioned, HealthScore: 61),
+        };
+
+        var reRead = (await FinOpsServerInventory.BuildAsync(servers, ReadLive, ReadCollected, () => Overlay(earlier))).Rows;
+        Assert.All(reRead, r => Assert.Equal(7m, r.StorageTotalGb));
+        FinOpsServerInventory.ReapplyCollectedMetrics(reRead, newer);
+
+        var loaded = (await FinOpsServerInventory.BuildAsync(servers, ReadLive, ReadCollected, () => Overlay(newer))).Rows;
+
+        Assert.Equal(loaded.Select(OverlayCells), reRead.Select(OverlayCells));
+        Assert.All(reRead, r => Assert.False(r.OverlayReadFailed));
+
+        /* What the load shows, said once in the test's own words, so the comparison above cannot pass on two wrong rows. */
+        Assert.Equal(500m, reRead[0].StorageTotalGb);
+        Assert.Equal("Not collected", reRead[0].ProvisioningDisplay);
+        Assert.Equal(500m, reRead[1].StorageTotalGb);
+        Assert.Equal("Not collected", reRead[1].HealthDisplay);
+        Assert.Null(reRead[2].StorageTotalGb);
+        Assert.Equal("No memory sample", reRead[2].HealthDisplay);
+        Assert.Equal(9m, reRead[3].StorageTotalGb);
+        Assert.Equal("61", reRead[3].HealthDisplay);
+    }
+
+    /// <summary>A failed re-read says nothing about any server: a row keeps the values it has, a cell with no value reads "Could
+    /// not read", and the next good re-read puts "Not collected" back.</summary>
+    [Fact]
+    public async Task AFailedReRead_KeepsTheValuesTheRowsHave_AndACellWithNoneReadsCouldNotRead()
+    {
+        var sampled = Server("inv-reread-failed-sampled");
+        var unsampled = Server("inv-reread-failed-unsampled");
+        var metrics = new Dictionary<int, LocalDataService.ServerMetricsRow>
+        {
+            [IdOf(sampled)] = new(AvgCpuPct: 42m, StorageTotalGb: 7m, IdleDbCount: 3, ProvisioningStatus: ProvisioningVerdict.RightSized, HealthScore: 88),
+        };
+        var rows = (await FinOpsServerInventory.BuildAsync(new[] { sampled, unsampled }, Live, NoCollected, () => Overlay(metrics))).Rows;
+        var before = OverlayCells(rows[0]);
+
+        AppLogger.DrainBufferedLines();
+        var (overlay, readFailed) = await FinOpsServerInventory.TryReadCollectedMetricsAsync(() => throw new InvalidOperationException("planted overlay failure"));
+        AppLogger.DrainBufferedLines();
+        Assert.True(readFailed);
+        FinOpsServerInventory.ReapplyCollectedMetrics(rows, overlay, readFailed);
+
+        Assert.Equal(before, OverlayCells(rows[0]));
+        Assert.Equal(88, rows[0].HealthScore);
+        Assert.Equal(ProvisioningVerdict.RightSized, rows[0].ProvisioningStatus);
+        Assert.All(rows, r => Assert.True(r.OverlayReadFailed));
+        Assert.Equal("Could not read", rows[1].ProvisioningDisplay);
+        Assert.Equal("Could not read", rows[1].HealthDisplay);
+
+        FinOpsServerInventory.ReapplyCollectedMetrics(rows, metrics);
+
+        Assert.Equal(before, OverlayCells(rows[0]));
+        Assert.All(rows, r => Assert.False(r.OverlayReadFailed));
+        Assert.Equal("Not collected", rows[1].ProvisioningDisplay);
+        Assert.Equal("Not collected", rows[1].HealthDisplay);
     }
 
     private static void Exec(DuckDBConnection conn, string sql, params object[] values)

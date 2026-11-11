@@ -368,6 +368,57 @@ public sealed class FinOpsServerInventoryCellsTests : IDisposable
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
+    /// <summary>A server's CPU samples leave the 24-hour window while its row is on screen, as they do when its collection stops.
+    /// The next overlay re-read takes the verdict and the score off the row, and both cells read "Not collected", as a load of
+    /// the same store shows them.</summary>
+    [Fact]
+    public async Task AnOverlayReRead_AfterTheCpuSamplesLeaveTheWindow_ReadsNotCollected()
+    {
+        var server = Unreachable("inv-cells-aged-out", 1);
+        var initializer = await StoreAsync((server, null));
+        await SeedCpuAndMemoryAsync(server);
+
+        var problems = OnTheInventory(new LocalDataService(initializer), new[] { server }, async (tab, window, grid) =>
+        {
+            var found = new List<string>();
+            if (grid.Items.Count != 1 || grid.Items[0] is not ServerPropertyRow row)
+            {
+                found.Add($"the inventory lists {grid.Items.Count} servers, not the one");
+                return found;
+            }
+
+            if (string.IsNullOrEmpty(row.ProvisioningStatus) || row.HealthScore is null)
+            {
+                found.Add($"the load brought the verdict \"{row.ProvisioningStatus}\" and the score {row.HealthScore?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "(none)"}, so the test cannot read both leaving the row");
+                return found;
+            }
+
+            await MoveCpuSamplesOutOfTheWindowAsync(server);
+            await (Task)typeof(FinOpsTab).GetMethod("ReReadServerInventoryOverlayAsync", Instance)!.Invoke(tab, null)!;
+            Settle(window);
+
+            foreach (var header in new[] { "Status", "Health" })
+            {
+                var text = CellText(grid, row, header);
+                if (text != "Not collected")
+                {
+                    found.Add($"after the re-read the {header} cell reads \"{text}\", not \"Not collected\": the last 24 hours hold no CPU sample for the server");
+                }
+            }
+
+            var statusColumn = grid.Columns.First(c => HeaderText(c) == "Status");
+            var tip = (statusColumn.GetCellContent(row) as TextBlock)?.ToolTip as string;
+            if (tip != "No CPU sample in the last 24 hours")
+            {
+                found.Add($"after the re-read the Status cell has the tooltip \"{tip}\", not \"No CPU sample in the last 24 hours\"");
+            }
+
+            return found;
+        });
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
     /// <summary>A row's Last Updated is an instant in UTC. With no clock of its own (a row nothing stamped) it reads the active
     /// tab's clock in Server Time and UTC in UTC, as the other FinOps rows that word their own times do.</summary>
     [Fact]
@@ -439,6 +490,35 @@ public sealed class FinOpsServerInventoryCellsTests : IDisposable
         memory.Parameters.Add(new DuckDBParameter { Value = IdOf(server) });
         memory.Parameters.Add(new DuckDBParameter { Value = server.ServerName });
         await memory.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>Replaces <paramref name="server"/>'s CPU samples with twenty that are all older than 24 hours: what the store holds a
+    /// day after the server's collection stopped. Its memory row stays.</summary>
+    private async Task MoveCpuSamplesOutOfTheWindowAsync(ServerConnection server)
+    {
+        using var conn = new DuckDBConnection($"Data Source={Path.Combine(_tempDir, "inventory.duckdb")}");
+        await conn.OpenAsync(TestContext.Current.CancellationToken);
+
+        using (var remove = conn.CreateCommand())
+        {
+            remove.CommandText = "DELETE FROM cpu_utilization_stats WHERE server_id = $1";
+            remove.Parameters.Add(new DuckDBParameter { Value = IdOf(server) });
+            await remove.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        var dayAgo = DateTime.UtcNow.AddHours(-25);
+        for (var i = 0; i < 20; i++)
+        {
+            using var cpu = conn.CreateCommand();
+            cpu.CommandText = @"INSERT INTO cpu_utilization_stats
+                                  (collection_id, collection_time, server_id, server_name, sample_time, sample_time_utc, sqlserver_cpu_utilization, other_process_cpu_utilization)
+                                VALUES ($1, $2, $3, $4, $2, $2, 40, 3)";
+            cpu.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+            cpu.Parameters.Add(new DuckDBParameter { Value = dayAgo.AddMinutes(-10 * (i + 1)) });
+            cpu.Parameters.Add(new DuckDBParameter { Value = IdOf(server) });
+            cpu.Parameters.Add(new DuckDBParameter { Value = server.ServerName });
+            await cpu.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
     }
 
     /// <summary>
