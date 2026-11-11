@@ -129,11 +129,10 @@ internal static class DarlingOversizedPlanBacklogReader
     /// still answers, by sorting.</para>
     /// </summary>
     public const string PerServerRollupSql = @"
-WITH agg AS (
+WITH held AS (
 SELECT
     b.server_id                                                              AS server_id,
-    s.server_name                                                            AS server_name,
-    count(*)                                                                 AS total_rows,
+    count(*)                                                                 AS held_rows,
     count(*) FILTER (WHERE " + PendingPredicate + @")                        AS pending_rows,
     count(*) FILTER (WHERE b.captured_at IS NOT NULL)                        AS captured_rows,
     count(*) FILTER (WHERE b.captured_at IS NULL
@@ -162,19 +161,65 @@ SELECT
     count(*) FILTER (WHERE b.captured_at IS NULL
                      AND   b.expired_at >= $2
                      AND   b.last_attempt_at IS NOT NULL)                    AS rows_expired_last_day,
-    count(*) FILTER (WHERE " + DroppedPredicate + @")                        AS dropped_rows,
+    count(*) FILTER (WHERE " + DroppedPredicate + @")                        AS held_dropped_rows,
     count(*) FILTER (WHERE " + DroppedPredicate + @"
-                     AND   b.expired_at >= $2)                               AS rows_dropped_last_day
+                     AND   b.expired_at >= $2)                               AS held_dropped_last_day
 FROM " + OversizedPlanBacklog.TableName + @" AS b
-LEFT JOIN servers AS s
-  ON s.server_id = b.server_id
 WHERE ($1::integer IS NULL OR b.server_id = $1)
 GROUP BY
-    b.server_id,
-    s.server_name)
+    b.server_id),
+dropped AS (
+SELECT
+    d.server_id                                                              AS server_id,
+    sum(d.rows_dropped)                                                      AS counted_dropped_rows,
+    coalesce(sum(d.rows_dropped) FILTER (WHERE d.hour_start >= $3), 0)
+                                                                             AS counted_dropped_last_day,
+    coalesce(sum(d.rows_first_seen) FILTER (WHERE d.hour_start >= $3), 0)
+                                                                             AS counted_added_last_day,
+    coalesce(sum(d.rows_dropped) FILTER (WHERE d.collector_name = '" + OversizedPlanBacklog.QueryStatsCollectorName + @"'), 0)
+                                                                             AS counted_query_stats_rows,
+    coalesce(sum(d.rows_dropped) FILTER (WHERE d.collector_name = '" + OversizedPlanBacklog.ProcedureStatsCollectorName + @"'), 0)
+                                                                             AS counted_procedure_stats_rows
+FROM " + OversizedPlanBacklog.DropCountsTableName + @" AS d
+WHERE ($1::integer IS NULL OR d.server_id = $1)
+GROUP BY
+    d.server_id),
+agg AS (
+SELECT
+    coalesce(h.server_id, d.server_id)                                       AS server_id,
+    coalesce(h.held_rows, 0)                                                 AS held_rows,
+    coalesce(h.held_rows, 0) + coalesce(d.counted_dropped_rows, 0)           AS total_rows,
+    coalesce(h.pending_rows, 0)                                              AS pending_rows,
+    coalesce(h.captured_rows, 0)                                             AS captured_rows,
+    coalesce(h.expired_rows, 0)                                              AS expired_rows,
+    coalesce(h.rows_with_content, 0)                                         AS rows_with_content,
+    coalesce(h.query_stats_rows, 0) + coalesce(d.counted_query_stats_rows, 0)
+                                                                             AS query_stats_rows,
+    coalesce(h.procedure_stats_rows, 0) + coalesce(d.counted_procedure_stats_rows, 0)
+                                                                             AS procedure_stats_rows,
+    coalesce(h.pending_rows_attempted, 0)                                    AS pending_rows_attempted,
+    coalesce(h.pending_attempts, 0)                                          AS pending_attempts,
+    coalesce(h.max_attempts_on_a_pending_row, 0)                             AS max_attempts_on_a_pending_row,
+    h.oldest_first_seen_at                                                   AS oldest_first_seen_at,
+    h.last_seen_at                                                           AS last_seen_at,
+    h.last_attempt_at                                                        AS last_attempt_at,
+    h.last_captured_at                                                       AS last_captured_at,
+    h.last_expired_at                                                        AS last_expired_at,
+    h.min_observed_bytes                                                     AS min_observed_bytes,
+    h.max_observed_bytes                                                     AS max_observed_bytes,
+    coalesce(h.rows_added_last_day, 0) + coalesce(d.counted_added_last_day, 0)
+                                                                             AS rows_added_last_day,
+    coalesce(h.rows_captured_last_day, 0)                                    AS rows_captured_last_day,
+    coalesce(h.rows_expired_last_day, 0)                                     AS rows_expired_last_day,
+    coalesce(h.held_dropped_rows, 0) + coalesce(d.counted_dropped_rows, 0)   AS dropped_rows,
+    coalesce(h.held_dropped_last_day, 0) + coalesce(d.counted_dropped_last_day, 0)
+                                                                             AS rows_dropped_last_day
+FROM held AS h
+FULL JOIN dropped AS d
+  ON d.server_id = h.server_id)
 SELECT
     agg.server_id,
-    agg.server_name,
+    s.server_name,
     agg.total_rows,
     agg.pending_rows,
     agg.captured_rows,
@@ -199,13 +244,15 @@ SELECT
     agg.dropped_rows,
     agg.rows_dropped_last_day
 FROM agg
+LEFT JOIN servers AS s
+  ON s.server_id = agg.server_id
 LEFT JOIN LATERAL
 (
     SELECT m.observed_bytes
     FROM " + OversizedPlanBacklog.TableName + @" AS m
     WHERE m.server_id = agg.server_id
     ORDER BY m.observed_bytes
-    OFFSET ((agg.total_rows + 1) / 2 - 1)
+    OFFSET greatest((agg.held_rows + 1) / 2 - 1, 0)
     LIMIT 1
 ) AS med ON true
 ORDER BY
@@ -230,10 +277,10 @@ ORDER BY
     /// wrong on one of the two stores whichever way they guess.</para>
     /// </summary>
     public const string CollectorCensusSql = @"
-WITH agg AS (
+WITH held AS (
 SELECT
     b.collector_name                                                         AS collector_name,
-    count(*)                                                                 AS total_rows,
+    count(*)                                                                 AS held_rows,
     count(*) FILTER (WHERE " + PendingPredicate + @")                        AS pending_rows,
     count(*) FILTER (WHERE b.captured_at IS NOT NULL)                        AS captured_rows,
     count(*) FILTER (WHERE b.captured_at IS NULL
@@ -243,10 +290,17 @@ SELECT
     max(b.expired_at) FILTER (WHERE b.last_attempt_at IS NOT NULL)           AS last_expired_at,
     min(b.observed_bytes)                                                    AS min_observed_bytes,
     max(b.observed_bytes)                                                    AS max_observed_bytes,
-    count(*) FILTER (WHERE " + DroppedPredicate + @")                        AS dropped_rows
+    count(*) FILTER (WHERE " + DroppedPredicate + @")                        AS held_dropped_rows
 FROM " + OversizedPlanBacklog.TableName + @" AS b
 GROUP BY
     b.collector_name),
+dropped AS (
+SELECT
+    d.collector_name                                                         AS collector_name,
+    sum(d.rows_dropped)                                                      AS counted_dropped_rows
+FROM " + OversizedPlanBacklog.DropCountsTableName + @" AS d
+GROUP BY
+    d.collector_name),
 sv AS (
 SELECT
     x.collector_name,
@@ -256,12 +310,32 @@ FROM
     SELECT b.collector_name, b.server_id
     FROM " + OversizedPlanBacklog.TableName + @" AS b
     GROUP BY b.collector_name, b.server_id
+    UNION
+    SELECT d.collector_name, d.server_id
+    FROM " + OversizedPlanBacklog.DropCountsTableName + @" AS d
+    WHERE d.rows_dropped > 0
 ) AS x
 GROUP BY
-    x.collector_name)
+    x.collector_name),
+agg AS (
+SELECT
+    coalesce(h.collector_name, d.collector_name)                             AS collector_name,
+    coalesce(h.held_rows, 0)                                                 AS held_rows,
+    coalesce(h.held_rows, 0) + coalesce(d.counted_dropped_rows, 0)           AS total_rows,
+    coalesce(h.pending_rows, 0)                                              AS pending_rows,
+    coalesce(h.captured_rows, 0)                                             AS captured_rows,
+    coalesce(h.expired_rows, 0)                                              AS expired_rows,
+    h.last_captured_at                                                       AS last_captured_at,
+    h.last_expired_at                                                        AS last_expired_at,
+    h.min_observed_bytes                                                     AS min_observed_bytes,
+    h.max_observed_bytes                                                     AS max_observed_bytes,
+    coalesce(h.held_dropped_rows, 0) + coalesce(d.counted_dropped_rows, 0)   AS dropped_rows
+FROM held AS h
+FULL JOIN dropped AS d
+  ON d.collector_name = h.collector_name)
 SELECT
     agg.collector_name,
-    sv.servers,
+    coalesce(sv.servers, 0)                                                  AS servers,
     agg.total_rows,
     agg.pending_rows,
     agg.captured_rows,
@@ -273,7 +347,7 @@ SELECT
     agg.max_observed_bytes,
     agg.dropped_rows
 FROM agg
-JOIN sv
+LEFT JOIN sv
   ON sv.collector_name = agg.collector_name
 LEFT JOIN LATERAL
 (
@@ -281,7 +355,7 @@ LEFT JOIN LATERAL
     FROM " + OversizedPlanBacklog.TableName + @" AS m
     WHERE m.collector_name = agg.collector_name
     ORDER BY m.observed_bytes
-    OFFSET ((agg.total_rows + 1) / 2 - 1)
+    OFFSET greatest((agg.held_rows + 1) / 2 - 1, 0)
     LIMIT 1
 ) AS med ON true
 ORDER BY
@@ -294,10 +368,10 @@ ORDER BY
     /// one server cannot ride <c>idx_oversized_plan_backlog_collector_bytes</c>, which holds no server.
     /// </summary>
     public const string CollectorCensusForServerSql = @"
+WITH held AS (
 SELECT
     b.collector_name                                                         AS collector_name,
-    count(DISTINCT b.server_id)                                              AS servers,
-    count(*)                                                                 AS total_rows,
+    count(*)                                                                 AS held_rows,
     count(*) FILTER (WHERE " + PendingPredicate + @")                        AS pending_rows,
     count(*) FILTER (WHERE b.captured_at IS NOT NULL)                        AS captured_rows,
     count(*) FILTER (WHERE b.captured_at IS NULL
@@ -308,14 +382,38 @@ SELECT
     min(b.observed_bytes)                                                    AS min_observed_bytes,
     percentile_disc(0.5) WITHIN GROUP (ORDER BY b.observed_bytes)            AS median_observed_bytes,
     max(b.observed_bytes)                                                    AS max_observed_bytes,
-    count(*) FILTER (WHERE " + DroppedPredicate + @")                        AS dropped_rows
+    count(*) FILTER (WHERE " + DroppedPredicate + @")                        AS held_dropped_rows
 FROM " + OversizedPlanBacklog.TableName + @" AS b
-WHERE ($1::integer IS NULL OR b.server_id = $1)
+WHERE b.server_id = $1
 GROUP BY
-    b.collector_name
+    b.collector_name),
+dropped AS (
+SELECT
+    d.collector_name                                                         AS collector_name,
+    sum(d.rows_dropped)                                                      AS counted_dropped_rows
+FROM " + OversizedPlanBacklog.DropCountsTableName + @" AS d
+WHERE d.server_id = $1
+GROUP BY
+    d.collector_name)
+SELECT
+    coalesce(h.collector_name, d.collector_name)                             AS collector_name,
+    1                                                                        AS servers,
+    coalesce(h.held_rows, 0) + coalesce(d.counted_dropped_rows, 0)           AS total_rows,
+    coalesce(h.pending_rows, 0)                                              AS pending_rows,
+    coalesce(h.captured_rows, 0)                                             AS captured_rows,
+    coalesce(h.expired_rows, 0)                                              AS expired_rows,
+    h.last_captured_at                                                       AS last_captured_at,
+    h.last_expired_at                                                        AS last_expired_at,
+    h.min_observed_bytes                                                     AS min_observed_bytes,
+    h.median_observed_bytes                                                  AS median_observed_bytes,
+    h.max_observed_bytes                                                     AS max_observed_bytes,
+    coalesce(h.held_dropped_rows, 0) + coalesce(d.counted_dropped_rows, 0)   AS dropped_rows
+FROM held AS h
+FULL JOIN dropped AS d
+  ON d.collector_name = h.collector_name
 ORDER BY
     total_rows DESC,
-    b.collector_name";
+    collector_name";
 
     /// <summary>
     /// One server's rows ($1 = server_id, $2 = row cap), largest plan first — the claim key, the plan's
@@ -388,14 +486,14 @@ LIMIT $2";
         long PendingRowsAttempted,
         long PendingAttempts,
         int MaxAttemptsOnAPendingRow,
-        DateTime OldestFirstSeenAt,
-        DateTime LastSeenAt,
+        DateTime? OldestFirstSeenAt,
+        DateTime? LastSeenAt,
         DateTime? LastAttemptAt,
         DateTime? LastCapturedAt,
         DateTime? LastExpiredAt,
-        long MinObservedBytes,
-        long MedianObservedBytes,
-        long MaxObservedBytes,
+        long? MinObservedBytes,
+        long? MedianObservedBytes,
+        long? MaxObservedBytes,
         long RowsAddedLastDay,
         long RowsCapturedLastDay,
         long RowsExpiredLastDay,
@@ -412,9 +510,9 @@ LIMIT $2";
         long ExpiredRows,
         DateTime? LastCapturedAt,
         DateTime? LastExpiredAt,
-        long MinObservedBytes,
-        long MedianObservedBytes,
-        long MaxObservedBytes,
+        long? MinObservedBytes,
+        long? MedianObservedBytes,
+        long? MaxObservedBytes,
         long DroppedRows);
 
     /// <summary>One backlog row: the claim key, the plan's identity, and every stamp.</summary>
@@ -438,6 +536,10 @@ LIMIT $2";
         /// <summary>This row's bucket — see <see cref="VerdictOf"/>.</summary>
         public string Verdict => VerdictOf(CapturedAt, ExpiredAt, LastAttemptAt);
     }
+
+    /// <summary>#8691: the top of the hour <paramref name="lastDaySince"/> falls in, where the per-hour drop counts of the last day start.</summary>
+    public static DateTime DayStartHour(DateTime lastDaySince) =>
+        new(lastDaySince.Year, lastDaySince.Month, lastDaySince.Day, lastDaySince.Hour, 0, 0, DateTimeKind.Unspecified);
 
     /// <summary>
     /// #8404: how many sweep passes FINISHED in the day before the read, from the run records the sweep writes under
@@ -482,6 +584,8 @@ AND   collection_time >= $3";
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(serverId.HasValue ? serverId.Value : (object)DBNull.Value);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(lastDaySince, DateTimeKind.Unspecified));
+        // #8691: the drop counts are kept per hour, so their day starts at the top of the hour the day starts in.
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(DayStartHour(lastDaySince), DateTimeKind.Unspecified));
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -499,14 +603,14 @@ AND   collection_time >= $3";
                 reader.GetInt64(9),
                 reader.GetInt64(10),
                 reader.GetInt32(11),
-                reader.GetDateTime(12),
-                reader.GetDateTime(13),
+                reader.IsDBNull(12) ? null : reader.GetDateTime(12),
+                reader.IsDBNull(13) ? null : reader.GetDateTime(13),
                 reader.IsDBNull(14) ? null : reader.GetDateTime(14),
                 reader.IsDBNull(15) ? null : reader.GetDateTime(15),
                 reader.IsDBNull(16) ? null : reader.GetDateTime(16),
-                reader.GetInt64(17),
-                reader.GetInt64(18),
-                reader.GetInt64(19),
+                reader.IsDBNull(17) ? null : reader.GetInt64(17),
+                reader.IsDBNull(18) ? null : reader.GetInt64(18),
+                reader.IsDBNull(19) ? null : reader.GetInt64(19),
                 reader.GetInt64(20),
                 reader.GetInt64(21),
                 reader.GetInt64(22),
@@ -542,9 +646,9 @@ AND   collection_time >= $3";
                 reader.GetInt64(5),
                 reader.IsDBNull(6) ? null : reader.GetDateTime(6),
                 reader.IsDBNull(7) ? null : reader.GetDateTime(7),
-                reader.GetInt64(8),
-                reader.GetInt64(9),
-                reader.GetInt64(10),
+                reader.IsDBNull(8) ? null : reader.GetInt64(8),
+                reader.IsDBNull(9) ? null : reader.GetInt64(9),
+                reader.IsDBNull(10) ? null : reader.GetInt64(10),
                 reader.GetInt64(11)));
         }
 

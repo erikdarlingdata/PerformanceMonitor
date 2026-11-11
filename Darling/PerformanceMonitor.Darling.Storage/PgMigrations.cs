@@ -3467,6 +3467,8 @@ $rung$;";
         new Migration(WebAccessGroupSchema.Version, "viewer-managed-web-access-groups", V261Sql),
         new Migration(WebAccessAdvancedSchema.Version, "advanced-web-access-opt-in", WebAccessAdvancedSchema.CreateSql),
         new Migration(263, "job-history-oldest-daily-rollup", V263Sql),
+        /* V264 (#8691): the per-hour counts of oversized-plan backlog rows the trim deletes. A new table only: no existing row moves. */
+        new Migration(264, "oversized-plan-backlog-dropped-counts", OversizedPlanBacklog.CreateDropCountsTableSql),
     };
 
     /* V256 (#7643): schema tracking. Versioned table and view definitions, kept by the schema_objects collector (Darling only).
