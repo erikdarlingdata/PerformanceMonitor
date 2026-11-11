@@ -972,8 +972,21 @@ public sealed partial class ViewerDataService
                kept beside it as the tier-1 proxy for rows collected before it existed — both in the key
                rather than a COALESCE, because the id is NULL on exactly the pre-tier-2 generation and
                non-NULL on exactly the post-tier-2 one, so the two can never collide and a legacy-only
-               window degrades to precisely tier 1's key. Twins Lite's GetQueryStoreSlicerDataAsync. */
-            SELECT
+               window degrades to precisely tier 1's key. Twins Lite's GetQueryStoreSlicerDataAsync.
+
+               #8549: the same rule, written so a compressed store reads it cheaply. On a field store of
+               3.5 million raw rows (12 compressed chunks, 5 raw, 30-day window) the window-function form took
+               14.5 s at work_mem 64MB. 7.9 s of that was the per-chunk sorts, on a key whose FIRST column was
+               database_name, a text column with a handful of values; with the integer columns first they took 2.9 s.
+               The key now leads with query_id, plan_id, runtime_stats_interval_id and first_execution_time, and
+               the text columns follow. A key is the same set of columns in any order, so the same rows are
+               grouped. DISTINCT ON keeps the FIRST row of each key
+               in the ORDER BY below, which is exactly what ROW_NUMBER() = 1 kept: the newest collection_time, then the
+               highest execution_count, a NULL count first because a descending sort puts NULLs first. It is also
+               a node the planner sizes from column statistics, where the window's rn = 1 filter was sized by a
+               default 0.5 percent guess (12,533 rows estimated, 1,767,500 returned) that made the bucket step a
+               1.77-million-row external sort. */
+            SELECT DISTINCT ON (query_id, plan_id, runtime_stats_interval_id, first_execution_time, database_name, execution_type_desc, replica_role)
                 collection_time,
                 interval_start_time_utc,
                 query_id,
@@ -982,12 +995,7 @@ public sealed partial class ViewerDataService
                 avg_duration_us,
                 avg_logical_io_reads,
                 avg_logical_io_writes,
-                avg_physical_io_reads,
-                ROW_NUMBER() OVER
-                (
-                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-                    ORDER BY collection_time DESC, execution_count DESC
-                ) AS rn
+                avg_physical_io_reads
             FROM query_store_stats
             WHERE server_id = $1
             /* The window is filtered on the SAME expression the bars are keyed on (#1892). It used to filter
@@ -1020,8 +1028,9 @@ public sealed partial class ViewerDataService
             AND   collection_time >= $2 - {{CollectionFloorSlackSql}}
             AND   collection_time <= $3 + {{CollectionCeilingSql}}
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        )
-        SELECT
+            ORDER BY query_id, plan_id, runtime_stats_interval_id, first_execution_time, database_name, execution_type_desc, replica_role, collection_time DESC, execution_count DESC
+        ),
+        binned AS (
             /* The bar sits in the hour the work RAN, not the hour it was last COLLECTED (#1841 tier 2).
                Query Store's default interval is 60 minutes and the closing fetch lands in the cycle AFTER
                the interval ends, so a collection_time bucket was reliably one bar late.
@@ -1029,16 +1038,37 @@ public sealed partial class ViewerDataService
                (the same clock as collection_time), so this is a placement fix and not a timezone trade.
                Legacy rows have no interval start and keep collection_time placement, so a window spanning
                the upgrade renders correctly on both sides and the lag disappears as those rows age out. */
-            date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), {{TrendBucketSql.OriginSql}}) AS bucket,
-            COUNT(DISTINCT query_id) AS query_count,
-            COALESCE(SUM(CAST(avg_cpu_time_us AS double precision) * execution_count), 0) / 1000.0 AS total_cpu_ms,
-            COALESCE(SUM(CAST(avg_duration_us AS double precision) * execution_count), 0) / 1000.0 AS total_duration_ms,
-            COALESCE(SUM(CAST(avg_logical_io_reads AS double precision) * execution_count), 0) AS total_reads,
-            COALESCE(SUM(CAST(avg_logical_io_writes AS double precision) * execution_count), 0) AS total_writes,
-            COALESCE(SUM(CAST(avg_physical_io_reads AS double precision) * execution_count), 0) AS total_physical_reads
-        FROM deduped
-        WHERE rn = 1
-        GROUP BY 1
+            SELECT
+                query_id,
+                date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), {{TrendBucketSql.OriginSql}}) AS bucket,
+                CAST(avg_cpu_time_us AS double precision) * execution_count AS cpu,
+                CAST(avg_duration_us AS double precision) * execution_count AS dur,
+                CAST(avg_logical_io_reads AS double precision) * execution_count AS reads,
+                CAST(avg_logical_io_writes AS double precision) * execution_count AS writes,
+                CAST(avg_physical_io_reads AS double precision) * execution_count AS preads
+            FROM deduped
+        ),
+        flagged AS (
+            /* #8549: the bucket step used to be COUNT(DISTINCT query_id), an aggregate PostgreSQL can only run
+               over input sorted by (bucket, query_id) -- a 1.77-million-row external sort (128 MB of temp files)
+               on the field store, under a GROUP BY it could not hash. The deduped rows arrive sorted by query_id,
+               so numbering each query's rows within a bucket is a sort of about 100 rows at a time (an Incremental
+               Sort), and the bucket totals are then a plain hash aggregate over the bucket. qrn = 1 marks the
+               first row of each query_id inside a bucket, so counting those rows is COUNT(DISTINCT query_id):
+               a NULL query_id is never counted, as before. */
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY query_id, bucket) AS qrn
+            FROM binned
+        )
+        SELECT
+            bucket,
+            COUNT(query_id) FILTER (WHERE qrn = 1) AS query_count,
+            COALESCE(SUM(cpu), 0) / 1000.0 AS total_cpu_ms,
+            COALESCE(SUM(dur), 0) / 1000.0 AS total_duration_ms,
+            COALESCE(SUM(reads), 0) AS total_reads,
+            COALESCE(SUM(writes), 0) AS total_writes,
+            COALESCE(SUM(preads), 0) AS total_physical_reads
+        FROM flagged
+        GROUP BY bucket
         ORDER BY bucket
         """;
 
