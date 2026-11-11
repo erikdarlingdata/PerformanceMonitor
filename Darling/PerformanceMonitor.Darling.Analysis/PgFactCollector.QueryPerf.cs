@@ -1442,37 +1442,50 @@ AND   delta_execution_count > 0";
     }
 
     public const string PlanAdvisorySql = @"
-SELECT query_plan_xml, query_plan_gz
+SELECT COALESCE(r.query_plan_xml, d.query_plan_xml) AS query_plan_xml, d.query_plan_gz
 FROM
 (
-    SELECT
-        query_plan_xml,
-        query_plan_gz,
-        delta_worker_time,
-        /* #7886: one row per plan. v_query_stats holds one row per query per snapshot, and every snapshot
-           row of a cached plan resolves to the same plan XML. Without this rank the hottest plan fills all
-           ten slots and is parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count
-           multiply by its snapshot count and the two facts cover one to three plans instead of ten. The
-           plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A plan is
-           a statement's plan in one database: query_plan_hash is a shape hash that two statements with one
-           shape share, as does one statement in two databases, and a hashless row's plan_handle is shared by
-           every statement in its batch, so database_name and query_hash stay in the key. The window sorts
-           every in-window row that has a plan, plan column included, before the limit takes ten. */
-        ROW_NUMBER() OVER (PARTITION BY database_name, query_hash, COALESCE(query_plan_hash, plan_handle) ORDER BY delta_worker_time DESC) AS plan_rank
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    /* #2069: plan content written since V54 lives as gzip bytes (query_plan_gz) with the text
-       column NULL, so the presence guard and the projection both carry BOTH forms and the read
-       loop resolves text-else-gz (PayloadDimensions.ResolveContent). A guard on query_plan_xml
-       alone matches nothing on a store using the default plan_xml_compression = 'gzip', which
-       costs this collector every MISSING_INDEX and PLAN_WARNING it exists to emit. */
-    AND   (query_plan_xml IS NOT NULL OR query_plan_gz IS NOT NULL)
-) AS ranked
-WHERE plan_rank = 1
-ORDER BY delta_worker_time DESC
-LIMIT 10";
+    SELECT query_plan_xml, query_plan_digest, delta_worker_time
+    FROM
+    (
+        SELECT
+            f.query_plan_xml,
+            f.query_plan_digest,
+            f.delta_worker_time,
+            /* #7886: one row per plan. query_stats holds one row per query per snapshot, and every snapshot
+               row of a cached plan resolves to the same plan XML. Without this rank the hottest plan fills all
+               ten slots and is parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count
+               multiply by its snapshot count and the two facts cover one to three plans instead of ten. The
+               plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A plan is
+               a statement's plan in one database: query_plan_hash is a shape hash that two statements with one
+               shape share, as does one statement in two databases, and a hashless row's plan_handle is shared by
+               every statement in its batch, so database_name and query_hash stay in the key. */
+            ROW_NUMBER() OVER (PARTITION BY f.database_name, f.query_hash, COALESCE(f.query_plan_hash, f.plan_handle) ORDER BY f.delta_worker_time DESC) AS plan_rank
+        FROM query_stats AS f
+        WHERE f.server_id = $1
+        AND   f.collection_time >= $2
+        AND   f.collection_time <= $3
+        /* #8570: the window ranks every in-window row, so it ranks the table's own thin columns and carries
+           the plan's digest, not the plan. This read went through v_query_stats, which looked up query_plan_dim and
+           put each row's plan content into the rank's sort: a plan under the 2 KB TOAST limit sits inline in the
+           dimension row, so every snapshot row of every plan was sorted with its whole plan (on 67,200 rows of
+           1.4 KB plans the sort wrote 26 MB and 21 MB to disk, against 4.5 MB). The ten winners' content is read
+           by their digest after the limit. The presence guard is the view's, kept as a test on the dimension
+           row: a row has a plan when its own column or its dimension row carries one (the dimension's text
+           column or, since #2069, its gzip bytes), and a digest whose dimension row is gone has none. */
+        AND   (f.query_plan_xml IS NOT NULL
+               OR EXISTS (SELECT 1 FROM query_plan_dim AS p
+                          WHERE p.digest = f.query_plan_digest
+                          AND   (p.query_plan_xml IS NOT NULL OR p.query_plan_gz IS NOT NULL)))
+    ) AS ranked
+    WHERE plan_rank = 1
+    ORDER BY delta_worker_time DESC
+    LIMIT 10
+) AS r
+/* #2069: a plan written since V54 lives as gzip bytes (query_plan_gz) with the text column NULL, so the
+   projection carries BOTH forms and the C# side resolves text-else-gz (PayloadDimensions.ResolveContent). */
+LEFT JOIN query_plan_dim AS d ON d.digest = r.query_plan_digest
+ORDER BY r.delta_worker_time DESC";
 
     /// <summary>
     /// WS4: plan-XML advisories. Parses the already-collected query plans of the top queries by

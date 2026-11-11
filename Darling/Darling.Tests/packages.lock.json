@@ -648,11 +648,6 @@
           "System.Memory.Data": "10.0.1"
         }
       },
-      "System.Formats.Cbor": {
-        "type": "Transitive",
-        "resolved": "9.0.5",
-        "contentHash": "f8z0zGhG7Wjd58MuY1blbYA7Gx/rr2Q9x5twpw/PomDhLKGwUcnYYm9kYvv44IvrNEG3gfmPBZaiwTkNZtqkZA=="
-      },
       "System.IdentityModel.Tokens.Jwt": {
         "type": "Transitive",
         "resolved": "8.16.0",
@@ -822,6 +817,7 @@
           "PerformanceMonitor.Darling.Storage": "[3.12.0, )",
           "PerformanceMonitor.Notifications": "[3.12.0, )",
           "PerformanceMonitor.PlanAnalysis": "[3.12.0, )",
+          "System.Formats.Cbor": "[10.0.15, )",
           "System.IO.FileSystem.AccessControl": "[5.0.0, )"
         }
       },
@@ -1080,6 +1076,12 @@
           "ScottPlot": "5.1.59",
           "SkiaSharp.Views.WPF": "3.119.0"
         }
+      },
+      "System.Formats.Cbor": {
+        "type": "CentralTransitive",
+        "requested": "[10.0.15, )",
+        "resolved": "10.0.15",
+        "contentHash": "8EBB814RXFnm/Klsuil8A6r+n6zvz4L/rQ1ROamxDZDt8lIjUl0tbSGlsYzea1jr/4V3Q6TNQbWfU/C8tjwPDQ=="
       },
       "System.IO.FileSystem.AccessControl": {
         "type": "CentralTransitive",

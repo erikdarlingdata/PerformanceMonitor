@@ -375,9 +375,9 @@ public partial class ViewerServerTab
         if (_dataService.IsReadOnly)
         {
             MessageBox.Show(
-                "Purging asks the service to run the retention purge, which it does by running a command — a " +
+                "Purging asks the service to run the retention purge, which it does by running a command: a " +
                 "read-only viewer seat can't enqueue commands. The command is queued in the MONITORING STORE, " +
-                "and the purge only ever deletes from the store — never from a monitored server. Reconnect " +
+                "and the purge only ever deletes from the store, never from a monitored server. Reconnect " +
                 "with a read-write store profile to purge.",
                 "Read-Only Viewer", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
@@ -387,7 +387,7 @@ public partial class ViewerServerTab
             "Run the retention purge now?\n\n" +
             "This permanently deletes collected data older than the configured retention horizons across ALL " +
             "monitored servers (the purge is fleet-wide over the shared store). It is exactly what the service " +
-            "does automatically once a day — running it now just does it immediately. This cannot be undone.",
+            "does automatically once a day. Running it now just does it immediately. This cannot be undone.",
             "Purge Now", MessageBoxButton.YesNo, MessageBoxImage.Warning);
         if (confirm != MessageBoxResult.Yes)
         {
@@ -425,7 +425,7 @@ public partial class ViewerServerTab
         catch (ViewerReadOnlyException)
         {
             /* Grants changed under us (the enqueue already threw). */
-            PurgeNowIndicator.Text = "Read-only viewer — cannot purge";
+            PurgeNowIndicator.Text = "Read-only viewer: cannot purge";
         }
         catch (Exception ex)
         {
@@ -727,9 +727,13 @@ public partial class ViewerServerTab
     internal static void PlotCollectorDurationSeries(ScottPlot.WPF.WpfPlot chart, ChartHoverHelper? hover, IReadOnlyList<CollectorDurationSeries> series)
     {
         int colorIdx = 0;
+        /* #8644: a collector with two or three buckets has no cadence of its own to judge a gap by, so it drew a straight line across
+           hours in which nothing was collected. The spans where no collector drew a bucket break every line, as the others do. */
+        var outages = TimeSeriesGaps.OutagesAcross(series.Select(s => s.Times));
         foreach (var line in series)
         {
-            var scatter = chart.Plot.Add.TimeSeries(line.Times, line.MaxMs);
+            var (gapXs, gapYs) = TimeSeriesGaps.BreakAtGaps(line.Times, line.MaxMs, outages);
+            var scatter = chart.Plot.Add.Scatter(gapXs, gapYs);
             scatter.LegendText = line.Collector;
             scatter.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
             ChartStyle.StyleScatter(scatter);

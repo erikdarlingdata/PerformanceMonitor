@@ -223,19 +223,19 @@ public class ServerConnection : INotifyPropertyChanged
     {
         AuthenticationTypes.EntraMFA => "Microsoft Entra MFA",
         AuthenticationTypes.SqlServer => "SQL Server",
-        AuthenticationTypes.ServicePrincipal => "Azure — Service Principal",
-        AuthenticationTypes.ManagedIdentity => "Azure — Managed Identity",
+        AuthenticationTypes.ServicePrincipal => "Azure: Service Principal",
+        AuthenticationTypes.ManagedIdentity => "Azure: Managed Identity",
         /* The label names its own precondition on purpose. "Azure - Default Credential" would be
            the driver's word for it and would tell a user nothing about what it needs; this mode
            fails outright on a machine with no Azure sign-in on it, so the requirement belongs in
            the name rather than only in a failure message. */
-        AuthenticationTypes.EntraDefaultCredential => "Azure — Existing Sign-In (az login)",
+        AuthenticationTypes.EntraDefaultCredential => "Azure: Existing Sign-In (az login)",
         /* Named for what the user has to do, for the same reason as the label above it. "Device Code
            Flow" is the driver's phrase and describes a grant type; what a user needs to know before
            choosing it is that they will read a code off this screen and type it into a browser, and
            that the browser does not have to be on this machine - which is the whole reason the mode
            survives an elevated process. */
-        AuthenticationTypes.EntraDeviceCode => "Azure — Device Code (browser on any device)",
+        AuthenticationTypes.EntraDeviceCode => "Azure: Device Code (browser on any device)",
         _ => "Windows"
     };
 
@@ -314,7 +314,7 @@ public class ServerConnection : INotifyPropertyChanged
             HostChangeNotice is { Length: > 0 } notice ? notice + "\n" + CardStatus.Headline() : CardStatus.Headline(),
             /* #7590: an unreachable server says since when and why, from the in-process connection check. */
             CardStatus == ServerCardStatus.Offline ? UnreachableReason : null,
-            "It reports the connection check only, not collection freshness — the Overview card's Last Collect row bands that.",
+            "It reports the connection check only, not collection freshness. The Overview card's Last Collect row bands that.",
             DotTooltipAction,
         }.Where(line => !string.IsNullOrEmpty(line)));
 

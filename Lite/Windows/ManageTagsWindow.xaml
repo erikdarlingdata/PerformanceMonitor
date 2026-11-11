@@ -44,6 +44,8 @@
                             ToolTip="Move the selected tag one place later among its siblings"/>
                 </WrapPanel>
                 <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                  <!-- #8645: an empty list says so, as Credential Profiles does. -->
+                  <Grid>
                     <TreeView x:Name="TagTree"
                               Background="{DynamicResource BackgroundBrush}"
                               BorderThickness="0"
@@ -67,6 +69,9 @@
                             </Style>
                         </TreeView.ItemContainerStyle>
                     </TreeView>
+                    <TextBlock x:Name="NoTagsMessage" Style="{DynamicResource EmptyHint}" Margin="12,0"
+                               Text="No tags yet. Use New Tag to add one."/>
+                  </Grid>
                 </Border>
             </DockPanel>
 
@@ -93,6 +98,7 @@
                             Click="UncheckAll_Click" IsEnabled="False"/>
                 </Grid>
                 <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                  <Grid>
                     <ListBox x:Name="ServerCheckList"
                              Background="{DynamicResource BackgroundBrush}"
                              BorderThickness="0"
@@ -119,6 +125,8 @@
                             </DataTemplate>
                         </ListBox.ItemTemplate>
                     </ListBox>
+                    <TextBlock x:Name="NoServersMessage" Style="{DynamicResource EmptyHint}" Margin="12,0"/>
+                  </Grid>
                 </Border>
             </DockPanel>
         </Grid>

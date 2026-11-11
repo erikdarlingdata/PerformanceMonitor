@@ -349,7 +349,7 @@ public sealed class FleetRollup
 {
     /// <summary>The one sentence every viewer surface uses for an offline server: the Overview card, the server tab's
     /// header and the Recommendations tab (#6135).</summary>
-    public const string OfflineNote = "Offline — no recent collection";
+    public const string OfflineNote = "Offline: no recent collection";
 
     /// <summary>
     /// The default depth of the worst-first ranking (the "Needs attention" list caps at this).
@@ -1031,8 +1031,8 @@ public sealed class FleetRollup
             /* The all-clear's "every metric" claim is earned only at full coverage — at partial coverage
                the coverage IS the headline's second half, because the claim it replaces is false. */
             return coverage.Length == 0
-                ? "Healthy — every metric on this card is inside its threshold"
-                : "Healthy — " + coverage;
+                ? "Healthy: every metric on this card is inside its threshold"
+                : "Healthy: " + coverage;
         }
 
         /* The guarded reason-append stays WithReason's (one copy — its own doc says why); the qualifier
@@ -1041,14 +1041,14 @@ public sealed class FleetRollup
            says "no metric measured yet" (#3539 A6), and "· 0 of 6 measured" after it would restate the
            same fact in different words, so the qualifier stands down there and only there. */
         var label = ServerHealthClassifier.BandLabel(band);
-        var headline = WithReason(label, " — ", s);
+        var headline = WithReason(label, ": ", s);
         if (coverage.Length == 0 || s.MeasuredMetricCount == 0)
         {
             return headline;
         }
 
         return headline.Equals(label, StringComparison.Ordinal)
-            ? label + " — " + coverage
+            ? label + ": " + coverage
             : headline + " · " + coverage;
     }
 
@@ -1078,7 +1078,7 @@ public sealed class FleetRollup
     }
 
     /// <summary>The words behind StatusDisplay's "Unknown" — a card whose freshness was never classified.</summary>
-    private const string UnknownStatus = "Unknown — no collection status for this server";
+    private const string UnknownStatus = "Unknown: no collection status for this server";
 
     /// <summary>
     /// The problem servers among the Overview's cards — band != Healthy — kept in the order the caller handed

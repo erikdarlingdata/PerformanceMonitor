@@ -204,7 +204,7 @@ public partial class CollectorScheduleEditorWindow : Window
 
         if (isServerScope)
         {
-            HeaderText.Text = $"Collector Schedules — {(ScopeCombo.SelectedItem as ComboBoxItem)?.Content}";
+            HeaderText.Text = $"Collector Schedules: {(ScopeCombo.SelectedItem as ComboBoxItem)?.Content}";
             SubHeaderText.Text = "This server's custom schedule. Uncheck 'Use default schedule' to override the fleet-wide defaults for it. Keep (days) is fleet-wide: change it under All servers.";
             var hasOverride = CollectorScheduleOverlay.ServerHasOverride(_allOverrides, _runTimes, _scopeServerId!.Value);
 
@@ -214,7 +214,7 @@ public partial class CollectorScheduleEditorWindow : Window
         }
         else
         {
-            HeaderText.Text = "Collector Schedules — All servers";
+            HeaderText.Text = "Collector Schedules: All servers";
             SubHeaderText.Text = "The fleet-wide default schedule. Every server without its own override collects on this schedule.";
         }
 
@@ -374,7 +374,7 @@ public partial class CollectorScheduleEditorWindow : Window
 
         if (_dataService.IsReadOnly)
         {
-            ShowStatus("Read-only connection — schedules can't be changed.");
+            ShowStatus("Read-only connection: schedules can't be changed.");
         }
         else if (_scopeServerId is null)
         {

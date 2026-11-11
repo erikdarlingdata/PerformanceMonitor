@@ -531,7 +531,7 @@ public sealed class ServerPropertyRow
     public long? PhysicalMemoryMb { get => FinOpsInventoryFigures.PhysicalMemoryMb(EngineEdition, _physicalMemoryMb); set => _physicalMemoryMb = value ?? 0L; }
     public int? SocketCount { get => FinOpsInventoryFigures.SocketCount(EngineEdition, _socketCount); set => _socketCount = value; }
     public int? CoresPerSocket { get => FinOpsInventoryFigures.CoresPerSocket(EngineEdition, _coresPerSocket); set => _coresPerSocket = value; }
-    /// <summary>The server's LOCAL start clock (sys.dm_os_sys_info) — stored verbatim, shown as-is like Lite.</summary>
+    /// <summary>The server's LOCAL start clock (sys.dm_os_sys_info), stored verbatim. The grid shows <see cref="StartTimeText"/>.</summary>
     public DateTime? SqlServerStartTime { get; set; }
 
     /// <summary>The server's UTC offset in minutes when the row was collected (<c>server_properties.utc_offset_minutes</c>), the fallback
@@ -566,9 +566,28 @@ public sealed class ServerPropertyRow
     /// repeated autumn hour, and nothing for a server with no snapshot. The column binds this and sorts by
     /// <see cref="InventoryAsOf"/>.
     /// </summary>
-    public string InventoryAsOfText => InventoryAsOfUtc.HasValue
-        ? ViewerTimeHelper.FormatForDisplay(InventoryAsOfUtc.Value, ApplicationConnectionRow.DisplayZoneNow(Clock), "yyyy-MM-dd HH:mm")
-        : "";
+    public string InventoryAsOfText => InventoryAsOfUtc.HasValue ? ZoneLabelledText(InventoryAsOfUtc.Value) : "";
+
+    /// <summary>#8634: one instant as this row's time column words it: the display mode's zone on this row's own clock, then that clock's
+    /// offset in Server Time. Start Time, Inventory As Of and Last Collected all go through it, so a row never shows one column with a
+    /// zone label and its neighbours without.</summary>
+    private string ZoneLabelledText(DateTime naiveUtc) =>
+        ViewerTimeHelper.WithServerZoneLabel(
+            ViewerTimeHelper.FormatForDisplay(naiveUtc, ApplicationConnectionRow.DisplayZoneNow(Clock), "yyyy-MM-dd HH:mm"),
+            ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock, naiveUtc);
+
+    /// <summary>
+    /// What the Start Time column shows (#8634). <see cref="SqlServerStartTime"/> is the server's own wall clock, so it is moved to its UTC
+    /// instant by the zone collected with it (the way <see cref="UptimeSecondsAt"/> does) and worded like the other two time columns: the
+    /// display mode's zone, with the server's offset after it in Server Time. A row with neither a zone id nor an offset has no zone to
+    /// move it by or to name, so its clock reading is shown as it was stored, with no label. The column sorts by
+    /// <see cref="SqlServerStartTime"/>.
+    /// </summary>
+    public string StartTimeText => SqlServerStartTime is not { } start
+        ? ""
+        : UtcOffsetMinutes is null && string.IsNullOrWhiteSpace(TimeZoneId)
+            ? start.ToString("yyyy-MM-dd HH:mm")
+            : ZoneLabelledText(ServerClock.Resolve(TimeZoneId, UtcOffsetMinutes).ToUtc(start));
 
     /// <summary>
     /// The clock of THIS row's server, stamped by the loader (#4766): its collected clock, else the viewer machine's
@@ -591,11 +610,7 @@ public sealed class ServerPropertyRow
     /// <summary>What the Last Collected column shows (#4766); see <see cref="InventoryAsOfText"/>. In Server Time each row is on its
     /// own server's clock, so the text ends with that clock's offset, "2026-07-01 10:30 (UTC-04:00)". The column sorts by
     /// <see cref="LastCollected"/>.</summary>
-    public string LastCollectedText => LastCollectedUtc.HasValue
-        ? ViewerTimeHelper.WithServerZoneLabel(
-            ViewerTimeHelper.FormatForDisplay(LastCollectedUtc.Value, ApplicationConnectionRow.DisplayZoneNow(Clock), "yyyy-MM-dd HH:mm"),
-            ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock, LastCollectedUtc.Value)
-        : "";
+    public string LastCollectedText => LastCollectedUtc.HasValue ? ZoneLabelledText(LastCollectedUtc.Value) : "";
     public bool? IsHadrEnabled { get; set; }
     public bool? IsClustered { get; set; }
     public string AgReplicaRole { get; set; } = "Standalone";

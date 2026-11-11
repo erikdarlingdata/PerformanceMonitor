@@ -28,6 +28,8 @@ let now = 0;
 let inFlight = 0;
 let readMs = 2000;
 let errors = 0;
+/* #8633: what app.js last told util.js about the page render in progress (setPollRender). */
+let pollRenderOn = false;
 const pending = [];
 const timers = [];
 const renders = [];
@@ -54,7 +56,7 @@ function element(id) {
 
 /* A page render opens one read that stays out for readMs of virtual time. */
 function renderPage() {
-  renders.push({ at: now });
+  renders.push({ at: now, poll: pollRenderOn });
   inFlight++;
   pending.push(now + readMs);
 }
@@ -78,7 +80,8 @@ const sandbox = {
   el: () => ({}),
   mount() {},
   apiGet: async () => ({ kind: "empty" }),
-  apiGetFleet: async () => ({ kind: "error" }),
+  apiGetFleetShell: async () => ({ kind: "error" }),
+  setPollRender(on) { pollRenderOn = on === true; },
   bandClass: () => "",
   localTime: String,
   hasInFlightReads: () => inFlight > 0,
@@ -250,6 +253,19 @@ const scenarios = {
     advance(70000);
     const recovered = snapshot();
     return { first, failed, recovered };
+  },
+  /* #8633: the page's poll re-render is the only render that may take the sidebar's fleet read. app.js says so through
+     setPollRender: off for the first (navigation) render, on while the poll's render is out, off again once it settles. */
+  pollFlag() {
+    boot();
+    const first = renders[0].poll;
+    advance(4000);
+    const settledFirst = pollRenderOn;
+    for (let i = 0; i < 100 && renders.length < 2; i++) advance(1000);
+    const second = renders.length > 1 ? renders[1].poll : null;
+    const during = pollRenderOn;
+    advance(5000);
+    return { first, settledFirst, second, during, after: pollRenderOn, renders: renders.length };
   },
   /* A render that is still loading, with no hide and no pause: 45 s of reads on a 60 s page. */
   stillLoading() {

@@ -78,9 +78,10 @@ public sealed class ViewerFleetScreenWalkFixesTests : IDisposable
     public void LastCollect_InServerTime_NamesTheOffsetOfTheClockItReads()
     {
         /* A fixed day in the past, so the stamp carries its date whatever today is. */
-        var card = new ServerSummaryItem { LastCollectionTime = Utc(2026, 9, 25, 9, 56, 40) };
+        var card = new ServerSummaryItem { LastCollectionTime = Utc(2026, 9, 25, 9, 56, 40), Clock = ServerClock.FixedOffset(-240) };
 
-        ViewerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(-240);
+        /* The card reads its own server's clock (#8645), never the last-opened tab's, so a different active clock must change nothing. */
+        ViewerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(120);
         ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
         Assert.Equal("2026-09-25 05:56:40 (UTC-04:00)", card.LastCollectionDisplay);
 

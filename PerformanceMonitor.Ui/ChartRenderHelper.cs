@@ -72,18 +72,129 @@ public sealed class ChartRenderHelper
     /// <see cref="ChartGroupAligner"/> leaves it out of its group, since there is no plot rectangle to share.
     /// </summary>
     public void RefreshEmptyChart(ScottPlot.WPF.WpfPlot chart, string legendText, string yAxisLabel)
-    {
-        ChartStyle.ReapplyAxisColors(chart);
+        => RefreshEmptyChart(chart, legendText, yAxisLabel, pinToPlotCenter: false);
 
+    /// <summary>
+    /// <see cref="RefreshEmptyChart(ScottPlot.WPF.WpfPlot, string, string)"/>, optionally with the sentence pinned to the plot's center
+    /// in pixels (<paramref name="pinToPlotCenter"/>) instead of to the data point (0, 0). A chart whose X limits are set after this
+    /// (the Overview lanes share one time ruler, set once every lane has drawn) would carry a data-anchored sentence off the screen.
+    /// </summary>
+    public void RefreshEmptyChart(ScottPlot.WPF.WpfPlot chart, string legendText, string yAxisLabel, bool pinToPlotCenter)
+    {
         var name = string.IsNullOrWhiteSpace(legendText) ? "data" : $"{legendText} data";
         var sentence = $"No {name} in this window";
         /* One sentence; on a narrow chart it breaks before the tail rather than running off the edge. */
         var label = sentence.Length > 36 ? $"No {name}\nin this window" : sentence;
-        var text = chart.Plot.Add.Text(label, 0, 0);
-        text.LabelFontColor = MutedTextColor();
-        text.LabelFontSize = 14;
-        text.LabelItalic = false;
-        text.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
+        DrawNote(chart, label, yAxisLabel, pinToPlotCenter);
+    }
+
+    /// <summary>The sentence a chart shows between the moment its tab is picked and the moment its first read returns (#8647).</summary>
+    public const string LoadingSentence = "Loading...";
+
+    /// <summary>
+    /// #8647: the empty look with <see cref="LoadingSentence"/> in place of the empty-state sentence, pinned to the plot's center.
+    /// A chart whose first read has not returned has nothing to say about its window yet; "No data in this window" is true only
+    /// after a read came back with no rows. The next <see cref="RefreshEmptyChart(ScottPlot.WPF.WpfPlot, string, string)"/> or a
+    /// plot that was cleared and drawn replaces it, and <see cref="ResolveLoadingChart"/> turns a loading chart no read ever
+    /// replaced into the empty look. <paramref name="legendText"/> and <paramref name="yAxisLabel"/> are what that empty look will use.
+    /// </summary>
+    public void RefreshLoadingChart(ScottPlot.WPF.WpfPlot chart, string legendText, string yAxisLabel)
+    {
+        var note = DrawNote(chart, LoadingSentence, yAxisLabel, pinToPlotCenter: true);
+        _loading.Remove(chart);
+        _loading.Add(chart, new LoadingMark(note!, legendText, yAxisLabel));
+    }
+
+    /// <summary>
+    /// #8647: the empty look for a chart whose list has nothing ticked ("No counters picked"). Not the "No data in this window"
+    /// sentence: a read has not found the window empty, none was asked for.
+    /// </summary>
+    public void RefreshNothingPickedChart(ScottPlot.WPF.WpfPlot chart, string noun, string yAxisLabel)
+        => DrawNote(chart, $"No {noun} picked", yAxisLabel, pinToPlotCenter: false);
+
+    /// <summary>
+    /// #8647: the look of a picker-driven chart (Perfmon counters, Wait Stats, Memory Clerks) when nothing is ticked, which is one of
+    /// three different facts. The list has not loaded yet: the loading look, since nobody has picked or declined anything. The list
+    /// loaded with no entries at all: the empty-state sentence, since there is nothing to pick. The list has entries and none is
+    /// ticked: "No <paramref name="noun"/> picked".
+    /// </summary>
+    public void RefreshNothingToPlotChart(ScottPlot.WPF.WpfPlot chart, bool listLoaded, int listCount, string title, string noun, string yAxisLabel)
+    {
+        if (!listLoaded)
+        {
+            RefreshLoadingChart(chart, title, yAxisLabel);
+        }
+        else if (listCount == 0)
+        {
+            RefreshEmptyChart(chart, title, yAxisLabel);
+        }
+        else
+        {
+            RefreshNothingPickedChart(chart, noun, yAxisLabel);
+        }
+    }
+
+    /// <summary>True while <paramref name="chart"/> still shows the sentence <see cref="RefreshLoadingChart"/> drew, that is, no read has drawn on it since.</summary>
+    public bool IsShowingLoading(ScottPlot.WPF.WpfPlot chart)
+        => _loading.TryGetValue(chart, out var mark) && chart.Plot.PlottableList.Contains(mark.Note);
+
+    /// <summary>
+    /// #8647: a loading chart that the pass which was meant to fill it ended without drawing on (the read failed, or the collector
+    /// has nothing to say on this server) becomes the empty look, so "Loading..." never outlives the read it waited for.
+    /// A chart a read drew on, or one that was never made to load, is left alone. Returns true when it changed the chart.
+    /// </summary>
+    public bool ResolveLoadingChart(ScottPlot.WPF.WpfPlot chart)
+    {
+        if (!_loading.TryGetValue(chart, out var mark))
+        {
+            return false;
+        }
+
+        if (!chart.Plot.PlottableList.Contains(mark.Note))
+        {
+            _loading.Remove(chart);
+            return false;
+        }
+
+        RefreshEmptyChart(chart, mark.Legend, mark.YLabel, pinToPlotCenter: true);
+        return true;
+    }
+
+    private sealed record LoadingMark(ScottPlot.Plottables.Annotation Note, string Legend, string YLabel);
+
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<ScottPlot.WPF.WpfPlot, LoadingMark> _loading = new();
+
+    private ScottPlot.Plottables.Annotation? DrawNote(ScottPlot.WPF.WpfPlot chart, string label, string yAxisLabel, bool pinToPlotCenter)
+    {
+        ChartStyle.ReapplyAxisColors(chart);
+
+        /* A loading sentence still on the plot goes first, so the two sentences are never drawn over each other. */
+        if (_loading.TryGetValue(chart, out var loading))
+        {
+            chart.Plot.Remove(loading.Note);
+            _loading.Remove(chart);
+        }
+
+        ScottPlot.Plottables.Annotation? pinned = null;
+        if (pinToPlotCenter)
+        {
+            var note = chart.Plot.Add.Annotation(label, ScottPlot.Alignment.MiddleCenter);
+            note.LabelFontSize = 14;
+            note.LabelFontColor = MutedTextColor();
+            note.LabelBackgroundColor = ScottPlot.Colors.Transparent;
+            note.LabelBorderColor = ScottPlot.Colors.Transparent;
+            note.LabelBorderWidth = 0;
+            note.LabelShadowColor = ScottPlot.Colors.Transparent;
+            pinned = note;
+        }
+        else
+        {
+            var text = chart.Plot.Add.Text(label, 0, 0);
+            text.LabelFontColor = MutedTextColor();
+            text.LabelFontSize = 14;
+            text.LabelItalic = false;
+            text.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
+        }
 
         chart.Plot.Axes.SetLimitsX(-1, 1);
         chart.Plot.Axes.SetLimitsY(-1, 1);
@@ -94,6 +205,7 @@ public sealed class ChartRenderHelper
         ChartGroupAligner.MarkEmpty(chart.Plot);
 
         chart.Refresh();
+        return pinned;
     }
 
     /// <summary>The theme's muted text color (the one the XAML empty hints use), or the palette's placeholder grey when no theme is loaded.</summary>

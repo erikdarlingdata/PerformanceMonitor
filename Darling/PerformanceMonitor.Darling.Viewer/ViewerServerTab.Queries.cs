@@ -252,11 +252,11 @@ public partial class ViewerServerTab
 
     /// <summary>#4231 stage 3: the Queries-tab grid header's hourly-routing disclosure — appended to the
     /// existing "Showing since" banner (#4278) rather than a new widget, per the lane's ruling.</summary>
-    private const string HourlyTierSuffix = " — aggregated hourly: per-caller detail, reads, writes, spills and min/max CPU and duration are not kept, so they show blank";
+    private const string HourlyTierSuffix = ". Aggregated hourly: per-caller detail, reads, writes, spills and min/max CPU and duration are not kept, so they show blank";
 
     /// <summary>#5329: the same disclosure when the io hourly rollup served the grid: it keeps logical reads, physical reads
     /// and logical writes (the grid fills them), so those are not named as blank.</summary>
-    private const string HourlyIoTierSuffix = " — aggregated hourly: per-caller detail, spills and min/max CPU and duration are not kept, so they show blank";
+    private const string HourlyIoTierSuffix = ". Aggregated hourly: per-caller detail, spills and min/max CPU and duration are not kept, so they show blank";
 
     /// <summary>
     /// #5329: the banner suffix an hourly-routed grid carries: <see cref="HourlyTierSuffix"/> plus the window's real edges

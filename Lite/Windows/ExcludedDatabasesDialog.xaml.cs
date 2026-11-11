@@ -58,7 +58,7 @@ public partial class ExcludedDatabasesDialog : Window
         if (xeSessionsMode)
         {
             Title = "Databases for Extended Events Sessions";
-            HeaderText.Text = $"Databases for Extended Events Sessions — {server.DisplayNameWithIntent}";
+            HeaderText.Text = $"Databases for Extended Events Sessions: {server.DisplayNameWithIntent}";
             DescriptionText.Text = "Applies to Azure SQL Database only. Azure caps database-scoped Extended Events sessions per pool, and Lite makes up to four per database "
                 + "(deadlock, blocked process, client timeout, long query completions). Check the databases that should get sessions. "
                 + "Leave every box clear to give every database a session. Excluded Databases still apply and win. "
@@ -66,7 +66,7 @@ public partial class ExcludedDatabasesDialog : Window
         }
         else
         {
-            HeaderText.Text = $"Excluded Databases — {server.DisplayNameWithIntent}";
+            HeaderText.Text = $"Excluded Databases: {server.DisplayNameWithIntent}";
         }
 
         Loaded += async (_, _) => await LoadAsync();

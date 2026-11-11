@@ -46,6 +46,7 @@ public sealed class TimingTestCensusTests
         ["PostCollectionCheckpointBudgetTests.cs"] = OwnCollection + " (CollectionResetGate)",
         ["QuerySnapshotPlanOnDemandTests.cs"] = Diagnostic + " (old and new read shapes compared on rows and allocations)",
         ["QueryWindowTruncationTests.cs"] = Diagnostic + " (written to the console)",
+        ["ServerTabOpenNativeMemoryTests.cs"] = Diagnostic + " (the Overview open's time after a trim and warm goes into the table the test writes, #8535)",
         ["TestCpuAccountantTests.cs"] = HangGuard + " (the loops spin until the accountant has moved, with 30 s as the stop)",
     };
 

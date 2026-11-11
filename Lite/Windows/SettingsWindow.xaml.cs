@@ -350,7 +350,7 @@ public partial class SettingsWindow : Window
         {
             /* Not "Disabled": nobody disabled it. Kept to one short line because this TextBlock does not
                wrap; the part that does not fit is on the tooltip. */
-            McpStatusText.Text = "Status: Off \u2014 settings.json could not be read";
+            McpStatusText.Text = "Status: Off. settings.json could not be read";
             McpStatusText.ToolTip =
                 $"settings.json could not be read ({_mcpSettingsProblem}), so the MCP server did not start and "
                 + "the tickbox and port above are defaults rather than your settings.\n\n"

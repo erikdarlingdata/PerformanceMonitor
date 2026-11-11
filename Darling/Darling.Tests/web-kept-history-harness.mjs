@@ -122,6 +122,7 @@ const editorScenario = scenario.startsWith("editor");
    ensureFieldConfigs. */
 const serverPageScenario = scenario === "offeredRanges" || scenario.startsWith("custom") || scenario.startsWith("picker") || scenario.startsWith("tabReach");
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "kept-history-"));
+const alertNotebookScenario = scenario.startsWith("alertNotebook");
 let modules;
 try {
   /* Copy the whole js tree (js/, js/pages/ and every subdirectory) rather than a hand-kept list (#5279): a page module that
@@ -150,6 +151,16 @@ try {
     );
     fs.writeFileSync(path.join(scratch, "compose.js"), "export function renderComposedPanelCard() { throw new Error('not drawn here'); }\n");
   }
+  if (alertNotebookScenario) {
+    /* The alert notebook page draws no composed chart here, so compose.js (and the chart renderers it needs) is a stand-in with the names the page and the notebook editor import. */
+    fs.writeFileSync(
+      path.join(scratch, "compose.js"),
+      "export function renderComposedPanelCard() { throw new Error('not drawn here'); }\n" +
+        "export function cellRange() { return null; }\n" +
+        "export function formatComposedValue(v) { return String(v); }\n" +
+        'export { pinRangeLabel } from "./util.js";\n'
+    );
+  }
   if (serverPageScenario) {
     fs.writeFileSync(
       path.join(scratch, "pages", "server.js"),
@@ -164,6 +175,7 @@ try {
     charts: await load("charts.js"),
     editor: editorScenario ? await load("editor.js") : null,
     server: serverPageScenario ? await load(path.join("pages", "server.js")) : null,
+    views: alertNotebookScenario ? await load(path.join("pages", "views.js")) : null,
     timeRange: serverPageScenario ? await load("time-range.js") : null,
     pageRange: serverPageScenario ? await load("page-range.js") : null,
   };
@@ -847,6 +859,42 @@ Object.assign(scenarios, {
     answer = () => data({ status: "empty", message: "No active query snapshots on SRV1 in the last 4 hour(s) matched blocking_only." });
     found = { asOfMs };
     return [modules.panels.renderPanel({ ...waitingTasksPanel, params })];
+  },
+  // #8630: the alert notebook page (views.js) over the real panels, with a catalog that lists each read's own parameters. The alert is a day old
+  // and every cell carries its `as_of`, as the templates write them. found.cells names each cell's read and the badges drawn on it.
+  alertNotebookPins: async () => {
+    const asOf = new Date(Date.now() - 24 * 3600000).toISOString();
+    const catalog = {
+      reads: [
+        { name: "get_server_summary", params: [{ name: "server" }] },
+        { name: "get_collection_health", params: [{ name: "server" }, { name: "collector_name" }] },
+        { name: "get_cpu_utilization", params: [{ name: "server" }, { name: "hours" }, { name: "as_of" }] },
+      ],
+      compose: { measures: [] },
+    };
+    const cell = (read, viz) => ({ type: "read", read, viz, title: read, params: { server: "SRV1", as_of: asOf, hours: "24" } });
+    answer = (url) => (tool(url) === "get_cpu_utilization" ? data({ samples: [{ sample_time: asOf, cpu: 5 }] }) : data({ status: "empty", message: "No rows on SRV1 in the last 24 hour(s)." }));
+    globalThis.location = { hash: "#/triage" };
+    const main = new FakeNode("main");
+    await modules.views.renderNotebookDoc(main, {
+      mode: "alert",
+      definition: { kind: "notebook", cells: [cell("get_server_summary", "stat"), cell("get_collection_health", "table"), { ...cell("get_cpu_utilization", "line"), rowsKey: "samples", xKey: "sample_time", series: [{ key: "cpu", label: "CPU" }] }] },
+      status: "Unknown",
+      notes: [],
+      canEdit: false,
+      provenance: "from alert template test",
+      onOpenLive: () => {},
+      alert: { server_name: "SRV1", metric_name: "Client Timeouts", alert_time: asOf },
+      catalog,
+      scopeServer: "SRV1",
+    });
+    await settle();
+    const cells = main.all((n) => n.getAttribute("data-panel") != null).map((n) => ({
+      read: n.getAttribute("data-panel"),
+      badges: n.all((c) => String(c.className).split(" ").includes("pin-badge")).map((c) => c.textContent),
+    }));
+    found = { cells };
+    return [main];
   },
 });
 

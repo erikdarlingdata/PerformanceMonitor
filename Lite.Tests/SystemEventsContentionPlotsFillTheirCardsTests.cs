@@ -151,7 +151,8 @@ public sealed class SystemEventsContentionPlotsFillTheirCardsTests
     /// <summary>The plot's data area, in pixels, as its last layout at the control's own size leaves it.</summary>
     private static double PlotHeight(WpfPlot chart)
     {
-        chart.Plot.RenderInMemory(Math.Max(1, (int)chart.ActualWidth), Math.Max(1, (int)chart.ActualHeight));
+        /* #8644: at the size the control paints at (device pixels), as the group aligner measures: at a 250% Windows scale the control's own size draws a plot a third as tall. */
+        chart.Plot.RenderInMemory(Math.Max(1, (int)(chart.ActualWidth * chart.DisplayScale)), Math.Max(1, (int)(chart.ActualHeight * chart.DisplayScale)));
         return chart.Plot.RenderManager.LastRender.Layout.DataRect.Height;
     }
 

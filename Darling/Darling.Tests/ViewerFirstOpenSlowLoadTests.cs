@@ -1,0 +1,177 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading.Tasks;
+using System.Windows;
+using PerformanceMonitor.Darling.Viewer;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #8549: a server tab's first open took 11.7 s in the field and wrote no SlowLoad line, because the only clock started inside the landing
+/// sub-tab's load and the reads before it (server clock, data start, freshness, permission count, collection interval) ran outside it.
+/// The first open now runs on one clock from the tab's activation to the first stamp. The slow store here is a listener that accepts a
+/// connection and never answers, so a read waits out the connection's one-second timeout, and the fast store is a port nothing listens on.
+/// </summary>
+[Collection("viewer-time-statics")]
+public sealed class ViewerFirstOpenSlowLoadTests
+{
+    [Fact]
+    public void ASlowReadBeforeTheLandingSubTab_IsNamedInTheFirstOpensSlowLoadLine()
+    {
+        var lines = new List<string>();
+        RunThemed(async () =>
+        {
+            using var silent = new TcpListener(IPAddress.Loopback, 0);
+            silent.Start();
+            var port = ((IPEndPoint)silent.LocalEndpoint).Port;
+            var tab = new ViewerServerTab(
+                new ViewerDataService($"Host=127.0.0.1;Port={port};Database=darling;Username=darling;Timeout=1"),
+                new DarlingServer(7, "first-open-host.invalid", "first-open-alias", true, null))
+            {
+                FirstOpenSlowThresholdMs = 500,
+                SlowLoadSink = lines.Add,
+            };
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                tab.BeginFirstOpen();
+                await tab.RefreshActiveInnerTabAsync();
+            }
+            finally
+            {
+                window.Close();
+                silent.Stop();
+            }
+        });
+
+        var line = Assert.Single(lines);
+        Assert.Contains("[first-open-alias]", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("first-open-host.invalid", line, StringComparison.Ordinal);
+        Assert.Contains("server tab first open > ", line, StringComparison.Ordinal);
+        /* The step that ran before the landing sub-tab's load is named, not lumped into client work. */
+        Assert.Contains("server clock read ", line, StringComparison.Ordinal);
+        Assert.Contains("waited for the shell to start this refresh ", line, StringComparison.Ordinal);
+        Assert.Contains("tab construction ", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnOpenUnderTheThreshold_WritesNothing()
+    {
+        var lines = new List<string>();
+        RunThemed(async () =>
+        {
+            var tab = new ViewerServerTab(
+                new ViewerDataService($"Host=127.0.0.1;Port={FreePort()};Database=darling;Username=darling;Timeout=5"),
+                new DarlingServer(8, "first-open-fast", "first-open-fast", true, null))
+            {
+                FirstOpenSlowThresholdMs = 600_000,
+                SlowLoadSink = lines.Add,
+            };
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                tab.BeginFirstOpen();
+                await tab.RefreshActiveInnerTabAsync();
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.Empty(lines);
+    }
+
+    [Fact]
+    public void ASecondRefresh_IsNotAFirstOpen_AndKeepsItsOwnClock()
+    {
+        var lines = new List<string>();
+        RunThemed(async () =>
+        {
+            var tab = new ViewerServerTab(
+                new ViewerDataService($"Host=127.0.0.1;Port={FreePort()};Database=darling;Username=darling;Timeout=5"),
+                new DarlingServer(9, "first-open-twice", "first-open-twice", true, null))
+            {
+                /* Zero makes every load that runs on a first-open clock write a line. */
+                FirstOpenSlowThresholdMs = 0,
+                SlowLoadSink = lines.Add,
+            };
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                await tab.RefreshActiveInnerTabAsync();
+                lines.Clear();
+                tab.BeginFirstOpen();
+                await tab.RefreshActiveInnerTabAsync();
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.DoesNotContain(lines, l => l.Contains("server tab first open", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AClockStartedAfterTheTabsConstruction_CountsTheConstructionInItsTotal()
+    {
+        var timer = new ViewerLoadTimer(slowThresholdMs: 3000, alreadyElapsedMs: 3500);
+        timer.BookStep("tab construction", 3500);
+        timer.Lead = "server tab first open > ";
+        var line = timer.Finish("Overview");
+        Assert.NotNull(line);
+        Assert.StartsWith("slow load: server tab first open > Overview took 35", line, StringComparison.Ordinal);
+        Assert.Contains("[client steps: tab construction 3500 ms]", line, StringComparison.Ordinal);
+    }
+
+    private static int FreePort()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return port;
+    }
+
+    /// <summary>Runs <paramref name="body"/> on the STA thread with the Viewer's theme resources in the application, as the tabs' cell styles need them.</summary>
+    private static void RunThemed(Func<Task> body) => StaTestThread.Run(async () =>
+    {
+        var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        ResourceDictionary? added = null;
+        if (!app.Resources.Contains("NumericCell"))
+        {
+            added = new ResourceDictionary
+            {
+                Source = new Uri("pack://application:,,,/PerformanceMonitor.Darling.Viewer;component/Themes/DarkTheme.xaml"),
+            };
+            app.Resources.MergedDictionaries.Add(added);
+        }
+
+        try
+        {
+            await body();
+        }
+        finally
+        {
+            if (added is not null)
+            {
+                app.Resources.MergedDictionaries.Remove(added);
+            }
+        }
+    });
+}

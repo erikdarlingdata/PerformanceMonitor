@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Ui;
 
@@ -43,7 +44,7 @@ public static class TimeSeriesGaps
     /// Returns the original arrays when no break is needed, so the common no-gap case allocates nothing.
     /// </summary>
     public static (double[] Xs, double[] Ys) BreakAtGaps(double[] xs, double[] ys)
-        => BreakAtGaps(xs, ys, null);
+        => BreakAtGaps(xs, ys, (double?)null);
 
     /// <summary>
     /// <see cref="BreakAtGaps(double[], double[])"/> for a series that joins two grains (#7508): the Query Store
@@ -131,6 +132,64 @@ public static class TimeSeriesGaps
         Array.Copy(ys, next, outYs, write, ys.Length - next);
 
         return (outXs, outYs);
+    }
+
+    /// <summary>
+    /// The spans in which NO series drew a point, judged over all the series' points together (#8644). A series with few points has no
+    /// cadence of its own to judge a gap by (two points have none, and with three the one long step drags the median up so far that
+    /// three times it passes over the gap), so Duration Trends drew a straight line across twenty hours in which nothing was collected.
+    /// The other collectors' points say what the rhythm is: the spans between neighbouring points of the combined set that are wider
+    /// than <see cref="CadenceMultiplier"/> times its median positive spacing. Empty when the combined set has no measurable cadence.
+    /// </summary>
+    public static IReadOnlyList<(double From, double To)> OutagesAcross(IEnumerable<double[]> seriesXs)
+    {
+        var all = seriesXs.SelectMany(x => x).Where(double.IsFinite).Distinct().OrderBy(x => x).ToArray();
+        var outages = new List<(double From, double To)>();
+        if (all.Length < 3 || GapThreshold(all) is not double threshold)
+        {
+            return outages;
+        }
+
+        for (var i = 0; i < all.Length - 1; i++)
+        {
+            if (all[i + 1] - all[i] > threshold)
+            {
+                outages.Add((all[i], all[i + 1]));
+            }
+        }
+
+        return outages;
+    }
+
+    /// <summary>
+    /// <see cref="BreakAtGaps(double[], double[])"/>, plus a break wherever one of <paramref name="outages"/> (from
+    /// <see cref="OutagesAcross"/>) lies between two neighbouring points of this series, so a series too short to judge a gap by its own
+    /// spacing still stops where every series stopped (#8644).
+    /// </summary>
+    public static (double[] Xs, double[] Ys) BreakAtGaps(double[] xs, double[] ys, IReadOnlyList<(double From, double To)> outages)
+    {
+        var (ownXs, ownYs) = BreakAtGaps(xs, ys, (double?)null);
+        if (outages is null || outages.Count == 0 || ownXs is null || ownXs.Length < 2)
+        {
+            return (ownXs!, ownYs!);
+        }
+
+        var outXs = new List<double>(ownXs.Length + outages.Count);
+        var outYs = new List<double>(ownYs.Length + outages.Count);
+        for (var i = 0; i < ownXs.Length; i++)
+        {
+            outXs.Add(ownXs[i]);
+            outYs.Add(ownYs[i]);
+            if (i + 1 < ownXs.Length
+                && !double.IsNaN(ownYs[i]) && !double.IsNaN(ownYs[i + 1])
+                && outages.Any(o => o.From >= ownXs[i] && o.To <= ownXs[i + 1]))
+            {
+                outXs.Add(ownXs[i] + (ownXs[i + 1] - ownXs[i]) / 2.0);
+                outYs.Add(double.NaN);
+            }
+        }
+
+        return outXs.Count == ownXs.Length ? (ownXs, ownYs) : (outXs.ToArray(), outYs.ToArray());
     }
 
     /// <summary>

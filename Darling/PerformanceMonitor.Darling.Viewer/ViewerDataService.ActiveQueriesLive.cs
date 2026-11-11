@@ -89,7 +89,7 @@ public sealed partial class ViewerDataService
         if (result is null)
         {
             return new ActiveQueriesLiveResult(ActiveQueriesLiveStatus.TimedOut, new List<ViewerQuerySnapshotRow>(),
-                "The service did not return the live active queries in time. It may still be reading — try again.");
+                "The service did not return the live active queries in time. It may still be reading. Try again.");
         }
 
         if (result.Status == StatusSucceeded)

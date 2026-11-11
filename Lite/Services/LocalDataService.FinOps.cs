@@ -449,14 +449,28 @@ public class ServerPropertyRow : System.ComponentModel.INotifyPropertyChanged
         get
         {
             if (LastUpdated is not { } utc) return "";
-            var mode = ServerTimeHelper.CurrentDisplayMode;
-            var clock = Clock ?? ServerTimeHelper.ActiveServerClock;
-            var text = ServerTimeHelper.WithServerZoneLabel(
-                ServerTimeHelper.FormatInstant(utc, ServerTimeHelper.DisplayZoneFor(mode, clock), "yyyy-MM-dd HH:mm"), mode, clock, utc);
+            var text = ZoneLabelledText(utc);
 
             return IsLastKnown ? "last known, " + text : text;
         }
     }
+
+    /// <summary>#8634: one instant as this row's time columns word it: the display mode's zone on the row's own clock, then that clock's
+    /// offset in Server Time. Start Time and Last Updated both go through it, so neither shows a zone label the other lacks.</summary>
+    private string ZoneLabelledText(DateTime utc)
+    {
+        var mode = ServerTimeHelper.CurrentDisplayMode;
+        var clock = Clock ?? ServerTimeHelper.ActiveServerClock;
+        return ServerTimeHelper.WithServerZoneLabel(
+            ServerTimeHelper.FormatInstant(utc, ServerTimeHelper.DisplayZoneFor(mode, clock), "yyyy-MM-dd HH:mm"), mode, clock, utc);
+    }
+
+    /// <summary>The Start Time cell (#8634): <see cref="SqlServerStartUtc"/>, the instant the server's own tick counts give, worded like
+    /// <see cref="LastUpdatedDisplay"/> on the selected display mode's clock. A row with no such instant shows the server's own clock
+    /// reading <see cref="SqlServerStartTime"/> as it was read, with no label. The column sorts on <see cref="SqlServerStartTime"/>.</summary>
+    public string StartTimeDisplay => SqlServerStartUtc is { } utc
+        ? ZoneLabelledText(utc)
+        : SqlServerStartTime is { } local ? local.ToString("yyyy-MM-dd HH:mm") : "";
 
     private TimeZoneInfo DisplayZoneNow =>
         ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, Clock ?? ServerTimeHelper.ActiveServerClock);
