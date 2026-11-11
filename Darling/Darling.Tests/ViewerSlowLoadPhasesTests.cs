@@ -64,7 +64,8 @@ public sealed class ViewerSlowLoadPhasesTests
     {
         var expected = expectedPhases.Split(',');
         var port = FreePort();
-        var booked = StaTestThread.Run(async () =>
+        var booked = new List<string>();
+        StaTestThread.Run(async () =>
         {
             var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
             ResourceDictionary? added = null;
@@ -98,7 +99,7 @@ public sealed class ViewerSlowLoadPhasesTests
                         await Task.Delay(50);
                     }
 
-                    return timer.PhaseNames.ToList();
+                    booked.AddRange(timer.PhaseNames);
                 }
                 finally
                 {
