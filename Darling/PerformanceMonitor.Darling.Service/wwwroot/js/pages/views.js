@@ -845,6 +845,13 @@ export async function renderNotebookDoc(main, opts) {
   const readSet = new Set((catalog.reads || []).map((r) => r.name));
   const sourceSet = new Set(((catalog.compose || {}).measures || []).map((m) => m.source));
 
+  /* #8555: a row that declares no notebook (the report rows) shows only the notes its caller drew: no "Alert notebook" header,
+     no Save as notebook or Open live buttons, no "no cells yet" line, none of which has anything to act on. */
+  if (isAlert && opts.noNotebook) {
+    mount(main, []);
+    return;
+  }
+
   const status = el("div", { class: "view-status" });
   const head = isAlert
     ? el("div", { class: "page-head" }, [
