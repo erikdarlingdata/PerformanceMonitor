@@ -565,7 +565,12 @@ public partial class ViewerServerTab : UserControl
                     break;
             }
 
-            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+            /* #8549: a refresh queued behind this one reads the window the picker names now, and this load read the one before it,
+               so it does not stamp "refreshed" over a header that already says the new range. The queued load stamps. */
+            if (ViewerRangeRefreshStatus.StampsRefreshed(_refreshRequested))
+            {
+                StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+            }
         }
         catch (Exception ex)
         {
