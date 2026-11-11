@@ -262,7 +262,16 @@ public partial class FinOpsTab : UserControl
             IndexAnalysisDatabaseInput.ItemsSource = databases.Names;
             IndexAnalysisDatabaseInput.Text = typed;
 
-            var note = IndexAnalysisListNote(databases.AsOfUtc);
+            /* #8645: the note names the snapshot's time on the PICKED server's clock, never the last-opened tab's. A current list
+               carries no time, so it reads no clock. */
+            string? note = null;
+            if (databases.AsOfUtc is not null)
+            {
+                var zone = await SelectedServerDayZoneAsync(serverId);
+                if (_loads.Superseded(nameof(PopulateIndexAnalysisDatabasesAsync), gen)) return;
+                note = IndexAnalysisListNote(databases.AsOfUtc, zone);
+            }
+
             IndexAnalysisDatabaseInput.ToolTip = note;
             if (note is null)
             {
@@ -282,12 +291,13 @@ public partial class FinOpsTab : UserControl
     }
 
     /// <summary>What the Index Analysis picker says about a list taken from a size snapshot: when it was collected, in the selected
-    /// time display, and that a database dropped since may be in it. Null for the current list.</summary>
-    internal static string? IndexAnalysisListNote(DateTime? asOfUtc)
+    /// time display on <paramref name="zone"/>, and that a database dropped since may be in it. Null for the current list.
+    /// #8645: <paramref name="zone"/> is the picked server's zone (<see cref="SelectedServerDayZoneAsync"/>), not the last-opened
+    /// server tab's.</summary>
+    internal static string? IndexAnalysisListNote(DateTime? asOfUtc, TimeZoneInfo zone)
     {
         if (asOfUtc is not { } asOf) return null;
-        var when = ServerTimeHelper.FormatInstant(
-            asOf, ServerTimeHelper.DisplayZoneFor(ServerTimeHelper.CurrentDisplayMode, ServerTimeHelper.ActiveServerClock), "yyyy-MM-dd HH:mm");
+        var when = ServerTimeHelper.FormatInstant(asOf, zone, "yyyy-MM-dd HH:mm");
         return $"Databases as of {when}, from the newest size snapshot. There is no recent database list, so a database dropped since may be listed";
     }
 
