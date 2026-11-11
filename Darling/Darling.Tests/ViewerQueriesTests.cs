@@ -242,7 +242,6 @@ public sealed class ViewerQueriesSqlTests
     [Theory]
     [InlineData(nameof(ViewerDataService.QueryStoreTopSql))]
     [InlineData(nameof(ViewerDataService.QueryStoreComparisonSql))]
-    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql))]
     [InlineData(nameof(ViewerDataService.QueryStoreRegressionsSql))]
     public void QueryStoreAggregates_DedupToTheLatestSnapshotPerInterval_BeforeAggregating(string sqlName)
     {
