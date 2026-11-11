@@ -93,6 +93,7 @@ public partial class ManageQueryTagsWindow : Window
             var selectedId = _selected?.Tag.Id;
             var roots = ManageQueryTagsModel.BuildTree(_tags).Select(r => new QueryTagNodeView(r)).ToList();
             TagTree.ItemsSource = roots;
+            NoQueryTagsMessage.Visibility = roots.Count == 0 ? Visibility.Visible : Visibility.Collapsed; /* #8645 */
             _selected = selectedId is int id ? Flatten(ManageQueryTagsModel.BuildTree(_tags)).FirstOrDefault(i => i.Tag.Id == id) : null;
             RuleTagBox.ItemsSource = _tags.OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase).ToList();
             RuleTagBox.SelectedIndex = RuleTagBox.Items.Count > 0 ? 0 : -1;

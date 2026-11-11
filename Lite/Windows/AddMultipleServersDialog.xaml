@@ -125,8 +125,9 @@
 
         <!-- Preview / results grid. NOTE: a plain read-only DataGrid — the ServerTab capability pin forbids
              DataGridFilterManager in this dialog. -->
-        <DataGrid Grid.Row="5" x:Name="PreviewGrid" AutoGenerateColumns="False" IsReadOnly="True"
-                  CanUserAddRows="False" HeadersVisibility="Column" SelectionMode="Single" Margin="0,0,0,8">
+        <Grid Grid.Row="5" Margin="0,0,0,8">
+        <DataGrid x:Name="PreviewGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                  CanUserAddRows="False" HeadersVisibility="Column" SelectionMode="Single">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="Line" Binding="{Binding LineNumber}" Width="50"/>
                 <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="*"/>
@@ -135,6 +136,11 @@
                 <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="2*"/>
             </DataGrid.Columns>
         </DataGrid>
+        <!-- #8645: an empty grid says what fills it, as Credential Profiles does. -->
+        <TextBlock x:Name="NoRowsMessage" Style="{DynamicResource EmptyHint}" Margin="12,30,12,0" VerticalAlignment="Top"
+                   Visibility="Visible"
+                   Text="Nothing to list yet. Paste one server per line in the box above and each one is listed here."/>
+        </Grid>
 
         <!-- Status -->
         <TextBlock Grid.Row="6" x:Name="StatusText" Foreground="{DynamicResource ForegroundMutedBrush}"

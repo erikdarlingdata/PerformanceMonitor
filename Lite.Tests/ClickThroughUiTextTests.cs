@@ -46,6 +46,21 @@ public sealed class ClickThroughUiTextTests : IDisposable
     private static readonly ServerClock Pacific = ServerClock.FixedOffset(-480);
 
     [Fact]
+    public void LastCollect_ServerMode_WithNoClockOfItsOwn_TakesTheMachinesClock_NotTheLastOpenedTabs()
+    {
+        /* #8645: a card with no clock stamped took whichever server tab was opened last. */
+        var machineMinutes = (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMinutes;
+        var otherMinutes = machineMinutes + 180 > 840 ? machineMinutes - 180 : machineMinutes + 180;
+        ServerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(otherMinutes);
+        var collected = Utc(2026, 1, 15, 20, 30, 15);
+
+        var text = ServerSummaryItem.FormatLastCollect(collected, TimeDisplayMode.ServerTime, null, Utc(2026, 1, 15, 21, 0));
+
+        Assert.EndsWith("(" + PerformanceMonitor.Ui.MultiServerTime.OffsetLabel(machineMinutes) + ")", text);
+        Assert.DoesNotContain(PerformanceMonitor.Ui.MultiServerTime.OffsetLabel(otherMinutes), text);
+    }
+
+    [Fact]
     public void LastCollect_ServerMode_ConvertsOnTheCardsOwnServerClock_NotTheActiveOne()
     {
         ServerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(600);
