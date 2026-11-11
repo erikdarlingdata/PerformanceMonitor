@@ -46,17 +46,21 @@ public sealed class ViewerIdentityCapacityTextTests : IDisposable
 
     public static TheoryData<TimeDisplayMode> Modes => new() { TimeDisplayMode.ServerTime, TimeDisplayMode.UTC, TimeDisplayMode.LocalTime };
 
-    /// <summary>The time of <paramref name="utc"/> as each display mode words it for the picked server: Server on its clock, UTC as is, Local on this machine.</summary>
+    /// <summary>The time of <paramref name="utc"/> as each display mode words it on the page's clock (#8576), to the second with its zone: UTC in
+    /// Server and UTC modes, as the refresh stamp beside it reads, and this machine's time with this machine's zone name in Local mode.</summary>
     private static string Worded(DateTime utc, TimeDisplayMode mode) => mode switch
     {
-        TimeDisplayMode.ServerTime => utc.AddMinutes(330).ToString("g", CultureInfo.CurrentCulture),
-        TimeDisplayMode.UTC => utc.ToString("g", CultureInfo.CurrentCulture),
-        _ => TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.Local).ToString("g", CultureInfo.CurrentCulture),
+        TimeDisplayMode.ServerTime or TimeDisplayMode.UTC => utc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture) + " UTC",
+        _ => LocalWorded(utc),
     };
+
+    private static string LocalWorded(DateTime utc) =>
+        TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.Local).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture)
+        + " " + (TimeZoneInfo.Local.IsDaylightSavingTime(utc) ? TimeZoneInfo.Local.DaylightName : TimeZoneInfo.Local.StandardName);
 
     [Theory]
     [MemberData(nameof(Modes))]
-    public void TheScanTimes_FollowTheDisplayMode_OnTheServersClock(TimeDisplayMode mode)
+    public void TheScanTimes_FollowTheDisplayMode_OnTheRefreshStampsClock(TimeDisplayMode mode)
     {
         ViewerTimeHelper.CurrentDisplayMode = mode;
         var read = ReadWithUnscanned([], [new IdentityNotYetScannedDatabase("Stale", Captured)], ("Clean", Captured));
@@ -64,6 +68,20 @@ public sealed class ViewerIdentityCapacityTextTests : IDisposable
         var rows = ViewerIdentityCapacityText.ScanRows(read, s_india);
 
         Assert.Equal([Worded(Captured, mode), Worded(Captured, mode)], rows.Select(r => r.LastScanned).ToArray());
+    }
+
+    /// <summary>#8576: a scan time is stamped to the second and names its zone, on the same clock as the tab's "Last refreshed" stamp. Server Time
+    /// has no server clock to apply to this page's stamps, so it reads UTC and says so, whatever the picked server's offset.</summary>
+    [Fact]
+    public void TheScanTimes_NameTheirZone_AndServerModeReadsUtcAsTheRefreshStampDoes()
+    {
+        var read = Read([], ("Clean", Captured));
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.Equal("2026-10-28 12:00:00 UTC", ViewerIdentityCapacityText.ScanRows(read, s_india).Single().LastScanned);
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+        Assert.Equal(LocalWorded(Captured), ViewerIdentityCapacityText.ScanRows(read, s_india).Single().LastScanned);
     }
 
 
