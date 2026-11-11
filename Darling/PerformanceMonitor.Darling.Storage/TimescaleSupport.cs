@@ -17590,6 +17590,12 @@ public sealed class RollupCoverage
     /// <summary>Does the store hold <see cref="TimescaleSupport.WaitStatsDailyView"/> (#8549)? The Daily Summary read takes it for
     /// the closed days it holds and reads raw <c>wait_stats</c> for the rest; without it, the whole window reads raw.</summary>
     public bool HasWaitStatsDaily => _availability.WaitStatsDaily;
+
+    /// <summary>Does the store hold any retention rollup at all? None is the plain-PostgreSQL shape (<see cref="RollupAvailability"/>),
+    /// where every chunk is an ordinary uncompressed heap, so the Daily Summary's raw queries read can use the shape that needs the
+    /// restart-row partial index (#8651). A TimescaleDB store whose probe failed reads the same as none, and takes that shape too,
+    /// which is correct and only costs a decompression the simple shape would not.</summary>
+    public bool HasAnyRollup => _availability != RollupAvailability.None;
     private readonly IReadOnlyDictionary<string, DateTime> _ceilingsByView;
 
     public RollupCoverage(

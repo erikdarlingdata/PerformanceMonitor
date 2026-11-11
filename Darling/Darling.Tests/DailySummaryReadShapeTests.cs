@@ -468,8 +468,11 @@ public sealed class DailySummaryReadShapeLiveTests
             .Single(n => n.TryGetProperty("Subplan Name", out var name) && name.GetString() == "CTE queries");
         var inQueries = Walk(queries).ToArray();
         Assert.DoesNotContain(inQueries, n => NodeType(n) == "Materialize");
+        /* #8651: the credited-pairs shape probes idx_query_stats_server_hash_time once per restart-only pair, a per-pair probe the rule
+           (the not-carried probes run once per day, not once per row) does not cover, so a join with that probe beneath it is left out. */
         Assert.DoesNotContain(inQueries, n => NodeType(n) == "Nested Loop"
-            && n.TryGetProperty("Join Type", out var join) && join.GetString() is "Semi" or "Anti");
+            && n.TryGetProperty("Join Type", out var join) && join.GetString() is "Semi" or "Anti"
+            && !Walk(n).Any(c => c.TryGetProperty("Index Name", out var index) && (index.GetString() ?? string.Empty).EndsWith("idx_query_stats_server_hash_time", StringComparison.Ordinal)));
 
         /* The legacy hourly's ceiling is D5 (the seed materializes D0, D3, D4 and D5); every window day at or
            below it is a candidate, and the ones the rollup holds no row for are probed at the source. */

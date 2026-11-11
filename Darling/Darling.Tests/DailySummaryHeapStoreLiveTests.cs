@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using PerformanceMonitor.Common;
 using NpgsqlTypes;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -53,7 +54,10 @@ public sealed class DailySummaryHeapStoreLiveTests
 
         /* The query_stats side takes the composer index idx_query_stats_server_hash_time, which the service's tuning pass
            builds on every store, so this store gets it the same way. */
-        var current = DailySummarySql.RangeSql;
+        /* #8651: a store with no rollups reads its raw window through the credited-pairs shape (DailySummarySql.CreditedPairs). */
+        var current = DailySummarySql.RangeSqlFor(RetentionTier.Raw,
+            new RollupCoverage(new Dictionary<string, DateTime>(StringComparer.Ordinal), new Dictionary<string, DateTime>(StringComparer.Ordinal), RollupAvailability.None),
+            start);
         Assert.Contains("FROM collect.query_stats", current, StringComparison.Ordinal);
         Assert.DoesNotContain("FROM v_query_stats", current, StringComparison.Ordinal);
         var viaView = current.Replace("FROM collect.query_stats", "FROM v_query_stats", StringComparison.Ordinal);
@@ -88,9 +92,9 @@ public sealed class DailySummaryHeapStoreLiveTests
         var directPlan = await PlanAsync(connection, current, start, end, ct);
         var viewPlan = await PlanAsync(connection, viaView, start, end, ct);
         const string QueryStatsIndex = "Index Only Scan using idx_query_stats_server_hash_time";
-        /* #8651: the direct query_stats read now also filters on sample_interval_seconds (restart rows do not count a hash), a column the
-           composer index does not carry, so on a plain heap store it reads the heap and no longer plans the index-only scan. The view read
-           still cannot take it either. */
+        /* #8651: the direct read counts only credited hashes through the index-only pair read plus the restart-only take-away
+           (DailySummarySql.CreditedPairs), so it still plans the index-only scan. */
+        Assert.True(directPlan.Contains(QueryStatsIndex, StringComparison.Ordinal), directPlan);
         Assert.DoesNotContain(QueryStatsIndex, viewPlan, StringComparison.Ordinal);
         Assert.Contains("Index Only Scan using " + PgTableTuning.WaitStatsDailyCoverIndexName, directPlan, StringComparison.Ordinal);
     }
