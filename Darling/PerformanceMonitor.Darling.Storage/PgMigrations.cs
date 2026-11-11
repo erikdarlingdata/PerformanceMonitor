@@ -3424,6 +3424,7 @@ $rung$;";
         new Migration(257, "collection-log-status-time", V257Sql),
         new Migration(258, "oversized-plan-backlog-dropped-index", V258Sql),
         new Migration(259, "wait-stats-daily-rollup", V259Sql),
+        new Migration(260, "oversized-plan-backlog-median-indexes", V260Sql),
     };
 
     /* V256 (#7643): schema tracking. Versioned table and view definitions, kept by the schema_objects collector (Darling only).
@@ -3611,6 +3612,17 @@ CREATE TABLE IF NOT EXISTS collect.schema_capture_state (
        uses, inside the ladder's own transaction. Idempotent. */
     private const string V257Sql = @"
 CREATE INDEX IF NOT EXISTS idx_collection_log_status_time ON collect.collection_log (server_id, status, collection_time DESC);";
+
+    /* V260 (#8570): the two indexes the oversized-plan backlog read takes its median through, on collect.oversized_plan_backlog:
+       idx_oversized_plan_backlog_server_bytes (server_id, observed_bytes) for the per-server rollup, and idx_oversized_plan_backlog_collector_bytes
+       (collector_name, observed_bytes) for the fleet-wide collector census. The median used to sort every row of every group, wide rows
+       and all (3,000,000 rows: a 228 MB spill, 5.9 s); the read now counts the group and walks that many rows halfway through the index, which
+       holds the two narrow columns and nothing else. observed_bytes is not NULL and a re-sighting writes the value it already holds unless the
+       plan really changed size, so an update of a waiting row stays heap-only. Plain B-trees on a plain table, built from one read of it. Not
+       CONCURRENTLY: the rung runs inside the ladder's own transaction. Idempotent. */
+    private const string V260Sql = @"
+CREATE INDEX IF NOT EXISTS idx_oversized_plan_backlog_server_bytes ON collect.oversized_plan_backlog (server_id, observed_bytes);
+CREATE INDEX IF NOT EXISTS idx_oversized_plan_backlog_collector_bytes ON collect.oversized_plan_backlog (collector_name, observed_bytes);";
 
     /* V258 (#8567): idx_oversized_plan_backlog_dropped, a partial B-tree on collect.oversized_plan_backlog (server_id, expired_at) over the
        rows the sweep dropped unfetched: no content, no attempt, an expiry stamp. Those are the rows OversizedPlanBacklog.PurgeDroppedSql

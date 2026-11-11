@@ -453,6 +453,13 @@ public sealed class MigrationDataMovingRungCensusPins
             + "deletes. The build reads the heap once and keeps the rows its predicate admits, which is none on a store whose sweep has not "
             + "dropped a row yet. Measured on a 2,000,000-row, 401 MB table holding 100,000 dropped rows: 58 ms, 704 kB. Not CONCURRENTLY, "
             + "inside the ladder's transaction. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            260,
+            SetsTheFloor: false,
+            "#8570: two CREATE INDEX IF NOT EXISTS over the populated collect.oversized_plan_backlog (created V121), a plain table: "
+            + "idx_oversized_plan_backlog_server_bytes (server_id, observed_bytes) and idx_oversized_plan_backlog_collector_bytes "
+            + "(collector_name, observed_bytes), the two narrow columns the median reads walk. Each build reads the heap once. Measured on a 3,000,000-row, 827 MB table: 7.2 s and 10.8 s on a busy laptop, 90 MB and 115 MB of index, one rung well inside one command timeout. "
+            + "Not CONCURRENTLY, inside the ladder's transaction. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
     ];
 
     /// <summary>

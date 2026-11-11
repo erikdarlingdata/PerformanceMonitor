@@ -10,6 +10,7 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -116,6 +117,82 @@ public sealed class QueryStoreClutterChurnPlanLiveTests
                 Assert.True(QueryStoreClutterChurnProbe.SpillIn(viaIndex.PlanText) is null,
                     label + ": the index path spilled at work_mem " + QueryStoreClutterChurnProbe.WorkMem + ": " + QueryStoreClutterChurnProbe.SpillIn(viaIndex.PlanText) + "\n" + viaIndex.PlanText);
             }
+        }
+    }
+
+    /// <summary>
+    /// #8570: the facts statement read the window's rows twice (once for the per-plan aggregate, once for the distinct collection
+    /// times), one pass after the other. The collection times are their own statement now, so the facts statement reads the window once.
+    /// Red on the old statement (about two passes of pages), green on the split.
+    /// </summary>
+    [Fact]
+    public async Task PlanChurnFacts_ReadTheWindowOnce_AndTheCollectionCountsStandAlone()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), Skip);
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
+        var anchor = LiveClock.AnchoredEnd();
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, null, ct);
+        if (scratch.TimescaleEnabled)
+        {
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            await using var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection);
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await PgTableTuning.ApplyAsync(connection, null, ct);
+        await QueryStoreClutterChurnProbe.SeedAsync(connection, anchor, ct);
+
+        var start = anchor.AddDays(-7);
+        NpgsqlCommand Explain(string sql)
+        {
+            var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql, connection);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = new[] { QueryStoreClutterChurnProbe.ServerId } });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(start, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(anchor, DateTimeKind.Unspecified) });
+            command.Parameters.Add(DatabaseFilter.All.Parameter());
+            return command;
+        }
+
+        long onePass;
+        await using (var reference = Explain("SELECT count(*), max(plan_id) FROM query_store_stats WHERE server_id = ANY($1::int[]) AND collection_time >= $2 AND collection_time <= $3 AND ($4::text[] IS NULL OR database_name = ANY($4))"))
+        {
+            onePass = ExplainBuffers.DataPages(await reference.ExecuteScalarAsync(ct));
+        }
+
+        long facts;
+        await using (var command = Explain(DarlingQueryStoreClutterReader.PlanChurnSql))
+        {
+            facts = ExplainBuffers.DataPages(await command.ExecuteScalarAsync(ct));
+        }
+
+        Assert.True(facts < onePass * 1.5, $"the facts statement read {facts} pages, one pass over the window reads {onePass}");
+
+        /* the collection counts are the model's: db_big is seen under 40 collection times, db_small under 3 (indexes 3 to 5) */
+        var counts = new System.Collections.Generic.Dictionary<string, long>();
+        await using (var command = new NpgsqlCommand(DarlingQueryStoreClutterReader.PlanChurnCollectionsSql, connection))
+        {
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = new[] { QueryStoreClutterChurnProbe.ServerId } });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(start, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(anchor, DateTimeKind.Unspecified) });
+            command.Parameters.Add(DatabaseFilter.All.Parameter());
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                counts[reader.GetString(1)] = reader.GetInt64(2);
+            }
+        }
+
+        var expected = QueryStoreClutterChurnProbe.ExpectedFor(anchor, start, anchor, null);
+        foreach (var e in expected)
+        {
+            Assert.Equal(e.CollectionsObserved, counts[e.Database]);
         }
     }
 }

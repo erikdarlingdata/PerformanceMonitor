@@ -56,12 +56,13 @@ public sealed class OversizedPlanBacklogReadPins
     private const string ToolSource =
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpOversizedPlanBacklogTools.cs";
 
-    /// <summary>The three statements this read is built from, as one sequence for the pins that hold a
+    /// <summary>The statements this read is built from, as one sequence for the pins that hold a
     /// property across all of them.</summary>
     private static string[] AllReadSql =>
     [
         DarlingOversizedPlanBacklogReader.PerServerRollupSql,
         DarlingOversizedPlanBacklogReader.CollectorCensusSql,
+        DarlingOversizedPlanBacklogReader.CollectorCensusForServerSql,
         DarlingOversizedPlanBacklogReader.RowsSql,
     ];
 
@@ -230,13 +231,21 @@ public sealed class OversizedPlanBacklogReadPins
            real rather than remembered. */
         var roundWithPrecision = new Regex(@"round\s*\([^()]*(?:\([^()]*\)[^()]*)*,", RegexOptions.IgnoreCase);
 
+        /* #8570: the rollup and the fleet census read the discrete percentile through an index (the value at
+           position ceil(n / 2), as an OFFSET of the ordered column), which is the same discrete value; the live
+           tests compare it with percentile_disc row for row. The one-server census still spells the aggregate. */
+        Assert.Contains(
+            "percentile_disc(0.5) WITHIN GROUP (ORDER BY b.observed_bytes)",
+            DarlingOversizedPlanBacklogReader.CollectorCensusForServerSql,
+            StringComparison.Ordinal);
+
         foreach (var sql in new[]
         {
             DarlingOversizedPlanBacklogReader.PerServerRollupSql,
             DarlingOversizedPlanBacklogReader.CollectorCensusSql,
+            DarlingOversizedPlanBacklogReader.CollectorCensusForServerSql,
         })
         {
-            Assert.Contains("percentile_disc(0.5) WITHIN GROUP (ORDER BY b.observed_bytes)", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("percentile_cont", sql, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("double precision", sql, StringComparison.OrdinalIgnoreCase);
             Assert.False(roundWithPrecision.IsMatch(sql),
@@ -261,6 +270,7 @@ public sealed class OversizedPlanBacklogReadPins
 
         /* And the census carries no registry join at all, so it cannot lose a row that way either. */
         Assert.DoesNotContain("JOIN servers", DarlingOversizedPlanBacklogReader.CollectorCensusSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("JOIN servers", DarlingOversizedPlanBacklogReader.CollectorCensusForServerSql, StringComparison.Ordinal);
     }
 
     /* ---- the statements address the shipped table ---------------------------------------------------- */
