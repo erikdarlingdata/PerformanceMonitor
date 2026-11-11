@@ -2934,6 +2934,12 @@ public static class FactAdvice
     /// PERMUTES on frequent-lightweight vs rare-heavyweight (the fix differs). The fact is keyed by
     /// the full BAD_ACTOR_{hash}, so the value reads use that key directly.
     /// </summary>
+    /// <summary>A bad-actor query is called "individually cheap" only when one execution costs under this much CPU (#8572).</summary>
+    internal const double BadActorCheapEachMaxCpuMs = 100;
+
+    /// <summary>...and under this many reads. Past either, a frequent query is expensive each time as well.</summary>
+    internal const double BadActorCheapEachMaxReads = 10_000;
+
     private static AdviceBlock ComposeBadActor(string key, IReadOnlyDictionary<string, Fact> facts)
     {
         var fallback = _byKey["BAD_ACTOR"];
@@ -2949,18 +2955,25 @@ public static class FactAdvice
         if (exec > 0)
             inv.Append($": {Plural(exec, "execution")}");
         if (cpu > 0)
-            inv.Append($", averaging {cpu:0.#} ms CPU");
+            inv.Append($", averaging {cpu:#,##0.#} ms CPU");
         if (reads > 0)
             inv.Append($" and {reads:N0} reads each");
         inv.Append(". ");
         var frequent = exec >= 1000;
-        inv.Append(frequent
+        /* #8572: "individually cheap" is a claim about one execution, so it is chosen from the per-execution cost and not from the count alone. A
+           query that costs a second of CPU and 250,000 reads each time is frequent AND expensive. A figure that is absent does not make it expensive. */
+        var expensiveEach = cpu >= BadActorCheapEachMaxCpuMs || reads >= BadActorCheapEachMaxReads;
+        inv.Append(frequent && expensiveEach
+            ? "It is a high-frequency query that is also expensive each time it runs, so the total cost is large from both directions: the win is reducing how often it runs (caching, batching at the application) and tuning the single execution (the right indexes, a better plan shape)."
+            : frequent
             ? "It is a high-frequency, individually-cheap query run so often that the total cost is large: the win is reducing how often it runs (caching, batching at the application) or shaving its per-execution cost."
             : "It is a low-frequency but very expensive query (run rarely, costly each time), so the win is tuning the single execution: the right indexes and a better plan shape.");
 
         var rem =
             "The attached detail has the query text and a live plan analysis. " +
-            (frequent
+            (frequent && expensiveEach
+                ? "For a frequent query that is also expensive each time, first ask whether it needs to run this often at all; then tune the single execution: eliminate the scans and spills its plan shows, add a covering index, tighten the predicate, or cache the result."
+                : frequent
                 ? "For a frequent query, first ask whether it needs to run this often at all; then make each execution cheap: a covering index, a tighter predicate, a cached result."
                 : "For a heavyweight query, tune the single execution: eliminate the scans and spills its plan shows, and give it the indexes it needs.");
 

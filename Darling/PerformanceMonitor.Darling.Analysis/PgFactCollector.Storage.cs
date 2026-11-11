@@ -49,6 +49,13 @@ WHERE rn = 1";
        that appears and vanishes strictly between those two snapshots and in neither of them; DatabaseSizeSql
        would carry it for up to 24 hours as a ghost, and #3896 exists to age ghosts out. Columns: total_size_mb
        (NULL with no qualifying row), dropped_out (true when DatabaseSizeSql must decide). */
+    /* #8570: EXCEPT, not NOT EXISTS over cur. The planner took the correlated form as a nested loop anti join of the
+       probed snapshots' files against the CTE's rows, one comparison per pair: 16 million of them, 2.1 seconds, on a
+       store holding 4,000 files for the server (a busy primary with 2,000 databases), growing with the square of
+       the file count. EXCEPT hashes the newest snapshot's keys once. The answer is the same for every file the
+       collector writes (both columns are always set). The one difference is a file with a NULL name: NOT EXISTS
+       never matched it, so it forced DatabaseSizeSql, while EXCEPT matches it with the newest snapshot's row of the
+       same NULL name and leaves the sum to this read. */
     public const string DatabaseSizeNewestSql = @"
 WITH newest AS (
     SELECT collection_time
@@ -94,17 +101,14 @@ edge AS (
 SELECT
     (SELECT SUM(size_mb) FROM cur) AS total_size_mb,
     EXISTS (
-        SELECT 1
+        SELECT f.database_name, f.file_name
         FROM file_io_stats AS f
         WHERE f.server_id = $1
         AND   f.collection_time IN (SELECT collection_time FROM edge)
         AND   f.size_mb > 0
-        AND   NOT EXISTS (
-            SELECT 1
-            FROM cur AS c
-            WHERE c.database_name = f.database_name
-            AND   c.file_name = f.file_name
-        )
+        EXCEPT
+        SELECT c.database_name, c.file_name
+        FROM cur AS c
     ) AS dropped_out";
 
     /// <summary>

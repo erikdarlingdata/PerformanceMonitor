@@ -358,9 +358,10 @@ internal static class TrendPayloads
             ["trend"] = points.Select(p => new
             {
                 time = Stamp(p.BucketStart),
-                wait_time_ms_per_second = p.WaitTimeMsPerSecond,
-                signal_wait_time_ms_per_second = p.SignalWaitTimeMsPerSecond,
-                peak_wait_time_ms_per_second = p.PeakWaitTimeMsPerSecond,
+                /* #8572: the same three places the wait-stats rate above carries, where the reply is built (257.70384995064165 otherwise). */
+                wait_time_ms_per_second = Math.Round(p.WaitTimeMsPerSecond, 3),
+                signal_wait_time_ms_per_second = Math.Round(p.SignalWaitTimeMsPerSecond, 3),
+                peak_wait_time_ms_per_second = McpHelpers.RoundTo(p.PeakWaitTimeMsPerSecond, 3),
             }),
             /* #3653 A5: trailing, after the points, on the data envelope only. */
             ["discontinuities"] = discontinuities,

@@ -156,6 +156,35 @@ function Get-RigPidFilePid {
     return 0
 }
 
+# The postmaster of the cluster in DataDir: the PID in postmaster.pid first, RegisteredPid second, either only when
+# it proves to be a live postgres.exe started on this data directory. Returns 0 when neither does.
+function Find-RigPostmaster {
+    param([Parameter(Mandatory)][string]$DataDir, [int]$RegisteredPid = 0)
+    foreach ($candidate in @((Get-RigPidFilePid $DataDir), $RegisteredPid)) {
+        if ($candidate -gt 0 -and (Test-RigPostmaster -ProcessId $candidate -DataDir $DataDir)) { return $candidate }
+    }
+    return 0
+}
+
+# Rewrites the PID field of the registry line for DataDir and keeps every other field, so the line format is unchanged.
+# A rig restarted with pg_ctl has a new postmaster PID the line does not know (the sweep must not call it stale).
+function Update-RigRegistryPid {
+    param([Parameter(Mandatory)][string]$DataDir, [Parameter(Mandatory)][int]$ProcessId)
+    $target = ConvertTo-RigPath $DataDir
+    Invoke-RigRegistryLocked {
+        if (-not (Test-Path -LiteralPath $script:RigRegistryPath)) { return }
+        $out = @(Get-Content -LiteralPath $script:RigRegistryPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object {
+            $f = $_.Split("`t")
+            if ([string]::Equals((ConvertTo-RigPath $f[0]), $target, [System.StringComparison]::OrdinalIgnoreCase) -and $f.Count -gt 1) {
+                $f[1] = [string]$ProcessId
+                $f -join "`t"
+            }
+            else { $_ }
+        })
+        Set-Content -LiteralPath $script:RigRegistryPath -Value $out -Encoding utf8NoBOM
+    }
+}
+
 # Stops the cluster in DataDir (pg_ctl first, then the verified postmaster PID), deletes the rig, drops its
 # registry line. Returns an object saying what it did. Refuses any path Get-RigPathRefusal rejects, touching nothing.
 function Stop-RigCluster {
@@ -174,10 +203,7 @@ function Stop-RigCluster {
     }
 
     # The postmaster to stop: postmaster.pid first, the registered PID second; either must prove itself.
-    $postmaster = 0
-    foreach ($candidate in @((Get-RigPidFilePid $data), $RegisteredPid)) {
-        if ($candidate -gt 0 -and (Test-RigPostmaster -ProcessId $candidate -DataDir $data)) { $postmaster = $candidate; break }
-    }
+    $postmaster = Find-RigPostmaster -DataDir $data -RegisteredPid $RegisteredPid
 
     if ($postmaster -eq 0) {
         # A live postgres at the postmaster.pid PID that does not name this data directory: deleting under a running
