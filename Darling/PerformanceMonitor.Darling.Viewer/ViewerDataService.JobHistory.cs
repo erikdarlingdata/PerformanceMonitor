@@ -378,7 +378,10 @@ public sealed partial class ViewerDataService
         "SELECT collection_time FROM job_history ORDER BY collection_time ASC LIMIT 1";
 
     /// <summary>One server's oldest run, on the server's wall clock as stored: an ordered one-row read on <c>idx_job_history_server_run</c>
-    /// <c>(server_id, run_datetime)</c>. The caller takes it to UTC on the server's clock, as the grid takes each row. $1 server_id.</summary>
+    /// <c>(server_id, run_datetime)</c>. The caller takes it to UTC on the server's clock, as the grid takes each row. $1 server_id.
+    /// Exact and fast on an uncompressed table, so it is the read where the store has no oldest-run rollup. On a TimescaleDB store a
+    /// compressed chunk keeps no rows in that index, and the read sorts every chunk's rows for the server to keep one (#8549), so
+    /// <see cref="GetJobHistoryOldestRunsAsync"/> takes the rollup there.</summary>
     public const string JobHistoryOldestRunServerSql =
         "SELECT server_id, run_datetime FROM job_history WHERE server_id = $1 ORDER BY run_datetime ASC LIMIT 1";
 
@@ -391,6 +394,65 @@ CROSS JOIN LATERAL
 (
     SELECT run_datetime FROM job_history WHERE server_id = s.server_id ORDER BY run_datetime ASC LIMIT 1
 ) AS r";
+
+    /// <summary>Is <c>collect.job_history_oldest_daily</c> (V263, #8549) a real continuous aggregate, not the plain view a store without
+    /// a hypertable carries? Read from the core catalogs, so it runs on plain PostgreSQL: a continuous aggregate's view reads from a table
+    /// in <c>_timescaledb_internal</c>, the plain view reads <c>job_history</c>. False when the relation is absent (an older store).</summary>
+    public const string JobHistoryOldestDailyIsAggregateSql = @"
+SELECT EXISTS
+(
+    SELECT 1
+    FROM pg_rewrite AS rw
+    JOIN pg_depend AS d ON d.classid = 'pg_rewrite'::regclass AND d.objid = rw.oid AND d.refclassid = 'pg_class'::regclass
+    JOIN pg_class AS t ON t.oid = d.refobjid
+    JOIN pg_namespace AS n ON n.oid = t.relnamespace
+    WHERE rw.ev_class = to_regclass('collect.job_history_oldest_daily')
+    AND   n.nspname = '_timescaledb_internal'
+)";
+
+    /// <summary>What the rollup read needs to decide which days it can take from the rollup: the rollup's oldest and newest bucket, and
+    /// the oldest <c>job_history</c> row of the whole store by collection (the raw tier's edge: retention drops whole chunks, so the day
+    /// that row is on may have lost rows the rollup's bucket for that day still counts). Three values, one read.</summary>
+    public const string JobHistoryOldestDailyBoundsSql = @"
+SELECT
+    (SELECT min(bucket) FROM collect.job_history_oldest_daily),
+    (SELECT max(bucket) FROM collect.job_history_oldest_daily),
+    (SELECT collection_time FROM job_history ORDER BY collection_time ASC LIMIT 1)";
+
+    /// <summary>The rollup's form of <see cref="JobHistoryOldestRunsFleetSql"/> (#8549): every server's oldest run, from the rollup's buckets in
+    /// [$1, $2) and raw <c>job_history</c> for every collection before $1 or from $2 on. The caller picks $1 and $2 so that every bucket in the
+    /// range is whole in raw's retention and in the rollup: $1 is the first bucket after the day of raw's oldest row (and no earlier than the
+    /// rollup's first), $2 the end of the rollup's last bucket. The two raw reads are plain ranges on <c>collection_time</c>, which exclude
+    /// every chunk inside [$1, $2), and each reads the one edge day, or the one open day, not the whole store. Joined to <c>servers</c>
+    /// as the read it replaces is.</summary>
+    public const string JobHistoryOldestRunsFleetRollupSql = @"
+SELECT s.server_id, m.oldest_run
+FROM servers AS s
+JOIN
+(
+    SELECT u.server_id, min(u.oldest_run) AS oldest_run
+    FROM
+    (
+        SELECT server_id, oldest_run_datetime AS oldest_run FROM collect.job_history_oldest_daily WHERE bucket >= $1 AND bucket < $2
+        UNION ALL
+        SELECT server_id, min(run_datetime) FROM job_history WHERE collection_time < $1 GROUP BY server_id
+        UNION ALL
+        SELECT server_id, min(run_datetime) FROM job_history WHERE collection_time >= $2 GROUP BY server_id
+    ) AS u
+    GROUP BY u.server_id
+) AS m ON m.server_id = s.server_id";
+
+    /// <summary>The one-server form of <see cref="JobHistoryOldestRunsFleetRollupSql"/>. $1 and $2 as there, $3 server_id.</summary>
+    public const string JobHistoryOldestRunServerRollupSql = @"
+SELECT $3::integer AS server_id, min(u.oldest_run) AS oldest_run
+FROM
+(
+    SELECT oldest_run_datetime AS oldest_run FROM collect.job_history_oldest_daily WHERE server_id = $3 AND bucket >= $1 AND bucket < $2
+    UNION ALL
+    SELECT min(run_datetime) FROM job_history WHERE server_id = $3 AND collection_time < $1
+    UNION ALL
+    SELECT min(run_datetime) FROM job_history WHERE server_id = $3 AND collection_time >= $2
+) AS u";
 
     /// <summary>
     /// The oldest instant the store holds job history from, for the Job History tab's time range picker's "Data starts" note: the
@@ -422,24 +484,7 @@ CROSS JOIN LATERAL
             }
         }
 
-        var runs = new List<(int ServerId, DateTime RunWall)>();
-        await using (var command = _dataSource.CreateCommand(serverId is null ? JobHistoryOldestRunsFleetSql : JobHistoryOldestRunServerSql))
-        {
-            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-            if (serverId is int id)
-            {
-                command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = id });
-            }
-
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                if (!reader.IsDBNull(1))
-                {
-                    runs.Add((reader.GetInt32(0), reader.GetDateTime(1)));
-                }
-            }
-        }
+        var runs = await GetJobHistoryOldestRunsAsync(serverId, cancellationToken);
 
         if (runs.Count > 0)
         {
@@ -457,6 +502,92 @@ CROSS JOIN LATERAL
         }
 
         return oldest;
+    }
+
+    /// <summary>
+    /// Every server's oldest run as stored, or <paramref name="serverId"/>'s alone (#8549). Where the store holds the oldest-run rollup
+    /// as a real continuous aggregate (<see cref="JobHistoryOldestDailyIsAggregateSql"/>) the days the rollup holds are read from it and the
+    /// rest from raw: the day raw's oldest row is on (retention drops whole chunks, so that day can have lost rows its bucket still counts),
+    /// every day before the rollup's first bucket, and every day after its last (the open day, and any day its refresh has not reached).
+    /// The answer is the same one <see cref="JobHistoryOldestRunsFleetSql"/> and <see cref="JobHistoryOldestRunServerSql"/> give: a bucket
+    /// is the smallest run among rows collected that day, a late collection holding an older run sits in the day it was collected, and a
+    /// day the rollup holds whole is never part of the raw reads. A store with no rollup, a plain view, or no usable bucket takes the
+    /// ordered one-row reads, which are exact on an uncompressed table.
+    /// </summary>
+    internal async Task<List<(int ServerId, DateTime RunWall)>> GetJobHistoryOldestRunsAsync(int? serverId, CancellationToken cancellationToken)
+    {
+        var range = await ReadJobHistoryOldestDailyRangeAsync(cancellationToken);
+        var runs = new List<(int ServerId, DateTime RunWall)>();
+        string sql;
+        if (range is not null)
+        {
+            sql = serverId is null ? JobHistoryOldestRunsFleetRollupSql : JobHistoryOldestRunServerRollupSql;
+        }
+        else
+        {
+            sql = serverId is null ? JobHistoryOldestRunsFleetSql : JobHistoryOldestRunServerSql;
+        }
+
+        await using var command = _dataSource.CreateCommand(sql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        if (range is { } window)
+        {
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = window.Lo });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = window.Hi });
+        }
+
+        if (serverId is int id)
+        {
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = id });
+        }
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(1))
+            {
+                runs.Add((reader.GetInt32(0), reader.GetDateTime(1)));
+            }
+        }
+
+        return runs;
+    }
+
+    /// <summary>
+    /// The bucket range [lo, hi) <see cref="JobHistoryOldestRunsFleetRollupSql"/> may take from the rollup, or null when the store has no
+    /// real rollup or it holds no bucket past raw's edge day. <c>lo</c> is the later of the rollup's first bucket and the first midnight after
+    /// the day of raw's oldest row; <c>hi</c> is the end of the rollup's last bucket.
+    /// </summary>
+    internal async Task<(DateTime Lo, DateTime Hi)?> ReadJobHistoryOldestDailyRangeAsync(CancellationToken cancellationToken)
+    {
+        await using (var probe = _dataSource.CreateCommand(JobHistoryOldestDailyIsAggregateSql))
+        {
+            probe.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
+            {
+                return null;
+            }
+        }
+
+        await using var bounds = _dataSource.CreateCommand(JobHistoryOldestDailyBoundsSql);
+        bounds.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        await using var reader = await bounds.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0) || reader.IsDBNull(1) || reader.IsDBNull(2))
+        {
+            return null;
+        }
+
+        return JobHistoryOldestDailyRange(reader.GetDateTime(0), reader.GetDateTime(1), reader.GetDateTime(2));
+    }
+
+    /// <summary><see cref="ReadJobHistoryOldestDailyRangeAsync"/>'s rule on its three inputs, apart from the read: the rollup's first and
+    /// last bucket and raw's oldest collection. Null when no bucket is left after raw's edge day.</summary>
+    internal static (DateTime Lo, DateTime Hi)? JobHistoryOldestDailyRange(DateTime firstBucket, DateTime lastBucket, DateTime rawOldestCollection)
+    {
+        var afterEdgeDay = rawOldestCollection.Date.AddDays(1);
+        var lo = firstBucket > afterEdgeDay ? firstBucket : afterEdgeDay;
+        var hi = lastBucket.AddDays(1);
+        return lo < hi ? (lo, hi) : null;
     }
 
     /// <summary>
