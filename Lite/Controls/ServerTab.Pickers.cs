@@ -56,9 +56,13 @@ public partial class ServerTab : UserControl
     }
 
     private bool _isUpdatingWaitTypeSelection;
+    private bool _waitTypeListLoaded;
+    private bool _memoryClerkListLoaded;
+    private bool _perfmonCounterListLoaded;
 
     private void PopulateWaitTypePicker(List<string> waitTypes)
     {
+        _waitTypeListLoaded = true; // #8647: from here on, nothing ticked means nothing picked, not "not read yet"
         var previouslySelected = new HashSet<string>(_waitTypeItems.Where(i => i.IsSelected).Select(i => i.DisplayName));
         var topWaits = previouslySelected.Count == 0 ? GetDefaultWaitTypes(waitTypes) : null;
         _waitTypeItems = waitTypes.Select(w => new SelectableItem
@@ -169,7 +173,7 @@ public partial class ServerTab : UserControl
             ApplyTheme(WaitStatsChart);
             _waitStatsHover?.Clear();
 
-            if (selected.Count == 0) { RefreshEmptyChart(WaitStatsChart, "Wait Stats", ""); return; }
+            if (selected.Count == 0) { _chartHelper.RefreshNothingToPlotChart(WaitStatsChart, _waitTypeListLoaded, _waitTypeItems.Count, "Wait Stats", "wait types", ""); return; } // #8647
 
             bool useAvgPerWait = WaitStatsMetricCombo?.SelectedIndex == 1;
             if (_waitStatsHover != null) _waitStatsHover.Unit = useAvgPerWait ? "ms/wait" : "ms/sec";
@@ -235,6 +239,7 @@ public partial class ServerTab : UserControl
 
     private void PopulateMemoryClerkPicker(List<string> clerkTypes)
     {
+        _memoryClerkListLoaded = true; // #8647
         var previouslySelected = new HashSet<string>(_memoryClerkItems.Where(i => i.IsSelected).Select(i => i.DisplayName));
         var topClerks = previouslySelected.Count == 0 ? new HashSet<string>(clerkTypes.Take(5)) : null;
         _memoryClerkItems = clerkTypes.Select(c => new SelectableItem
@@ -342,7 +347,7 @@ public partial class ServerTab : UserControl
             {
                 MemoryClerksTotalText.Text = "--";
                 MemoryClerksTopText.Text = "--";
-                RefreshEmptyChart(MemoryClerksChart, "Memory Clerks", "MB"); // #8644: the one empty look, not the default axes
+                _chartHelper.RefreshNothingToPlotChart(MemoryClerksChart, _memoryClerkListLoaded, _memoryClerkItems.Count, "Memory Clerks", "clerks", "MB"); // #8644, #8647
                 return;
             }
 
@@ -438,6 +443,7 @@ public partial class ServerTab : UserControl
             PerfmonPackCombo.SelectedItem = "General Throughput";
         }
 
+        _perfmonCounterListLoaded = true; // #8647
         var previouslySelected = new HashSet<string>(_perfmonCounterItems.Where(i => i.IsSelected).Select(i => i.DisplayName));
         _perfmonCounterItems = counters.Select(c => new SelectableItem
         {
@@ -596,7 +602,7 @@ public partial class ServerTab : UserControl
             _perfmonHover?.Clear();
             ApplyTheme(PerfmonChart);
 
-            if (selected.Count == 0) { RefreshEmptyChart(PerfmonChart, "Perfmon", ""); return; } // #8644: the one empty look, not the default axes
+            if (selected.Count == 0) { _chartHelper.RefreshNothingToPlotChart(PerfmonChart, _perfmonCounterListLoaded, _perfmonCounterItems.Count, "Perfmon", "counters", ""); return; } // #8644, #8647
 
             var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
             double globalMax = 0;

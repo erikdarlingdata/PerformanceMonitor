@@ -48,6 +48,28 @@ namespace PerformanceMonitor.Ui
             set => SetValue(DaysProperty, value);
         }
 
+        /// <summary>
+        /// #8647: true from the moment the host picks the calendar's tab until its first month read returns. The cells dim and
+        /// <c>Loading...</c> sits over them, so a calendar that has not been read does not pass for a month with no collection.
+        /// The host sets it back to false when the read returns, with rows or without.
+        /// </summary>
+        public static readonly DependencyProperty IsLoadingProperty = DependencyProperty.Register(
+            nameof(IsLoading), typeof(bool), typeof(PerformanceCalendar),
+            new PropertyMetadata(false, OnIsLoadingChanged));
+        public bool IsLoading
+        {
+            get => (bool)GetValue(IsLoadingProperty);
+            set => SetValue(IsLoadingProperty, value);
+        }
+
+        private static void OnIsLoadingChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+        {
+            var calendar = (PerformanceCalendar)d;
+            var loading = (bool)e.NewValue;
+            calendar.DayCells.Opacity = loading ? 0.3 : 1.0;
+            calendar.CalendarLoadingText.Visibility = loading ? Visibility.Visible : Visibility.Collapsed;
+        }
+
         /// <summary>The month to display (any day within it; normalized to the first). Defaults to the current
         /// UTC month — the calendar operates in UTC day-space to match the collected data (naive-UTC collection times).</summary>
         public static readonly DependencyProperty DisplayMonthProperty = DependencyProperty.Register(

@@ -179,18 +179,111 @@ public sealed class RefreshCoordinatorTests
         Assert.Equal(2, h.Passes.Count);
         Assert.False(h.Passes[0].Painted, "the superseded Overview read must not paint");
 
-        /* The replay reads the selection at ITS start (Waits), and carries the tick's wider scope so the badges still refresh. */
+        /* The replay reads the selection at ITS start (Waits), the picked tab first (#8647); the tick's wider scope rides along as the
+           chrome pass after it, so the badges still refresh. */
         Assert.Equal("Waits", h.Passes[1].Tab);
-        Assert.Equal(RefreshScope.Full, h.Passes[1].Scope);
+        Assert.Equal(RefreshScope.VisibleTab, h.Passes[1].Scope);
         Assert.False(h.Passes[1].Token.IsCancellationRequested);
 
         h.Release(1);
+        await h.Started(2);
+        Assert.Equal(RefreshScope.Surround, h.Passes[2].Scope);
+        h.Release(2);
         await Completes(navigation);
         await Completes(tick);
 
-        Assert.Equal(new[] { "Full:Waits:4h" }, h.Paints);
+        Assert.Equal(new[] { "VisibleTab:Waits:4h", "Surround:Waits:4h" }, h.Paints);
         Assert.Equal(1, h.MaxConcurrent);
         Assert.False(h.Coordinator.IsRunning);
+    }
+
+    /* #8647: a switch that arrives while a Full pass reads (a newly opened tab's first pass) reads the picked tab FIRST. */
+    [Fact]
+    public async Task ATabSwitchDuringAFullPass_ReadsThePickedTabBeforeTheRestOfTheFullScope()
+    {
+        var h = new Harness { SelectedTab = "Overview" };
+
+        var open = h.Coordinator.RequestAsync(RefreshScope.Full);
+        h.SelectedTab = "Perfmon";
+        var navigation = h.Coordinator.RequestAsync(RefreshScope.VisibleTab);
+        Assert.True(h.Passes[0].Token.IsCancellationRequested, "the first pass is superseded");
+
+        h.Release(0);
+        await h.Started(1);
+        Assert.Equal(RefreshScope.VisibleTab, h.Passes[1].Scope);
+        Assert.Equal("Perfmon", h.Passes[1].Tab);
+        Assert.Equal(2, h.Passes.Count);
+
+        h.Release(1);
+        await h.Started(2);
+        Assert.Equal(RefreshScope.Surround, h.Passes[2].Scope);
+        h.Release(2);
+        await Completes(open);
+        await Completes(navigation);
+
+        Assert.Equal(new[] { "VisibleTab:Perfmon:4h", "Surround:Perfmon:4h" }, h.Paints);
+        Assert.Equal(1, h.MaxConcurrent);
+        Assert.False(h.Coordinator.IsRunning);
+    }
+
+    [Fact]
+    public async Task ASecondSwitchDuringThePickedTabsRead_StillOwesTheRestOfTheFullScope()
+    {
+        var h = new Harness { SelectedTab = "Overview" };
+
+        var open = h.Coordinator.RequestAsync(RefreshScope.Full);
+        h.SelectedTab = "Perfmon";
+        _ = h.Coordinator.RequestAsync(RefreshScope.VisibleTab);
+        h.Release(0);
+        await h.Started(1);
+
+        /* The user moves on while the picked tab's read waits: that read is dropped, the new tab is read next, and the chrome the first
+           half owed is not lost. */
+        h.SelectedTab = "Daily Summary";
+        _ = h.Coordinator.RequestAsync(RefreshScope.VisibleTab);
+        Assert.True(h.Passes[1].Token.IsCancellationRequested);
+        h.Release(1);
+        await h.Started(2);
+        Assert.Equal(RefreshScope.VisibleTab, h.Passes[2].Scope);
+        Assert.Equal("Daily Summary", h.Passes[2].Tab);
+
+        h.Release(2);
+        await h.Started(3);
+        Assert.Equal(RefreshScope.Surround, h.Passes[3].Scope);
+        h.Release(3);
+        await Completes(open);
+
+        Assert.Equal(new[] { "VisibleTab:Daily Summary:4h", "Surround:Daily Summary:4h" }, h.Paints);
+        Assert.Equal(1, h.MaxConcurrent);
+    }
+
+    [Fact]
+    public async Task AFullRequestThatArrivesWithNoSwitch_StillRunsOneWholeFullPass()
+    {
+        var h = new Harness { SelectedTab = "Overview" };
+
+        var run = h.Coordinator.RequestAsync(RefreshScope.Full);
+        _ = h.Coordinator.RequestAsync(RefreshScope.Full);
+        h.Release(0);
+        await h.Started(1);
+        Assert.Equal(RefreshScope.Full, h.Passes[1].Scope);
+        h.Release(1);
+        await Completes(run);
+
+        Assert.Equal(2, h.Passes.Count);
+    }
+
+    [Fact]
+    public async Task ASwitchWhenNothingIsRunning_IsOneTabOnlyPass_WithNoChromeAfterIt()
+    {
+        var h = new Harness { SelectedTab = "Perfmon" };
+
+        var run = h.Coordinator.RequestAsync(RefreshScope.VisibleTab);
+        h.Release(0);
+        await Completes(run);
+
+        Assert.Single(h.Passes);
+        Assert.Equal(RefreshScope.VisibleTab, h.Passes[0].Scope);
     }
 
     [Fact]
@@ -326,9 +419,12 @@ public sealed class RefreshCoordinatorTests
         await h.Started(1);
         Assert.Equal(2, h.Passes.Count);
         h.Release(1);
+        await h.Started(2);
+        h.Release(2);
         await Completes(run);
 
-        Assert.Equal(2, h.Passes.Count);
+        /* The switch's tab read, then the Full scope's chrome (#8647); the ticks added nothing. */
+        Assert.Equal(3, h.Passes.Count);
         Assert.Equal(1, h.MaxConcurrent);
     }
 
@@ -343,8 +439,12 @@ public sealed class RefreshCoordinatorTests
 
         h.Release(0);
         await h.Started(1);
-        Assert.Equal(RefreshScope.Full, h.Passes[1].Scope);
+        /* The Full request is not narrowed: its chrome still runs, after the picked tab's read (#8647). */
+        Assert.Equal(RefreshScope.VisibleTab, h.Passes[1].Scope);
         h.Release(1);
+        await h.Started(2);
+        Assert.Equal(RefreshScope.Surround, h.Passes[2].Scope);
+        h.Release(2);
         await Completes(run);
     }
 
@@ -388,14 +488,17 @@ public sealed class RefreshCoordinatorTests
         Assert.Equal("None", h.Passes[0].Compare);
         Assert.False(h.Passes[0].Painted);
         Assert.Equal("Yesterday", h.Passes[1].Compare);
-        Assert.Equal(RefreshScope.Full, h.Passes[1].Scope);
+        Assert.Equal(RefreshScope.VisibleTab, h.Passes[1].Scope);
 
         h.Release(1);
+        await h.Started(2);
+        Assert.Equal(RefreshScope.Surround, h.Passes[2].Scope);
+        h.Release(2);
         await Completes(change);
         await Completes(tick);
 
-        Assert.Equal(2, h.Passes.Count);
-        Assert.Equal(new[] { "Full:Overview:4h" }, h.Paints);
+        Assert.Equal(3, h.Passes.Count);
+        Assert.Equal(new[] { "VisibleTab:Overview:4h", "Surround:Overview:4h" }, h.Paints);
         Assert.Equal(1, h.MaxConcurrent);
     }
 

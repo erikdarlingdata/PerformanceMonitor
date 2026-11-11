@@ -277,7 +277,8 @@ FROM range(1000000) a, range(1000000) b";
 
         Assert.IsAssignableFrom<OperationCanceledException>(firstOutcome);
         Assert.True(firstStopped.Elapsed < InterruptBound, $"the superseded read stopped after {firstStopped.ElapsedMilliseconds} ms");
-        Assert.Equal(2, calls);
+        /* The cancelled Full pass, then the picked tab's read and the chrome pass that follows it (#8647). */
+        Assert.Equal(3, calls);
         AssertLockIsFree();
     }
 

@@ -19,6 +19,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 public partial class ViewerServerTab
 {
     private readonly ChartRenderHelper _chartHelper = new();
+    private FirstPaintLoading? _firstPaint;
+    /// <summary>#8647: "Loading..." where a sub-tab's empty-state sentence goes until its first read returns.</summary>
+    private FirstPaintLoading FirstPaint => _firstPaint ??= new FirstPaintLoading(_chartHelper, ApplyTheme);
+
+    private void ShowFirstPaintLoading() => FirstPaint.Show((InnerTabs.SelectedItem as TabItem)?.Content as DependencyObject);
 
     private void ClearChart(ScottPlot.WPF.WpfPlot chart)
     {
