@@ -29,15 +29,17 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// T" by comparison, which is the one question the recording half shipped without any client able to
 /// ask.</para>
 ///
-/// <para><b>The three verdicts are a strict partition of the total, and the read is written so they cannot
+/// <para><b>The four verdicts are a strict partition of the total, and the read is written so they cannot
 /// be anything else.</b> <c>captured</c> is <c>captured_at IS NOT NULL</c>; <c>expired</c> excludes a row
 /// that also carries content, because a capture retires a standing expiry
 /// (<see cref="OversizedPlanBacklog.RecordCaptureSql"/>) and so does a re-sighting
 /// (<see cref="OversizedPlanBacklog.UpsertSightingSql"/>); <c>pending</c> is the sweep's own claim
-/// predicate. Every row therefore lands in exactly one bucket and <c>pending + captured + expired</c>
-/// equals <c>total</c> — asserted against a live store rather than argued, because a rollup whose buckets
-/// silently overlap reads as a bigger backlog than exists, and one whose buckets leave a gap reads as a
-/// smaller one.</para>
+/// predicate. A row with no content and a standing <c>expired_at</c> is <c>expired</c> when a fetch stamped
+/// it, which also stamps <c>last_attempt_at</c>, and <c>dropped</c> when the sweep's trim did, which only
+/// ever stamps a row never attempted (#8567). Every row therefore lands in exactly one bucket and
+/// <c>pending + captured + expired + dropped</c> equals <c>total</c> — asserted against a live store rather
+/// than argued, because a rollup whose buckets silently overlap reads as a bigger backlog than exists, and
+/// one whose buckets leave a gap reads as a smaller one.</para>
 ///
 /// <para><b><c>pending</c> is the claim's predicate, spelled the same way on purpose.</b> A read that
 /// defined "still to do" independently of <see cref="OversizedPlanBacklog.ClaimSql"/> could report an empty
@@ -83,12 +85,24 @@ internal static class DarlingOversizedPlanBacklogReader
     /// <summary>The verdict a row the sweep will still go back for carries.</summary>
     public const string VerdictPending = "pending";
 
+    /// <summary>#8567: the verdict a row carries once the sweep's trim dropped it unfetched: a newer sighting of
+    /// the same query is waiting in its place, or the server was past its pending cap.</summary>
+    public const string VerdictDropped = "dropped";
+
     /// <summary>
     /// The sweep's claim predicate, qualified to this read's alias — the definition of "still to do" that
     /// <see cref="OversizedPlanBacklog.ClaimSql"/> selects on, restated once here and reused by every
     /// pending-shaped aggregate below so the three of them cannot drift from each other either.
     /// </summary>
     private const string PendingPredicate = "b.captured_at IS NULL AND b.expired_at IS NULL";
+
+    /// <summary>
+    /// #8567: a row the sweep's trim dropped unfetched, qualified to this read's alias. The trim stamps
+    /// <c>expired_at</c> on rows never attempted and a fetch expiry stamps <c>last_attempt_at</c> with it
+    /// (<see cref="OversizedPlanBacklog.RecordExpirySql"/>), so the attempt stamp is what separates the two.
+    /// </summary>
+    private const string DroppedPredicate =
+        "b.captured_at IS NULL AND b.expired_at IS NOT NULL AND b.last_attempt_at IS NULL";
 
     /// <summary>
     /// One row per server that has any backlog at all ($1 = an optional server_id, or NULL for every
@@ -114,7 +128,8 @@ SELECT
     count(*) FILTER (WHERE " + PendingPredicate + @")                        AS pending_rows,
     count(*) FILTER (WHERE b.captured_at IS NOT NULL)                        AS captured_rows,
     count(*) FILTER (WHERE b.captured_at IS NULL
-                     AND   b.expired_at IS NOT NULL)                         AS expired_rows,
+                     AND   b.expired_at IS NOT NULL
+                     AND   b.last_attempt_at IS NOT NULL)                    AS expired_rows,
     count(*) FILTER (WHERE b.plan_xml IS NOT NULL)                           AS rows_with_content,
     count(*) FILTER (WHERE b.collector_name = '" + OversizedPlanBacklog.QueryStatsCollectorName + @"')
                                                                              AS query_stats_rows,
@@ -130,14 +145,18 @@ SELECT
     max(b.last_seen_at)                                                      AS last_seen_at,
     max(b.last_attempt_at)                                                   AS last_attempt_at,
     max(b.captured_at)                                                       AS last_captured_at,
-    max(b.expired_at)                                                        AS last_expired_at,
+    max(b.expired_at) FILTER (WHERE b.last_attempt_at IS NOT NULL)           AS last_expired_at,
     min(b.observed_bytes)                                                    AS min_observed_bytes,
     percentile_disc(0.5) WITHIN GROUP (ORDER BY b.observed_bytes)            AS median_observed_bytes,
     max(b.observed_bytes)                                                    AS max_observed_bytes,
     count(*) FILTER (WHERE b.first_seen_at >= $2)                            AS rows_added_last_day,
     count(*) FILTER (WHERE b.captured_at >= $2)                              AS rows_captured_last_day,
     count(*) FILTER (WHERE b.captured_at IS NULL
-                     AND   b.expired_at >= $2)                               AS rows_expired_last_day
+                     AND   b.expired_at >= $2
+                     AND   b.last_attempt_at IS NOT NULL)                    AS rows_expired_last_day,
+    count(*) FILTER (WHERE " + DroppedPredicate + @")                        AS dropped_rows,
+    count(*) FILTER (WHERE " + DroppedPredicate + @"
+                     AND   b.expired_at >= $2)                               AS rows_dropped_last_day
 FROM " + OversizedPlanBacklog.TableName + @" AS b
 LEFT JOIN servers AS s
   ON s.server_id = b.server_id
@@ -169,12 +188,14 @@ SELECT
     count(*) FILTER (WHERE " + PendingPredicate + @")                        AS pending_rows,
     count(*) FILTER (WHERE b.captured_at IS NOT NULL)                        AS captured_rows,
     count(*) FILTER (WHERE b.captured_at IS NULL
-                     AND   b.expired_at IS NOT NULL)                         AS expired_rows,
+                     AND   b.expired_at IS NOT NULL
+                     AND   b.last_attempt_at IS NOT NULL)                    AS expired_rows,
     max(b.captured_at)                                                       AS last_captured_at,
-    max(b.expired_at)                                                        AS last_expired_at,
+    max(b.expired_at) FILTER (WHERE b.last_attempt_at IS NOT NULL)           AS last_expired_at,
     min(b.observed_bytes)                                                    AS min_observed_bytes,
     percentile_disc(0.5) WITHIN GROUP (ORDER BY b.observed_bytes)            AS median_observed_bytes,
-    max(b.observed_bytes)                                                    AS max_observed_bytes
+    max(b.observed_bytes)                                                    AS max_observed_bytes,
+    count(*) FILTER (WHERE " + DroppedPredicate + @")                        AS dropped_rows
 FROM " + OversizedPlanBacklog.TableName + @" AS b
 WHERE ($1::integer IS NULL OR b.server_id = $1)
 GROUP BY
@@ -234,10 +255,11 @@ LIMIT $2";
     /// <c>expired_at</c>, so a row carrying both stamps is a row that was retired and later fetched
     /// anyway, and the useful thing to say about it is that the plan is available.</para>
     /// </summary>
-    public static string VerdictOf(DateTime? capturedAt, DateTime? expiredAt) =>
+    public static string VerdictOf(DateTime? capturedAt, DateTime? expiredAt, DateTime? lastAttemptAt) =>
         capturedAt.HasValue ? VerdictCaptured
-        : expiredAt.HasValue ? VerdictExpired
-        : VerdictPending;
+        : !expiredAt.HasValue ? VerdictPending
+        : lastAttemptAt.HasValue ? VerdictExpired
+        : VerdictDropped;
 
     /// <summary>One server's backlog, rolled up.</summary>
     public sealed record BacklogServerRollup(
@@ -263,7 +285,9 @@ LIMIT $2";
         long MaxObservedBytes,
         long RowsAddedLastDay,
         long RowsCapturedLastDay,
-        long RowsExpiredLastDay);
+        long RowsExpiredLastDay,
+        long DroppedRows,
+        long RowsDroppedLastDay);
 
     /// <summary>One collector's share of the scope.</summary>
     public sealed record BacklogCollectorCensus(
@@ -277,7 +301,8 @@ LIMIT $2";
         DateTime? LastExpiredAt,
         long MinObservedBytes,
         long MedianObservedBytes,
-        long MaxObservedBytes);
+        long MaxObservedBytes,
+        long DroppedRows);
 
     /// <summary>One backlog row: the claim key, the plan's identity, and every stamp.</summary>
     public sealed record BacklogRow(
@@ -298,7 +323,7 @@ LIMIT $2";
         bool HasPlanXml)
     {
         /// <summary>This row's bucket — see <see cref="VerdictOf"/>.</summary>
-        public string Verdict => VerdictOf(CapturedAt, ExpiredAt);
+        public string Verdict => VerdictOf(CapturedAt, ExpiredAt, LastAttemptAt);
     }
 
     /// <summary>
@@ -371,7 +396,9 @@ AND   collection_time >= $3";
                 reader.GetInt64(19),
                 reader.GetInt64(20),
                 reader.GetInt64(21),
-                reader.GetInt64(22)));
+                reader.GetInt64(22),
+                reader.GetInt64(23),
+                reader.GetInt64(24)));
         }
 
         return rows;
@@ -400,7 +427,8 @@ AND   collection_time >= $3";
                 reader.IsDBNull(7) ? null : reader.GetDateTime(7),
                 reader.GetInt64(8),
                 reader.GetInt64(9),
-                reader.GetInt64(10)));
+                reader.GetInt64(10),
+                reader.GetInt64(11)));
         }
 
         return rows;

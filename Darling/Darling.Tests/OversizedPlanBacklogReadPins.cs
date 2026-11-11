@@ -35,7 +35,7 @@ namespace Darling.Tests;
 /// had two silent fallback readers; what it did not have was any way to see the sweep's verdicts, so the
 /// failure this read exists to prevent is a plausible-looking answer rather than a missing one. Each pin
 /// below covers one way this read could return numbers that look right and are not: counting "pending"
-/// differently from the sweep's own claim, letting the three verdict buckets overlap or leave a gap,
+/// differently from the sweep's own claim, letting the verdict buckets overlap or leave a gap,
 /// reporting a CHARACTER count under a byte-shaped name, and losing rows whose server has left the
 /// registry. Every one of those reads as a smaller or larger backlog than exists, with nothing to say
 /// so.</para>
@@ -163,7 +163,8 @@ public sealed class OversizedPlanBacklogReadPins
             expected,
             DarlingOversizedPlanBacklogReader.VerdictOf(
                 captured ? at : null,
-                expired ? at : null));
+                expired ? at : null,
+                captured || expired ? at : null));
     }
 
     [Fact]
@@ -171,7 +172,8 @@ public sealed class OversizedPlanBacklogReadPins
     {
         /* The SQL half of the partition, and the arm that is easiest to "simplify" into
            expired_at IS NOT NULL on its own — at which point a both-stamps row is counted twice and
-           pending + captured + expired exceeds total_rows, which reads as a bigger backlog than exists. */
+           pending + captured + expired exceeds total_rows, which reads as a bigger backlog than exists. The
+           attempt arm keeps a row the trim dropped unfetched out of it: that row is the dropped bucket's. */
         foreach (var sql in new[]
         {
             DarlingOversizedPlanBacklogReader.PerServerRollupSql,
@@ -179,7 +181,7 @@ public sealed class OversizedPlanBacklogReadPins
         })
         {
             Assert.Contains(
-                "count(*) filter (where captured_at is null and expired_at is not null) as expired_rows",
+                "count(*) filter (where captured_at is null and expired_at is not null and last_attempt_at is not null) as expired_rows",
                 Normalize(sql),
                 StringComparison.Ordinal);
         }
