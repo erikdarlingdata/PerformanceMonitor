@@ -174,7 +174,7 @@ public sealed class ViewerIdentityCapacityTextTests : IDisposable
         Assert.Equal(["Clean", "Fresh", "Stale"], rows.Select(r => r.Database).ToArray());
         Assert.Equal(["Scanned, clean", "Not yet scanned", "Not yet scanned"], rows.Select(r => r.State).ToArray());
         Assert.Equal("-", rows[1].LastScanned);
-        Assert.Equal(earlier.ToLocalTime().ToString("g", CultureInfo.CurrentCulture), rows[2].LastScanned);
+        Assert.Equal(LocalWorded(earlier), rows[2].LastScanned);
         Assert.Equal("Critical: 0   Warning: 0   Columns above 10 percent: 0   Databases scanned: 1   Not yet scanned: 2   Skipped: 0   " + ViewerIdentityCapacityText.BandsNote, ViewerIdentityCapacityText.StatusLine(read));
         Assert.Equal(ViewerIdentityCapacityRead.Data, read.Status);
     }
