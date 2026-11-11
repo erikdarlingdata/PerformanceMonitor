@@ -33,6 +33,14 @@ public sealed class ViewerLoadTimer
     private readonly List<(string Phase, long StartedMs, long EndedMs)> _phases = new();
     private readonly List<(string Step, long Ms)> _clientSteps = new();
     private readonly object _gate = new();
+    private readonly int _slowThresholdMs;
+
+    public ViewerLoadTimer() : this(SlowLoadThresholdMs)
+    {
+    }
+
+    /// <summary>A clock with its own slow-load threshold, so a test reads the line a load would log without waiting three seconds (#8549).</summary>
+    internal ViewerLoadTimer(int slowThresholdMs) => _slowThresholdMs = slowThresholdMs;
 
     /// <summary>What the load is: set by a loader that knows its sub-tab ("Queries > Top Queries by Duration").</summary>
     internal string Surface { get; set; } = "";
@@ -113,9 +121,9 @@ public sealed class ViewerLoadTimer
 
     /// <summary>The log line for a load of <paramref name="totalMs"/>, or null when it was not slow. Pure, so a test reads the text.</summary>
     internal static string? Describe(string surface, long totalMs, IReadOnlyList<(string Phase, long StartedMs, long EndedMs)> phases,
-        IReadOnlyList<(string Step, long Ms)>? clientSteps = null)
+        IReadOnlyList<(string Step, long Ms)>? clientSteps = null, int slowThresholdMs = SlowLoadThresholdMs)
     {
-        if (totalMs < SlowLoadThresholdMs)
+        if (totalMs < slowThresholdMs)
         {
             return null;
         }
@@ -188,7 +196,7 @@ public sealed class ViewerLoadTimer
         _total.Stop();
         lock (_gate)
         {
-            return Describe(string.IsNullOrEmpty(Surface) ? fallbackSurface : Surface, _total.ElapsedMilliseconds, _phases.ToList(), _clientSteps.ToList());
+            return Describe(string.IsNullOrEmpty(Surface) ? fallbackSurface : Surface, _total.ElapsedMilliseconds, _phases.ToList(), _clientSteps.ToList(), _slowThresholdMs);
         }
     }
 }
