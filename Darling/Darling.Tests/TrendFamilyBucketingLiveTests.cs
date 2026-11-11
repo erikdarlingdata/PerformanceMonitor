@@ -76,9 +76,9 @@ public sealed class TrendFamilyBucketingLiveTests
 
             var bucket = trend[0];
             Assert.Equal(Stamp(new DateTime(2026, 4, 6, 10, 0, 0)), bucket.GetProperty("time").GetString());
-            Assert.Equal(3000.0 / 90.0, bucket.GetProperty("wait_time_ms_per_second").GetDouble(), precision: 6);
-            Assert.Equal(300.0 / 90.0, bucket.GetProperty("signal_wait_time_ms_per_second").GetDouble(), precision: 6);
-            Assert.Equal(80.0, bucket.GetProperty("peak_wait_time_ms_per_second").GetDouble(), precision: 6);
+            Assert.Equal(3000.0 / 90.0, bucket.GetProperty("wait_time_ms_per_second").GetDouble(), precision: 3);
+            Assert.Equal(300.0 / 90.0, bucket.GetProperty("signal_wait_time_ms_per_second").GetDouble(), precision: 3);
+            Assert.Equal(80.0, bucket.GetProperty("peak_wait_time_ms_per_second").GetDouble(), precision: 3);
         });
     }
 

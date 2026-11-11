@@ -180,6 +180,8 @@ finds, in one PR. A flake that stalls every lane outranks the rest of the queue.
    `postmaster.pid`, only once that PID proves to be `postgres.exe` started on that data directory. It never stops
    by image name. Then it deletes the rig folder and drops the registry line. A rig you leave running is stopped by
    the coordinator's `rig-sweep.ps1` at the wave boundary once your worktree is gone or its postmaster has died.
+   A rig you restarted with pg_ctl runs under a new PID: the sweep sees that through `postmaster.pid`, keeps the rig while your
+   worktree exists, and rewrites the registry line's PID.
 
 ## Build and test
 

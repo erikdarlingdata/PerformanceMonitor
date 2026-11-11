@@ -575,7 +575,7 @@ public static class FleetSweepEngine
         }
         else if (baselineReset)
         {
-            notes.Add("Service restarted since the previous sweep — the pass-counter baseline reset, so counter advance "
+            notes.Add("Service restarted since the previous sweep: the pass-counter baseline reset, so counter advance "
                 + "is not judgeable this sweep.");
         }
 

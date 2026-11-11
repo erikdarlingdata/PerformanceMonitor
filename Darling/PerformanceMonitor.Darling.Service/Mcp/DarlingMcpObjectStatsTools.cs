@@ -126,22 +126,24 @@ public sealed class DarlingMcpObjectStatsTools
                 database_name = r.DatabaseName,
                 schema_name = r.SchemaName,
                 table_name = r.TableName,
-                reserved_mb = r.CurrentReservedMb,
-                used_mb = r.CurrentUsedMb,
+                /* #8572: every size and growth figure is rounded here, where the reply is built, to the two places growth_7d_mb has always
+                   carried. A difference of two stored doubles is 48.06999999999999 otherwise. */
+                reserved_mb = McpHelpers.RoundTo(r.CurrentReservedMb, 2),
+                used_mb = McpHelpers.RoundTo(r.CurrentUsedMb, 2),
                 total_rows = r.TotalRows,
                 index_count = r.IndexCount,
                 /* Each nominal-window figure comes from exactly the baseline it names, or is null (#3541
                    A12). The SQL this replaced folded a missing 30-day baseline onto the 7-day one and a
                    missing 7-day one onto the oldest, and labelled the result with the window asked for. */
-                growth_7d_mb = r.Growth7dMb,
-                growth_30d_mb = r.Growth30dMb,
-                growth_pct_30d = r.GrowthPct30d,
+                growth_7d_mb = McpHelpers.RoundTo(r.Growth7dMb, 2),
+                growth_30d_mb = McpHelpers.RoundTo(r.Growth30dMb, 2),
+                growth_pct_30d = McpHelpers.RoundTo(r.GrowthPct30d, 2),
                 /* The figure that is always honest: growth from the store's earliest snapshot of this table
                    to its latest, over exactly growth_window_days. Null only when there is no span at all. */
-                growth_over_available_history_mb = r.GrowthOverAvailableHistoryMb,
-                growth_over_available_history_pct = r.GrowthOverAvailableHistoryPct,
+                growth_over_available_history_mb = McpHelpers.RoundTo(r.GrowthOverAvailableHistoryMb, 2),
+                growth_over_available_history_pct = McpHelpers.RoundTo(r.GrowthOverAvailableHistoryPct, 2),
                 growth_window_days = r.DaysOfData,
-                daily_growth_rate_mb = r.DailyGrowthRateMb,
+                daily_growth_rate_mb = McpHelpers.RoundTo(r.DailyGrowthRateMb, 2),
                 growth_note = GrowthNote(r),
             });
 
@@ -742,8 +744,10 @@ public sealed class DarlingMcpObjectStatsTools
                     /* A file with no allocated size (the Hyperscale log file, in the log service) adds nothing,
                        so a Hyperscale database's total is its data file alone, and used sums over the same files.
                        Used is null when none of those files has a used size: that is unknown, not 0 MB. */
-                    ["total_size_mb"] = g.Sum(r => r.TotalSizeMb ?? 0),
-                    ["used_size_mb"] = UsedSizeTotalMb(g)
+                    /* #8572: summed doubles carry float noise (985829.2999999999), so the totals are rounded to the two places a megabyte
+                       figure carries elsewhere. */
+                    ["total_size_mb"] = Math.Round(g.Sum(r => r.TotalSizeMb ?? 0), 2),
+                    ["used_size_mb"] = McpHelpers.RoundTo(UsedSizeTotalMb(g), 2)
                 };
                 if (g.Any(r => r.IsAzureSiblingRow))
                     database[AzureSiblingDatabaseSize.RowNoteKey] = AzureSiblingDatabaseSize.LogNote;
@@ -797,8 +801,8 @@ public sealed class DarlingMcpObjectStatsTools
         {
             ["file_name"] = r.FileName,
             ["file_type"] = r.FileTypeDesc,
-            ["total_size_mb"] = r.TotalSizeMb,
-            ["used_size_mb"] = r.UsedSizeMb
+            ["total_size_mb"] = McpHelpers.RoundTo(r.TotalSizeMb, 2),
+            ["used_size_mb"] = McpHelpers.RoundTo(r.UsedSizeMb, 2)
         };
         if (r.IsAzureSiblingRow)
             file[AzureSiblingDatabaseSize.RowNoteKey] = AzureSiblingDatabaseSize.LogNote;

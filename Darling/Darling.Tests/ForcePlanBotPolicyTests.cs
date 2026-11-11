@@ -259,6 +259,10 @@ public sealed class ForcePlanBotPolicyTests
         var standDown = blockers[1];
         Assert.Contains("force_last_good_plan_actual_state = ON for orders at 2026-09-18T12:00:00Z", standDown.Evidence, StringComparison.Ordinal);
         Assert.Contains("second forcer", standDown.Evidence, StringComparison.Ordinal);
+        /* #8572: reader text holds no em dash, no tracker number and no internal word. */
+        Assert.DoesNotContain("\u2014", standDown.Evidence, StringComparison.Ordinal);
+        Assert.DoesNotContain("#3652", standDown.Evidence, StringComparison.Ordinal);
+        Assert.DoesNotContain("the bot", standDown.Evidence, StringComparison.Ordinal);
     }
 
     [Theory]
