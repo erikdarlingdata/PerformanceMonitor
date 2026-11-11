@@ -256,6 +256,147 @@ ORDER BY plan_handle;"))
         Assert.Equal(new[] { "0xDROPPED_TODAY", "0xFETCH_EXPIRED" }, left);
     }
 
+    /// <summary>
+    /// Only a later sighting of the same query supersedes a waiting row. Rows of one query sighted in the same
+    /// collection were in cache together, so each keeps waiting and each is claimed; a row the sweep has tried is
+    /// never dropped; and a dropped row that is sighted again waits again, in place of the rows it now outdates.
+    /// </summary>
+    [Fact]
+    public async Task OnlyALaterSightingSupersedes_ATriedRowIsKept_AndAReSightingReturnsADroppedRowToPending()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #8567 backlog bound test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await MigrateAsync(scratch, ct);
+        await using var postgres = NpgsqlDataSource.Create(ReadConnectionString(scratch));
+
+        var now = WholeSecond(DateTime.UtcNow);
+
+        await using (var seed = postgres.CreateCommand(@"
+INSERT INTO collect.oversized_plan_backlog
+(server_id, collector_name, plan_handle, sql_handle, statement_start_offset, statement_end_offset,
+ database_name, query_hash, observed_bytes, first_seen_at, last_seen_at, last_attempt_at)
+VALUES
+    /* one query, tried once three hours ago and not sighted since */
+    (4301, 'query_stats', '0xTRIED', '0xSQL', 0, 400, 'bound_db', '0xHASH', 600001, $1, $1, $1),
+    /* the same query under another handle, last sighted two hours ago */
+    (4301, 'query_stats', '0xEARLIER', '0xSQL', 0, 400, 'bound_db', '0xHASH', 600002, $2, $2, NULL),
+    /* and under three handles sighted together an hour ago */
+    (4301, 'query_stats', '0xTOGETHER_1', '0xSQL', 0, 400, 'bound_db', '0xHASH', 600003, $3, $3, NULL),
+    (4301, 'query_stats', '0xTOGETHER_2', '0xSQL', 0, 400, 'bound_db', '0xHASH', 600004, $3, $3, NULL),
+    (4301, 'query_stats', '0xTOGETHER_3', '0xSQL', 0, 400, 'bound_db', '0xHASH', 600005, $3, $3, NULL);"))
+        {
+            seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now.AddHours(-3) });
+            seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now.AddHours(-2) });
+            seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now.AddHours(-1) });
+            await seed.ExecuteNonQueryAsync(ct);
+        }
+
+        var claimed = await OversizedPlanBacklogSweep.ClaimAsync(postgres, ServerId, ct);
+        Assert.Equal(
+            new[] { "0xTOGETHER_1", "0xTOGETHER_2", "0xTOGETHER_3", "0xTRIED" },
+            claimed.Select(p => p.Observation.PlanHandle).Order(StringComparer.Ordinal));
+
+        var verdicts = await VerdictsAsync(postgres, ct);
+        Assert.Equal(DarlingOversizedPlanBacklogReader.VerdictDropped, verdicts["0xEARLIER"]);
+        Assert.Equal(4, verdicts.Values.Count(v => v == DarlingOversizedPlanBacklogReader.VerdictPending));
+
+        /* The earlier handle is sighted again: it is the query's newest sighting now, so it waits and the three it outdates do not. */
+        var written = await OversizedPlanBacklog.RecordSightingsAsync(
+            postgres,
+            ServerId,
+            OversizedPlanBacklog.QueryStatsCollectorName,
+            new[] { new OversizedPlanObservation("0xEARLIER", "0xSQL", 0, 400, Database, "0xHASH", 600002) },
+            now.AddMinutes(-1),
+            null,
+            ct);
+        Assert.Equal(1, written);
+        Assert.Equal(DarlingOversizedPlanBacklogReader.VerdictPending, (await VerdictsAsync(postgres, ct))["0xEARLIER"]);
+
+        claimed = await OversizedPlanBacklogSweep.ClaimAsync(postgres, ServerId, ct);
+        Assert.Equal(
+            new[] { "0xEARLIER", "0xTRIED" },
+            claimed.Select(p => p.Observation.PlanHandle).Order(StringComparer.Ordinal));
+
+        verdicts = await VerdictsAsync(postgres, ct);
+        Assert.Equal(3, verdicts.Values.Count(v => v == DarlingOversizedPlanBacklogReader.VerdictDropped));
+        Assert.Equal(DarlingOversizedPlanBacklogReader.VerdictPending, verdicts["0xTRIED"]);
+    }
+
+    /// <summary>
+    /// The cap is held against rows that are each the newest sighting of their query. A server whose distinct
+    /// queries fit under the cap loses none of them while one query's stale re-keys, more than one pass drops,
+    /// are still being cleared.
+    /// </summary>
+    [Fact]
+    public async Task TheCapWaitsForTheSupersedeToFinish_SoAQuerysOnlyRowIsNotCutWhileReKeysRemain()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #8567 backlog bound test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await MigrateAsync(scratch, ct);
+        await using var postgres = NpgsqlDataSource.Create(ReadConnectionString(scratch));
+
+        var distinctQueries = PendingCap - 100;
+        var reKeys = 2 * OversizedPlanBacklogSweep.MaxRowsDroppedPerServerPerTick;
+        var firstSighting = WholeSecond(DateTime.UtcNow.AddHours(-20));
+
+        /* The distinct queries were sighted first, one a second; the one re-keyed query's handles after them. */
+        await using (var seed = postgres.CreateCommand(@"
+INSERT INTO collect.oversized_plan_backlog
+(server_id, collector_name, plan_handle, sql_handle, statement_start_offset, statement_end_offset,
+ database_name, query_hash, observed_bytes, first_seen_at, last_seen_at)
+SELECT
+    $1,
+    'query_stats',
+    '0xPLAN' || i,
+    '0xSQL' || i,
+    0,
+    400,
+    'bound_db',
+    CASE WHEN i > $3 THEN '0xREKEYED' ELSE '0xHASH' || i END,
+    600000 + i,
+    $2 + make_interval(secs => i),
+    $2 + make_interval(secs => i)
+FROM generate_series(1, $3 + $4) AS i;"))
+        {
+            seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = ServerId });
+            seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = firstSighting });
+            seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = distinctQueries });
+            seed.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = reKeys });
+            await seed.ExecuteNonQueryAsync(ct);
+        }
+
+        /* Two passes: the first stops at the per-statement limit, the second drops the rest of the re-keys. */
+        await OversizedPlanBacklogSweep.ClaimAsync(postgres, ServerId, ct);
+        await OversizedPlanBacklogSweep.ClaimAsync(postgres, ServerId, ct);
+
+        await using var waiting = postgres.CreateCommand(@"
+SELECT
+    count(*) FILTER (WHERE query_hash <> '0xREKEYED'),
+    count(*) FILTER (WHERE query_hash = '0xREKEYED')
+FROM collect.oversized_plan_backlog
+WHERE server_id = $1
+AND   captured_at IS NULL
+AND   expired_at IS NULL;");
+        waiting.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = ServerId });
+        await using var reader = await waiting.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        Assert.Equal((long)distinctQueries, reader.GetInt64(0));
+        Assert.Equal(1L, reader.GetInt64(1));
+    }
+
+    /// <summary>Each row's verdict as the read lists it, by plan handle.</summary>
+    private static async Task<Dictionary<string, string>> VerdictsAsync(NpgsqlDataSource postgres, CancellationToken ct) =>
+        (await DarlingOversizedPlanBacklogReader.GetRowsAsync(postgres, ServerId, 100, ct))
+        .ToDictionary(r => r.PlanHandle, r => r.Verdict, StringComparer.Ordinal);
+
     /// <summary>What the sweep's ceiling drains from one server in one retention period.</summary>
     private static int PendingCap =>
         OversizedPlanBacklogSweep.RowsPerServerPerDayCeiling * DarlingRetention.OversizedPlanBacklogRetentionDays;
