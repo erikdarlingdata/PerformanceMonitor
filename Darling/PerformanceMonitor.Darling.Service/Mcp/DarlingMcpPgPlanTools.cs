@@ -338,11 +338,16 @@ public sealed class DarlingMcpPgPlanTools
     /// </summary>
     internal static string PlanCaptureNotReadyStatus(IReadOnlyList<string> unmet)
     {
+        /* #8572: counted, and listed in the causal order get_pg_plan_capture_readiness uses (a facet cannot be fixed before the
+           ones ahead of it), not the alphabetical order the store read returns them in. Each entry is "facet = observed". */
+        var ordered = unmet
+            .OrderBy(entry => DarlingPgPlanCaptureReadinessReader.CausalRank(entry.Split(" = ", 2)[0]))
+            .ToList();
         return McpHelpers.Status(
             "precondition",
             "This server cannot capture execution plans yet, so an empty result here says nothing about "
-            + "the query. Unsatisfied precondition(s), from pg_plan_capture_readiness: "
-            + string.Join(" | ", unmet)
+            + "the query. " + CountText.Plural(unmet.Count, "unsatisfied precondition") + ", from pg_plan_capture_readiness, in the order they have to be fixed in: "
+            + string.Join(" | ", ordered)
             + ", the pg_plan_capture_readiness collector stores the full detail and the remedy "
             + "beside each observation, and get_pg_plan_capture_readiness returns them: every facet, "
             + "satisfied or not, in the order they have to be fixed in.",

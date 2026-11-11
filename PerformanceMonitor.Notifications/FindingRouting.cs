@@ -209,32 +209,32 @@ public static class FindingRouting
     {
         if (string.Equals(rootFactKey, StoryConfidence.AbsolutionRootKey, StringComparison.Ordinal))
             return new FindingRouteDecision(FindingRoute.Page,
-                "absolution: every fact was scored and none rooted a finding — 1.0 by construction, not a lone fact.");
+                "absolution: every fact was scored and none rooted a finding, 1.0 by construction, not a lone fact.");
 
         if (string.Equals(rootFactKey, StoryConfidence.PileupRootKey, StringComparison.Ordinal))
             return new FindingRouteDecision(FindingRoute.Page,
-                "detector-measured: the same-statement pileup is a directly observed convoy against its own baseline — 1.0 by construction, not a lone fact.");
+                "detector-measured: the same-statement pileup is a directly observed convoy against its own baseline: 1.0 by construction, not a lone fact.");
 
         if (recurringWeeks is { } weeks)
             return HeldBy(uncorroboratedRoute, RecurringReason(weeks));
 
         if (factCount >= 2)
             return new FindingRouteDecision(FindingRoute.Page,
-                $"corroborated: {factCount.ToString(CultureInfo.InvariantCulture)} facts in the chain — each traversed edge is a fired predicate onto a fact that itself scored.");
+                $"corroborated: {factCount.ToString(CultureInfo.InvariantCulture)} facts in the chain, each traversed edge is a fired predicate onto a fact that itself scored.");
 
         if (matchedAmplifiers >= 1 && IsOneFactAtTheBar(severity, notifySeverity))
             return HeldBy(uncorroboratedRoute, OneFactReason(severity, notifySeverity));
 
         if (matchedAmplifiers >= 1)
             return new FindingRouteDecision(FindingRoute.Page,
-                $"corroborated: a co-fire check matched ({matchedAmplifiers.ToString(CultureInfo.InvariantCulture)} of {definedAmplifiers.ToString(CultureInfo.InvariantCulture)} amplifier checks on the root fact) — another fact the engine went looking for was there.");
+                $"corroborated: a co-fire check matched ({matchedAmplifiers.ToString(CultureInfo.InvariantCulture)} of {definedAmplifiers.ToString(CultureInfo.InvariantCulture)} amplifier checks on the root fact): another fact the engine went looking for was there.");
 
         /* A story has at least its root; a factCount below 1 is a caller that never set it, and the sentence
            should still be true of a lone fact rather than claim "0 facts". */
         var chain = Math.Max(1, factCount).ToString(CultureInfo.InvariantCulture);
         var uncorroborated = definedAmplifiers > 0
-            ? $"uncorroborated: a lone fact — {chain} fact in the chain and 0 of {definedAmplifiers.ToString(CultureInfo.InvariantCulture)} co-fire checks matched."
-            : $"uncorroborated: a lone fact — {chain} fact in the chain and no co-fire checks defined for its root.";
+            ? $"uncorroborated: a lone fact, {chain} fact in the chain and 0 of {definedAmplifiers.ToString(CultureInfo.InvariantCulture)} co-fire checks matched."
+            : $"uncorroborated: a lone fact, {chain} fact in the chain and no co-fire checks defined for its root.";
 
         return uncorroboratedRoute == FindingRoute.Page
             ? new FindingRouteDecision(FindingRoute.Page, uncorroborated + " Paged because analysis.uncorroborated_route is 'page'.")
@@ -288,22 +288,22 @@ public static class FindingRouting
                 return HeldBy(uncorroboratedRoute, OneFactReason(severity, notifySeverity));
 
             return new FindingRouteDecision(FindingRoute.Page,
-                "corroborated: a co-fire check matched — re-derived from the persisted confidence, which a one-fact story earns above the 0.20 floor only through the amplifier share.");
+                "corroborated: a co-fire check matched, re-derived from the persisted confidence, which a one-fact story earns above the 0.20 floor only through the amplifier share.");
         }
 
         return uncorroboratedRoute == FindingRoute.Page
-            ? new FindingRouteDecision(FindingRoute.Page, "uncorroborated: a lone fact at the 0.20 floor — no co-fire check matched. Paged because analysis.uncorroborated_route is 'page'.")
-            : new FindingRouteDecision(FindingRoute.Digest, "uncorroborated: a lone fact at the 0.20 floor — no co-fire check matched.");
+            ? new FindingRouteDecision(FindingRoute.Page, "uncorroborated: a lone fact at the 0.20 floor, no co-fire check matched. Paged because analysis.uncorroborated_route is 'page'.")
+            : new FindingRouteDecision(FindingRoute.Digest, "uncorroborated: a lone fact at the 0.20 floor, no co-fire check matched.");
     }
 
     private static bool IsOneFactAtTheBar(double severity, double notifySeverity)
         => severity < notifySeverity + OneFactPageMargin;
 
     private static string RecurringReason(int weeks)
-        => $"recurring: this weekday and hour for {weeks.ToString(CultureInfo.InvariantCulture)} weeks — the story keeps a weekly schedule, so it goes to the digest with its severity and label unchanged.";
+        => $"recurring: this weekday and hour for {weeks.ToString(CultureInfo.InvariantCulture)} weeks, the story keeps a weekly schedule, so it goes to the digest with its severity and label unchanged.";
 
     private static string OneFactReason(double severity, double notifySeverity)
-        => $"one fact at the bar: severity {severity.ToString("F2", CultureInfo.InvariantCulture)} is under {(notifySeverity + OneFactPageMargin).ToString("F2", CultureInfo.InvariantCulture)} (notify bar {notifySeverity.ToString("F2", CultureInfo.InvariantCulture)} + {OneFactPageMargin.ToString("F2", CultureInfo.InvariantCulture)}) and no second fact corroborates it — a co-fire check matched, but that alone does not page this close to the bar.";
+        => $"one fact at the bar: severity {severity.ToString("F2", CultureInfo.InvariantCulture)} is under {(notifySeverity + OneFactPageMargin).ToString("F2", CultureInfo.InvariantCulture)} (notify bar {notifySeverity.ToString("F2", CultureInfo.InvariantCulture)} + {OneFactPageMargin.ToString("F2", CultureInfo.InvariantCulture)}) and no second fact corroborates it. A a co-fire check matched, but that alone does not page this close to the bar.";
 
     /// <summary>A rule that holds a finding off the page: the digest, unless the operator's knob restores paging.</summary>
     private static FindingRouteDecision HeldBy(FindingRoute uncorroboratedRoute, string reason)

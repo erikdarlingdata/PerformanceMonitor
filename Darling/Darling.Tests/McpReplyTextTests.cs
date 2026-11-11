@@ -129,6 +129,33 @@ public sealed class McpReplyTextTests
         Assert.DoesNotContain("could not be counted found", note, StringComparison.Ordinal);
     }
 
+    // ── Rows 8 and 11 (the pieces that need the fixed signatures) ────────────────────────────────────
+
+    [Fact]
+    public void NoBlockingFinding_GroupsTheCaptureCount()
+    {
+        Assert.Contains("any of the 1,438 captures", DarlingMcpPgBlockingTools.NoBlockingFinding(1438), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CostFinding_OnAScannedIndex_DoesNotCallTheBlockAccessesTheWritePathAlone()
+    {
+        var cost = DarlingMcpPgIndexUsageTools.CostFinding(1_000_000, 9_000_000, 443_230_195, 0, scansInWindow: 18_781_131);
+
+        Assert.Contains("443,230,195 block accesses", cost, StringComparison.Ordinal);
+        Assert.DoesNotContain("On an index with no scans", cost, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PlanCaptureNotReadyStatus_CountsAndOrdersCausally()
+    {
+        var message = JsonDocument.Parse(DarlingMcpPgPlanTools.PlanCaptureNotReadyStatus(new[] { "message_locale = x", "capture_threshold = -1", "library_loaded = false" }))
+            .RootElement.GetProperty("message").GetString()!;
+
+        Assert.Contains("3 unsatisfied preconditions", message, StringComparison.Ordinal);
+        Assert.Contains("library_loaded = false | capture_threshold = -1 | message_locale = x", message, StringComparison.Ordinal);
+    }
+
     // ── Rows 9 and 10: bad-actor sentences ───────────────────────────────────────────────────────────
 
     private static AdviceBlock BadActor(double executions, double cpuMs, double reads)
