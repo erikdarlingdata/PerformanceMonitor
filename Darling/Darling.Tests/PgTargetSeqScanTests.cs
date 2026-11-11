@@ -492,6 +492,25 @@ public sealed class PgTargetSeqScanTests
         }
     }
 
+    /// <summary>#8532: a statement that was captured never reads as captured zero times an hour. A capture rate too
+    /// small for the sentence's one decimal place says "&lt;0.1", for the statement the card is about and for the
+    /// pairs listed after it.</summary>
+    [Fact]
+    public void ACaptureRateTooSmallForOneDecimalPlace_ReadsLessThanATenth()
+    {
+        var rare = new List<Fact> { Scan(0.5, GiB, 0.03) };
+        new FactScorer().ScoreAll(rare);
+        var rareBlock = PgTargetAdvice.Compose(PgTargetFactKeys.SeqScanAdvisory, rare.ToFactLookup())!;
+        Assert.Contains("observed hours (<0.1 per hour, a lower bound", rareBlock.Investigation, StringComparison.Ordinal);
+
+        var listed = Scan(0.99, GiB, 5);
+        AddPair(listed, 2, OtherQueryId, 0.95, 2 * GiB, 0.04);
+        listed.Metadata[PgTargetScorer.SeqScanPairsKey] = 2;
+        listed.Metadata[PgTargetScorer.SeqScanCandidatePairsKey] = 7;
+        var listedBlock = PgTargetAdvice.Compose(PgTargetFactKeys.SeqScanAdvisory, new[] { listed }.ToFactLookup())!;
+        Assert.Contains($"queryid {OtherQueryId} at <0.1 per hour", listedBlock.Investigation, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void EveryComposedShape_CarriesTheRegressionCaveatWheneverItNamesAnIndex()
     {
