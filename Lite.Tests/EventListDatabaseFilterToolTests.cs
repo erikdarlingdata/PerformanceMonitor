@@ -378,6 +378,7 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
     [Fact]
     public async Task LongQueries_EmptyAnswer_NamesTheOptInSwitchOnlyWhenTheCollectorIsOff()
     {
+        await SeedLongQueryRunAsync();
         var server = _serverManager.GetAllServers().Single();
         var schedules = new ScheduleManager(_configDir);
         var runTimes = new McpCollectorRunTimes(schedules, _serverManager);
@@ -406,6 +407,7 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
     [Fact]
     public async Task LongQueries_FilteredEmptyAnswer_NamesTheOptInSwitchOnlyWhenTheStoreHoldsNoRow()
     {
+        await SeedLongQueryRunAsync();
         var server = _serverManager.GetAllServers().Single();
         var schedules = new ScheduleManager(_configDir);
         var runTimes = new McpCollectorRunTimes(schedules, _serverManager);
@@ -451,6 +453,7 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
     [Fact]
     public async Task LongQueries_FilteredEmpty_OnAServerWithNoLongQueryRows_KeepsTheOptInSentence()
     {
+        await SeedLongQueryRunAsync();
         var filtered = Parse(await McpLongQueryTools.GetLongQueryCompletions(
             _service, _serverManager, ServerName, 24, 30, database_name: "DbA"));
 
@@ -461,6 +464,25 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
         Assert.Equal("DbA", filtered.GetProperty("database_name").GetString());
         Assert.False(filtered.GetProperty("hints").TryGetProperty("effective_start", out var start) && start.ValueKind != JsonValueKind.Null,
             "the notice must carry no effective_start on an empty store; that is what keeps the opt-in sentence");
+    }
+
+    /// <summary>#8571: a collector that never ran is not_collected, so a test of the empty answer records one recent run that found nothing.</summary>
+    private Task SeedLongQueryRunAsync() => ExecuteAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, rows_collected)
+VALUES ($1, $2, $3, 'long_query_completions', $4, 'SUCCESS', 0)",
+        _nextId++, _serverId, ServerName, Naive(DateTime.UtcNow.AddMinutes(-5)));
+
+    /// <summary>#8571 item 3, Darling's twin: a collector that never ran is not_collected with the enable step; one that ran and found nothing stays empty.</summary>
+    [Fact]
+    public async Task LongQueries_ACollectorThatNeverRan_IsNotCollected_AndOneThatRanFoundNothingIsEmpty()
+    {
+        var never = Parse(await McpLongQueryTools.GetLongQueryCompletions(_service, _serverManager, ServerName, 24, 30));
+        Assert.Equal("not_collected", never.GetProperty("status").GetString());
+        Assert.Contains("has never run for it", never.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        await SeedLongQueryRunAsync();
+        var ran = Parse(await McpLongQueryTools.GetLongQueryCompletions(_service, _serverManager, ServerName, 24, 30));
+        Assert.Equal("empty", ran.GetProperty("status").GetString());
     }
 
     /// <summary>

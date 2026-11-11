@@ -906,7 +906,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
                 /* #8571: a long-query collector that never ran is not_collected; this server's collector ran once and stored nothing. */
                 await DarlingMcpTestData.ExecAsync(connection, ct,
                     "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, rows_collected) VALUES ($1, $2, $3, 'long_query_completions', $4, 'SUCCESS', 0)",
-                    PerformanceMonitor.Collectors.CollectionIdGenerator.Next(), ServerIdHelper.GetDeterministicHashCode(name), name, DarlingMcpTestData.Naive(end.AddDays(-30)));
+                    PerformanceMonitor.Collectors.CollectionIdGenerator.Next(), ServerIdHelper.GetDeterministicHashCode(name), name, DarlingMcpTestData.Naive(end.AddDays(-5).AddMinutes(-30)));
             }
 
             var root = ParseEvent(await CallEventAsync(postgres, tool, name, 1, end.AddDays(-5)));

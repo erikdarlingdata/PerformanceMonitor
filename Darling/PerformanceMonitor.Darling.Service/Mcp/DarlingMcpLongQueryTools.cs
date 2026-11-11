@@ -34,6 +34,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpLongQueryTools
 {
+    private const string NeverRanMessage =
+        "Long query completions have not been collected for this server: the long_query_completions collector has never run for it. It is off by default; " +
+        "turn it on with enable_collector (collector long_query_completions) and read again after its first pass.";
+
     [McpServerTool(Name = "get_long_query_completions"), Description("Gets the SLOWEST long-running query completions in the window: rpc/batch completions over the trace's duration threshold, plus attentions (cancels/timeouts), ranked duration DESC, attentions (no duration) last. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: truncated means the window held more, none slower than the page; oldest/newest_returned_event_time bound the slowest runs' ages, NOT how far the read reached. Collector is opt-in, OFF by default: empty can mean none in the window, or the collector was off, enable 'long_query_completions' in the schedule. <<GUIDE>> Gets the SLOWEST long-running query completions in the window, captured by the opt-in long-query trace: rpc/batch completions whose duration exceeded the trace threshold, plus attentions (client cancels / query timeouts), ranked by duration DESC with attentions (no duration) last. Shows duration, CPU, reads/writes, row count, result (OK/Error/Abort, Abort means the long query was cancelled), the statement text, and the calling session/app/login. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: completions_returned is how many rows you got and truncated says the window held more than limit. Because the page is duration-RANKED, oldest_returned_event_time / newest_returned_event_time tell you how old the slowest runs are and say NOTHING about how far back the read reached: every row in the window was a candidate, so a truncated page still holds the window's slowest. query_identity is the key to group rows by: it is the engine's query_hash when the engine gave one (batch-level events carry none, so query_hash is null there), otherwise text: plus a fingerprint of the statement text that does not merge statements differing only in a literal. An attention row (client cancel or timeout) carries no statement text, so its query_identity is null and it cannot be grouped by it; a null query_identity is never a group key, so do not pool those rows under one. Both SKUs keep the same population. The collector is OFF by default; if it returns empty, enable the 'long_query_completions' collector in the schedule. The monitor's own statements (program name starting PerformanceMonitor) are left out unless include_monitor is true, so an idle server answers empty." + McpHelpers.UtcStampsDescription)]
     public static Task<string> GetLongQueryCompletions(
         NpgsqlDataSource postgres,
@@ -116,6 +120,15 @@ public sealed class DarlingMcpLongQueryTools
                 var emptyNotice = await DarlingMcpWindowNotice.ReadEventAsync(
                     () => DarlingMcpWindowNotice.Probe(postgres, "long_query_completions", resolved.ServerName, windowStart, now, cancellationToken),
                     null, windowStart, now, "long_query_completions", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken);
+                /* #8571: a collector that has never run for this server read nothing, and "empty" is the word for a collector that ran and found
+                   none. The store holding no row in the window (a null floor) and no run of the collector ever logged is the never-ran state, answered
+                   as get_schema_changes answers it. A failed probe gives no verdict, so the empty answer stands. */
+                if (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null
+                    && !await DarlingDataReader.CollectorEverRanAsync(postgres, resolved.ServerId, LongQueryCompletionsCollector.Instance.Name, cancellationToken))
+                {
+                    return McpHelpers.StatusForDatabase("not_collected", NeverRanMessage, databaseFilter.Describe());
+                }
+
                 /* #5244 round 2 (L3): the probe is not database-filtered, so a null floor means the store holds no long-query row for
                    this server in the window, and only then does the answer send the reader to the opt-in switch. With rows for other
                    databases the collector is on, and the answer is about the chosen databases. A failed probe gives no verdict, so a

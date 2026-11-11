@@ -4625,6 +4625,61 @@ FROM config.config_collector_schedules";
     }
 
     /// <summary>
+    /// #8571: whether one collector has EVER recorded a run for this server, ignoring any window. An event-list tool that finds no rows
+    /// asks it to tell a collector that never ran (not_collected, with the enable step) from one that ran and found nothing (empty).
+    /// LIMIT 1 on <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>, so it stops at the first row.
+    /// </summary>
+    public const string CollectorEverRanSql = """
+        SELECT 1
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collector_name = $2
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="CollectorEverRanSql"/>.</summary>
+    public static async Task<bool> CollectorEverRanAsync(
+        NpgsqlDataSource postgres, int serverId, string collectorName, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(CollectorEverRanSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddNullableText(command, collectorName);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    /// <summary>
+    /// #8571: the number of log rows that match <see cref="GetCollectionLogAsync"/>'s filters in the window, uncapped, for the page's
+    /// <c>runs_total</c>. Asked only when the over-fetch saw more rows than the limit, so a page that holds everything never pays for it.
+    /// </summary>
+    public const string CollectionLogCountSql = """
+        SELECT COUNT(*)
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   ($4::text IS NULL OR collector_name = $4::text)
+        AND   ($5::double precision IS NULL OR duration_ms >= $5::double precision)
+        AND   ($6::text IS NULL OR status = UPPER($6::text))
+        """;
+
+    /// <summary>Runs <see cref="CollectionLogCountSql"/>.</summary>
+    public static async Task<long> CountCollectionLogAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime windowStartUtc, DateTime windowEndUtc,
+        string? collectorName, double? minDurationMs, string? status, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(CollectionLogCountSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddTimestamp(command, windowStartUtc);
+        AddTimestamp(command, windowEndUtc);
+        AddNullableText(command, string.IsNullOrWhiteSpace(collectorName) ? null : collectorName.Trim());
+        AddNullableDouble(command, minDurationMs);
+        AddNullableText(command, string.IsNullOrWhiteSpace(status) ? null : status.Trim());
+        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
     /// Runs <see cref="CollectionLogSql"/>, or <see cref="CollectionLogSlowestFirstSql"/> when
     /// <paramref name="minDurationMs"/> is supplied. See <see cref="CollectionLogBody"/> for the window and
     /// filter semantics.

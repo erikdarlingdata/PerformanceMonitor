@@ -109,6 +109,29 @@ public sealed class CollectionLogPerServerResponseBudgetToolTests : IClassFixtur
         Assert.Equal(System.Text.Json.JsonValueKind.Null, small.RootElement.GetProperty("size_note").ValueKind);
     }
 
+    /// <summary>#8571 item 1, Darling's twin: runs_total is the count of the runs that matched in the window, not the page the limit left.</summary>
+    [Fact]
+    public async Task RunsTotal_IsTheMatchedCount_WhenTheLimitCutsThePage()
+    {
+        var service = new LocalDataService(_duckDb);
+        for (var i = 0; i < 5; i++)
+        {
+            await SeedLogAsync(_serverId, ServerName, i < 3 ? "query_store" : "wait_stats", DateTime.UtcNow.AddMinutes(-(i + 1)), 100 + i, null);
+        }
+
+        using var cut = System.Text.Json.JsonDocument.Parse(await McpHealthTools.GetCollectionLog(service, _serverManager, server_name: ServerName, hours_back: 24, limit: 2));
+        Assert.True(cut.RootElement.GetProperty("truncated").GetBoolean());
+        Assert.Equal(2, cut.RootElement.GetProperty("runs_returned").GetInt32());
+        Assert.Equal(5, cut.RootElement.GetProperty("runs_total").GetInt32());
+
+        using var filtered = System.Text.Json.JsonDocument.Parse(await McpHealthTools.GetCollectionLog(service, _serverManager, server_name: ServerName, hours_back: 24, limit: 1, collector_name: "query_store"));
+        Assert.Equal(3, filtered.RootElement.GetProperty("runs_total").GetInt32());
+
+        using var whole = System.Text.Json.JsonDocument.Parse(await McpHealthTools.GetCollectionLog(service, _serverManager, server_name: ServerName, hours_back: 24, limit: 50));
+        Assert.False(whole.RootElement.GetProperty("truncated").GetBoolean());
+        Assert.Equal(5, whole.RootElement.GetProperty("runs_total").GetInt32());
+    }
+
     private async Task<DuckDBConnection> SeedConnectionAsync()
     {
         if (_seedConn is null)

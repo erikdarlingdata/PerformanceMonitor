@@ -38,12 +38,12 @@ public sealed class DarlingMcpReadLatencyTools
     /// The caveat every row of this surface carries: percentiles here are the SMALLEST bucket upper bound
     /// whose cumulative count reaches the target, never an interpolation — the same honesty
     /// <see cref="ReadLatencyPercentiles.FromBuckets"/> documents. A percentile flagged <c>"≥ &lt;bound&gt;"</c>
-    /// means the true value only proven to exceed the last finite bucket, with no bound above it to report.
+    /// means the true value is only proven to exceed the last finite bucket, with no bound above it to report.
     /// </summary>
     internal const string BucketEstimateNote =
-        "p50/p95/p99 are bucket UPPER-BOUND estimates from a fixed log-scale histogram, never an interpolation "
+        "p50/p95/p99 are bucket UPPER-BOUND estimates from a fixed log-scale histogram, never an interpolation"
         + ": the true duration could be anywhere at or below the reported bound, and no percentile is reported above max_ms (a bound past the slowest read seen is capped to max_ms). A value flagged with \"≥\" means "
-        + "the true duration only proven to exceed the last finite bucket bound, with no bound above it to report.";
+        + "the true duration is only proven to exceed the last finite bucket bound, with no bound above it to report.";
 
     [McpServerTool(Name = "get_read_latency"), Description(
         "Gets the monitoring tool's OWN read-latency history (web and MCP reads); no server_name. "

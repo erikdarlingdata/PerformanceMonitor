@@ -46,7 +46,7 @@ public sealed class LongQueryNeverRanLiveTests
         {
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, rows_collected) VALUES ($1, $2, $3, 'long_query_completions', $4, 'SUCCESS', 0)",
-                CollectionIdGenerator.Next(), serverId, serverName, DarlingMcpTestData.Naive(now.AddDays(-3)));
+                CollectionIdGenerator.Next(), serverId, serverName, DarlingMcpTestData.Naive(now.AddMinutes(-5)));
 
             var json = await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, serverName, 24, 10, cancellationToken: ct);
 

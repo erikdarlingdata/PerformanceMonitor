@@ -3316,6 +3316,14 @@ ORDER BY server_name";
                 postgres, resolved.ServerId, start, end, effectiveLimit + 1, collector_name, min_duration_ms, status, cancellationToken);
             var truncated = rows.Count > effectiveLimit;
             if (truncated) rows = rows.Take(effectiveLimit).ToList();
+            /* #8571: runs_total is the runs that matched the filters in the window, not the page the limit left. Counted only when the over-fetch saw
+               more than the limit; a page that is not cut holds every match. */
+            long matchingRuns = rows.Count;
+            if (truncated)
+            {
+                matchingRuns = Math.Max(rows.Count, await DarlingDataReader.CountCollectionLogAsync(
+                    postgres, resolved.ServerId, start, end, collector_name, min_duration_ms, status, cancellationToken));
+            }
 
             /* #4966: where the LOG's coverage of the window starts, in the three keys every window-floor tool writes. The probe reads
                the log whole (DataWindowFloor.Source.ForCollectionLog) and ignores collector_name, min_duration_ms and status ON
@@ -3612,7 +3620,7 @@ ORDER BY server_name";
                 */
                 status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
                 runs_returned = pageCount,
-                runs_total = rows.Count,
+                runs_total = matchingRuns,
                 size_note = cut
                     ? $"{rows.Count - pageCount} of the {CountText.Plural(rows.Count, "run")} this read selected {(rows.Count - pageCount == 1 ? "was" : "were")} left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one collector_name / status to read the rest in full."
                     : null,
