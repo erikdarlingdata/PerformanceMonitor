@@ -232,11 +232,12 @@
                 </DataGrid.Columns>
             </DataGrid>
 
-            <!-- Empty State -->
+            <!-- Empty State. #8662: the engine's sentence for a PostgreSQL target is two lines long, so it wraps to the grid's width the way the
+                 empty-grid sentences of Agent Alerts, Database Protection and Identity Capacity do (TextWrapping, the 36 px drop under the headers). -->
             <TextBlock x:Name="NoJobsMessage"
                        Text="No job runs recorded in the selected time range"
                        FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
-                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       TextWrapping="Wrap" Margin="4,36,4,6" VerticalAlignment="Top"
                        Visibility="Collapsed"/>
 
             <!-- Loading State (#4478): shown while a read is in flight, so an empty grid does not read as
