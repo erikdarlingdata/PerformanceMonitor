@@ -1124,6 +1124,13 @@ export function fmtNum(v, d = 1) {
   const n = Number(v);
   return isFinite(n) ? n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }) : "—";
 }
+/* A per-hour rate to one decimal place, for the text beside the count it was made from. A positive rate that one
+   decimal place would write as zero reads "<0.1", so a count that happened never sits beside a rate of none (#8532).
+   Every other rate reads as fmtNum writes it, and a true 0 reads 0.0. */
+export function fmtPerHour(v) {
+  const text = fmtNum(v);
+  return Number(v) > 0 && text === fmtNum(0) ? "<" + fmtNum(0.1) : text;
+}
 /* A per-second rate. From 1 up it reads as fmtNum does without padding (66, 1,234.57). Below 1 it keeps two
    significant digits (0.22, 0.0033, 0.000012), so a real rate never reads as 0: one deadlock in a 300 s collection
    is 0.0033 a second, and one count over a day-wide bucket is 0.000012. Only a true 0 reads 0. */

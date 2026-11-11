@@ -1697,7 +1697,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                fact; the rate is added because it is the banded one. An unrateable window prints the count
                alone, which is exactly what the band had to go on. */
             parts.Add(c.DeadlockRatePerHour.HasValue
-                ? $"Deadlocks {c.DeadlockCount} ({c.DeadlockRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr)"
+                ? $"Deadlocks {c.DeadlockCount} ({DailyHealthBandCalculator.RatePerHourText(c.DeadlockRatePerHour.Value)}/hr)"
                 : $"Deadlocks {c.DeadlockCount}");
         }
 
