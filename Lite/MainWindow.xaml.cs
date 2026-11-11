@@ -1644,6 +1644,9 @@ public partial class MainWindow : Window
         ServerTabControl.Items.Add(tabItem);
         ServerTabControl.SelectedItem = tabItem;
 
+        /* #8535: DuckDB's own memory beside the process's, so a walk's growth reads as DuckDB or not DuckDB straight from the log. */
+        _databaseInitializer.LogServerTabMemoryInBackground(server.DisplayName, opened: true);
+
         // Show the tab control, hide empty state
         EmptyStatePanel.Visibility = Visibility.Collapsed;
         ServerTabControl.Visibility = Visibility.Visible;
@@ -2049,6 +2052,9 @@ public partial class MainWindow : Window
             ServerTabControl.Items.Remove(tab);
             _openServerTabs.Remove(serverId);
             _serverStatusSuffix.Remove(serverId);
+
+            /* #8535: the line a close leaves, to read against the open's. */
+            _databaseInitializer.LogServerTabMemoryInBackground(_serverManager.GetServerById(serverId)?.DisplayName ?? serverId, opened: false);
 
             /* Clean up alert state for this server */
             _alertStateService.RemoveServerState(serverId);

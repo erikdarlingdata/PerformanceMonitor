@@ -722,9 +722,11 @@ public partial class DuckDbInitializer : IDisposable
         var readHoldId = StoreLockHolders.Register(nameof(RunMemoryTrimCycle), "DuckDbInitializer.cs", write: false);
 
         double? beforeBytes;
+        IReadOnlyList<MemoryTag>? beforeTags = null;
         try
         {
             beforeBytes = ReadSentinelMemoryUsageBytes(sentinel);
+            beforeTags = TryReadMemoryTags(sentinel);
         }
         catch (Exception ex)
         {
@@ -738,7 +740,13 @@ public partial class DuckDbInitializer : IDisposable
         }
 
         if (beforeBytes is null || beforeBytes < TrimThresholdBytes)
+        {
+            /* #8535: the tick says what DuckDB held even when it does nothing, so a log with no trim in it still shows the number
+               the 256 MB test ran against. */
+            if (beforeBytes is not null)
+                LogTrimTick(beforeTags, $"Under the {Mb(TrimThresholdBytes)} MB trim threshold, so no trim.");
             return;
+        }
 
         /* Never wait — a reader must never block behind the trim (#4262 round 1 finding 1). If the write
            lock is busy, skip this cycle; the next one TrimInterval later gets another try. The wait is
@@ -754,6 +762,7 @@ public partial class DuckDbInitializer : IDisposable
                 _logger?.LogDebug(
                     "Trim cycle: skipped, write lock unavailable ({BeforeMb:F0} MiB in use)",
                     beforeBytes.Value / (1024.0 * 1024.0));
+                LogTrimTick(beforeTags, $"Over the {Mb(TrimThresholdBytes)} MB trim threshold, but the local database was busy, so the trim was skipped.");
                 return;
             }
         }
@@ -774,15 +783,36 @@ public partial class DuckDbInitializer : IDisposable
 
             var configuredMemoryLimit = ConfiguredMemoryLimit;
 
-            using (var cmd = lockedSentinel.CreateCommand())
+            /* #8535: the target sits above the memory the buffer manager cannot give up (ART indexes, the object cache and the
+               other tags that are not a cache of the database file), because DuckDB refuses a limit below what it holds
+               that cannot be evicted. A 64 MB target failed every minute once the indexes alone held more than that, and the
+               failure only reached a Debug line, so the trim never ran and nothing said so. */
+            var target = TrimTargetFor(TryReadMemoryTags(lockedSentinel));
+            string? lowerFailure = null;
+            try
             {
-                cmd.CommandText = $"SET memory_limit='{TrimTargetMemoryLimit}'";
-                cmd.ExecuteNonQuery();
+                using var lower = lockedSentinel.CreateCommand();
+                lower.CommandText = $"SET memory_limit='{target}'";
+                lower.ExecuteNonQuery();
             }
-            using (var cmd = lockedSentinel.CreateCommand())
+            catch (DuckDBException ex)
             {
-                cmd.CommandText = $"SET memory_limit='{configuredMemoryLimit}'";
-                cmd.ExecuteNonQuery();
+                lowerFailure = ex.Message.Split('\n')[0].Trim();
+            }
+            finally
+            {
+                /* The limit goes back whether or not it came down: DuckDB keeps the old limit when a lowering fails, and
+                   putting it back anyway costs nothing and never leaves a trim's limit behind. */
+                using var restore = lockedSentinel.CreateCommand();
+                restore.CommandText = $"SET memory_limit='{configuredMemoryLimit}'";
+                restore.ExecuteNonQuery();
+            }
+
+            if (lowerFailure is not null)
+            {
+                LogTrimTick(TryReadMemoryTags(lockedSentinel),
+                    $"Over the {Mb(TrimThresholdBytes)} MB trim threshold, but DuckDB would not lower memory_limit to {target}: {lowerFailure}");
+                return;
             }
 
             /* #4262 round 3: only incremented once both SET statements above actually ran, so a test can
@@ -800,8 +830,11 @@ public partial class DuckDbInitializer : IDisposable
                 beforeBytes.Value / (1024.0 * 1024.0),
                 (afterBytes ?? 0) / (1024.0 * 1024.0),
                 stopwatch.ElapsedMilliseconds,
-                TrimTargetMemoryLimit,
+                target,
                 configuredMemoryLimit);
+            LogTrimTick(TryReadMemoryTags(lockedSentinel),
+                $"Trimmed from {Mb((long)beforeBytes.Value)} MB to {Mb((long)(afterBytes ?? 0))} MB in {stopwatch.ElapsedMilliseconds} ms " +
+                $"(memory_limit {target}, then {configuredMemoryLimit}).");
         }
         finally
         {
