@@ -90,10 +90,7 @@ public partial class AgentAlertsTab : UserControl
             var read = await _dataService.ReadAgentAlertsAsync(server, DateTime.UtcNow);
             if (_loads.Superseded(nameof(LoadAlertsAsync), gen)) return;
 
-            var clock = await _dataService.GetServerClockOrMachineAsync(server.ServerId, System.Threading.CancellationToken.None);
-            if (_loads.Superseded(nameof(LoadAlertsAsync), gen)) return;
-
-            Show(read, clock);
+            Show(read);
             LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.RefreshedStamp();
             StatusChanged?.Invoke($"agent alerts — refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
@@ -105,7 +102,7 @@ public partial class AgentAlertsTab : UserControl
         }
     }
 
-    private void Show(ViewerAgentAlertsRead? read, ServerClock? clock = null)
+    private void Show(ViewerAgentAlertsRead? read)
     {
         if (read is null)
         {
@@ -116,7 +113,7 @@ public partial class AgentAlertsTab : UserControl
             return;
         }
 
-        StatusLine.Text = ViewerAgentAlertsText.StatusLine(read, clock ?? ViewerTimeHelper.ActiveServerClock);
+        StatusLine.Text = ViewerAgentAlertsText.StatusLine(read);
         var gaps = ViewerAgentAlertsText.GapRows(read);
         var alerts = ViewerAgentAlertsText.AlertRows(read);
         GapsDataGrid.ItemsSource = gaps;
