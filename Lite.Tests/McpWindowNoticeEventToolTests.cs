@@ -336,13 +336,17 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'Db', 'SELECT 1', 5000000)",
     public async Task AnEmptyWindow_TheStoreHoldsNothingIn_SaysNothingWasRead(EventTool tool)
     {
         await _duckDb.InitializeFromTemplateAsync();
-        /* #8571: a long-query collector that never ran is not_collected, so this empty state is a run long before the window that found nothing. */
-        if (tool == EventTool.LongQueryCompletions)
-        {
-            await SeedLogRunsAsync(CollectorOf(tool), Anchor.AddDays(-60), Anchor.AddDays(-60), everyMinutes: 30);
-        }
 
         var root = Root(await CallAsync(tool));
+
+        /* #8571: a long-query collector that never ran for the server is not_collected, with the enable step (nothing says its schedule is on),
+           not an empty answer with hints. A run that found nothing would put a row in the window, and a run before it reads as an offline server. */
+        if (tool == EventTool.LongQueryCompletions)
+        {
+            Assert.Equal("not_collected", root.GetProperty("status").GetString());
+            Assert.Contains("has never run for it", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+            return;
+        }
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
         AssertNothingHeld(root.GetProperty("hints"), TableOf(tool));
