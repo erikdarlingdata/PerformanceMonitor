@@ -1487,6 +1487,23 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         };
     }
 
+    /// <summary>Whether a card is on the needs-attention list: its band is Warning or worse, or it is Healthy and
+    /// carries an advisory tile (#7561).</summary>
+    internal static bool NeedsAttention(FleetServerCard card) =>
+        card.Band != FleetHealthBand.Healthy || card.HasAdvisoryTile;
+
+    /// <summary>
+    /// The cards worst first (#8654), the one order <c>worst_servers</c> and a budgeted cards page share: the
+    /// needs-attention cards lead, then <see cref="ServerHealthClassifier.FleetHealthScore"/> descending (band first,
+    /// Offline over Critical over Warning over Healthy), then display name. <c>worst_servers</c> is the head of this
+    /// list, so a page cut anywhere in it keeps every card that ranks above the first one it leaves out.
+    /// </summary>
+    internal static List<FleetServerCard> WorstFirst(IEnumerable<FleetServerCard> cards) => cards
+        .OrderByDescending(NeedsAttention)
+        .ThenByDescending(c => ServerHealthClassifier.FleetHealthScore(c.Band, c.ToHealthMetrics()))
+        .ThenBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase)
+        .ToList();
+
     /// <summary>Reduces the pre-banded cards to the fleet rollup — band counts, cross-server totals (summed from
     /// the cards), and the worst-first ranking. Pure so the reduction is unit-testable without a store.</summary>
     /// <param name="collectionHealthAgeSeconds">How old the collection-health half of the cards is (#3735) —
@@ -1563,11 +1580,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             if (card.DeadlockSeverity > deadlockTileSeverity) deadlockTileSeverity = card.DeadlockSeverity;
         }
 
-        var problems = cards
-            .Where(c => c.Band != FleetHealthBand.Healthy || c.HasAdvisoryTile)
-            .OrderByDescending(c => ServerHealthClassifier.FleetHealthScore(c.Band, c.ToHealthMetrics()))
-            .ThenBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        var problems = WorstFirst(cards.Where(NeedsAttention));
 
         var worst = problems
             .Take(worstCount)
