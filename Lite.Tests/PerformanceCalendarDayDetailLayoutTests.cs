@@ -140,7 +140,8 @@ public sealed class PerformanceCalendarDayDetailLayoutTests
         Assert.Empty(violations);
     }
 
-    /// <summary>Leaving the selected day's month closes its detail. Coming back opens it again, in view.</summary>
+    /// <summary>Leaving the selected day's month closes its detail. Coming back opens it again, in view. The month
+    /// is left from the top of the calendar, where Previous and Next are, with the detail below the view.</summary>
     [Theory]
     [InlineData("NextMonthButton", "PrevMonthButton")]
     [InlineData("PrevMonthButton", "NextMonthButton")]
@@ -149,6 +150,8 @@ public sealed class PerformanceCalendarDayDetailLayoutTests
         var violations = StaTestThread.Run(() =>
         {
             var (host, calendar) = Build(900, 350, click: true);
+            if (ScrollBackToTheMonthButtons(host, calendar) is { } unproven)
+                return new List<string> { unproven };
 
             Press(host, calendar, away);
             Assert.Equal(Visibility.Collapsed, DetailPanel(calendar).Visibility);
@@ -173,6 +176,8 @@ public sealed class PerformanceCalendarDayDetailLayoutTests
             calendar.SelectedDate = calendar.DisplayMonth;
             Layout(host);
             Assert.Equal(Visibility.Visible, DetailPanel(calendar).Visibility);
+            if (ScrollBackToTheMonthButtons(host, calendar) is { } unproven)
+                return new List<string> { unproven };
 
             Press(host, calendar, "NextMonthButton");
             Assert.Equal(Visibility.Collapsed, DetailPanel(calendar).Visibility);
@@ -334,6 +339,24 @@ public sealed class PerformanceCalendarDayDetailLayoutTests
         cell.RaiseEvent(down);
         cell.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left) { RoutedEvent = UIElement.MouseLeftButtonUpEvent });
         Layout(host);
+    }
+
+    /// <summary>Scrolls back to the top of the calendar, where Previous, Next and Today are: the click that opened
+    /// the day detail scrolled them out of view. Returns why the case proves nothing when the click left them in
+    /// view, or when the detail is still in view from the top.</summary>
+    private static string? ScrollBackToTheMonthButtons(Border host, PerformanceCalendar calendar)
+    {
+        var scroller = Scroller(calendar);
+        var view = Descendants<ScrollContentPresenter>(scroller).First();
+        var previous = Assert.IsAssignableFrom<FrameworkElement>(calendar.FindName("PrevMonthButton"));
+        if (BoundsIn(previous, view).Bottom > Tolerance)
+            return "the click left the month buttons in view, so the case proves nothing";
+
+        scroller.ScrollToVerticalOffset(0);
+        Layout(host);
+        return ReachViolations(host, calendar).Any()
+            ? null
+            : "scrolling to the top left the day-detail panel in view, so the case proves nothing";
     }
 
     /// <summary>Presses one of the calendar's own buttons: Previous, Next or Today.</summary>
