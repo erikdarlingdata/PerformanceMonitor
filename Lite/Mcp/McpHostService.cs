@@ -173,7 +173,8 @@ public sealed class McpHostService : BackgroundService
     /// when given, is read on every request, so a replaced token takes effect at once. A null or empty
     /// <paramref name="token"/> installs nothing (<c>mcp_allow_tokenless_loopback</c> is on, and only the read tools are served).
     /// </summary>
-    internal static void UseBearerTokenGate(IApplicationBuilder app, string? token, Func<string?>? currentToken = null)
+    internal static void UseBearerTokenGate(IApplicationBuilder app, string? token, Func<string?>? currentToken = null,
+        Action<string>? log = null, Func<DateTime>? utcNow = null)
     {
         if (string.IsNullOrEmpty(token))
         {

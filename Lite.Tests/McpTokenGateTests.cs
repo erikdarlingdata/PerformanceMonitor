@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
 using System.Text.RegularExpressions;
@@ -80,6 +81,67 @@ public sealed class McpTokenGateTests
 
         Assert.Equal(StatusCodes.Status401Unauthorized, status);
         Assert.Equal(0, reached);
+    }
+
+    /// <summary>#8611: a refused token used to leave nothing in the log, so "is my token wrong" was answerable only from the client. One line
+    /// per refusal, rate-limited the way Darling's MCP host is (a run of wrong tokens writes one line, the next window's line says how many
+    /// were held back), and never any part of a token.</summary>
+    [Fact]
+    public async Task AWrongToken_WritesOneRefusalLine_ARunOfThemIsRateLimited_AndNoLineCarriesAToken()
+    {
+        var lines = new List<string>();
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        await using var app = builder.Build();
+        McpHostService.UseBearerTokenGate(app, Token, currentToken: null, log: lines.Add, utcNow: () => now);
+        app.Run(context =>
+        {
+            context.Response.StatusCode = StatusCodes.Status200OK;
+            return Task.CompletedTask;
+        });
+        await app.StartAsync();
+        using var client = app.GetTestClient();
+
+        async Task<int> Send(string? authorization)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/");
+            if (authorization is not null)
+            {
+                request.Headers.TryAddWithoutValidation("Authorization", authorization);
+            }
+
+            using var response = await client.SendAsync(request);
+            return (int)response.StatusCode;
+        }
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, await Send("Bearer secretguess0"));
+        Assert.Single(lines);
+        Assert.Contains("401", lines[0], StringComparison.Ordinal);
+
+        for (var i = 1; i < 5; i++)
+        {
+            now = now.AddSeconds(5);
+            Assert.Equal(StatusCodes.Status401Unauthorized, await Send("Bearer secretguess" + i));
+        }
+
+        Assert.Single(lines);
+
+        /* The right token is served and logs nothing. */
+        Assert.Equal(StatusCodes.Status200OK, await Send("Bearer " + Token));
+        Assert.Single(lines);
+
+        /* Past the window the next refusal is logged again and says how many were held back (four in the run, the right token not counted). */
+        now = now.AddMinutes(11);
+        Assert.Equal(StatusCodes.Status401Unauthorized, await Send("Bearer secretguess9"));
+        Assert.Equal(2, lines.Count);
+        Assert.Contains("4 further", lines[1], StringComparison.Ordinal);
+
+        foreach (var line in lines)
+        {
+            Assert.DoesNotContain("secretguess", line, StringComparison.Ordinal);
+            Assert.DoesNotContain(Token[..8], line, StringComparison.Ordinal);
+        }
     }
 
     [Theory]

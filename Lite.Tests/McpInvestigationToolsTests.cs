@@ -89,6 +89,24 @@ public sealed class McpInvestigationToolsTests : IDisposable
     private void Lapse(string id) =>
         Exec($"UPDATE investigation_requests SET lease_until = TIMESTAMP '2000-01-01 00:00:00' WHERE request_id = '{id}'");
 
+    /// <summary>#8611: Lite journals its own refusals under invalid and unclaimed, so a claim as either name would make the claim's rows read
+    /// as a refusal's. Darling refuses both (case-insensitively); so does Lite, and no claim is made.</summary>
+    [Theory]
+    [InlineData("invalid")]
+    [InlineData("unclaimed")]
+    [InlineData("Invalid")]
+    [InlineData("UNCLAIMED")]
+    public async Task Claim_AsAReservedAgentName_IsRefused_AndMakesNoClaim(string agentId)
+    {
+        var openedId = (await _store.OpenOrJoinAsync(Alert(), Ct)).RequestId!.Value;
+
+        var answer = Root(await McpInvestigationTools.ClaimAsync(_store, Composer(), openedId.ToString(), agentId, null, null, Ct));
+
+        Assert.NotEqual("claimed", answer.GetProperty("status").GetString());
+        Assert.Equal("agent_id_is_named_token", answer.GetProperty("status").GetString());
+        Assert.Equal("", Scalar($"SELECT coalesce(CAST(claim_id AS VARCHAR), '') FROM investigation_requests WHERE request_id = '{openedId}'"));
+    }
+
     [Fact]
     public async Task Claim_ComposesTheBrief_StoresItUnderTheClaim_AndReturnsIt()
     {

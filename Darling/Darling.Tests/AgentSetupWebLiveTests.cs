@@ -392,6 +392,26 @@ public sealed class AgentSetupWebLiveTests
         }, ring);
     }
 
+    /// <summary>#8611: DELETE /api/notification-routes/{id} carries no body, so a cross-site form or fetch could send it with no JSON content
+    /// type. The mute routes refuse that with 415; this one does too, and the route stays. The dashboard's own call sends the JSON type and
+    /// still deletes.</summary>
+    [Fact]
+    public async Task DeleteRoute_WithoutAJsonContentType_Is415_AndKeepsTheRoute_WithItItDeletes()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            var seeded = await SeedRouteAsync(owner, "performance", ct);
+
+            Assert.Equal(415, (await Send("DELETE", $"/api/notification-routes/{seeded}", null)).Status);
+            Assert.Equal(415, (await Send("DELETE", $"/api/notification-routes/{seeded}", "text/plain")).Status);
+            Assert.Equal("1", await ScalarAsync(owner, $"SELECT count(*) FROM config_notification_routes WHERE route_id = {seeded}", ct));
+
+            var deleted = await Send("DELETE", $"/api/notification-routes/{seeded}", Json);
+            Assert.Equal(200, deleted.Status);
+            Assert.Equal("0", await ScalarAsync(owner, $"SELECT count(*) FROM config_notification_routes WHERE route_id = {seeded}", ct));
+        });
+    }
+
     [Fact]
     public async Task AgentRoutes_RefuseWhatTheViewerRefuses_WithTheSharedSentence_AndWriteNothing()
     {
