@@ -564,6 +564,12 @@ public static class DailySummarySql
                 (hourlySource, string.Empty, RestartRowPredicate(hourlySource, string.Empty)));
         var rawTailGate = hourlySource is null ? string.Empty : "\n                  AND (SELECT raw_from FROM queries_ceiling) IS NULL";
 
+        /* #8549: a hash whose only row on a day the daily holds is a restart row is in raw's count and not in the interval daily's. The daily
+           half unions those hashes in, so the daily tier answers what raw does on every day the daily holds. */
+        var heldDayRestartRows = hourlySource is null
+            ? string.Empty
+            : HeldDayRestartRows(relation, RestartRowPredicate(hourlySource, " AND c.collection_time < (SELECT raw_from FROM queries_ceiling)"));
+
         /* #7505: the partial ceiling day's raw rows are counted with the rollup's own source filter, so that day
            is not read higher than the rollup would have read it once it catches up (a restart row's hash counts in
            raw and not in the interval-honest successor). Days past the ceiling keep reading raw unfiltered, as they
@@ -595,7 +601,7 @@ public static class DailySummarySql
             FROM (
                 SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash
                 FROM collect.{relation}
-                WHERE server_id = $1 AND bucket >= $2 AND bucket < $3
+                WHERE server_id = $1 AND bucket >= $2 AND bucket < $3{heldDayRestartRows}
             ) AS x
             GROUP BY x.d
             UNION ALL
@@ -667,6 +673,50 @@ public static class DailySummarySql
     }
 
     /// <summary>
+    /// The restart-row hashes of the days a daily rollup holds that the rollup does not already list, as a <c>UNION ALL</c> tail for the daily
+    /// half's pair set (#8549), or empty when <paramref name="restartPredicate"/> (<see cref="RestartRowPredicate"/>, already bounded to the days
+    /// the daily holds) is null. A hash whose only row on a day is a restart row (<c>sample_interval_seconds = 0</c>) is in raw's count and not in
+    /// the interval-honest rollups, which skip those rows, so the daily tier read one below raw on that day.
+    ///
+    /// <para><b>What the member reads.</b> The window's restart rows from raw, once, as distinct (day, hash) pairs (the partial index on an
+    /// uncompressed chunk, a filtered decompression on a compressed one, and raw keeps four days). The days among them the daily holds a bucket
+    /// for, probed once per day (a day it does not hold is NULL or raw's, never a count of the restart rows alone). The pairs of those days whose
+    /// hash the daily does not list for the day, anti-joined against the daily's rows for just the span of those days, so the daily is not read
+    /// in full a second time. A day whose start is before the window (a window that starts inside a day does not count that day from the rollup)
+    /// is left out too. The daily half's <c>COUNT</c> of pairs then stays a distinct count, because the tail adds only hashes the daily lacks.</para>
+    ///
+    /// <para><b>Why not a <c>UNION</c> of the daily's pairs and the restart pairs, or a per-row <c>EXISTS</c> (#8549, measured).</b> A
+    /// <c>UNION</c> put every daily row through a text sort (0.27 s for 80,000 rows on the test store), and an anti-join over the daily's whole
+    /// window sorted it the same way, taking the queries part from 0.16 s to 0.51 s. A per-restart-row <c>EXISTS</c> was 3,456 probes. Bounding the
+    /// anti-join to the held days' span and probing per distinct day cost the part 20 ms.</para>
+    /// </summary>
+    private static string HeldDayRestartRows(string dailyRelation, string? restartPredicate)
+        => restartPredicate is null
+            ? string.Empty
+            : $"""
+
+                UNION ALL
+                SELECT e.d, e.query_hash
+                FROM (
+                    WITH restart_pairs AS MATERIALIZED (
+                        SELECT DISTINCT date_trunc('day', c.collection_time) AS d, c.query_hash
+                        FROM collect.query_stats AS c
+                        WHERE c.server_id = $1 AND c.collection_time >= $2 AND c.collection_time < $3
+                          AND date_trunc('day', c.collection_time) >= $2{restartPredicate}
+                    ),
+                    held_days AS MATERIALIZED (
+                        SELECT x.d FROM (SELECT DISTINCT p.d FROM restart_pairs AS p) AS x
+                        WHERE EXISTS (SELECT 1 FROM collect.{dailyRelation} AS h WHERE h.server_id = $1 AND h.bucket = x.d OFFSET 0)
+                    )
+                    SELECT p.d, p.query_hash FROM restart_pairs AS p
+                    WHERE p.d IN (SELECT k.d FROM held_days AS k)
+                      AND NOT EXISTS (SELECT 1 FROM collect.{dailyRelation} AS h
+                                      WHERE h.server_id = $1 AND h.bucket >= (SELECT min(k.d) FROM held_days AS k) AND h.bucket <= (SELECT max(k.d) FROM held_days AS k)
+                                        AND h.bucket = p.d AND h.query_hash = p.query_hash)
+                ) AS e
+            """;
+
+    /// <summary>
     /// The member of the daily <c>queries</c> CTE that counts the days at and after the daily rollup's ceiling (#8549). The daily's refresh
     /// leaves yesterday out until the next UTC midnight, so for a day it lacks, a closed day, the old raw tail read every raw row of
     /// the day: 381 of the 482 buffers of a 30-day read on a test store. This member reads the HOURLY rollup for the hours it holds and raw
@@ -690,7 +740,7 @@ public static class DailySummarySql
     /// row would be counted by the raw tail this member replaces and not by a held hour. The reply must be the raw tail's for the same store,
     /// so the member also reads the window's restart rows from raw (<see cref="RestartRowPredicate"/>, through the partial index on them) and
     /// unions their hashes in, where the raw hours already count them. A hash seen in a restart row of a held hour and in an ordinary row of
-    /// another counts once. The days the daily itself holds still leave a restart-only hash out, as they did before this member.</para>
+    /// another counts once. The days the daily itself holds get the same union in the daily half (<see cref="HeldDayRestartRows"/>).</para>
     ///
     /// <para>With no ceiling (<paramref name="rawFrom"/> NULL, an empty daily) the grid is empty and the raw tail reads the window as before:
     /// reading a month of the hourly for a daily that holds nothing is the read this member avoids.</para>
@@ -809,6 +859,13 @@ public static class DailySummarySql
             : string.Empty;
         var rawTailGate = hierarchical ? $"\n                  AND {stitchedRawFrom} IS NULL" : string.Empty;
 
+        /* #8549: the restart-only hashes of the days the successor daily holds (the legacy hourly keeps restart rows, so the legacy half needs none). */
+        var heldDayRestartRows = hierarchical
+            ? HeldDayRestartRows(
+                successor,
+                RestartRowPredicate(successorTarget.Source, $" AND c.collection_time >= {boundary} AND c.collection_time < (SELECT raw_from FROM queries_ceiling_successor)"))
+            : string.Empty;
+
         return $"""
         /* #7505: raw_from is the day in which each side's newest bucket ends, the first day that side does not
            hold whole. See QueriesCteForCagg. */
@@ -841,7 +898,7 @@ public static class DailySummarySql
             FROM (
                 SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash
                 FROM collect.{successor}
-                WHERE server_id = $1 AND bucket >= $2 AND bucket < $3 AND bucket >= {boundary}
+                WHERE server_id = $1 AND bucket >= $2 AND bucket < $3 AND bucket >= {boundary}{heldDayRestartRows}
             ) AS x
             GROUP BY x.d
             UNION ALL

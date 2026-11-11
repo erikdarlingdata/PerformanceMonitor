@@ -153,6 +153,7 @@ public sealed class DailySummaryClosedHoursLiveTests
            the others in held hours. */
         var windowStart = yesterday.AddHours(14).AddMinutes(30);
         var windowEnd = yesterday.AddHours(19).AddMinutes(30);
+        var heldDay = today.AddDays(-2);
         await PlantAsync(connection, 854998000L, new (DateTime At, string? Hash, int Interval)[]
         {
             (yesterday.AddHours(11).AddMinutes(25), "RST_HELD", 0),
@@ -166,6 +167,7 @@ public sealed class DailySummaryClosedHoursLiveTests
             (windowStart, "RST_EDGE_IN", 0),
             (windowEnd.AddTicks(-10), "RST_END_IN", 0),
             (windowEnd, "RST_END_OUT", 0),
+            (heldDay.AddHours(12).AddMinutes(25), "RST_IN_A_HELD_DAY", 0),
         }, ct);
 
         /* Legacy shape. Its hourly has no filter and keeps restart rows, so this is the control. */
@@ -202,15 +204,16 @@ public sealed class DailySummaryClosedHoursLiveTests
         await AssertSameRowsAsync(connection, RetentionTier.Daily, alone, start, end, ct);
         await AssertSameRowsAsync(connection, RetentionTier.Daily, alone, windowStart, windowEnd, ct);
 
-        /* The disagreement that was already there: a day the interval daily HOLDS leaves a restart-only hash out and raw counts it. The routed
-           statement keeps the daily's count for that day, one fewer than the raw statement's. */
-        var heldDay = today.AddDays(-2);
-        await PlantAsync(connection, 854997000L, new (DateTime At, string? Hash, int Interval)[] { (heldDay.AddHours(12).AddMinutes(25), "RST_IN_A_HELD_DAY", 0) }, ct);
-        await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, today.AddDays(-6), yesterday, ct);
-        await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalDailyView, today.AddDays(-6), yesterday, ct);
+        /* A day the interval daily HOLDS and a hash whose only row that day is a restart row (RST_IN_A_HELD_DAY, planted above): raw counts it and
+           the interval rollups skip it, so the daily half unions the day's restart rows in and the routed statement is raw's, on the interval daily
+           alone (above) and on the stitched daily (further up), by EXCEPT both ways over the whole window. The daily's own count for the day is one
+           fewer, so the union is what the equality rests on. */
         var rawCount = await UniqueQueriesAsync(connection, DailySummarySql.RangeSql, heldDay, yesterday, ct);
         var routedCount = await UniqueQueriesAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Daily, alone, heldDay), heldDay, yesterday, ct);
-        Assert.Equal(rawCount - 1, routedCount);
+        var dailyOwnCount = await ScalarAsync<long>(connection,
+            $"SELECT count(DISTINCT query_hash) FROM collect.{TimescaleSupport.QueryStatsIntervalDailyView} WHERE server_id = {ServerId} AND bucket = '{Ts(heldDay)}'", ct);
+        Assert.Equal(rawCount, routedCount);
+        Assert.Equal(rawCount, dailyOwnCount + 1);
     }
 
     /// <summary>
