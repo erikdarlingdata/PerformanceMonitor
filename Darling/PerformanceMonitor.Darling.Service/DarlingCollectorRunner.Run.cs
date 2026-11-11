@@ -2622,6 +2622,9 @@ public sealed partial class DarlingCollectorRunner
             collectionNote, StoreWriteReattemptNote(context.StoreWriteReattempts));
         collectionNote = EnumeratedCollectorDriver.MergeNotes(
             collectionNote, QueryStoreIntervalMissNote(context.QueryStoreIntervalMisses));
+        /* #8541: set only on a run that carries no other note. The readable-secondary judgment takes this note as the run's
+           answer and a run with any other note as no answer, so a partial failure never reads as "every database is a secondary". */
+        collectionNote ??= QueryStoreSecondaryNote(context.QueryStoreSecondaryDatabases, rowsWritten);
 
         return new CollectorRunResult(
             rowsWritten, sqlMs, storageMs, context.Measurements, collectionNote, fanout.Result,

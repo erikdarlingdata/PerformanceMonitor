@@ -177,12 +177,12 @@ public sealed class CollectionSweepCommandTimeoutTests
     /// #8361: sweep-body members that hand their store command to a factory in the Storage project instead of building it.
     /// The deadline travels as an argument, so the construction scan above cannot see it: each (file, member, factory) is
     /// scanned for the factory's calls, and every call must carry <see cref="ServiceCommandDeadlines.CollectionSweepSeconds"/>.
-    /// IsQueryStoreReadableSecondaryAsync runs inside RunDueCollectorsAsync at every query_store_hints slot and asks the store
+    /// QueryStoreHintsStandsDownAsync runs inside RunDueCollectorsAsync at every query_store_hints slot and asks the store
     /// through DarlingQueryStoreReadableSecondary, which sets the command's timeout from the seconds it is given.
     /// </summary>
     private static readonly (string File, string Member, string Factory)[] s_sweepHandoffMembers =
     {
-        ("DarlingWorker.Targets.cs", "IsQueryStoreReadableSecondaryAsync", "DarlingQueryStoreReadableSecondary"),
+        ("DarlingWorker.Targets.cs", "QueryStoreHintsStandsDownAsync", "DarlingQueryStoreReadableSecondary"),
     };
 
     /// <summary>The factory calls the handoff members make, pinned like <see cref="ExpectedSweepCommandSites"/>.</summary>
