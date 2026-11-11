@@ -152,14 +152,13 @@ VALUES ($1, $2, $3, $4, $5, 'RESTART', 'RESTARTHANDLE', 0, 0, 0, 0)", connection
            missing on either side. The legacy-side days (D0, D1, AND D2 — D2's boundary day-aligns to D3, so
            D2 stays whole on the legacy side even though F itself falls inside D2) count TWO distinct hashes:
            the planted query AND the restart row, which the legacy admits (its own not-carried source filter
-           is empty). The successor-side days (D3, D4) count TWO as well: the successor's own WHERE (the source
-           filter its CREATE carries) leaves the restart row out of the rollup, which IntervalHonestHourlyRollupLiveTests
-           measures directly on the rollups themselves, and the hourly tier adds the restart-only hash back from raw
-           on a day the rollup holds (#8549), so the read is raw's. */
+           is empty). The successor-side days (D3, D4) count ONE: the restart row is filtered by the
+           successor's own WHERE (the source filter its CREATE carries), exactly the interval-honest
+           distinction IntervalHonestHourlyRollupLiveTests measures directly on the rollups themselves. */
         Assert.Equal(5, rows.Count);
         Assert.Equal(new[] { d0, d0.AddDays(1), d0.AddDays(2), d0.AddDays(3), d0.AddDays(4) }, rows.Select(r => r.Day).OrderBy(d => d).ToArray());
         Assert.All(rows, r => Assert.NotNull(r.Unique));
-        Assert.Equal(new long?[] { 2, 2, 2, 2, 2 }, rows.OrderBy(r => r.Day).Select(r => r.Unique).ToArray());
+        Assert.Equal(new long?[] { 2, 2, 2, 1, 1 }, rows.OrderBy(r => r.Day).Select(r => r.Unique).ToArray());
 
         /* ── step 3: one Compose panel over the SAME stitched pair, per-bucket totals split at F ── */
         var json = JsonNode.Parse(

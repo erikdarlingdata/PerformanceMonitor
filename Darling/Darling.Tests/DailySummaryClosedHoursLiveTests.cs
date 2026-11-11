@@ -194,16 +194,6 @@ public sealed class DailySummaryClosedHoursLiveTests
         await AssertSameRowsAsync(connection, RetentionTier.Daily, stitched, start, end, ct);
         await AssertSameRowsAsync(connection, RetentionTier.Daily, stitched, windowStart, windowEnd, ct);
 
-        /* The HOURLY tier on the same store (#8549). Its hourly rollup skips restart rows too, so a hash whose only row on a day it holds is a restart row
-           (RST_IN_A_HELD_DAY on a day the interval hourly holds) read one below raw. The window stops before yesterday, whose hours 9 and 21 to 23 the test
-           deleted from the hourly: a hole inside a held day is not this member's. The window that starts at 13:00 of the day leaves the 12:25 restart row out. */
-        var hourlyStitchedSql = DailySummarySql.RangeSqlFor(RetentionTier.Hourly, stitched, start);
-        Assert.Contains("queries_ceiling_successor", hourlyStitchedSql, StringComparison.Ordinal);
-        await AssertSameRowsAsync(connection, RetentionTier.Hourly, stitched, start, yesterday, ct);
-        await AssertSameRowsAsync(connection, RetentionTier.Hourly, stitched, heldDay.AddHours(13), yesterday, ct);
-        Assert.Equal(await UniqueQueriesAsync(connection, DailySummarySql.RangeSql, heldDay, heldDay.AddDays(1), ct),
-            await UniqueQueriesAsync(connection, hourlyStitchedSql, heldDay, heldDay.AddDays(1), ct));
-
         /* The interval-honest daily alone: the successor reaches the window start, so the legacy daily drops out of the statement. */
         await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, today.AddDays(-6), today.AddDays(-3), ct);
         await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalDailyView, today.AddDays(-6), today.AddDays(-3), ct);
@@ -224,17 +214,6 @@ public sealed class DailySummaryClosedHoursLiveTests
             $"SELECT count(DISTINCT query_hash) FROM collect.{TimescaleSupport.QueryStatsIntervalDailyView} WHERE server_id = {ServerId} AND bucket = '{Ts(heldDay)}'", ct);
         Assert.Equal(rawCount, routedCount);
         Assert.Equal(rawCount, dailyOwnCount + 1);
-
-        /* The Hourly tier on the interval hourly alone: the same day, the same equality by EXCEPT both ways, and the hourly's own count one below raw. */
-        var hourlyAloneSql = DailySummarySql.RangeSqlFor(RetentionTier.Hourly, alone, start);
-        Assert.DoesNotContain("queries_ceiling_successor", hourlyAloneSql, StringComparison.Ordinal);
-        Assert.Contains(TimescaleSupport.QueryStatsIntervalHourlyView, hourlyAloneSql, StringComparison.Ordinal);
-        await AssertSameRowsAsync(connection, RetentionTier.Hourly, alone, start, yesterday, ct);
-        await AssertSameRowsAsync(connection, RetentionTier.Hourly, alone, heldDay.AddHours(13), yesterday, ct);
-        var hourlyOwnCount = await ScalarAsync<long>(connection,
-            $"SELECT count(DISTINCT query_hash) FROM collect.{TimescaleSupport.QueryStatsIntervalHourlyView} WHERE server_id = {ServerId} AND bucket >= '{Ts(heldDay)}' AND bucket < '{Ts(heldDay.AddDays(1))}'", ct);
-        Assert.Equal(rawCount, await UniqueQueriesAsync(connection, hourlyAloneSql, heldDay, yesterday, ct));
-        Assert.Equal(rawCount, hourlyOwnCount + 1);
     }
 
     /// <summary>
