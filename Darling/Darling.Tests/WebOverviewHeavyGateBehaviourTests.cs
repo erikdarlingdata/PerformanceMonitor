@@ -21,7 +21,7 @@ namespace Darling.Tests;
 /// harness says so. The tab asks for the daily summary range, the baseline read and the three 24 hour trends together; on a server
 /// nobody had opened they took 4 to 10 s each and ended within 300 ms of one another, and held four of the browser's six
 /// connections to the origin while the page's own reads waited behind them. At most two of those five are in flight at once, the
-/// strips' trends are asked for first and the baseline and the daily summary last, the small reads (CPU, blocking, deadlocks) are
+/// daily summary range is asked for first (the slowest read, #8554 part 2), then the strips' trends, and the baseline last, the small reads (CPU, blocking, deadlocks) are
 /// sent at once, and every read is still sent. No clock is read on either side. Behavior only; the pages' source is not pinned.
 /// </summary>
 public sealed class WebOverviewHeavyGateBehaviourTests
@@ -80,16 +80,25 @@ public sealed class WebOverviewHeavyGateBehaviourTests
     }
 
     [Fact]
-    public void TheStripsTrendsAreAskedForFirst_AndTheBaselineAndTheDailySummaryLast()
+    public void TheDailySummaryIsAskedForFirst_ThenTheStripsTrends_AndTheBaselineLast()
     {
+        /* #8554: the daily summary range is the slowest read on a first visit, so the gate that lets two heavy reads go at a time starts it first. */
         var order = Strings(Run().GetProperty("heavySentOrder"));
-        Assert.Equal(Trends.Concat(["get_overview_baselines", "get_daily_summary_range"]).ToArray(), order);
+        Assert.Equal(["get_daily_summary_range", .. Trends, "get_overview_baselines"], order);
+    }
+
+    [Fact]
+    public void TheDailySummaryIsOneOfTheTwoHeavyReadsInFlightOnTheFirstLoad()
+    {
+        var heavy = Strings(Run().GetProperty("load").GetProperty("heavyInFlight"));
+        Assert.Contains("get_daily_summary_range", heavy);
     }
 
     [Fact]
     public void EveryReadIsStillSent_SoNoPanelLosesItsData()
     {
+        /* The tab's whole build runs, so its other panels' reads are in the list too; each heavy and small read is sent exactly once. */
         var all = Strings(Run().GetProperty("sentAll"));
-        Assert.Equal(Heavy.Concat(Small).OrderBy(t => t, StringComparer.Ordinal), all.OrderBy(t => t, StringComparer.Ordinal));
+        Assert.All(Heavy.Concat(Small), tool => Assert.Single(all, tool));
     }
 }

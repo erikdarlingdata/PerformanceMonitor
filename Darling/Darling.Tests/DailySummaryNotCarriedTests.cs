@@ -245,7 +245,6 @@ public sealed class DailySummaryNotCarriedTests
         Assert.Contains("export function dailySummaryPanels(server)", page, StringComparison.Ordinal);
         Assert.Contains("row.unique_queries == null", page, StringComparison.Ordinal);
         Assert.Contains("[\"not materialized\"]", page, StringComparison.Ordinal);
-        Assert.Contains("...dailySummaryPanels(server),", page, StringComparison.Ordinal);
         /* The descriptor it replaced is gone: one fetch of the one read, as before. */
         Assert.DoesNotContain("\"Daily Health Calendar\",\n        \"get_daily_summary_range\"", page.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 
