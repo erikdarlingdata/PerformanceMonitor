@@ -811,11 +811,22 @@ FROM collect.wait_stats
 WHERE delta_wait_time_ms > 0
 GROUP BY server_id, date_trunc('day', collection_time), wait_type";
 
-    /// <summary><see cref="WaitStatsDailyView"/>'s refresh policy: the daily tier's own (<see cref="AddDailyRefreshPolicySql"/>, four
-    /// days of window, one day of end offset, a daily finish-to-start schedule). A day is materialized once it is a whole day inside
-    /// that window, so the open day and the day or two after it close are never in the rollup and the read takes them from raw.
-    /// A row that arrives for an already materialized day inside the four days invalidates its bucket and the next run re-sums it.</summary>
-    public static string AddWaitStatsDailyRefreshPolicySql() => AddDailyRefreshPolicySql(WaitStatsDailyView);
+    /// <summary><see cref="WaitStatsDailyView"/>'s refresh policy (#8549): the daily tier's four days of window, and the HOURLY tier's
+    /// <see cref="HourlyRefreshScheduleInterval"/> as BOTH <c>schedule_interval</c> and <c>end_offset</c>, never the end offset alone
+    /// (<see cref="ScheduleIntervalDoublesAsEndOffset"/>: every refresh policy here passes one value for both). A day is materialized
+    /// once it is a whole day inside <c>[now - 4 days, now - 1 hour]</c>, so yesterday lands at the first run after 01:00 UTC. With the
+    /// daily tier's own one-day end offset a refresh over that window wrote the day before yesterday and left yesterday raw for the
+    /// whole of the next day. Four days minus one hour is still more than the two buckets TimescaleDB requires. The open day is never
+    /// in the rollup, and the read takes it from raw. A row that arrives for an already materialized day inside the four days
+    /// invalidates its bucket and the next run re-sums it. Only this aggregate: every other policy keeps its own offsets.</summary>
+    public static string AddWaitStatsDailyRefreshPolicySql()
+        => AddContinuousAggregatePolicySql(
+            WaitStatsDailyView,
+            DailyRefreshStartOffset,
+            HourlyRefreshScheduleInterval,
+            HourlyRefreshScheduleInterval,
+            phaseMinutes: null,
+            bucketsPerBatch: DailyRefreshBucketsPerBatch);
 
     /// <summary>The SUPERSEDED BatchRequests supply, as every pre-#3653 store still carries it: no interval
     /// filter, so a restart's fabricated zero is summed and counted as a quiet sample, and no interval column,

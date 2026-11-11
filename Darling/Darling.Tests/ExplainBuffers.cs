@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Text.Json;
 
@@ -57,6 +58,37 @@ internal static class ExplainBuffers
         }
 
         return pages;
+    }
+
+    /// <summary>The rows the scan nodes over <paramref name="relations"/> returned (actual rows times loops), summed over the plan in
+    /// <paramref name="explainJson"/>. A compressed chunk's decompress node carries the uncompressed chunk's name, its compressed child does
+    /// not, so a chunk is counted once. Rows, unlike pages, mean the same at every table size: a per-row index scan of an uncompressed chunk
+    /// counts a buffer access per row, and a compressed read counts a few.</summary>
+    public static long RowsRead(object? explainJson, ISet<string> relations)
+    {
+        using var document = JsonDocument.Parse(Convert.ToString(explainJson, CultureInfo.InvariantCulture)!);
+        return RowsRead(document.RootElement[0].GetProperty("Plan"), relations);
+    }
+
+    private static long RowsRead(JsonElement plan, ISet<string> relations)
+    {
+        var rows = 0L;
+        if (plan.TryGetProperty("Relation Name", out var name) && relations.Contains(name.GetString() ?? string.Empty)
+            && plan.TryGetProperty("Actual Rows", out var actual))
+        {
+            var loops = plan.TryGetProperty("Actual Loops", out var l) ? l.GetInt64() : 1L;
+            rows += (long)Math.Round(actual.GetDouble() * loops);
+        }
+
+        if (plan.TryGetProperty("Plans", out var children))
+        {
+            foreach (var child in children.EnumerateArray())
+            {
+                rows += RowsRead(child, relations);
+            }
+        }
+
+        return rows;
     }
 
     private static long Blocks(JsonElement node, string name) => node.TryGetProperty(name, out var value) ? value.GetInt64() : 0;

@@ -22,8 +22,8 @@ namespace Darling.Tests;
 /// #8549: the Daily Summary's wait part reads <c>collect.wait_stats_daily</c> for the closed days it holds and raw
 /// <c>wait_stats</c> for every other day. The rollup is the same sum the raw statement runs, so the two statements must return the
 /// same rows: EXCEPT both ways over a window that crosses rollup days, the open day and a day missing from the rollup, then over a
-/// window that does not start at midnight. The rollup read must also touch a fraction of the pages (<see cref="ExplainBuffers"/>, never
-/// a time), fall back to the raw shape when the relation is absent or empty, and be there on a fresh, an upgraded and a plain store.
+/// window that does not start at midnight. The rollup read must also read raw <c>wait_stats</c> rows only for the open day and a day the
+/// rollup lacks (rows from EXPLAIN ANALYZE, which hold at every table size where a page count does not), fall back to the raw shape when the relation is absent or empty, and be there on a fresh, an upgraded and a plain store.
 ///
 /// <para><b>Own store</b> (<c>#1776 own-store</c>): each test mints its own scratch database through <see cref="ScratchPostgres"/> and
 /// drops it whole.</para>
@@ -36,7 +36,7 @@ public sealed class WaitStatsDailyRollupLiveTests
     private static readonly RollupAvailability WithRollup = new(false, false, false, false, false, false, false, false, WaitStatsDaily: true);
 
     [Fact]
-    public async Task TheRollupRead_EqualsTheRawStatement_AcrossRollupDays_TheOpenDay_AndAMissingDay_AndReadsFarFewerPages()
+    public async Task TheRollupRead_EqualsTheRawStatement_AcrossRollupDays_TheOpenDay_AndAMissingDay_AndReadsRawRowsOnlyForThose()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
@@ -71,12 +71,27 @@ public sealed class WaitStatsDailyRollupLiveTests
         /* A window that does not start or end at midnight: the partial days sum only the rows inside the window, so they read raw. */
         await AssertSameRowsAsync(connection, today.AddDays(-12).AddHours(14).AddMinutes(30), today.AddHours(9).AddMinutes(10), ct);
 
-        /* The closed days read from the rollup: the plan names it, and the statement reads a fraction of the raw statement's pages. */
-        var rawPages = await DataPagesAsync(connection, RawSql(start), start, end, ct);
+        /* The closed days the rollup holds read no raw wait_stats rows: the statement may read the open day's rows and the missing day's
+           rows and nothing else. Rows, not pages: at 11.5 M rows the whole statement's page count went UP (the open day is read by an
+           index scan of an uncompressed chunk, which counts a buffer access per row) while the time fell from 5.6 s to 0.45 s. */
         var rollupSql = RollupSql(start);
         Assert.Contains("wait_stats_daily", rollupSql, StringComparison.Ordinal);
-        var rollupPages = await DataPagesAsync(connection, rollupSql, start, end, ct);
-        Assert.True(rollupPages * 3 <= rawPages, $"the rollup read touches {rollupPages} pages against the raw statement's {rawPages}");
+        var waitChunks = new HashSet<string>(StringComparer.Ordinal);
+        await using (var chunks = new NpgsqlCommand("SELECT chunk_name FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'wait_stats'", connection))
+        await using (var reader = await chunks.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                waitChunks.Add(reader.GetString(0));
+            }
+        }
+
+        var allowed = await ScalarAsync<long>(connection,
+            $"SELECT count(*) FROM collect.wait_stats WHERE server_id = {ServerId} AND (collection_time >= '{Ts(today)}' OR (collection_time >= '{Ts(today.AddDays(-10))}' AND collection_time < '{Ts(today.AddDays(-9))}'))", ct);
+        var rawRows = await RawWaitRowsAsync(connection, RawSql(start), start, end, waitChunks, ct);
+        var rollupRows = await RawWaitRowsAsync(connection, rollupSql, start, end, waitChunks, ct);
+        Assert.True(rawRows > allowed, $"the raw statement reads the whole window ({rawRows} rows), more than the open and missing days hold ({allowed})");
+        Assert.True(rollupRows <= allowed, $"the rollup statement read {rollupRows} raw wait_stats rows, more than the open day's and the missing day's {allowed}");
     }
 
     [Fact]
@@ -159,6 +174,46 @@ public sealed class WaitStatsDailyRollupLiveTests
         Assert.Equal(1L, await ScalarAsync<long>(connection,
             $"SELECT count(*) FROM timescaledb_information.jobs WHERE hypertable_schema = 'collect' AND hypertable_name = '{TimescaleSupport.WaitStatsDailyView}' AND proc_name = 'policy_refresh_continuous_aggregate'", ct));
     }
+
+    [Fact]
+    public async Task ThePolicy_MaterializesYesterday_AtTheFirstRunAfterOneAmUtc_WhereADailyEndOffsetLeavesItRaw()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = await BuildTimescaleStoreAsync(scratch, ct);
+        await SeedThirtyDaysAsync(connection, ct);
+
+        /* The job the sweep created carries the hourly tier's value for BOTH the schedule and the end offset, and the daily tier's start. */
+        Assert.Equal(1L, await ScalarAsync<long>(connection,
+            $"SELECT count(*) FROM timescaledb_information.jobs WHERE hypertable_schema = 'collect' AND hypertable_name = '{TimescaleSupport.WaitStatsDailyView}' AND proc_name = 'policy_refresh_continuous_aggregate' "
+            + "AND schedule_interval = interval '1 hour' AND (config->>'end_offset')::interval = interval '1 hour' AND (config->>'start_offset')::interval = interval '4 days'", ct));
+
+        /* The refresh the policy makes at a planted time, 01:00 UTC today: [now - start_offset, now - end_offset], aligned to whole days. */
+        var today = LiveClock.Now().Date;
+        var planted = today.AddHours(1);
+        var yesterday = $"bucket = '{Ts(today.AddDays(-1))}'";
+        var dayBefore = $"bucket = '{Ts(today.AddDays(-2))}'";
+
+        /* A one day end offset (the daily tier's own, what this aggregate had) stops at yesterday 01:00, aligned down to yesterday's start. */
+        await RefreshAsync(connection, planted - TimescaleSupport.DailyRefreshStartSpan, planted - TimeSpan.FromDays(1), ct);
+        Assert.True(await HasBucketAsync(connection, dayBefore, ct), "the day before yesterday is materialized by the old window");
+        Assert.False(await HasBucketAsync(connection, yesterday, ct), "yesterday is not: the whole of the next day it reads raw");
+
+        /* The policy's window: one hour of end offset, so yesterday is a whole day inside it. The open day never is. */
+        await RefreshAsync(connection, planted - TimescaleSupport.DailyRefreshStartSpan, planted - TimeSpan.FromHours(1), ct);
+        Assert.True(await HasBucketAsync(connection, yesterday, ct), "one refresh at the policy's window materializes yesterday");
+        Assert.False(await HasBucketAsync(connection, $"bucket >= '{Ts(today)}'", ct), "and not the open day");
+        await AssertSameRowsAsync(connection, today.AddDays(-29), today.AddDays(1), ct);
+    }
+
+    private static Task RefreshAsync(NpgsqlConnection connection, DateTime from, DateTime to, CancellationToken ct)
+        => ExecuteAsync(connection, $"CALL refresh_continuous_aggregate('collect.{TimescaleSupport.WaitStatsDailyView}'::regclass, '{Ts(from)}'::timestamp, '{Ts(to)}'::timestamp)", ct);
+
+    private static async Task<bool> HasBucketAsync(NpgsqlConnection connection, string predicate, CancellationToken ct)
+        => await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.WaitStatsDailyView} WHERE server_id = {ServerId} AND {predicate}", ct) > 0;
 
     [Fact]
     public async Task AnUpgradedStore_GetsTheEmptyAggregateFromTheRung_ThenItsPolicyAndBackfillFromTheSweep()
@@ -247,6 +302,15 @@ public sealed class WaitStatsDailyRollupLiveTests
         await ExecuteAsync(connection, $"PREPARE ws_pages_q(int, timestamp, timestamp, timestamp) AS {sql}", ct);
         var plan = await ScalarAsync<object>(connection, $"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE ws_pages_q({Args(start, end)})", ct);
         return ExplainBuffers.DataPages(plan);
+    }
+
+    /// <summary>The raw <c>wait_stats</c> rows the statement's plan read (rows of the scans over the table's chunks).</summary>
+    private static async Task<long> RawWaitRowsAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, ISet<string> waitChunks, CancellationToken ct)
+    {
+        await ExecuteAsync(connection, "DEALLOCATE ALL", ct);
+        await ExecuteAsync(connection, $"PREPARE ws_rows_q(int, timestamp, timestamp, timestamp) AS {sql}", ct);
+        var plan = await ScalarAsync<object>(connection, $"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE ws_rows_q({Args(start, end)})", ct);
+        return ExplainBuffers.RowsRead(plan, waitChunks);
     }
 
     private static async Task<long> ReadRowCountAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, CancellationToken ct)
