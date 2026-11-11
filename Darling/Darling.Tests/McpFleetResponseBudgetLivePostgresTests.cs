@@ -56,6 +56,23 @@ public sealed class McpFleetResponseBudgetLivePostgresTests
     private static readonly int[] LogFleetIds =
         Enumerable.Range(1, LogFleetServerCount).Select(i => LogFleetBase - i).ToArray();
 
+    /* The ranked fleet (#8654): more Critical servers than one cards page holds, and Warning and Healthy servers whose
+       names sort ahead of every Critical one. -994_4xxx, disjoint from the fleets above. */
+    private const int RankFleetBase = -994_4000;
+    private const int RankFleetCriticalCount = 60;
+    private const int RankFleetWarningCount = 3;
+    private const int RankFleetHealthyCount = 6;
+    private static readonly string[] RankFleetCriticalNames =
+        Enumerable.Range(0, RankFleetCriticalCount).Select(i => $"zz-m2b-rank-critical-{i:D3}").ToArray();
+    private static readonly string[] RankFleetWarningNames =
+        Enumerable.Range(0, RankFleetWarningCount).Select(i => $"ab-m2b-rank-warning-{i:D3}").ToArray();
+    private static readonly string[] RankFleetHealthyNames =
+        Enumerable.Range(0, RankFleetHealthyCount).Select(i => $"aa-m2b-rank-healthy-{i:D3}").ToArray();
+    private static readonly string[] RankFleetNamesWorstFirst =
+        [.. RankFleetCriticalNames, .. RankFleetWarningNames, .. RankFleetHealthyNames];
+    private static readonly int[] RankFleetIds =
+        Enumerable.Range(1, RankFleetNamesWorstFirst.Length).Select(i => RankFleetBase - i).ToArray();
+
     [Fact]
     public async Task GetCollectionLog_FleetForm_MergesAcrossServers_AndMinDurationMsRanksAcrossServers()
     {
@@ -323,6 +340,107 @@ public sealed class McpFleetResponseBudgetLivePostgresTests
     }
 
     /// <summary>
+    /// #8654: a cards page is worst first all the way down, past the five servers <c>worst_servers</c> names. On a fleet
+    /// with more Critical servers than one page holds, whose Warning and Healthy servers sort first by name, the page
+    /// holds no card below Critical while a Critical card is left out, and <c>cards_left_out</c> and the pages that
+    /// follow <c>next_card_offset</c> keep the same order: Critical, then Warning, then Healthy, by name within a rank.
+    /// </summary>
+    [Fact]
+    public async Task GetFleetOverview_Cards_OnAFleetWithMoreCriticalServersThanOnePageHolds_AreWorstFirstAllTheWayDown()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live MCP fleet-response-budget tests.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRankFleetRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Every server collected moments ago. The newest CPU sample sets the band: 99% is Critical, 85% is Warning,
+               and a server with no CPU sample stays Healthy. */
+            var now = DateTime.UtcNow;
+            for (var i = 0; i < RankFleetNamesWorstFirst.Length; i++)
+            {
+                var id = RankFleetIds[i];
+                var name = RankFleetNamesWorstFirst[i];
+                await InsertServerAsync(connection, id, name, ct);
+                await InsertCollectionLogAsync(connection, id, name, now.AddSeconds(-30), 50, ct);
+                if (i < RankFleetCriticalCount)
+                {
+                    await InsertCpuSampleAsync(connection, id, name, now.AddSeconds(-30), 99, ct);
+                }
+                else if (i < RankFleetCriticalCount + RankFleetWarningCount)
+                {
+                    await InsertCpuSampleAsync(connection, id, name, now.AddSeconds(-30), 85, ct);
+                }
+            }
+
+            /* Every page, in the order next_card_offset gives them. */
+            var paged = new System.Collections.Generic.List<(string Name, string Band)>();
+            var firstPage = new System.Collections.Generic.List<(string Name, string Band)>();
+            var firstPageLeftOut = new System.Collections.Generic.List<string>();
+            var nextCardOffset = 0;
+            for (var calls = 0; calls < 200; calls++)
+            {
+                var pageJson = await DarlingMcpFleetTools.GetFleetOverview(postgres, hours_back: 1, detail: "cards", card_offset: nextCardOffset);
+                using var pageDoc = JsonDocument.Parse(pageJson);
+                var root = pageDoc.RootElement;
+                var cards = root.GetProperty("cards").EnumerateArray()
+                    .Select(c => (Name: c.GetProperty("server_name").GetString()!, Band: c.GetProperty("band").GetString()!)).ToList();
+                paged.AddRange(cards);
+                if (calls == 0)
+                {
+                    firstPage.AddRange(cards);
+                    firstPageLeftOut.AddRange(root.GetProperty("cards_left_out").EnumerateArray().Select(n => n.GetString()!));
+                }
+
+                if (!root.GetProperty("budget_truncated").GetBoolean()) break;
+                nextCardOffset = root.GetProperty("next_card_offset").GetInt32();
+            }
+
+            /* The fixture is what it says: each seeded server's card carries the band it was seeded for. */
+            var bandByName = paged.ToDictionary(c => c.Name, c => c.Band, StringComparer.Ordinal);
+            Assert.All(RankFleetCriticalNames, name => Assert.Equal("Critical", bandByName[name]));
+            Assert.All(RankFleetWarningNames, name => Assert.Equal("Warning", bandByName[name]));
+            Assert.All(RankFleetHealthyNames, name => Assert.Equal("Healthy", bandByName[name]));
+
+            /* More Critical servers than one page holds. */
+            var firstPageNames = firstPage.Select(c => c.Name).ToHashSet(StringComparer.Ordinal);
+            var criticalLeftOut = RankFleetCriticalNames.Count(name => !firstPageNames.Contains(name));
+            Assert.True(criticalLeftOut > 0,
+                $"the fixture needs more Critical servers than one page holds, and the first page held all {RankFleetCriticalCount}.");
+
+            /* No card below Critical is on the page while a Critical one is left out. */
+            var belowCritical = firstPage.Where(c => c.Band is not ("Critical" or "Offline")).ToList();
+            Assert.True(belowCritical.Count == 0,
+                $"{criticalLeftOut} Critical cards were left out of the first page, which held {belowCritical.Count} cards below Critical: "
+                + string.Join(", ", belowCritical.Select(c => $"{c.Name} ({c.Band})")));
+
+            /* The servers the first page names as left out are in the same order, the Critical ones first. */
+            var seeded = RankFleetNamesWorstFirst.ToHashSet(StringComparer.Ordinal);
+            var seededLeftOut = firstPageLeftOut.Where(seeded.Contains).ToList();
+            Assert.NotEmpty(seededLeftOut);
+            Assert.Equal(RankFleetNamesWorstFirst.Where(name => !firstPageNames.Contains(name)).Take(seededLeftOut.Count), seededLeftOut);
+
+            /* Paging on reads the whole fleet in rank order: every Critical card, then every Warning one, then every Healthy one. */
+            Assert.Equal(RankFleetNamesWorstFirst, paged.Select(c => c.Name).Where(seeded.Contains));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteRankFleetRowsAsync);
+        }
+    }
+
+    /// <summary>
     /// #4199's default-limit sizing, reproduced on the rig: a fleet-wide <c>get_collection_log</c> call at
     /// DEFAULT arguments (server_name omitted, limit omitted) on a fleet with more rows than the fleet
     /// default stays under <see cref="McpResponseBudget.DefaultBytes"/>. The byte count is written to the
@@ -429,6 +547,32 @@ VALUES ($1, $2, $3, 'query_store', $4, $6, $5, ($5 * 0.6)::int, ($5 * 0.1)::int,
         command.Parameters.AddWithValue(errorMessage is null ? "SUCCESS" : "ERROR");
         command.Parameters.AddWithValue(errorMessage ?? (object)DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task InsertCpuSampleAsync(
+        NpgsqlConnection connection, int serverId, string name, DateTime collectionTime, int sqlCpuPercent, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO cpu_utilization_stats
+    (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
+VALUES ($1, $2, $3, $4, $2, $5, 0)", connection);
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(name);
+        command.Parameters.AddWithValue(sqlCpuPercent);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task DeleteRankFleetRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var idList = string.Join(", ", RankFleetIds.Select(i => i.ToString(CultureInfo.InvariantCulture)));
+        using (var cleanup = new NpgsqlCommand($"DELETE FROM cpu_utilization_stats WHERE server_id IN ({idList});", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await DeleteFleetRowsAsync(connection, RankFleetIds, ct);
     }
 
     private static Task DeleteSmallFleetRowsAsync(NpgsqlConnection connection, CancellationToken ct) =>

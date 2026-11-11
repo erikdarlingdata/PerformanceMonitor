@@ -96,8 +96,9 @@ public sealed class DarlingMcpFleetTools
         "that Claude Code refused it inline outright. Pass detail=\"cards\" for the per-server cards, " +
         "once you already know which server needs it; cards_included says " +
         "which shape you got, and a summary response's cards_note repeats the lever. A cards answer is held " +
-        "to the 32,768-byte response budget (#8568): the cards are ordered worst first (the worst_servers " +
-        "ranking, then every other server), and as many whole cards as fit are returned. cards_total is how " +
+        "to the 32,768-byte response budget (#8568): the cards are ordered worst first, every card by the " +
+        "worst_servers ranking (the needs-attention servers by score, then the rest by score, name breaking a " +
+        "tie), so no card on a page ranks below one left out, and as many whole cards as fit are returned. cards_total is how " +
         "many cards the call selected, card_offset where this page starts, cards_returned how many it holds. " +
         "When cards were left out, budget_truncated is true, budget_note says how many of how many fit, " +
         "cards_left_out names the servers whose cards are not on this page (the first 100; " +
@@ -213,7 +214,7 @@ public sealed class DarlingMcpFleetTools
                 windowNotice?.AttachCards(node["cards"] as JsonArray);
                 node["cards_included"] = true;
                 return responseByteBudget is int budget
-                    ? PageCards(node, result.WorstServers.Select(w => w.ServerId).ToList(), card_offset, budget)
+                    ? PageCards(node, DarlingFleetReader.WorstFirst(result.Cards).Select(c => c.ServerId).ToList(), card_offset, budget)
                     : node.ToJsonString(DarlingFleetReader.JsonOptions);
             }
 
@@ -239,18 +240,19 @@ public sealed class DarlingMcpFleetTools
     internal const int MaxCardsLeftOutNamed = 100;
 
     /// <summary>
-    /// The cards page of a budgeted answer (#8568): <paramref name="node"/>'s <c>cards</c> ordered worst first (the
-    /// needs-attention ranking in <paramref name="worstServerIds"/>, then every other card in the order it was
-    /// read), started at <paramref name="cardOffset"/> and ended at the last whole card that fits
-    /// <paramref name="budgetBytes"/>. The answer counts what it selected and what it holds, names the servers left
-    /// out and gives the offset that reads on from them, so a card is paged to and never dropped.
+    /// The cards page of a budgeted answer (#8568): <paramref name="node"/>'s <c>cards</c> ordered worst first (every
+    /// card at its place in <paramref name="rankedServerIds"/>, the fleet's servers in
+    /// <see cref="DarlingFleetReader.WorstFirst"/> order, #8654), started at <paramref name="cardOffset"/> and ended at
+    /// the last whole card that fits <paramref name="budgetBytes"/>. The answer counts what it selected and what it
+    /// holds, names the servers left out in the same order and gives the offset that reads on from them, so a card is
+    /// paged to and never dropped, and no card on a page ranks below one the page left out.
     /// </summary>
-    internal static string PageCards(JsonObject node, IReadOnlyList<int> worstServerIds, int cardOffset, int budgetBytes)
+    internal static string PageCards(JsonObject node, IReadOnlyList<int> rankedServerIds, int cardOffset, int budgetBytes)
     {
         var rank = new Dictionary<int, int>();
-        for (var i = 0; i < worstServerIds.Count; i++)
+        for (var i = 0; i < rankedServerIds.Count; i++)
         {
-            rank.TryAdd(worstServerIds[i], i);
+            rank.TryAdd(rankedServerIds[i], i);
         }
 
         var cards = (node["cards"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().ToList();
