@@ -1466,7 +1466,7 @@ FROM
         AND   f.collection_time >= $2
         AND   f.collection_time <= $3
         /* #8570: the window ranks every in-window row, so it ranks the table's own thin columns and carries
-           the plan's digest, not the plan. This read went through v_query_stats, whose join to query_plan_dim
+           the plan's digest, not the plan. This read went through v_query_stats, which looked up query_plan_dim and
            put each row's plan content into the rank's sort: a plan under the 2 KB TOAST limit sits inline in the
            dimension row, so every snapshot row of every plan was sorted with its whole plan (on 67,200 rows of
            1.4 KB plans the sort wrote 26 MB and 21 MB to disk, against 4.5 MB). The ten winners' content is read
