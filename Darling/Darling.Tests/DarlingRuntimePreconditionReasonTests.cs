@@ -57,8 +57,8 @@ public sealed class DarlingRuntimePreconditionReasonTests
 
     /// <summary>#8555: one unmet facet is "precondition", several are "preconditions", never "precondition(s)".</summary>
     [Theory]
-    [InlineData(1, "Unsatisfied precondition, from pg_plan_capture_readiness: ")]
-    [InlineData(2, "Unsatisfied preconditions, from pg_plan_capture_readiness: ")]
+    [InlineData(1, "1 unsatisfied precondition, from pg_plan_capture_readiness, in the order they have to be fixed in: ")]
+    [InlineData(2, "2 unsatisfied preconditions, from pg_plan_capture_readiness, in the order they have to be fixed in: ")]
     public void PlanCaptureThatIsNotReady_CountsItsPreconditions(int unmet, string expected)
     {
         var facets = Enumerable.Range(1, unmet).Select(i => "facet_" + i).ToArray();
@@ -73,7 +73,9 @@ public sealed class DarlingRuntimePreconditionReasonTests
     {
         var r = JsonDocument.Parse(DarlingMcpPgPlanTools.PlanCaptureNotReadyStatus(new[] { "capture_threshold = -1", "extension_available = false" })).RootElement;
         Assert.Equal("precondition", r.GetProperty("status").GetString());
-        Assert.Contains("capture_threshold = -1 | extension_available = false", r.GetProperty("message").GetString()!, System.StringComparison.Ordinal);
+        /* #8572: counted, and in the causal order get_pg_plan_capture_readiness uses, not alphabetical. */
+        Assert.Contains("2 unsatisfied preconditions", r.GetProperty("message").GetString()!, System.StringComparison.Ordinal);
+        Assert.Contains("extension_available = false | capture_threshold = -1", r.GetProperty("message").GetString()!, System.StringComparison.Ordinal);
         var hints = r.GetProperty("hints");
         Assert.Equal("plan_capture_not_ready", hints.GetProperty("reason").GetString());
         Assert.Equal(2, hints.GetProperty("unsatisfied_count").GetInt32());

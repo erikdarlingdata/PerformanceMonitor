@@ -518,7 +518,7 @@ const RECONNECT_STEP = " After you fix the cause, the service must reconnect to 
 
 /** The sentence the DEGRADED answer (a collector that cannot read its source) closes on for an MCP client (#6869): it says what to do with the
     stored sentence, which a reader of the page cannot use. CollectorRuntimePrecondition.DegradedClientSentence, with the space before it. */
-const DEGRADED_CLIENT_SENTENCE = " Act on that sentence — it is what the monitored server itself answered, and it distinguishes the states this one status carries: a grant the login was refused, a source object that does not exist on this target, and a feature the platform does not implement or has switched off.";
+const DEGRADED_CLIENT_SENTENCE = " Act on that sentence: it is what the monitored server itself answered, and it distinguishes the states this one status carries: a grant the login was refused, a source object that does not exist on this target, and a feature the platform does not implement or has switched off.";
 
 /**
  * A runtime-precondition answer (CollectorRuntimePrecondition.cs) the way the page shows it. The server's text is written for

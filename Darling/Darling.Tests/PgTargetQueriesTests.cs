@@ -710,7 +710,10 @@ public sealed class PgTargetQueriesTests
         Assert.Equal("One statement reached 61% of a single collection's execution time: 9.8 times its usual variation above its own normal for this hour", block.Headline);
         Assert.Contains("Statement queryid -1234567890123456789 held 61.2% of the window's total statement execution time. Its own normal is judged on its share of each collection's execution time, not on that window total: against its own routine of 22% ± 4% for this hour-of-week, it sat 9.8 times its usual variation above normal on the window's peak per-collection share (61.2%) and 9.8 times on its mean (61.2%), over 48 baseline samples.", block.Investigation, StringComparison.Ordinal);
         /* The card's figures, borrowed so the anomaly's story states the same numbers. */
-        Assert.Contains("The statement ran 2,640 calls averaging 227.4 ms per call this window; its PG_BAD_ACTOR card carries the rest", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("The statement ran 2,640 calls averaging 227.4 ms per call this window.", block.Investigation, StringComparison.Ordinal);
+        /* #8572: the reply may hold neither the card nor a drill-down, so the text points at neither. */
+        Assert.DoesNotContain("PG_BAD_ACTOR", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("drill-down", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("Of the window's 3 top statements, 1 was beyond its own normal and 1 has no trustworthy own-normal yet; this card names the one furthest beyond it.", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("The absolute share (at or above 60%) is context", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("re-keyed by a major upgrade", block.Investigation, StringComparison.Ordinal);
