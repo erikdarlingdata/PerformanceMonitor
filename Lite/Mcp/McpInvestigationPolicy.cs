@@ -14,8 +14,9 @@ namespace PerformanceMonitorLite.Mcp;
 ///
 /// <para>The gated set is built from the shared kind list (<see cref="InvestigationToolNames.StateChanging"/>), so a shared name is
 /// gated by the same rule in both apps. The investigation reads (<see cref="InvestigationToolNames.Reads"/>:
-/// <c>list_investigation_requests</c>, <c>get_investigation_reports</c>, and <c>wait_for_investigation_requests</c>, which only waits
-/// and reads) are ordinary reads, served in every configuration as Darling serves them, and are never gated here.</para>
+/// <c>list_investigation_requests</c> and <c>get_investigation_reports</c>, the two reads Lite registers; the shared list also holds
+/// <c>wait_for_investigation_requests</c>, a Darling-only tool that Lite does not register) are ordinary reads, served in every
+/// configuration as Darling serves them, and are never gated here.</para>
 ///
 /// <para>Gated by tool NAME, like <see cref="McpWritePolicy"/>: a tool that is not served is ABSENT from the served
 /// collection, so <c>tools/list</c> omits it and <c>tools/call</c> fails as an unknown tool, the same refusal a write

@@ -143,12 +143,12 @@ internal static class McpWritePolicy
     /// #5789: it also sets the server instructions, from the tool names before and after the narrowing, so their
     /// census counts the set <c>tools/list</c> serves; they used to carry a fixed catalog count.
     /// </summary>
-    internal static IServiceCollection AddMcpWritePolicy(this IServiceCollection services, bool allowWrites) =>
+    internal static IServiceCollection AddMcpWritePolicy(this IServiceCollection services, bool allowWrites, McpHostService.McpServing? serving = null) =>
         services.PostConfigure<McpServerOptions>(options =>
         {
             var catalog = ToolNames(options.ToolCollection);
             Apply(options.ToolCollection, allowWrites);
-            options.ServerInstructions = McpInstructions.Build(catalog, ToolNames(options.ToolCollection));
+            options.ServerInstructions = McpInstructions.Build(catalog, ToolNames(options.ToolCollection), serving);
         });
 
     /// <summary>The protocol names of <paramref name="tools"/>, in collection order; empty for null.</summary>

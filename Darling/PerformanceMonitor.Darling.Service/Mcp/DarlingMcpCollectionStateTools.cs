@@ -51,17 +51,17 @@ public sealed class DarlingMcpCollectionStateTools
     private sealed record ServerRow(int ServerId, string Name, string StorageName, string Engine, bool Enabled, IReadOnlyList<string> Excluded, decimal MonthlyCostUsd);
 
     [McpServerTool(Name = "pause_collection"), Description(
-        "Pauses ALL collection, alerting, analysis and purge in the service: queues the same pause command the Viewer's Pause button queues, which the service runs and which sets its paused flag. Data already collected stays, and nothing is deleted. A pass already running finishes; no new pass starts until resume_collection. Served only with mcp.allowWrites. The answer gives the command id, the previous state, the exact call that undoes it and the read that shows the result (get_command_result, then get_collection_state).")]
+        "Pauses ALL collection, alerting, analysis and purge in the service: queues the same pause command the Viewer's Pause button queues, which the service runs and which sets its paused flag. Data already collected stays, and nothing is deleted. A pass already running finishes; no new pass starts until resume_collection. Served only with mcp.allowWrites or a named operator token. The answer gives the command id, the previous state, the exact call that undoes it and the read that shows the result (get_command_result, then get_collection_state).")]
     public static Task<string> PauseCollection(NpgsqlDataSource postgres, ILogger? logger = null, CancellationToken cancellationToken = default) =>
         ApplyPauseAsync(postgres, "pause_collection", pause: true, logger, cancellationToken);
 
     [McpServerTool(Name = "resume_collection"), Description(
-        "Resumes collection after pause_collection: queues the same resume command the Viewer's Resume button queues, which the service runs and which clears its paused flag, so the next pass runs. Served only with mcp.allowWrites. The answer gives the command id, the previous state, the exact call that undoes it and the read that shows the result (get_command_result, then get_collection_state).")]
+        "Resumes collection after pause_collection: queues the same resume command the Viewer's Resume button queues, which the service runs and which clears its paused flag, so the next pass runs. Served only with mcp.allowWrites or a named operator token. The answer gives the command id, the previous state, the exact call that undoes it and the read that shows the result (get_command_result, then get_collection_state).")]
     public static Task<string> ResumeCollection(NpgsqlDataSource postgres, ILogger? logger = null, CancellationToken cancellationToken = default) =>
         ApplyPauseAsync(postgres, "resume_collection", pause: false, logger, cancellationToken);
 
     [McpServerTool(Name = "disable_server"), Description(
-        "Takes ONE monitored server out of collection: sets its enabled flag to false. Its definition, tags and collected history stay; the service skips it from its next config poll. Reversed by enable_server. Served only with mcp.allowWrites. The answer gives the previous state and the exact call that undoes it; get_collection_state lists each server's enabled flag.")]
+        "Takes ONE monitored server out of collection: sets its enabled flag to false. Its definition, tags and collected history stay; the service skips it from its next config poll. Reversed by enable_server. Served only with mcp.allowWrites or a named operator token. The answer gives the previous state and the exact call that undoes it; get_collection_state lists each server's enabled flag.")]
     public static Task<string> DisableServer(
         NpgsqlDataSource postgres,
         [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
@@ -70,7 +70,7 @@ public sealed class DarlingMcpCollectionStateTools
         ApplyEnabledAsync(postgres, "disable_server", server_name, enable: false, logger, cancellationToken);
 
     [McpServerTool(Name = "enable_server"), Description(
-        "Brings a disabled monitored server back into collection: sets its enabled flag to true; the service picks it up on its next config poll. Reverses disable_server. Served only with mcp.allowWrites. The answer gives the previous state and the exact call that undoes it; get_collection_state lists each server's enabled flag.")]
+        "Brings a disabled monitored server back into collection: sets its enabled flag to true; the service picks it up on its next config poll. Reverses disable_server. Served only with mcp.allowWrites or a named operator token. The answer gives the previous state and the exact call that undoes it; get_collection_state lists each server's enabled flag.")]
     public static Task<string> EnableServer(
         NpgsqlDataSource postgres,
         [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
@@ -79,7 +79,7 @@ public sealed class DarlingMcpCollectionStateTools
         ApplyEnabledAsync(postgres, "enable_server", server_name, enable: true, logger, cancellationToken);
 
     [McpServerTool(Name = "set_server_excluded_databases"), Description(
-        "Replaces ONE server's excluded-databases list: the databases the collectors skip on that server. The list you send is the whole new list; an empty list clears it. At most 256 names of at most 128 characters each, no control characters; repeats (any casing) are kept once. Data already collected stays. The service applies it on its next config poll. Served only with mcp.allowWrites. The answer gives the previous list and the exact call that restores it; get_collection_state lists each server's excluded databases.")]
+        "Replaces ONE server's excluded-databases list: the databases the collectors skip on that server. The list you send is the whole new list; an empty list clears it. At most 256 names of at most 128 characters each, no control characters; repeats (any casing) are kept once. Data already collected stays. The service applies it on its next config poll. Served only with mcp.allowWrites or a named operator token. The answer gives the previous list and the exact call that restores it; get_collection_state lists each server's excluded databases.")]
     public static async Task<string> SetServerExcludedDatabases(
         NpgsqlDataSource postgres,
         [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
@@ -138,7 +138,7 @@ public sealed class DarlingMcpCollectionStateTools
     }
 
     [McpServerTool(Name = "set_server_xe_session_databases"), Description(
-        "Replaces ONE server's list of databases that get Extended Events sessions: only the listed databases get the deadlock, blocked process, client timeout and long query sessions, an empty list clears it and means every database, and the excluded-databases list still wins. It matters on Azure SQL Database, where each session is database-scoped and Azure caps them per pool; a box SQL Server covers every database and ignores it. The list you send is the whole new list. At most 256 names of at most 128 characters each, no control characters; repeats (any casing) are kept once. A session this install made in a database left off the list is left in place, never dropped. The ownerless legacy long-query session is still dropped in every database. The service reconnects that server on its next config poll to apply it, so its collectors restart once. Served only with mcp.allowWrites. The answer gives the previous list and the exact call that undoes it.")]
+        "Replaces ONE server's list of databases that get Extended Events sessions: only the listed databases get the deadlock, blocked process, client timeout and long query sessions, an empty list clears it and means every database, and the excluded-databases list still wins. It matters on Azure SQL Database, where each session is database-scoped and Azure caps them per pool; a box SQL Server covers every database and ignores it. The list you send is the whole new list. At most 256 names of at most 128 characters each, no control characters; repeats (any casing) are kept once. A session this install made in a database left off the list is left in place, never dropped. The ownerless legacy long-query session is still dropped in every database. The service reconnects that server on its next config poll to apply it, so its collectors restart once. Served only with mcp.allowWrites or a named operator token. The answer gives the previous list and the exact call that undoes it.")]
     public static async Task<string> SetServerXeSessionDatabases(
         NpgsqlDataSource postgres,
         [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
@@ -198,7 +198,7 @@ public sealed class DarlingMcpCollectionStateTools
     }
 
     [McpServerTool(Name = "reload_config"), Description(
-        "Asks the running service to re-read its configuration from the store now, instead of on its next poll. It changes no setting: it bumps the store's config version, which the service watches. Served only with mcp.allowWrites. The answer gives the version before and after; there is nothing to undo.")]
+        "Asks the running service to re-read its configuration from the store now, instead of on its next poll. It changes no setting: it bumps the store's config version, which the service watches. Served only with mcp.allowWrites or a named operator token. The answer gives the version before and after; there is nothing to undo.")]
     public static async Task<string> ReloadConfig(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
         const string tool = "reload_config";
