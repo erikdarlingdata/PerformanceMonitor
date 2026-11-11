@@ -241,7 +241,10 @@ public sealed class ViewerQueriesSqlTests
     [Theory]
     [InlineData(nameof(ViewerDataService.QueryStoreTopSql))]
     [InlineData(nameof(ViewerDataService.QueryStoreComparisonSql))]
-    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql))]
+    /* #8549: QueryStoreSlicerSql left this row. Its dedupe is DISTINCT ON now, and this pin's rule for it was the window
+       function's spelling (PARTITION BY ... AS rn ... WHERE rn = 1). What the row stood for, a latest-snapshot-per-interval
+       dedupe whose key holds the interval identity and breaks ties on execution_count, NULL count first, is bounded by
+       QueryStoreSlicerCompressedLiveTests, which runs the statement on rows that tie. */
     [InlineData(nameof(ViewerDataService.QueryStoreRegressionsSql))]
     public void QueryStoreAggregates_DedupToTheLatestSnapshotPerInterval_BeforeAggregating(string sqlName)
     {
@@ -342,7 +345,7 @@ public sealed class ViewerQueriesSqlTests
     [Theory]
     [InlineData(nameof(ViewerDataService.QueryStatsSlicerSql), "query_stats", "COUNT(DISTINCT query_hash)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time")]
     [InlineData(nameof(ViewerDataService.ProcStatsSlicerSql), "procedure_stats", "COUNT(DISTINCT object_name)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time")]
-    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(DISTINCT query_id)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), TIMESTAMP '2000-01-01 00:00:00')", "COALESCE(interval_start_time_utc, collection_time)")]
+    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(query_id) FILTER (WHERE qrn = 1)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), TIMESTAMP '2000-01-01 00:00:00')", "COALESCE(interval_start_time_utc, collection_time)")]
     public void SlicerSql_BucketsAtTheWindowsWidth_SevenColumnShape(string sqlName, string table, string distinctCount, string bucketExpression, string windowFilter)
     {
         var sql = SqlByName(sqlName);
