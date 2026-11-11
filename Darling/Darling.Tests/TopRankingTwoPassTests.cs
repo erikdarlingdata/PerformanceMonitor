@@ -168,7 +168,10 @@ public sealed class TopRankingTwoPassTests
                 continue;
             }
 
-            Assert.Equal(lookup ? 3 : 2, Regex.Matches(sql, Regex.Escape(text)).Count);
+            /* #8570: TopQueriesSql's pass 2 reads the window as two arms (the winners' hashes, then the NULL-hash rows), each
+               carrying the same window and list predicates, so the filters it counts are one more than the other statements'. */
+            var arms = name == "TopQueriesSql" ? 1 : 0;
+            Assert.Equal((lookup ? 3 : 2) + arms, Regex.Matches(sql, Regex.Escape(text)).Count);
         }
 
         var p2 = sql[sql.IndexOf("JOIN winners AS w", StringComparison.Ordinal)..];
@@ -184,7 +187,12 @@ public sealed class TopRankingTwoPassTests
         }
 
         Assert.DoesNotMatch(@"=\s*w\.win_", p2);   /* a plain equality drops the NULL-keyed groups */
-        Assert.DoesNotMatch(@"\bIN \(SELECT", sql);
+        if (name != "TopQueriesSql")
+        {
+            /* #8570: TopQueriesSql narrows pass 2 with an IN semi-join on the hash and reads the NULL-hash rows in an arm of
+               its own; the join above stays the NULL-safe match. The other statements have no such narrowing. */
+            Assert.DoesNotMatch(@"\bIN \(SELECT", sql);
+        }
     }
 
     [Theory]
