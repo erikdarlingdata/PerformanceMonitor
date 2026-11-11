@@ -172,33 +172,53 @@ public sealed class FinOpsPagesReadabilityTests
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
+    /// <summary>
+    /// Before a run the Index Analysis screen shows one message over both grids, not a message under a bare summary grid (#8621).
+    /// A run that returns rows swaps the message for the grids, and an empty one swaps them back.
+    /// </summary>
     [Fact]
-    public void TheIndexAnalysisGrids_ShowNoHorizontalScrollBar_WhileTheyAreEmpty()
+    public void TheIndexAnalysisScreen_ShowsOneEmptyState_UntilARunReturnsRows()
     {
         var problems = StaTestThread.Run(() => WithTheme("Dark", () => WithTab(MinimumTabWidth, 600, (tab, window) =>
         {
             var summary = (DataGrid)tab.FindName("IndexAnalysisSummaryGrid");
             var detail = (DataGrid)tab.FindName("IndexAnalysisDetailGrid");
+            var message = (TextBlock)tab.FindName("IndexAnalysisNoDataMessage");
+            var holdRows = typeof(FinOpsTab).GetMethod("IndexAnalysisGridsHoldRows", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
             Reveal(summary);
             Settle(window);
 
             var found = new List<string>();
-            foreach (var (name, grid) in new[] { ("summary", summary), ("detail", detail) })
+            void Expect(string moment, bool gridsShown)
             {
-                if (grid.Items.Count != 0)
+                foreach (var (name, grid) in new[] { ("summary", summary), ("detail", detail) })
                 {
-                    found.Add($"the {name} grid holds {grid.Items.Count} rows before a run");
-                }
-                var scroller = Descendants(grid).OfType<ScrollViewer>().FirstOrDefault();
-                if (scroller is null)
-                {
-                    found.Add($"the {name} grid has no scroll viewer");
-                }
-                else if (scroller.ComputedHorizontalScrollBarVisibility == Visibility.Visible)
-                {
-                    found.Add($"the empty {name} grid shows a horizontal scroll bar");
+                    if (grid.IsVisible != gridsShown)
+                    {
+                        found.Add($"{moment}: the {name} grid IsVisible is {grid.IsVisible}, expected {gridsShown}");
+                    }
                 }
             }
+
+            Expect("before a run", gridsShown: false);
+            if (!message.IsVisible)
+            {
+                found.Add("before a run: the empty message is not showing");
+            }
+            if (Grid.GetRow(message) != 0 || Grid.GetRowSpan(message) != 2)
+            {
+                found.Add($"the message sits in row {Grid.GetRow(message)} spanning {Grid.GetRowSpan(message)} rows; it must cover both grids");
+            }
+
+            holdRows.Invoke(tab, new object[] { true });
+            message.Visibility = Visibility.Collapsed;
+            Settle(window);
+            Expect("after a run with rows", gridsShown: true);
+
+            holdRows.Invoke(tab, new object[] { false });
+            message.Visibility = Visibility.Visible;
+            Settle(window);
+            Expect("after a run with no rows", gridsShown: false);
             return found;
         })));
 

@@ -59,8 +59,8 @@ public sealed class ViewerCredentialProfile
     public string AuthTypeDisplay => AuthType switch
     {
         AuthenticationTypes.SqlServer => "SQL Server",
-        AuthenticationTypes.ServicePrincipal => "Azure — Service Principal",
-        AuthenticationTypes.ManagedIdentity => "Azure — Managed Identity",
+        AuthenticationTypes.ServicePrincipal => "Azure: Service Principal",
+        AuthenticationTypes.ManagedIdentity => "Azure: Managed Identity",
         _ => AuthType
     };
 

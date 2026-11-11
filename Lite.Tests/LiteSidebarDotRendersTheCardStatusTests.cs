@@ -108,10 +108,10 @@ public sealed class LiteSidebarDotRendersTheCardStatusTests
     public void TheDotTooltip_OpensOnTheSentenceTheCardOpensOn()
     {
         /* The first line names the server, since the rail shows the dot with no name beside it; the sentence follows. */
-        Assert.StartsWith("Online — the last connection check succeeded", HeadlineLine(Connection(true, false)), StringComparison.Ordinal);
-        Assert.StartsWith("Warning — one or more collectors are failing on this server", HeadlineLine(Connection(true, true)), StringComparison.Ordinal);
-        Assert.StartsWith("Offline — the last connection check failed", HeadlineLine(Connection(false, false)), StringComparison.Ordinal);
-        Assert.StartsWith("Connecting — the first connection check has not finished yet", HeadlineLine(Connection(null, false)), StringComparison.Ordinal);
+        Assert.StartsWith("Online: the last connection check succeeded", HeadlineLine(Connection(true, false)), StringComparison.Ordinal);
+        Assert.StartsWith("Warning: one or more collectors are failing on this server", HeadlineLine(Connection(true, true)), StringComparison.Ordinal);
+        Assert.StartsWith("Offline: the last connection check failed", HeadlineLine(Connection(false, false)), StringComparison.Ordinal);
+        Assert.StartsWith("Connecting: the first connection check has not finished yet", HeadlineLine(Connection(null, false)), StringComparison.Ordinal);
 
         /* And it ends on the gesture THIS surface supports. The card's line names the card; naming a single click
            on either would be naming a no-op, since both handlers act only on a double-click. */

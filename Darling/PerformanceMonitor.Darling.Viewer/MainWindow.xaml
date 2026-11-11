@@ -1478,7 +1478,7 @@
 
                             <TextBlock x:Name="RecommendationsEmptyText"
                                        Style="{StaticResource EmptyHint}"
-                                       Text="All clear — no current recommendations."/>
+                                       Text="All clear. No current recommendations."/>
 
                             <!-- Insufficient data: the analysis pass has not cleared its 24h data-span
                                  gate yet (the persisted V19 marker). Text is set from the view-model. -->

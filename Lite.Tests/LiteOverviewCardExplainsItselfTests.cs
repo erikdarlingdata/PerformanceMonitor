@@ -140,7 +140,7 @@ public sealed class LiteOverviewCardExplainsItselfTests
     {
         var tooltip = Healthy().StatusTooltip;
 
-        Assert.Contains("Online — the last connection check succeeded", tooltip, StringComparison.Ordinal);
+        Assert.Contains("Online: the last connection check succeeded", tooltip, StringComparison.Ordinal);
         Assert.Contains("Every metric on this card is inside its threshold", tooltip, StringComparison.Ordinal);
         Assert.DoesNotContain("Needs attention", tooltip, StringComparison.Ordinal);
     }
@@ -158,7 +158,7 @@ public sealed class LiteOverviewCardExplainsItselfTests
         var tooltip = card.StatusTooltip;
 
         Assert.True(card.IsOffline);
-        Assert.Contains("Offline — the last connection check failed", tooltip, StringComparison.Ordinal);
+        Assert.Contains("Offline: the last connection check failed", tooltip, StringComparison.Ordinal);
         Assert.DoesNotContain("Needs attention", tooltip, StringComparison.Ordinal);
         Assert.DoesNotContain("CPU", tooltip, StringComparison.Ordinal);
 
@@ -176,7 +176,7 @@ public sealed class LiteOverviewCardExplainsItselfTests
     {
         var tooltip = NotYetChecked().StatusTooltip;
 
-        Assert.Contains("Connecting — the first connection check has not finished yet", tooltip, StringComparison.Ordinal);
+        Assert.Contains("Connecting: the first connection check has not finished yet", tooltip, StringComparison.Ordinal);
         Assert.Contains("Needs attention: SQL CPU 62%", tooltip, StringComparison.Ordinal);
     }
 

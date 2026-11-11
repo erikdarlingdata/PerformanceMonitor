@@ -289,7 +289,7 @@ public sealed class AgAlertEvaluator
                         previousRole!,
                         $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} changed role from " +
                         $"{previousRole} to {replica.RoleDesc}. A role change is either a failover somebody performed or " +
-                        "an automatic one the cluster performed after a health-check timeout — if nobody initiated it, " +
+                        "an automatic one the cluster performed after a health-check timeout. If nobody initiated it, " +
                         "the previous primary had a problem worth finding. Confirm the new primary is the node you want " +
                         "serving the workload, check the WSFC cluster log for the failover reason, and verify that " +
                         "backups, index maintenance and integrity checks run against the new primary.",
@@ -363,7 +363,7 @@ public sealed class AgAlertEvaluator
                         replica.ConnectedStateDesc!,
                         "CONNECTED",
                         $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is connected to " +
-                        "the primary again. It is still behind by whatever accumulated while it was gone — watch the " +
+                        "the primary again. It is still behind by whatever accumulated while it was gone. Watch the " +
                         "send and redo queues until they drain before you count it as a failover target again.",
                         IsResolution: true,
                         /* Same incident identity as the firing, on both edges: the pair is one incident. */
@@ -462,7 +462,7 @@ public sealed class AgAlertEvaluator
                         $"{database.DatabaseName} on replica {database.ReplicaServerName} is SUSPENDED " +
                         $"({suspendReason}). While movement is suspended the secondary receives nothing AND the " +
                         "primary cannot truncate its transaction log, so the primary's log grows until its disk " +
-                        "fills — this is a primary-side outage risk, not just a secondary-side one. Fix the " +
+                        "fills. This is a primary-side outage risk, not just a secondary-side one. Fix the " +
                         $"underlying cause, then resume it with ALTER DATABASE [{database.DatabaseName}] SET HADR RESUME.",
                         IsResolution: false,
                         Context: AgAlertContexts.ForDatabase(
@@ -523,8 +523,8 @@ public sealed class AgAlertEvaluator
                         repeatNote + behindReason + " A secondary that trails the primary is a data-loss window: an automatic " +
                         "failover cannot complete until it catches up, and a forced failover throws away everything " +
                         "still queued. Look at the network throughput between the replicas, the secondary's redo " +
-                        "thread, and whether something on the primary — an index rebuild, a bulk load, a long " +
-                        "transaction — is generating log faster than the secondary can consume it. Read the figures " +
+                        "thread, and whether something on the primary (an index rebuild, a bulk load, a long " +
+                        "transaction) is generating log faster than the secondary can consume it. Read the figures " +
                         "for what they measure: the lag seconds are how STALE the secondary's last hardened log is, " +
                         "not how much data is queued behind it, so on a quiet group a large value can simply mean " +
                         "nothing has been written recently.",

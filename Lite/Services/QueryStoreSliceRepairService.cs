@@ -765,7 +765,7 @@ HAVING COUNT(*) > 1";
             {
                 failures.Add($"{Path.GetFileName(file.Path)}: {ex.Message}");
                 _logger?.LogError(ex, "#1912 archive repair failed for {File}; the original was left in place", file.Path);
-                progress?.Report($"Archive {Path.GetFileName(file.Path)}: NOT repaired — {ex.Message}");
+                progress?.Report($"Archive {Path.GetFileName(file.Path)}: NOT repaired: {ex.Message}");
             }
         }
 

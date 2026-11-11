@@ -721,7 +721,7 @@ public partial class MainWindow : Window
                 {
                     Dispatcher.Invoke(() =>
                     {
-                        Title = $"Performance Monitor Lite — Update v{newVersion.TargetFullRelease.Version} available (About in the sidebar)";
+                        Title = $"Performance Monitor Lite: Update v{newVersion.TargetFullRelease.Version} available (About in the sidebar)";
                         AnnounceUpdate($"v{newVersion.TargetFullRelease.Version}");
                     });
                     return;
@@ -738,7 +738,7 @@ public partial class MainWindow : Window
             {
                 Dispatcher.Invoke(() =>
                 {
-                    Title = $"Performance Monitor Lite — Update {result.LatestVersion} available (About in the sidebar)";
+                    Title = $"Performance Monitor Lite: Update {result.LatestVersion} available (About in the sidebar)";
                     AnnounceUpdate(result.LatestVersion);
                 });
             }
@@ -765,7 +765,7 @@ public partial class MainWindow : Window
     {
         _trayService?.ShowNotification(
             "Update Available",
-            $"Performance Monitor Lite {version} is available. Click About in the left sidebar to install it — "
+            $"Performance Monitor Lite {version} is available. Click About in the left sidebar to install it. "
                 + "that updates in place and keeps your data.",
             Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
     }
@@ -2839,7 +2839,7 @@ public partial class MainWindow : Window
 
                     _trayService?.ShowNotification(
                         "Capture Not Running",
-                        $"{server.DisplayNameWithIntent}: {captures} capture can't start — {reason}",
+                        $"{server.DisplayNameWithIntent}: {captures} capture can't start: {reason}",
                         Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
                 }
 

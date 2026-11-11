@@ -22,7 +22,7 @@ namespace PerformanceMonitorLite.Tests;
 /// What Lite says about a server in the half minute after launch, before its first connection check has finished. The collectors
 /// have run and the Overview card's rows are green, so a status word that reads as a verdict ("Unknown") contradicts the rows beside
 /// it. The word, its headline and the sidebar dot's tooltip say the server is connecting. The server tab's header says the same, and
-/// that the charts fill after the first collection, so an Overview chart with no data in the window reads as loading, not as empty.
+/// that the first collection is pending, so an Overview chart with no data in the window reads as loading, not as empty.
 /// </summary>
 [Collection("credential-manager")]
 public sealed class ConnectTimeStatusWordsTests
@@ -43,11 +43,11 @@ public sealed class ConnectTimeStatusWordsTests
         var connection = new ServerConnection { Id = "s1", ServerName = "sql-a", DisplayName = "sql-a", IsEnabled = true, IsOnline = null };
 
         Assert.Equal("Connecting", connection.DotStatus);
-        Assert.Contains("Connecting — the first connection check has not finished yet", connection.DotTooltip, StringComparison.Ordinal);
+        Assert.Contains("Connecting: the first connection check has not finished yet", connection.DotTooltip, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void TheServerTabHeader_WhileConnecting_SaysTheChartsFillAfterTheFirstCollection()
+    public void TheServerTabHeader_WhileConnecting_SaysTheFirstCollectionIsPending_NotThatTheChartsAreEmpty()
     {
         var dir = Path.Combine(Path.GetTempPath(), "ConnectTimeStatus_" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
@@ -70,6 +70,8 @@ public sealed class ConnectTimeStatusWordsTests
 
             Assert.StartsWith("Connecting", text, StringComparison.Ordinal);
             Assert.Contains("first collection", text, StringComparison.Ordinal);
+            /* #8621: the charts may already show the data the store holds, so the line must not promise that they are still to fill. */
+            Assert.DoesNotContain("charts", text, StringComparison.Ordinal);
         }
         finally
         {

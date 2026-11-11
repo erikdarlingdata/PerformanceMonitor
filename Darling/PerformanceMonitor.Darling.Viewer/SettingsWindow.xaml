@@ -249,7 +249,7 @@
                                          fleet-calibrated bars shared with the PostgreSQL edition (PoisonWaitEvaluator). The ms box was the
                                          retired per-wait-average bar (#6136: no longer shown, as in Lite). It stays in the tree, collapsed, so saved
                                          settings round-trip; nothing reads it. The preview line below the section states the live bars. -->
-                                    <CheckBox x:Name="AlertPoisonWaitCheckBox" Content="Poison waits (THREADPOOL, etc.) — accumulated wait over a 10-minute window" VerticalAlignment="Center"
+                                    <CheckBox x:Name="AlertPoisonWaitCheckBox" Content="Poison waits (THREADPOOL, etc.): accumulated wait over a 10-minute window" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"
                                               ToolTip="The Poison Wait alert fires when a poison wait type accumulates 600 s of wait inside 10 minutes (WARNING) or 6,000 s (CRITICAL)."/>
                                     <TextBox x:Name="AlertPoisonWaitThresholdBox" Width="45" Text="500" Visibility="Collapsed" IsEnabled="False"
@@ -258,7 +258,7 @@
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <!-- #5641: the Runnable Queue alert grades the AVERAGE of runnable tasks per scheduler over the collections of the last 5 minutes
                                          (at least 3; otherwise the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates)). Warning and Critical are runnable tasks per scheduler; Critical never sits below Warning. -->
-                                    <CheckBox x:Name="AlertRunnableQueueCheckBox" Content="Runnable queue (runnable tasks per scheduler, windowed average) — Warning at" VerticalAlignment="Center"
+                                    <CheckBox x:Name="AlertRunnableQueueCheckBox" Content="Runnable queue (runnable tasks per scheduler, windowed average): Warning at" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"
                                               ToolTip="The Runnable Queue alert averages runnable tasks per scheduler over the collections in the last 5 minutes when there are at least 3, otherwise over the newest 3 if all fall in the last 10 minutes (or in 4 times the gap between cpu_scheduler_stats collections when that is longer, so the Low-Impact preset's 5-minute collection still evaluates). It fires WARNING at the first bar and CRITICAL at the second; a Warning that worsens to Critical is delivered at once."/>
                                     <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertRunnableQueueCheckBox}" x:Name="AlertRunnableQueueWarningBox" Width="45" Text="8" Margin="6,0,0,0" VerticalAlignment="Center"
@@ -272,7 +272,7 @@
                                     <!-- #5640: the Client Timeouts alert grades client timeouts and cancels (the sqlserver.attention event: a client cancelled a query
                                          or its timeout expired) per minute over the covered span of the attention collector's last runs (about 3 minutes). ON by default since #5736:
                                          the bars are relative to each server's own normal rate (#5736). The two bars are the floors; the two multiples scale the server's baseline. All whole numbers; Critical never below Warning. -->
-                                    <CheckBox x:Name="AlertClientTimeoutsCheckBox" Content="Client timeouts and cancels per minute — Warning at" VerticalAlignment="Center"
+                                    <CheckBox x:Name="AlertClientTimeoutsCheckBox" Content="Client timeouts and cancels per minute: Warning at" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"
                                               ToolTip="The Client Timeouts alert counts client timeouts and cancels per minute (the sqlserver.attention event: a client cancelled a query or its timeout expired) over the attention collector's last runs (about 3 minutes). The two bars are floors: the Warning bar is the higher of the first floor and the Warning multiple times the server's own baseline (the p99.9 of its 3-minute average rate over the last 7 days), and the Critical bar the same with the second floor and the Critical multiple. A server with under a day of capture uses the floors. A Warning that worsens to Critical is delivered at once. On by default."/>
                                     <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertClientTimeoutsCheckBox}" x:Name="AlertClientTimeoutsWarningBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
@@ -338,7 +338,7 @@
                                 <TextBlock Text="Exclude sessions whose login IS (comma-separated, case-insensitive, whole name):"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,4" FontSize="12"/>
                                 <TextBox AutomationProperties.Name="Excluded logins" x:Name="AlertLrqExcludedLoginsBox" Margin="20,0,0,4"/>
-                                <TextBlock Text="Defaults from a 7-day read of one large production store: SQL Agent job steps (program prefix 'SQLAgent - TSQL JobStep', ~460 sessions/week, 35–62 min medians) and the NT AUTHORITY\SYSTEM / NT AUTHORITY\NETWORK SERVICE logins (the multi-day CDC-shaped background). The application's admin login is NOT a default: it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share. Named humans are never excluded — they are what the alert is for. An excluded session is never evaluated (the opposite of a mute); the alert card counts how many each list removed. Empty a box to disable that default."
+                                <TextBlock Text="Defaults from a 7-day read of one large production store: SQL Agent job steps (program prefix 'SQLAgent - TSQL JobStep', ~460 sessions/week, 35–62 min medians) and the NT AUTHORITY\SYSTEM / NT AUTHORITY\NETWORK SERVICE logins (the multi-day CDC-shaped background). The application's admin login is NOT a default: it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share. Named humans are never excluded. They are what the alert is for. An excluded session is never evaluated (the opposite of a mute); the alert card counts how many each list removed. Empty a box to disable that default."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
@@ -506,13 +506,13 @@
                                 <TextBlock x:Name="AlertExcludedDatabasesLabel" Text="Exclude databases from alerts (one name per line):"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,0,0,4" FontSize="12"/>
                                 <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertExcludedDatabasesLabel}" x:Name="AlertExcludedDatabasesBox" Margin="20,0,0,4" AcceptsReturn="True" TextWrapping="NoWrap" Height="60" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
-                                <TextBlock Text="e.g. DBAtools, msdb and tempdb on three lines; a name may hold a comma — applies to blocking, deadlock, and long-running query alerts"
+                                <TextBlock Text="e.g. DBAtools, msdb and tempdb on three lines; a name may hold a comma. It applies to blocking, deadlock, and long-running query alerts"
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
                                 <TextBlock x:Name="AlertExcludedVolumesLabel" Text="Exclude volumes from the Volume Free Space alert (one per line):"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,10,0,4" FontSize="12"/>
                                 <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertExcludedVolumesLabel}" x:Name="AlertExcludedVolumesBox" Margin="20,0,0,4" AcceptsReturn="True" TextWrapping="NoWrap" Height="60" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
-                                <TextBlock Text="e.g. S:\, T:\ and /mnt/scratch on three lines (a comma-separated paste also works) — the whole mount point, any case, a trailing \ or / is ignored; applies to every server"
+                                <TextBlock Text="e.g. S:\, T:\ and /mnt/scratch on three lines (a comma-separated paste also works). It matches the whole mount point, in any case, and ignores a trailing \ or /. It applies to every server"
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
                                 <!-- #5916: a threshold held for one server (or one database) that differs from the global value above. -->
@@ -602,8 +602,8 @@
                                     <TextBlock x:Name="AlertDeliveryModeLabel" TextWrapping="Wrap" Text="Deadlock/blocking delivery:" VerticalAlignment="Center" Margin="0,0,8,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <ComboBox AutomationProperties.LabeledBy="{Binding ElementName=AlertDeliveryModeLabel}" x:Name="AlertDeliveryModeBox" Width="260" VerticalAlignment="Center">
-                                        <ComboBoxItem Content="Summary — one card per cycle" Tag="Summary"/>
-                                        <ComboBoxItem Content="Per-event — one notification per incident" Tag="PerEvent"/>
+                                        <ComboBoxItem Content="Summary: one card per cycle" Tag="Summary"/>
+                                        <ComboBoxItem Content="Per-event: one notification per incident" Tag="PerEvent"/>
                                     </ComboBox>
                                     <TextBlock Text="max" VerticalAlignment="Center" Margin="8,0,4,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
@@ -865,7 +865,7 @@
                                 <!-- Generic webhook -->
                                 <TextBlock Text="Generic Webhook (HTTP POST)" FontSize="14" FontWeight="SemiBold"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="0,20,0,0"/>
-                                <TextBlock Text="POST alerts as JSON to any endpoint — PagerDuty, Opsgenie, n8n, or a GitHub repository_dispatch that re-runs a workflow. Use this to trigger automation when an alert fires (for example, re-adding your IP to an Azure SQL firewall rule after a connection is lost)."
+                                <TextBlock Text="POST alerts as JSON to any endpoint, for example PagerDuty, Opsgenie, n8n, or a GitHub repository_dispatch that re-runs a workflow. Use this to trigger automation when an alert fires (for example, re-adding your IP to an Azure SQL firewall rule after a connection is lost)."
                                            FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                 <CheckBox x:Name="GenericWebhookEnabledCheckBox" Content="Enable generic webhook" Margin="0,8,0,0"
                                           Foreground="{DynamicResource ForegroundBrush}" Checked="GenericWebhookEnabledCheckBox_Changed" Unchecked="GenericWebhookEnabledCheckBox_Changed"/>
@@ -937,7 +937,7 @@
                                     <Run FontFamily="Consolas" Text="{}{{metric}} {{server}} {{value}} {{threshold}} {{severity}} {{context}} {{detail}} {{timestamp}} {{status}}"/>
                                 </TextBlock>
                                 <TextBlock Margin="20,4,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
-                                    <Run Text="Automation placeholders — the first two substitute RAW JSON values (use them unquoted, e.g. &quot;context&quot;: {{context_json}}): "/>
+                                    <Run Text="Automation placeholders: the first two substitute RAW JSON values (use them unquoted, e.g. &quot;context&quot;: {{context_json}}): "/>
                                     <Run FontFamily="Consolas" Text="{}{{context_json}} {{incidents_json}} {{dedup_key}} {{resource_name}} {{database}} {{triage_url}}"/>
                                 </TextBlock>
                                 <TextBlock Margin="20,4,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
@@ -945,7 +945,7 @@
                                     <Run Text=" : the investigation request the alert opened or joined, as one JSON object (unquoted it is the object, inside quotes its escaped text); empty when the alert opened none (no agent level on its route, muted, a report or a recovery). Once an agent has claimed the request it carries the brief, masked at mcp.dataDetail: at full, the shipped default, that is the brief as stored (findings, approved notes, the environment profile, earlier agents' root causes, the alerts' details), sent to this URL."/>
                                 </TextBlock>
                                 <TextBlock Margin="20,6,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
-                                    <Run FontWeight="SemiBold" Text="Example — re-run a GitHub Actions workflow when an alert fires:"/>
+                                    <Run FontWeight="SemiBold" Text="Example: re-run a GitHub Actions workflow when an alert fires:"/>
                                     <LineBreak/>
                                     <Run FontFamily="Consolas" Text="URL: https://api.github.com/repos/OWNER/REPO/dispatches"/>
                                     <LineBreak/>
@@ -962,19 +962,19 @@
                                 <TextBlock Text="Alert Severity Colors" FontWeight="SemiBold" FontSize="12"
                                            Foreground="{DynamicResource ForegroundBrush}" Margin="0,16,0,4"/>
                                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                                    <Run Foreground="#DC2626" FontWeight="Bold" Text="&#x25A0; Red" /> — Critical (Deadlocks, Poison Waits, Runnable Queue and Client Timeouts at the Critical bar, Server Unreachable)
+                                    <Run Foreground="#DC2626" FontWeight="Bold" Text="&#x25A0; Red" />: Critical (Deadlocks, Poison Waits, Runnable Queue and Client Timeouts at the Critical bar, Server Unreachable)
                                 </TextBlock>
                                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                                    <Run Foreground="#D97706" FontWeight="Bold" Text="&#x25A0; Orange" /> — Alert / Warning (Blocking, Long-Running Queries, Runnable Queue, Client Timeouts, tempdb, Jobs)
+                                    <Run Foreground="#D97706" FontWeight="Bold" Text="&#x25A0; Orange" />: Alert / Warning (Blocking, Long-Running Queries, Runnable Queue, Client Timeouts, tempdb, Jobs)
                                 </TextBlock>
                                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                                    <Run Foreground="#F59E0B" FontWeight="Bold" Text="&#x25A0; Yellow" /> — Warning (High CPU)
+                                    <Run Foreground="#F59E0B" FontWeight="Bold" Text="&#x25A0; Yellow" />: Warning (High CPU)
                                 </TextBlock>
                                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,2">
-                                    <Run Foreground="#16A34A" FontWeight="Bold" Text="&#x25A0; Green" /> — Resolved (Server Restored)
+                                    <Run Foreground="#16A34A" FontWeight="Bold" Text="&#x25A0; Green" />: Resolved (Server Restored)
                                 </TextBlock>
                                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
-                                    <Run Foreground="{DynamicResource InfoBrush}" FontWeight="Bold" Text="&#x25A0; Blue" /> — Info
+                                    <Run Foreground="{DynamicResource InfoBrush}" FontWeight="Bold" Text="&#x25A0; Blue" />: Info
                                 </TextBlock>
                             </StackPanel>
                         </Border>
@@ -1040,7 +1040,7 @@
                             <StackPanel>
                                 <!-- Automated Analysis -->
                                 <TextBlock Text="Automated Analysis" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
-                                <TextBlock Text="Periodically run the triage engine and record findings in the Alerts tab. Notifications below are optional — analysis runs and stores findings even with notifications off."
+                                <TextBlock Text="Periodically run the triage engine and record findings in the Alerts tab. Notifications below are optional. Analysis runs and stores findings even with notifications off."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="0,4,0,4" TextWrapping="Wrap"/>
                                 <CheckBox x:Name="AnalysisEnabledCheckBox" Content="Enable automated analysis"
@@ -1082,8 +1082,8 @@
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <ComboBox AutomationProperties.LabeledBy="{Binding ElementName=AnalysisUncorroboratedRouteLabel}" x:Name="AnalysisUncorroboratedRouteBox" Width="380" VerticalAlignment="Center"
                                               ToolTip="A finding with ONE fact in its chain and no matched co-fire check. Digest: recorded (Alert History status Digest), shown on the web and MCP surfaces the moment it fires, and named once a day in the Daily Digest — never a page. Page: the pre-#3712 behaviour, every finding at or above the severity floor pages. Use the service's darling.json value: clears the store column so analysis.uncorroboratedRoute in the service's file decides (its shipped default is Digest). Digest or Page set here wins over the file and reaches the running service within one collection sweep; a corroborated finding pages whichever you choose. Escalation is the corroboration event: a digest-routed single that later gains a fact pages then, as a new firing.">
-                                        <ComboBoxItem Content="Digest — recorded and shown, never paged (recommended)" Tag="digest"/>
-                                        <ComboBoxItem Content="Page — every notify-worthy finding pages (pre-#3712)" Tag="page"/>
+                                        <ComboBoxItem Content="Digest: recorded and shown, never paged (recommended)" Tag="digest"/>
+                                        <ComboBoxItem Content="Page: every notify-worthy finding pages (pre-#3712)" Tag="page"/>
                                         <ComboBoxItem Content="Use the service's darling.json value (store column cleared)" Tag=""/>
                                     </ComboBox>
                                 </WrapPanel>

@@ -26,7 +26,7 @@
         <!-- Format hint -->
         <TextBlock Grid.Row="1" TextWrapping="Wrap" FontSize="11" Margin="0,0,0,10"
                    Foreground="{DynamicResource ForegroundMutedBrush}"
-                   Text="Paste one server per line as: server[, display name][, database]. A non-default port rides the server name SQL Server style — sql01,2433 — and is told apart from a display name by being a pure number. Fields separate on a comma, or on a tab for spreadsheet pastes (a display name with a comma, or one that is only digits, needs the tab form). Blank lines and lines starting with # are ignored. All servers share the authentication and encryption below — the Darling service connects with Windows, SQL, or a non-interactive Entra mode (Service Principal or Managed Identity); a SQL password or service-principal secret is entered once and stamped, encrypted, onto every server. Duplicates of servers you already monitor are skipped."/>
+                   Text="Paste one server per line as: server[, display name][, database]. A non-default port rides the server name SQL Server style (sql01,2433) and is told apart from a display name by being a pure number. Fields separate on a comma, or on a tab for spreadsheet pastes (a display name with a comma, or one that is only digits, needs the tab form). Blank lines and lines starting with # are ignored. All servers share the authentication and encryption below. The Darling service connects with Windows, SQL, or a non-interactive Entra mode (Service Principal or Managed Identity); a SQL password or service-principal secret is entered once and stamped, encrypted, onto every server. Duplicates of servers you already monitor are skipped."/>
 
         <!-- Paste box -->
         <TextBlock Grid.Row="2" Text="Servers" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
@@ -67,9 +67,9 @@
                              IsChecked="True" Checked="AuthMode_Changed" Margin="0,0,0,4"/>
                 <RadioButton x:Name="SqlAuthRadio" Content="S_QL Server Authentication" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,0,0,4"/>
-                <RadioButton x:Name="ServicePrincipalAuthRadio" Content="Azure — Service _Principal" Foreground="{DynamicResource ForegroundBrush}"
+                <RadioButton x:Name="ServicePrincipalAuthRadio" Content="Azure: Service _Principal" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,0,0,4"/>
-                <RadioButton x:Name="ManagedIdentityAuthRadio" Content="Azure — _Managed Identity" Foreground="{DynamicResource ForegroundBrush}"
+                <RadioButton x:Name="ManagedIdentityAuthRadio" Content="Azure: _Managed Identity" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed"/>
             </StackPanel>
 
@@ -136,7 +136,7 @@
         <!-- Buttons -->
         <StackPanel Grid.Row="7" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button x:Name="TestAllButton" Content="_Test All" Height="30" MinWidth="90" Click="TestAllButton_Click" Margin="0,0,8,0"
-                    ToolTip="Ask the Darling service to probe each server with the shared credentials, one at a time. Informational only — no server is added."/>
+                    ToolTip="Ask the Darling service to probe each server with the shared credentials, one at a time. Informational only. No server is added."/>
             <Button x:Name="CancelTestButton" Content="Cancel Te_st" Height="30" MinWidth="90" Click="CancelTestButton_Click"
                     Visibility="Collapsed" Margin="0,0,8,0"/>
             <!-- No IsDefault: this is a multi-field entry form (server list, credential source, auth

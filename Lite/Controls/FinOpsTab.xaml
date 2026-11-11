@@ -1789,8 +1789,8 @@
                         <RowDefinition Height="2*"/>
                     </Grid.RowDefinitions>
 
-                    <!-- Both grids hide their horizontal scroll bar while they hold no rows; a run with rows turns it back on (IndexAnalysisGridsHoldRows). -->
-                    <DataGrid x:Name="IndexAnalysisSummaryGrid" Grid.Row="0" HorizontalScrollBarVisibility="Hidden"
+                    <!-- Both grids stay collapsed until a run returns rows (IndexAnalysisGridsHoldRows), so the screen shows one empty-state message instead of a message beside a bare grid. -->
+                    <DataGrid x:Name="IndexAnalysisSummaryGrid" Grid.Row="0" HorizontalScrollBarVisibility="Hidden" Visibility="Collapsed"
                               AutoGenerateColumns="False"
                               IsReadOnly="True"
                               CanUserSortColumns="True"
@@ -2063,7 +2063,7 @@
                         </DataGrid.Columns>
                     </DataGrid>
 
-                    <DataGrid x:Name="IndexAnalysisDetailGrid" Grid.Row="1" Margin="0,8,0,0" HorizontalScrollBarVisibility="Hidden"
+                    <DataGrid x:Name="IndexAnalysisDetailGrid" Grid.Row="1" Margin="0,8,0,0" HorizontalScrollBarVisibility="Hidden" Visibility="Collapsed"
                               AutoGenerateColumns="False"
                               IsReadOnly="True"
                               CanUserSortColumns="True"
@@ -2212,11 +2212,11 @@
                     </DataGrid>
 
                     <!-- One sentence for the whole analysis, in the lower grid; the summary grid above keeps only its header. -->
-                    <TextBlock Style="{DynamicResource EmptyHint}" x:Name="IndexAnalysisNotInstalledMessage" Grid.Row="1"
+                    <TextBlock Style="{DynamicResource EmptyHint}" x:Name="IndexAnalysisNotInstalledMessage" Grid.Row="0" Grid.RowSpan="2"
                                Text="sp_IndexCleanup is not installed on this server. Visit https://github.com/erikdarlingdata/DarlingData to install it."
                                Visibility="Collapsed"/>
 
-                    <TextBlock Style="{DynamicResource EmptyHint}" x:Name="IndexAnalysisNoDataMessage" Grid.Row="1"
+                    <TextBlock Style="{DynamicResource EmptyHint}" x:Name="IndexAnalysisNoDataMessage" Grid.Row="0" Grid.RowSpan="2"
                                Text="No index analysis results. Click 'Run Analysis' to start."
                                Visibility="Visible"/>
                 </Grid>

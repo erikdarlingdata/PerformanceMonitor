@@ -405,7 +405,7 @@ public partial class AddMultipleServersDialog : Window
                 FailedCount = failed;
                 CollidedCount = 0;
                 StatusText.Text = firstError != null
-                    ? $"No servers added — {firstError}."
+                    ? $"No servers added: {firstError}."
                     : $"No new servers to add ({CountText.Plural(skipped, "duplicate")} skipped).";
                 return;
             }

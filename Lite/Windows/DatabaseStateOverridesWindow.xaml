@@ -19,7 +19,7 @@
 
         <TextBlock Grid.Row="0" FontWeight="Bold" FontSize="14"
                    Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,8"
-                   Text="Database State Alert — Expected State per Database"/>
+                   Text="Database State Alert: Expected State per Database"/>
 
         <TextBlock Grid.Row="1" TextWrapping="Wrap" FontSize="11"
                    Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,12"

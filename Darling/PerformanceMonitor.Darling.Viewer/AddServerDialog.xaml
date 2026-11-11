@@ -136,10 +136,10 @@
                 <RadioButton x:Name="EntraMfaAuthRadio" Content="Microsoft _Entra MFA" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed"
                              ToolTip="Interactive authentication with MFA for Azure SQL Database."/>
-                <RadioButton x:Name="ServicePrincipalAuthRadio" Content="Azure — Service _Principal" Foreground="{DynamicResource ForegroundBrush}"
+                <RadioButton x:Name="ServicePrincipalAuthRadio" Content="Azure: Service _Principal" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,4,0,0"
                              ToolTip="Non-interactive Azure SQL auth using an Entra app registration (client id + secret)."/>
-                <RadioButton x:Name="ManagedIdentityAuthRadio" Content="Azure — _Managed Identity" Foreground="{DynamicResource ForegroundBrush}"
+                <RadioButton x:Name="ManagedIdentityAuthRadio" Content="Azure: _Managed Identity" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,4,0,0"
                              ToolTip="Non-interactive Azure SQL auth using the managed identity of the Azure resource running the Darling service."/>
             </StackPanel>
@@ -217,8 +217,8 @@
                 <ComboBox x:Name="AlertDeliveryOverrideBox" Width="240" SelectedIndex="0"
                           ToolTip="How deadlock/blocking alerts for THIS server are delivered. 'Use global setting' follows the app-wide Alerts setting; override to force Summary or Per-event for just this server.">
                     <ComboBoxItem Content="Use global setting"/>
-                    <ComboBoxItem Content="Summary — one card per cycle"/>
-                    <ComboBoxItem Content="Per-event — one notification per incident"/>
+                    <ComboBoxItem Content="Summary: one card per cycle"/>
+                    <ComboBoxItem Content="Per-event: one notification per incident"/>
                 </ComboBox>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,6,0,0">

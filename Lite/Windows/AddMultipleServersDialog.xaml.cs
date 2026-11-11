@@ -133,8 +133,8 @@ public partial class AddMultipleServersDialog : Window
         if (sqlOrSp && !_profileNameTouched)
         {
             string auto = SqlAuthRadio.IsChecked == true
-                ? $"SQL — {UsernameBox.Text.Trim()}"
-                : $"Azure SP — {AzureClientIdBox.Text.Trim()}";
+                ? $"SQL: {UsernameBox.Text.Trim()}"
+                : $"Azure SP: {AzureClientIdBox.Text.Trim()}";
             _suppressProfileNameSync = true;
             ProfileNameBox.Text = auto;
             _suppressProfileNameSync = false;
@@ -318,7 +318,7 @@ public partial class AddMultipleServersDialog : Window
             using var command = new SqlCommand("SELECT @@VERSION", connection);
             var version = await command.ExecuteScalarAsync(ct) as string;
             var firstLine = version?.Split('\n')[0]?.Trim();
-            row.Status = string.IsNullOrEmpty(firstLine) ? "OK" : "OK — " + firstLine;
+            row.Status = string.IsNullOrEmpty(firstLine) ? "OK" : "OK: " + firstLine;
         }
         catch (OperationCanceledException)
         {
@@ -392,7 +392,7 @@ public partial class AddMultipleServersDialog : Window
             FailedCount = failed;
             var collidedPart = collided > 0 ? $", {collided} collided" : string.Empty;
             StatusText.Text = firstBuildError != null
-                ? $"No servers added — {firstBuildError}."
+                ? $"No servers added: {firstBuildError}."
                 : $"No new servers to add ({CountText.Plural(skipped, "duplicate")} skipped{collidedPart}).";
             return;
         }
@@ -583,8 +583,8 @@ public partial class AddMultipleServersDialog : Window
 
     private static string DefaultProfileName(BulkSharedSettings shared) => shared.AuthType switch
     {
-        AuthenticationTypes.SqlServer => $"SQL — {shared.Username}",
-        AuthenticationTypes.ServicePrincipal => $"Azure SP — {shared.AzureClientId}",
+        AuthenticationTypes.SqlServer => $"SQL: {shared.Username}",
+        AuthenticationTypes.ServicePrincipal => $"Azure SP: {shared.AzureClientId}",
         _ => "Bulk credential"
     };
 
@@ -603,7 +603,7 @@ public partial class AddMultipleServersDialog : Window
     {
         if (AuthenticationTypes.RequiresInteractiveSignIn(shared.AuthType))
         {
-            return (null, $"{ServerConnection.AuthenticationDisplayFor(shared.AuthType)} needs a sign-in per server and is not supported in bulk add — use Add Server");
+            return (null, $"{ServerConnection.AuthenticationDisplayFor(shared.AuthType)} needs a sign-in per server and is not supported in bulk add. Use Add Server");
         }
 
         var databaseName = string.IsNullOrWhiteSpace(row.DatabaseName) ? null : row.DatabaseName.Trim();
