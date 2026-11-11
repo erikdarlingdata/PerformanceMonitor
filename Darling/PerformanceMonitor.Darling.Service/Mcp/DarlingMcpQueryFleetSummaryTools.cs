@@ -112,6 +112,171 @@ public sealed class DarlingMcpQueryFleetSummaryTools
         """;
     }
 
+    /// <summary>#8570: OFF until the per-pair LIMIT 1 probes of <see cref="BuildMidSql"/> stop at the first index row. On a 12-server uncompressed seed
+    /// the statement reads about 7,600 pages against the old statement's 2,000 (the probes read a day of heap pages each), so the tool keeps the old
+    /// statement. The route, its guards and its equality tests are in place and run through <see cref="PlanDailyMid"/> directly.</summary>
+    public const bool MidRouteEnabled = false;
+
+    /// <summary>#8570: the fewest whole closed days the daily tier must hold before the mid route is worth its probes. Below it the
+    /// two partial edge days are most of the window and the old statement is the same read.</summary>
+    public const int MinMidDays = 2;
+
+    /// <summary>
+    /// #8570: where the daily tier can stand in for the hourly rows of whole closed days. <see cref="DailyView"/> is the daily
+    /// relation (aliased <c>d</c> in <see cref="DailyRelation"/>), <see cref="DStart"/> the first midnight at or after the window
+    /// start and <see cref="DEnd"/> the last midnight at or before the window end, the hourly ceiling and the daily ceiling.
+    /// </summary>
+    internal sealed record DailyMidPlan(string DailyRelation, string DailyView, DateTime DStart, DateTime DEnd);
+
+    /// <summary>
+    /// #8570: the coverage guards of the mid route. Null (read the hourly rollup alone, as before) unless every one holds:
+    /// <list type="number">
+    /// <item>The hourly relation is ONE relation for this window and the daily relation is the SAME family (both successor or both
+    /// legacy), also one relation. A stitched hourly relation, or a daily one that reads a different family than the hourly one, has a
+    /// day the two tiers disagree about (the day holding the stitch floor takes its hours from both sides).</item>
+    /// <item>The daily tier has a measured ceiling, and so does the hourly one. A day is read from the daily only when it ends at or
+    /// before both ceilings, so a daily that trails the hourly (the daily refresh runs a day behind) leaves those days to the hourly edge.</item>
+    /// <item>At least <see cref="MinMidDays"/> whole days remain.</item>
+    /// </list>
+    /// The remaining guard, no whole-day hole in the daily across <c>[DStart, DEnd)</c>, needs the store and is
+    /// <see cref="DailyHasNoHoleAsync"/>. The daily policy re-reads only <see cref="TimescaleSupport.DailyRefreshStartSpan"/> of days, so
+    /// a day the daily never wrote is never written later: that hole check is what stops a day with no daily row being read as an empty day.
+    /// </summary>
+    internal static DailyMidPlan? PlanDailyMid(RollupCoverage coverage, string hourlyRelation, DateTime start, DateTime windowEnd, DateTime? hourlyCeiling)
+    {
+        if (hourlyCeiling is not DateTime hourlyEnd
+            || coverage.StitchFloor(TimescaleSupport.QueryStatsHourlyView, RollupCoverage.StitchTier.Hourly, start) is not null)
+        {
+            return null;
+        }
+
+        var dStart = start == start.Date ? start : start.Date.AddDays(1);
+        var dailyRelation = coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDailyView, "d", dStart, RollupCoverage.StitchTier.Daily);
+        if (dailyRelation.Contains("UNION", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var hourlyIsSuccessor = hourlyRelation.Contains("collect." + TimescaleSupport.QueryStatsIntervalHourlyView + " ", StringComparison.Ordinal);
+        var dailyIsSuccessor = dailyRelation.Contains("collect." + TimescaleSupport.QueryStatsIntervalDailyView + " ", StringComparison.Ordinal);
+        if (hourlyIsSuccessor != dailyIsSuccessor)
+        {
+            return null;
+        }
+
+        var dailyView = dailyIsSuccessor ? TimescaleSupport.QueryStatsIntervalDailyView : TimescaleSupport.QueryStatsDailyView;
+        if (coverage.CeilingOf(dailyView) is not DateTime dailyEnd)
+        {
+            return null;
+        }
+
+        var limit = new[] { windowEnd, hourlyEnd, dailyEnd }.Min();
+        var dEnd = limit.Date;
+        return (dEnd - dStart).TotalDays >= MinMidDays ? new DailyMidPlan(dailyRelation, dailyView, dStart, dEnd) : null;
+    }
+
+    /// <summary>
+    /// #8570: true when every whole day in <c>[plan.DStart, plan.DEnd)</c> has a daily bucket, or the hourly rollup holds nothing for it
+    /// either: the repair pass's own hole scan (<see cref="TimescaleSupport.HoleFreeThroughAsync"/>), one range probe per day.
+    /// </summary>
+    internal static async Task<bool> DailyHasNoHoleAsync(NpgsqlDataSource postgres, DailyMidPlan plan, CancellationToken cancellationToken)
+    {
+        var target = TimescaleSupport.RollupCoverageProbeTargets.Single(t => string.Equals(t.View, plan.DailyView, StringComparison.Ordinal));
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        return await TimescaleSupport.HoleFreeThroughAsync(
+            connection, target, ("collect", plan.DailyView), plan.DStart, plan.DEnd, Array.Empty<(DateTime Start, DateTime End)>(), cancellationToken);
+    }
+
+    /// <summary>
+    /// #8570: the fleet statement with the closed whole days read from the daily rollup. Same parameters and rows as
+    /// <see cref="BuildSql"/> plus $7 (<see cref="DailyMidPlan.DStart"/>) and $8 (<see cref="DailyMidPlan.DEnd"/>):
+    /// <c>edge_start</c> is the hourly rows in <c>[$2, $7)</c>, <c>mid</c> the daily rows in <c>[$7, $8)</c>, <c>edge_end</c> the hourly
+    /// rows in <c>[$8, $3)</c> below the ceiling $4. A daily row carries no hour, so first_hour and last_hour of a pair that is only in
+    /// the mid are two ordered LIMIT 1 probes of the hourly rollup inside its first and last daily day (one index step each). The pair's
+    /// first_hour is then the least of its parts and last_hour the greatest, as the one-relation statement computes it.
+    /// </summary>
+    public static string BuildMidSql(string hourlyRelation, string dailyRelation)
+        => $"""
+        WITH edge_start AS
+        (
+            SELECT f.server_id, f.database_name,
+                   SUM(f.execution_count_sum) AS executions, SUM(f.worker_time_sum) AS cpu_us, SUM(f.elapsed_time_sum) AS elapsed_us,
+                   MIN(f.bucket) AS first_hour, MAX(f.bucket) AS last_hour
+            FROM {hourlyRelation}
+            WHERE f.query_hash = $1
+            AND   f.bucket >= $2
+            AND   f.bucket < $7
+            GROUP BY f.server_id, f.database_name
+        ),
+        edge_end AS
+        (
+            SELECT f.server_id, f.database_name,
+                   SUM(f.execution_count_sum) AS executions, SUM(f.worker_time_sum) AS cpu_us, SUM(f.elapsed_time_sum) AS elapsed_us,
+                   MIN(f.bucket) AS first_hour, MAX(f.bucket) AS last_hour
+            FROM {hourlyRelation}
+            WHERE f.query_hash = $1
+            AND   f.bucket >= $8
+            AND   f.bucket < $3
+            AND   f.bucket < $4
+            GROUP BY f.server_id, f.database_name
+        ),
+        mid AS
+        (
+            SELECT d.server_id, d.database_name,
+                   SUM(d.execution_count_sum) AS executions, SUM(d.worker_time_sum) AS cpu_us, SUM(d.elapsed_time_sum) AS elapsed_us,
+                   MIN(d.bucket) AS first_day, MAX(d.bucket) AS last_day
+            FROM {dailyRelation}
+            WHERE d.query_hash = $1
+            AND   d.bucket >= $7
+            AND   d.bucket < $8
+            GROUP BY d.server_id, d.database_name
+        ),
+        probe AS
+        (
+            SELECT m.server_id, m.database_name, m.executions, m.cpu_us, m.elapsed_us,
+                   (
+                       SELECT f.bucket FROM {hourlyRelation}
+                       WHERE f.query_hash = $1 AND f.server_id = m.server_id AND f.database_name IS NOT DISTINCT FROM m.database_name
+                       AND   f.bucket >= m.first_day AND f.bucket < m.first_day + interval '1 day'
+                       ORDER BY f.bucket LIMIT 1
+                   ) AS first_hour,
+                   (
+                       SELECT f.bucket FROM {hourlyRelation}
+                       WHERE f.query_hash = $1 AND f.server_id = m.server_id AND f.database_name IS NOT DISTINCT FROM m.database_name
+                       AND   f.bucket >= m.last_day AND f.bucket < m.last_day + interval '1 day'
+                       ORDER BY f.bucket DESC LIMIT 1
+                   ) AS last_hour
+            FROM mid AS m
+        ),
+        tail AS
+        (
+            SELECT q.server_id, q.database_name,
+                   SUM(q.delta_execution_count) AS executions, SUM(q.delta_worker_time) AS cpu_us, SUM(q.delta_elapsed_time) AS elapsed_us,
+                   MIN(date_trunc('hour', q.collection_time)) AS first_hour, MAX(date_trunc('hour', q.collection_time)) AS last_hour
+            FROM query_stats AS q
+            WHERE q.query_hash = $1
+            AND   q.collection_time >= $4
+            AND   q.collection_time <= $3
+            AND   q.collection_time >= $2
+            GROUP BY q.server_id, q.database_name
+        ),
+        pairs AS
+        (
+            SELECT server_id, database_name,
+                   COALESCE(SUM(executions), 0)::bigint AS executions, COALESCE(SUM(cpu_us), 0)::bigint AS cpu_us,
+                   COALESCE(SUM(elapsed_us), 0)::bigint AS elapsed_us, MIN(first_hour) AS first_hour, MAX(last_hour) AS last_hour
+            FROM (SELECT * FROM edge_start UNION ALL SELECT * FROM probe UNION ALL SELECT * FROM edge_end UNION ALL SELECT * FROM tail) AS u
+            GROUP BY server_id, database_name
+        )
+        SELECT s.server_name, s.display_name, p.database_name, p.executions, p.cpu_us, p.elapsed_us, p.first_hour, p.last_hour,
+               COUNT(*) OVER () AS pairs
+        FROM pairs AS p
+        JOIN servers AS s ON s.server_id = p.server_id
+        WHERE ($6::integer[] IS NULL OR p.server_id = ANY($6))
+        ORDER BY p.cpu_us DESC, s.server_name, p.database_name
+        LIMIT $5
+        """;
+
     /// <summary>The label every row of the Query Store read carries.</summary>
     public const string QueryStoreSource = "query_store";
 
@@ -215,7 +380,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
 
     private static async Task<(List<FleetRow> Rows, int Pairs)> ReadFleetAsync(
         NpgsqlDataSource postgres, string sql, string source, string hash, DateTime start, DateTime windowEnd, DateTime rawFrom, int limit,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, DailyMidPlan? mid = null)
     {
         var rows = new List<FleetRow>();
         var pairs = 0;
@@ -227,6 +392,11 @@ public sealed class DarlingMcpQueryFleetSummaryTools
         DarlingMcpReadParameters.AddTimestamp(command, rawFrom);
         DarlingMcpReadParameters.AddInt(command, limit);
         command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Integer, (object?)DarlingServerResolver.WebAllowedServerIds?.ToArray() ?? DBNull.Value);
+        if (mid is not null)
+        {
+            DarlingMcpReadParameters.AddTimestamp(command, mid.DStart);
+            DarlingMcpReadParameters.AddTimestamp(command, mid.DEnd);
+        }
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -278,6 +448,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
 
             string? hourlyRelation = null;
             var ceilingClause = "";
+            DailyMidPlan? mid = null;
             var rawFrom = start;
             if (tier != RetentionTier.Raw)
             {
@@ -286,6 +457,15 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                 {
                     ceilingClause = RollupCoverage.HourlyCeilingClause(4);
                     rawFrom = ceiling > start ? ceiling : start;
+
+                    /* #8570: whole closed days come from the daily tier. The hourly rollup reads one heap page per row on a cold cache
+                       (and decompresses a day's batches on a compressed chunk), the daily rollup 24 times fewer rows. Any guard that
+                       fails leaves the hourly read alone. */
+                    mid = MidRouteEnabled ? PlanDailyMid(coverage, hourlyRelation, start, windowEnd, ceiling) : null;
+                    if (mid is not null && !await DailyHasNoHoleAsync(postgres, mid, cancellationToken))
+                    {
+                        mid = null;
+                    }
                 }
                 else
                 {
@@ -295,7 +475,8 @@ public sealed class DarlingMcpQueryFleetSummaryTools
             }
 
             var (planRows, planPairs) = await ReadFleetAsync(
-                postgres, BuildSql(hourlyRelation, ceilingClause), PlanCacheSource, hash, start, windowEnd, rawFrom, limit, cancellationToken);
+                postgres, mid is null ? BuildSql(hourlyRelation, ceilingClause) : BuildMidSql(hourlyRelation!, mid.DailyRelation),
+                PlanCacheSource, hash, start, windowEnd, rawFrom, limit, cancellationToken, mid);
 
             /* #7609: the Query Store source, capped at seven days. It reads the corrected hourly rollup below the rollup's boundary and the
                deduped raw rows from it up, the split get_query_store_duration_trend makes. */
