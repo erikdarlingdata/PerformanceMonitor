@@ -18,6 +18,11 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpHealthTools
 {
+    /* #8533: get_collection_health runs the Collection Health read, and its description words that read's window in literals
+       ("7-day", "always 7 days"). This constant compiles only while the window is seven days, so the window cannot change
+       under a description that says otherwise. */
+    internal const byte CollectionHealthDescriptionDays = CollectionHealthWindow.Days == 7 ? 7 : -1;
+
     /// <summary>get_server_summary's description, VERBATIM Darling's (#3541 A10); the cross-SKU census pins them
     /// equal. Names the three clocks the payload carries, because the payload used to carry one.</summary>
     internal const string ServerSummaryDescription =
@@ -136,7 +141,8 @@ public sealed class McpHealthTools
                 data_state = DailySummaryRetention.Label(row.DataState),
                 data_note = row.RetentionHorizon is { } horizon ? DailySummaryRetention.Note(row.DataState, horizon, row.SignalSourcesPresent) : null,
                 retention_horizon = row.RetentionHorizon?.ToString("yyyy-MM-dd"),
-                total_wait_time_sec = row.TotalWaitTimeSec,
+                /* #8572: the store's numeric carries sixteen decimals (9387.6560000000000000); the source is whole milliseconds, so three places. */
+                total_wait_time_sec = Math.Round(row.TotalWaitTimeSec, 3),
                 top_wait_type = row.TopWaitType,
                 unique_queries = row.UniqueQueries,
                 deadlock_count = row.DeadlockCount,
@@ -152,7 +158,7 @@ public sealed class McpHealthTools
                    when the window was too short to normalise). The window is the row's own clamp against
                    its ReferenceUtc, so an anchored read rates against its as_of, not the process clock. */
                 collection_runs = row.CollectionRuns,
-                blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window),
+                blocking_rate_per_hour = TrendPayloads.RoundRate(ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window), 2), // #8572: 0.32255504310332606 otherwise
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -263,7 +269,7 @@ public sealed class McpHealthTools
                     health_band = row.HealthBand.ToString(),
                     data_state = DailySummaryRetention.Label(row.DataState),
                     data_note = row.RetentionHorizon is { } rowHorizon ? DailySummaryRetention.Note(row.DataState, rowHorizon, row.SignalSourcesPresent) : null,
-                    total_wait_time_sec = row.TotalWaitTimeSec,
+                    total_wait_time_sec = Math.Round(row.TotalWaitTimeSec, 3),
                     top_wait_type = row.TopWaitType,
                     unique_queries = row.UniqueQueries,
                     deadlock_count = row.DeadlockCount,
@@ -276,7 +282,7 @@ public sealed class McpHealthTools
                     max_block_duration_ms = row.MaxBlockDurationMs,
                     /* #3539 A2/A3, additive — see get_daily_summary's members of the same names. */
                     collection_runs = row.CollectionRuns,
-                    blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window),
+                    blocking_rate_per_hour = TrendPayloads.RoundRate(ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window), 2), // #8572: 0.32255504310332606 otherwise
                 }),
             }, McpHelpers.JsonOptions);
         }
@@ -1148,6 +1154,13 @@ public sealed class McpHealthTools
                 collectorName: collector_name, minDurationMs: min_duration_ms, status: status);
             var truncated = rows.Count > effectiveLimit;
             if (truncated) rows = rows.Take(effectiveLimit).ToList();
+            /* #8571, Darling's twin: runs_total is the runs that matched the filters in the window, counted only when the over-fetch saw more than the limit. */
+            long matchingRuns = rows.Count;
+            if (truncated)
+            {
+                matchingRuns = Math.Max(rows.Count, await dataService.CountRecentCollectionLogAsync(
+                    resolved.ServerId, hours, asOfUtc: windowEnd, collectorName: collector_name, minDurationMs: min_duration_ms, status: status));
+            }
 
             var filtered = !string.IsNullOrWhiteSpace(collector_name) || min_duration_ms is not null
                 || !string.IsNullOrWhiteSpace(status);
@@ -1307,7 +1320,7 @@ public sealed class McpHealthTools
                    keeps its own `status`, where nothing collides. */
                 status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
                 runs_returned = pageCount,
-                runs_total = rows.Count,
+                runs_total = matchingRuns,
                 size_note = cut
                     ? $"{rows.Count - pageCount} of the {CountText.Plural(rows.Count, "run")} this read selected {(rows.Count - pageCount == 1 ? "was" : "were")} left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one collector_name / status to read the rest in full."
                     : null,
@@ -1363,6 +1376,13 @@ public sealed class McpHealthTools
                 collectorName: collector_name, minDurationMs: min_duration_ms, status: status);
             var truncated = rows.Count > limit;
             if (truncated) rows = rows.Take(limit).ToList();
+            /* #8571, Darling's twin: runs_total is the runs that matched the filters in the window across the enabled fleet, counted only when the over-fetch saw more than the limit. */
+            long matchingRuns = rows.Count;
+            if (truncated)
+            {
+                matchingRuns = Math.Max(rows.Count, await dataService.CountRecentCollectionLogFleetAsync(
+                    serverIds, hours, asOfUtc: windowEnd, collectorName: collector_name, minDurationMs: min_duration_ms, status: status));
+            }
 
             var filtered = !string.IsNullOrWhiteSpace(collector_name)
                 || min_duration_ms is not null
@@ -1429,7 +1449,7 @@ public sealed class McpHealthTools
                 min_duration_ms,
                 status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
                 runs_returned = pageCount,
-                runs_total = rows.Count,
+                runs_total = matchingRuns,
                 size_note = cut
                     ? $"{rows.Count - pageCount} of the {CountText.Plural(rows.Count, "run")} this read selected {(rows.Count - pageCount == 1 ? "was" : "were")} left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one server_name / collector_name / status to read the rest in full."
                     : null,

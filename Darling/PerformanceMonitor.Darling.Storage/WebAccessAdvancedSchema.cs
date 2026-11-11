@@ -14,7 +14,7 @@ public static class WebAccessAdvancedSchema
 {
     /// <summary>The migration creating the switch. It follows <see cref="WebAccessGroupSchema.Version"/>; the only groups table it
     /// touches is the journal, where a flip writes its row.</summary>
-    public const int Version = 259;
+    public const int Version = 262;
 
     /// <summary>DDL for the switch, its owner guard, the protected setter and the hardening function. Every statement is re-runnable, so a
     /// half-applied store finishes on the next attempt.</summary>

@@ -155,6 +155,53 @@ AND   ($3::text IS NULL OR lower(metric_name) = lower($3))
 AND   ($4::integer[] IS NULL OR server_id = ANY($4))
 AND   TRUE /* family */";
 
+    /// <summary>#8551: what the web sidebar's alert badge needs, grouped in the store: the actionable rows (not muted, not
+    /// dismissed) of the window, one group per server, metric and fired tier, with the group's size and newest time. $1 window
+    /// start, $2 window end (naive UTC), $3 the caller's server grant (null = every server). No row cap, so a window busier than
+    /// any page still counts every actionable row, and no detail_text or context_json leaves the store. The tier is read off the
+    /// stored context's own <c>Severity</c> member (the serializer writes it compact and as a name, and no nested member is
+    /// called that, so the text only matches the member itself); a row with none is decided by its metric name, as
+    /// <see cref="PerformanceMonitor.Alerting.AlertHistoryRowSeverity.DescribeFired"/> does. Negative server ids are real ids and are kept.</summary>
+    public const string AlertBadgeGroupsSql = @"
+SELECT a.server_id,
+       a.metric_name,
+       CASE WHEN a.context_json LIKE '%""Severity"":""Critical""%' THEN 2
+            WHEN a.context_json LIKE '%""Severity"":""Warning""%' THEN 1
+            ELSE 0 END AS fired_tier,
+       COUNT(*) AS alert_count,
+       MAX(a.alert_time) AS latest_alert_time
+FROM config_alert_log a
+WHERE a.alert_time >= $1
+AND   a.alert_time <= $2
+AND   a.muted = FALSE
+AND   a.dismissed = FALSE
+AND   ($3::integer[] IS NULL OR a.server_id = ANY($3))
+GROUP BY a.server_id, a.metric_name, 3";
+
+    /// <summary>One group of <see cref="AlertBadgeGroupsSql"/>: <see cref="FiredTier"/> is 2 (fired Critical), 1 (fired Warning) or 0 (the row stored none).</summary>
+    public sealed record AlertBadgeGroup(int ServerId, string MetricName, int FiredTier, long Count, DateTime LatestAlertTime);
+
+    /// <summary>#8551: the groups of <see cref="AlertBadgeGroupsSql"/> for the window, limited to <paramref name="allowedServerIds"/>
+    /// when the caller holds a grant (the same ids <c>get_alert_history</c> binds), every server otherwise.</summary>
+    public static async Task<List<AlertBadgeGroup>> GetAlertBadgeGroupsAsync(
+        NpgsqlDataSource postgres, DateTime sinceUtc, DateTime untilUtc, IReadOnlyList<int>? allowedServerIds, CancellationToken cancellationToken = default)
+    {
+        var groups = new List<AlertBadgeGroup>();
+        await using var command = postgres.CreateCommand(AlertBadgeGroupsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddTimestamp(command, sinceUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, untilUtc);
+        command.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Integer, (object?)allowedServerIds?.ToArray() ?? DBNull.Value);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            groups.Add(new AlertBadgeGroup(reader.GetInt32(0), reader.GetString(1), reader.GetInt32(2), reader.GetInt64(3), reader.GetDateTime(4)));
+        }
+
+        return groups;
+    }
+
     /// <summary>
     /// Recent alerts newest first, excluding dismissed rows — the Alert History read. With no
     /// <paramref name="serverId"/> it aggregates ALL servers (the fleet default); with one it scopes to that

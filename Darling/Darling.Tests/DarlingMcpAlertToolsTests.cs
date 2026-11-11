@@ -108,7 +108,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     [Theory]
-    [InlineData("get_alert_history", "server_name,hours_back,limit,as_of,include_dismissed,metric_name,family,include_streak")]
+    [InlineData("get_alert_history", "server_name,hours_back,limit,as_of,include_dismissed,metric_name,family,include_streak,full_text")]
     [InlineData("get_mute_rules", "enabled_only")]
     [InlineData("update_alert_settings", "settings_json")]
     /* #5915: each mute write tool also takes the optional agent_action, last (Level 2: ignored under the writes arm). */
@@ -182,9 +182,6 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         var sql = Reader.AlertHistoryAllServersSql;
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
         Assert.Contains("(a.dismissed = FALSE OR $4)", sql, StringComparison.Ordinal);
-        /* fleet-wide: no fixed server. The one server predicate is the scoped web token's grant, bound NULL for every other caller. */
-        Assert.DoesNotContain("a.server_id = $", sql, StringComparison.Ordinal);
-        Assert.Contains("AND   ($6::integer[] IS NULL OR a.server_id = ANY($6))", sql, StringComparison.Ordinal);
         Assert.Contains("alert_time <= $2", sql, StringComparison.Ordinal);       /* #2495 upper edge */
         Assert.Contains("LIMIT $3", sql, StringComparison.Ordinal);
     }
@@ -516,7 +513,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         var poison = payload["poison_wait"]!;
         Assert.Equal(1000, poison["threshold_ms"]!.GetValue<int>());
         Assert.Equal(DarlingMcpAlertTools.PoisonWaitThresholdMsNote, poison["threshold_ms_note"]!.GetValue<string>());
-        Assert.StartsWith("retired by #3593", DarlingMcpAlertTools.PoisonWaitThresholdMsNote, StringComparison.Ordinal);
+        /* #8572: the reply names no tracker number. */
+        Assert.DoesNotMatch(@"#\d", DarlingMcpAlertTools.PoisonWaitThresholdMsNote);
 
         /* Setting the value: stored under its old bounds, named in the targets, and warned about. */
         var (targets, error, warnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(

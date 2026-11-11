@@ -43,9 +43,13 @@ a:hover { text-decoration: underline; }
   flex-direction: column;
   position: sticky;
   top: 0;
-  height: 100vh;
+  /* #8578: the column fills the window above the fixed status bar. The brand, the page links' fold button, the Servers heading and
+     the search box keep their height; the page links and the server list each scroll on their own. The sidebar's own scrollbar is
+     only the fallback for a window too short for even the minimum of both. */
+  height: calc(100vh - 28px);
   overflow-y: auto;
 }
+#sidebar > * { flex-shrink: 0; }
 
 .brand {
   padding: 1rem 1.25rem;
@@ -75,7 +79,33 @@ a:hover { text-decoration: underline; }
 .refresh-control { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--muted); }
 .refresh-control .refresh-select { font-size: 0.82rem; }
 
-.nav { padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
+/* #8578: the page links. Sixteen entries used to push the server list below the fold on a short window. The block shrinks first
+   when the window is short (down to the button and about three entries) and never grows past 15rem; the links scroll inside it. */
+#sidebar > .nav-block { flex: 0 1 auto; display: flex; flex-direction: column; border-bottom: 1px solid var(--border); }
+/* The floor (the button plus about three links) is set on the block: a nested scroller's own minimum does not count toward the block's. */
+#sidebar > .nav-block:has(> .nav:not([hidden])) { min-height: 8.5rem; }
+.nav-collapse {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0.55rem 1.25rem 0.3rem;
+  background: none;
+  border: 0;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  text-align: left;
+  cursor: pointer;
+}
+.nav-collapse:hover { color: var(--fg); }
+.nav-collapse:focus-visible { outline: 2px solid var(--muted); outline-offset: -2px; }
+.nav-collapse-chevron { width: 0.9rem; font-size: 0.7rem; }
+.nav { padding: 0 0 0.4rem; flex: 1 1 auto; min-height: 0; max-height: 15rem; overflow-y: auto; }
+.nav[hidden] { display: none; }
 .nav a,
 .server-item {
   display: flex;
@@ -102,6 +132,23 @@ a:hover { text-decoration: underline; }
   text-transform: uppercase;
   letter-spacing: 0.6px;
   color: var(--muted);
+}
+/* #8578: the Servers heading and the search box stay put; only the rows scroll, and they take every pixel the page links and the
+   views leave. The minimum is about five rows. */
+.server-list-header, .server-search { flex: 0 0 auto; }
+#server-list { flex: 1 1 0; min-height: 11.5rem; overflow-y: auto; }
+/* #8631: on a desktop-width window the 15rem cap above was a cap at every height, so most of the sixteen page links sat behind a
+   scroll on a 1080-high window. Here the page links take their own height and every entry shows whenever the sidebar has room for
+   all of them and five server rows. Only when it has not does space come out: first from the views list (a shrink factor of 100
+   against the page block's 1 takes nearly all of a shortfall first, down to about two rows, and the list scrolls inside that), then
+   from the page block, which shrinks with the window (the sidebar is as tall as the window) down to the button and five entries, so
+   Alert History stays in view at 1280x720. The server list keeps five rows (12rem at 32 px a row). The phone-width menu below
+   768 px keeps the rules above. */
+@media (min-width: 769px) {
+  .nav { max-height: none; }
+  #sidebar > .nav-block:has(> .nav:not([hidden])) { min-height: 14rem; }
+  #server-list { min-height: 12rem; }
+  #sidebar > #view-list { flex: 0 100 auto; min-height: 4.5rem; overflow-y: auto; }
 }
 .server-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -1162,7 +1209,6 @@ table.data td .disclosure { margin-top: 0; }
 #statusbar .sb-sep { color: var(--border); }
 /* A collection state that is not ok reads as a warning. */
 #statusbar .sb-warn { color: var(--warn, #e0a030); font-weight: 600; }
-#server-list { padding-bottom: 34px; }
 
 /* ─────────────────────────── alert status cell (collapsed channel/sent/muted/error) ─────────────────────────── */
 
@@ -1285,6 +1331,15 @@ pre.code {
 .markdown-body .md-pre code { font-family: var(--mono); font-size: 0.8rem; color: var(--dim); white-space: pre; }
 /* A "text" fence (the notebook's finding story): still literal text, but wrapped prose in the body font. */
 .markdown-body .md-pre-text code { font-family: inherit; font-size: 0.9rem; color: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Pipe tables and block quotes (markdown.js): the table scrolls sideways inside its own wrapper instead of widening the page. */
+.markdown-body .md-table-wrap { margin: 0.6em 0; overflow-x: auto; }
+.markdown-body .md-table { border-collapse: collapse; font-size: 0.9rem; }
+.markdown-body .md-table th,
+.markdown-body .md-table td { border: 1px solid var(--border); padding: 0.25rem 0.6rem; text-align: left; vertical-align: top; }
+.markdown-body .md-table th { background: var(--bg-dark); font-weight: 600; }
+.markdown-body .md-table .md-al-right { text-align: right; }
+.markdown-body .md-table .md-al-center { text-align: center; }
+.markdown-body .md-quote { margin: 0.6em 0; padding: 0.1rem 0.9rem; border-left: 3px solid var(--border); color: var(--dim); }
 .markdown-body .md-link { color: var(--accent); }
 .markdown-body .md-link:hover { text-decoration: underline; }
 
@@ -1343,6 +1398,8 @@ pre.code {
   font-size: 0.78rem;
 }
 .cell-pin-strip .pin-badge { margin-left: 0; }
+/* #8630: the label on a read cell whose tool has no end time to pin: muted, because nothing here is pinned. */
+.pin-badge.pin-badge-current { background: transparent; color: var(--muted); border-color: var(--border); }
 
 /* ─────────────────────────── availability groups (#991) ─────────────────────────── */
 
@@ -1551,6 +1608,10 @@ table.data td.rec-text { min-width: 16rem; }
 .jh-detail:empty { display: none; }
 .jh-detail { background: var(--bg-dark); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; margin: 8px 0; }
 .jh-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+/* #8578: a picked request's heading is scrolled to and focused; it clears the 48px top bar of a narrow window and the status bar at the bottom. */
+.jh-detail-title { scroll-margin: 56px 0 48px; }
+.jh-detail-title:focus { outline: none; }
+.jh-detail-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .jh-detail-message { margin: 8px 0 0; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* The Investigations page (#5904) reuses the jh-detail pane, head and message above; these two only space its sections and its report blocks. */
 .inv-section { margin: 10px 0 0; }

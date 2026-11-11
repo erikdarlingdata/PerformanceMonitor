@@ -11,7 +11,7 @@ The service reads the `servers` array in `darling.json` on the first start only.
 To change the list, use one of these:
 
 - The Viewer: **Manage Servers**.
-- The `add_servers`, `edit_server` and `remove_server` MCP tools. They need `mcp.allowWrites` and `mcp.allowServerAdmin`.
+- The `add_servers`, `edit_server`, `remove_server` and `set_server_action` MCP tools. They need `mcp.allowWrites` and `mcp.allowServerAdmin`.
 - The `--add-server` command line verb. It can add a server. It cannot remove one.
 
 The web Admin page can edit a server that already exists. It cannot add, remove, enable or disable one. The page says so itself. For the full list of what the file still controls, see [`darling.json` is only a seed](install.md#darlingjson-is-only-a-seed).
@@ -133,7 +133,7 @@ The key is a hash of the sign-in that Darling works out when you sign in. It is 
 To pause all collection:
 
 1. In the Viewer, open **Settings**. Under **Data Collection**, click **Pause Collection**. Wait for the status line to change.
-2. Or call `pause_collection` through MCP. It needs `mcp.allowWrites`. Then call `get_command_result` and `get_collection_state` to see that it took effect.
+2. Or call `pause_collection` through MCP. It needs `mcp.allowWrites` or an `operator` token in `mcp.tokens`. Then call `get_command_result` and `get_collection_state` to see that it took effect.
 
 To resume, click **Resume Collection** in the same place, or call `resume_collection`.
 
@@ -246,6 +246,7 @@ An older build ignores what those migrations added, so it can read some newer da
 - **V239**: an older build does not know the fleet rollup of the Query Store compose stamp ([#7146](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7146)). Rolling back leaves `collect.query_store_compose_fleet` and the `fleet_built_seq` column of `collect.query_store_compose_stamp_built` in place. The older build neither reads nor fills them, so the rollup stops growing and its hours go stale. Nothing to do before rolling back. If you roll forward again, an hour the older build rebuilt reads from the stamp until the next hourly pass rebuilds its fleet rows, newest first, and the next cleanup removes the fleet rows of any hour the older build retired. Until then those leftover rows are not read, because a read trusts the fleet rows of an hour only when the hour still has a ledger row.
 - **V240**: an older build does not know the execution-weighted sums on the Query Store daily table ([#7169](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7169)). Rolling back leaves the six `avg_*_wsum` columns of `collect.query_store_top_daily` in place. The older build ignores them and reads its own `_sum` and `_n` columns, so nothing is read differently and nothing needs doing before you roll back. Days the older build builds while it runs are written with NULL weighted sums, and so are the days built before V240. The newer build does not trust such a day: `get_query_store_top` reads it from the wide table, which gives the exact answer but is slower for a long window, and the service rebuilds it, newest day first, 60 builds an hour. That holds when you roll forward again and when an older and a newer instance share one store. Nothing needs doing in either case. After the upgrade itself, a store with 211 servers takes at least 35 hours, and probably 45 hours or more, to rebuild all of its roughly 10 days. The 35 hours is 2,110 builds at 60 an hour. The routine builds of each new day also use some of those 60, and a long hourly pass can stop early. Short windows return to the summary within the first hours, because the newest days come first.
 - **V241**: an older build does not read the blocking process's open transaction count from a blocked process report ([#7497](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7497)). Rolling back leaves `collect.blocked_process_reports.blocking_open_transaction_count` in place. The older build ignores it, so nothing is read differently and nothing needs doing before you roll back. Reports the older build stores while it runs have NULL there, as do reports stored before V241. Leave the column in place: the view `collect.v_blocked_process_reports` includes it, so a manual `DROP COLUMN` is refused until that view is dropped and recreated.
+- **V259**: an older build does not know the daily wait totals ([#8549](https://github.com/erikdarlingdata/PerformanceMonitor/issues/8549)). Rolling back leaves `collect.wait_stats_daily` in place, a TimescaleDB continuous aggregate (a plain view on a store without TimescaleDB), with its refresh and retention policies. The older build ignores it and reads the raw `wait_stats` rows for the Daily Summary exactly as before, so nothing needs to be done before you roll back. The aggregate keeps refreshing at a few thousand rows a month for each server.
 
 ### Upgrading from a build that predates the script
 

@@ -1219,16 +1219,34 @@ internal static class DarlingDataReader
                     FILTER (WHERE q.query_text IS NOT NULL OR q.query_text_digest IS NOT NULL) AS latest_text_key,
                 MAX(w.rank_metric) AS rank_metric,
                 MAX(w.rank_cpu) AS rank_cpu
-            FROM query_stats AS q
+            FROM (
+                /* #8570: the window's rows of the winners' query hashes only, through idx_query_stats_server_hash_time
+                   (server_id, query_hash, collection_time) where a store has it. The join below used to be the only thing that
+                   narrowed this pass to the winners, so a 24-hour window scanned every row it had a second time (360,000 rows
+                   and 36,700 pages to build 25 wide rows; 37,700 pages in all against 73,100 here). The equality is plain (an
+                   IN semi-join, so a hash shared by two winners is read once, not once a winner) and cannot match a NULL
+                   hash, so the second arm reads the NULL-hash rows, and only when a winner has a NULL hash. The join below stays
+                   the exact NULL-safe match, so the groups and every figure are unchanged. */
+                SELECT * FROM query_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                AND   query_hash IN (SELECT win_query_hash FROM winners)
+                UNION ALL
+                SELECT * FROM query_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                AND   query_hash IS NULL
+                AND   EXISTS (SELECT 1 FROM winners WHERE win_query_hash IS NULL)
+            ) AS q
             JOIN winners AS w
                 ON  COALESCE(query_hash, '') = COALESCE(w.win_query_hash, '')
                 AND database_name IS NOT DISTINCT FROM w.win_database_name
                 AND query_hash IS NOT DISTINCT FROM w.win_query_hash
                 AND host_object_name IS NOT DISTINCT FROM w.win_host_object_name
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, query_hash, host_object_name
         ),
         latest_text AS MATERIALIZED (
@@ -4625,6 +4643,61 @@ FROM config.config_collector_schedules";
     }
 
     /// <summary>
+    /// #8571: whether one collector has EVER recorded a run for this server, ignoring any window. An event-list tool that finds no rows
+    /// asks it to tell a collector that never ran (not_collected, with the enable step) from one that ran and found nothing (empty).
+    /// LIMIT 1 on <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>, so it stops at the first row.
+    /// </summary>
+    public const string CollectorEverRanSql = """
+        SELECT 1
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collector_name = $2
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="CollectorEverRanSql"/>.</summary>
+    public static async Task<bool> CollectorEverRanAsync(
+        NpgsqlDataSource postgres, int serverId, string collectorName, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(CollectorEverRanSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddNullableText(command, collectorName);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    /// <summary>
+    /// #8571: the number of log rows that match <see cref="GetCollectionLogAsync"/>'s filters in the window, uncapped, for the page's
+    /// <c>runs_total</c>. Asked only when the over-fetch saw more rows than the limit, so a page that holds everything never pays for it.
+    /// </summary>
+    public const string CollectionLogCountSql = """
+        SELECT COUNT(*)
+        FROM v_collection_log
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   ($4::text IS NULL OR collector_name = $4::text)
+        AND   ($5::double precision IS NULL OR duration_ms >= $5::double precision)
+        AND   ($6::text IS NULL OR status = UPPER($6::text))
+        """;
+
+    /// <summary>Runs <see cref="CollectionLogCountSql"/>.</summary>
+    public static async Task<long> CountCollectionLogAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime windowStartUtc, DateTime windowEndUtc,
+        string? collectorName, double? minDurationMs, string? status, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(CollectionLogCountSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddTimestamp(command, windowStartUtc);
+        AddTimestamp(command, windowEndUtc);
+        AddNullableText(command, string.IsNullOrWhiteSpace(collectorName) ? null : collectorName.Trim());
+        AddNullableDouble(command, minDurationMs);
+        AddNullableText(command, string.IsNullOrWhiteSpace(status) ? null : status.Trim());
+        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
     /// Runs <see cref="CollectionLogSql"/>, or <see cref="CollectionLogSlowestFirstSql"/> when
     /// <paramref name="minDurationMs"/> is supplied. See <see cref="CollectionLogBody"/> for the window and
     /// filter semantics.
@@ -4801,6 +4874,38 @@ FROM config.config_collector_schedules";
         ORDER BY cl.duration_ms DESC NULLS LAST, cl.collection_time DESC
         LIMIT $3
         """;
+
+    /// <summary>
+    /// #8571: the fleet twin of <see cref="CollectionLogCountSql"/>: the log rows that match <see cref="CollectionLogFleetBody"/>'s
+    /// filters in the window across the same enabled servers (the same <c>servers</c> join), uncapped, for the fleet page's
+    /// <c>runs_total</c>. Asked only when the over-fetch saw more rows than the limit. $1 window start, $2 window end, $3 collector
+    /// name or NULL, $4 duration floor or NULL, $5 status or NULL.
+    /// </summary>
+    public const string CollectionLogFleetCountSql = """
+        SELECT COUNT(*)
+        FROM v_collection_log cl
+        JOIN servers s ON s.server_id = cl.server_id AND s.is_enabled
+        WHERE cl.collection_time >= $1
+        AND   cl.collection_time <= $2
+        AND   ($3::text IS NULL OR cl.collector_name = $3::text)
+        AND   ($4::double precision IS NULL OR cl.duration_ms >= $4::double precision)
+        AND   ($5::text IS NULL OR cl.status = UPPER($5::text))
+        """;
+
+    /// <summary>Runs <see cref="CollectionLogFleetCountSql"/>.</summary>
+    public static async Task<long> CountCollectionLogFleetAsync(
+        NpgsqlDataSource postgres, DateTime windowStartUtc, DateTime windowEndUtc,
+        string? collectorName, double? minDurationMs, string? status, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(CollectionLogFleetCountSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddTimestamp(command, windowStartUtc);
+        AddTimestamp(command, windowEndUtc);
+        AddNullableText(command, string.IsNullOrWhiteSpace(collectorName) ? null : collectorName.Trim());
+        AddNullableDouble(command, minDurationMs);
+        AddNullableText(command, string.IsNullOrWhiteSpace(status) ? null : status.Trim());
+        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+    }
 
     /// <summary>Whether ANY enabled server has EVER recorded a collector run — the fleet-wide
     /// <see cref="HasAnyCollectionLogSql"/>, used the same way: to tell a genuinely quiet fleet-wide window

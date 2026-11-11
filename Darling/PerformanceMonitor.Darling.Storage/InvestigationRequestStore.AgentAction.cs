@@ -494,7 +494,7 @@ RETURNING journal_id";
             return new AgentActionRefusal(AgentActionCodes.NotLevel2,
                 "This request is not Level 2: its routes let an agent investigate, not change settings. Report what you would change instead.");
 
-        if (call.Target.ServerId != live.ServerId)
+        if (!call.Target.NamesServer || call.Target.ServerId != live.ServerId)
             return new AgentActionRefusal(AgentActionCodes.OtherServer,
                 $"This change targets {call.Target.ServerName}; the request is for {live.ServerName}. Level 2 changes only the request's server.");
 

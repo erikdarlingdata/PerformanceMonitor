@@ -540,7 +540,7 @@ public partial class MainWindow
            with nothing said. The store's log line has the reason; this is the half the user sees. */
         StatusText.Text = _serverStore.LastSaveSucceeded
             ? (isFavorite ? $"Pinned {server.DisplayName}" : $"Unpinned {server.DisplayName}")
-            : $"Could not save the pin for {server.DisplayName} — see the viewer log. It will be back as it was on the next launch.";
+            : $"Could not save the pin for {server.DisplayName}: see the viewer log. It will be back as it was on the next launch.";
     }
 
     private async void ServerContextMenu_Edit_Click(object sender, RoutedEventArgs e)
@@ -581,7 +581,7 @@ public partial class MainWindow
     private async void ServerContextMenu_Remove_Click(object sender, RoutedEventArgs e)
     {
         var server = GetServerFromContextMenu(sender);
-        if (server is null || _dataService is null)
+        if (server is null || _dataService is null || _dataService.IsReadOnly)
         {
             return;
         }
@@ -641,7 +641,7 @@ public partial class MainWindow
     private async void ServerContextMenu_Silence_Click(object sender, RoutedEventArgs e)
     {
         var server = GetServerFromContextMenu(sender);
-        if (server is null || _dataService is null)
+        if (server is null || _dataService is null || _dataService.IsReadOnly)
         {
             return;
         }
@@ -662,7 +662,7 @@ public partial class MainWindow
             server.SetSilenced(true);
             _viewerMuteRules.Add(silence);
             StatusText.Text =
-                $"Silenced all alerts for '{server.DisplayName}' — tray toasts stop now; the service applies it within "
+                $"Silenced all alerts for '{server.DisplayName}': tray toasts stop now; the service applies it within "
                 + $"{ViewerDataService.ServiceReloadTickSeconds} s. Right-click → Unsilence to restore.";
         }
         catch (ViewerReadOnlyException ex)
@@ -690,7 +690,7 @@ public partial class MainWindow
     private async void ServerContextMenu_Unsilence_Click(object sender, RoutedEventArgs e)
     {
         var server = GetServerFromContextMenu(sender);
-        if (server is null || _dataService is null)
+        if (server is null || _dataService is null || _dataService.IsReadOnly)
         {
             return;
         }
@@ -1037,7 +1037,7 @@ public partial class MainWindow
             var message = registrySaved
                 ? $"Imported {CountText.Plural(imported, "server definition")}."
                 : $"Read {CountText.Plural(imported, "server definition")}, but {(imported == 1 ? "it" : "they")} could not be saved to "
-                  + $"{Path.GetFileName(ViewerServerStore.DefaultFilePath())} — see the viewer log. {(imported == 1 ? "It" : "They")} will "
+                  + $"{Path.GetFileName(ViewerServerStore.DefaultFilePath())}: see the viewer log. {(imported == 1 ? "It" : "They")} will "
                   + "not be there on the next launch.";
             if (skipped > 0)
             {

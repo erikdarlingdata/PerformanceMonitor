@@ -215,6 +215,22 @@ public sealed class PgTargetZeroHistoryTests
         Assert.DoesNotContain("measured ZERO", unstampedBlock.Investigation, StringComparison.Ordinal);
     }
 
+    /// <summary>#8532: the deadlock rate the sentence gives beside its count is not written as zero when it is too
+    /// small for the sentence's one decimal place.</summary>
+    [Fact]
+    public void ComposeDeadlockRatio_ARateTooSmallForOneDecimalPlace_ReadsLessThanATenth()
+    {
+        var bucket = Trusted();
+        var perHour = bucket.Mean * (AnomalyThresholds.PgRatioAnomalyThreshold + 1);
+        var fact = DeadlockFact(Build(bucket, (long)Math.Ceiling(perHour * ObservedHours), perHour)!);
+        fact.Metadata["current_rate_per_hour"] = 0.03;
+
+        var block = Compose(fact);
+
+        Assert.Contains("The deadlock rate reached <0.1/hour", block.Headline, StringComparison.Ordinal);
+        Assert.Contains("<0.1 per observed hour", block.Investigation, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ComposeDeadlockRatio_TrustedBucket_KeepsTheRatioWording()
     {
@@ -226,6 +242,10 @@ public sealed class PgTargetZeroHistoryTests
 
         Assert.Contains("about 4× its baseline for this time of week", block.Headline, StringComparison.Ordinal);
         Assert.Contains("about 4× the 2/hour this server normally sees at this hour-of-week", block.Investigation, StringComparison.Ordinal);
+
+        // #8532: a baseline too small for the sentence's one decimal place is not written as zero.
+        fact.Metadata["baseline_rate"] = 0.03;
+        Assert.Contains("the <0.1/hour this server normally sees at this hour-of-week", Compose(fact).Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("measured ZERO", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("first occurrence", block.Headline, StringComparison.Ordinal);
     }

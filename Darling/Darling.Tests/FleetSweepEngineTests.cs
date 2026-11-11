@@ -124,6 +124,25 @@ public sealed class FleetSweepEngineTests
         Assert.Contains("\"blocking_rate_per_hour\":0", verdictA.VerdictJson, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #8572: the blocking rate in the evidence payload is rounded for reading, and a rare rate is not rounded to
+    /// nothing. One blocking event over 30 days is 1/720 an hour, which a fixed two places would answer as 0.
+    /// </summary>
+    [Fact]
+    public void VerdictJson_ABlockingRateOfOneInThirtyDays_IsNotRoundedToZero()
+    {
+        var reading = new FleetSweepServerReading(
+            1, "server-a",
+            new DailyHealthSignals { HasData = true, BlockingEvents = 1, Window = TimeSpan.FromDays(30) }, 0, null);
+        var verdict = ComposeSimple(new[] { reading }).Verdicts.Single();
+
+        using var doc = System.Text.Json.JsonDocument.Parse(verdict.VerdictJson!);
+        var rate = doc.RootElement.GetProperty("blocking_rate_per_hour").GetDouble();
+        Assert.NotEqual(0.0, rate);
+        Assert.Equal(1.0 / 720, rate, 3);
+        Assert.True(rate.ToString("R", System.Globalization.CultureInfo.InvariantCulture).Length <= 8, "the rate is rounded, not the raw quotient");
+    }
+
     /* ─────────────────────── the diff: sweep N against sweep N−1's rows ─────────────────────── */
 
     /// <summary>

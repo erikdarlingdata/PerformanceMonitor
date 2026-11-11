@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -98,8 +99,9 @@ ORDER BY ds.total_size_mb DESC";
     /// </summary>
     private static string IdleActivityForCagg(string relationSql, DateTime ceilingHourUtc, DateTime watermarkUtc)
     {
-        var ceiling = $"TIMESTAMP '{ceilingHourUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
-        var watermark = $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var ceiling = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{ceilingHourUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
+        var watermark = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
 
         return $@"db_activity AS (
     SELECT
@@ -224,7 +226,8 @@ SELECT (SELECT collection_time FROM v_query_stats WHERE server_id = $1 ORDER BY 
     {
         ArgumentNullException.ThrowIfNull(coverage);
 
-        var watermark = $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var watermark = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
         var relationSql = coverage.StitchedRelationSql(
             TimescaleSupport.QueryStatsDbHourlyView, "f", coverageStartUtc, RollupCoverage.StitchTier.Hourly);
 
@@ -510,6 +513,11 @@ ORDER BY bc.total_wait_time_ms DESC";
     /// of the text, so two digests never hold one text, and a row that carries its text inline (written before the dimensions) groups by
     /// that text as before. The plan of a row is its inline plan, else its dimension plan, and the statement keeps the greatest of them,
     /// as <c>MAX(query_plan_xml)</c> over the view did.</para>
+    ///
+    /// <para>#8552: this raw form reads every row of the window, which is a parallel sequential scan of each chunk the window touches (all of
+    /// every server's rows, because the chunk is shared) and cost 12 to 30 seconds on a production store with cold buffers. It runs only on a
+    /// store whose hourly rollup does not cover the window (<see cref="ResolveExpensiveQueriesRouteAsync"/>); otherwise
+    /// <see cref="ExpensiveQueriesSqlFor"/> answers from the rollup.</para>
     /// </summary>
     public const string ExpensiveQueriesSql = $@"
 WITH grp AS (
@@ -597,12 +605,152 @@ GROUP BY
     t.query_hash
 ORDER BY t.cpu DESC, t.database_name, t.sql_handle, t.query_text";
 
-    /// <summary>Reads the top-N statements. The caller clamps <paramref name="cutoffUtc"/> to the horizon that still
+    /// <summary>The split of the window for <see cref="ExpensiveQueriesSqlFor"/>: whole hours from <see cref="CeilingHourUtc"/> up to
+    /// <see cref="TrailingStartUtc"/> come from the hourly rollup, the partial leading hour before the ceiling and everything from the trailing
+    /// start on (the hours the rollup has not materialized) from raw. The three ranges never overlap.</summary>
+    public readonly record struct ExpensiveQueriesRoute(DateTime CeilingHourUtc, DateTime TrailingStartUtc);
+
+    /// <summary>
+    /// #8552: the hourly rollup route of the expensive-queries read, or null when the raw statement must answer. The route needs the per-statement
+    /// hourly rollup that carries CPU and logical reads (<see cref="TimescaleSupport.QueryStatsIoHourlyView"/>), its oldest bucket at or before the
+    /// first whole hour of the window (a rollup that began later holds only part of the window, and a sum over it would be short), and a
+    /// materialization watermark past that first whole hour (a rollup that has not caught up leaves the raw statement the whole window). The
+    /// text and plan lookups need <c>idx_query_stats_server_hash_time</c>, which the service's tuning pass creates: without it each lookup walks the
+    /// window's rows (394,690 buffers measured on a 36 hour store, 18 times the raw statement), so a store that lacks it reads raw.
+    /// </summary>
+    public static async Task<ExpensiveQueriesRoute?> ResolveExpensiveQueriesRouteAsync(
+        NpgsqlDataSource dataSource, DateTime cutoffUtc, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(dataSource, cancellationToken);
+        if (!rollups.Has(TimescaleSupport.QueryStatsIoHourlyView))
+            return null;
+
+        var ceilingHour = CeilingHour(cutoffUtc);
+        if (coverage.FloorOf(TimescaleSupport.QueryStatsIoHourlyView) is not DateTime floor || floor > ceilingHour)
+            return null;
+
+        await using (var indexProbe = dataSource.CreateCommand(
+            "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'collect' AND tablename = 'query_stats' AND indexname = 'idx_query_stats_server_hash_time')"))
+        {
+            indexProbe.CommandTimeout = commandTimeoutSeconds;
+            if (await indexProbe.ExecuteScalarAsync(cancellationToken) is not true)
+                return null;
+        }
+
+        var watermark = await RollupMaterializationWatermark.GetAsync(
+            dataSource, TimescaleSupport.QueryStatsIoHourlyView, TimescaleSupport.HourlyBucket, commandTimeoutSeconds, cancellationToken);
+        return watermark is DateTime mark && mark > ceilingHour ? new ExpensiveQueriesRoute(ceilingHour, mark) : null;
+    }
+
+    /// <summary>
+    /// #8552: <see cref="ExpensiveQueriesSql"/> over the hourly rollup. $1 server_id, $2 cutoff, $3 topN, the same parameters and the same eleven columns.
+    /// The sums come from three ranges that partition the window: the whole hours in <c>[ceiling, trailingStart)</c> from the rollup
+    /// (<see cref="TimescaleSupport.QueryStatsIoHourlyView"/>, one row per statement per hour), the partial leading hour <c>[$2, ceiling)</c> from raw,
+    /// and the hours the rollup has not materialized, <c>[trailingStart, now)</c>, from raw. The statements are ranked at the rollup's grain
+    /// (database, sql_handle, query_hash), cut to the top N, and only then is each kept statement's text and plan read: one index probe per statement
+    /// on <c>idx_query_stats_server_hash_time</c>, newest sample first, so the raw rows read are bounded by the statements kept, not by the window.
+    ///
+    /// <para><b>What differs from the raw statement, and why.</b> (1) The statement is a (database, sql_handle, query_hash) group, where the raw
+    /// statement grouped by (database, sql_handle, resolved text): two statements of one batch that share a query_hash but differ in text (literal
+    /// variants) are one row here and two there, and one text that carries two hashes is two rows here and one there. The tie-break among equal CPU
+    /// sums is the hash where it was the text. (2) The rollup sums every sample with an interval, where the raw statement summed only the samples
+    /// whose CPU delta was above zero: a sample with no CPU still adds its executions and logical reads, so <c>executions</c>, the reads and the
+    /// averages count the cheap executions the raw statement left out. The CPU sum, the ranking and the window are unchanged. (3) The text and the
+    /// plan are the newest sample's (the newest sample that has one), where the raw statement kept the greatest plan text of all the samples.
+    /// A statement with a NULL query_hash has no probe key and reads no text or plan.</para>
+    /// </summary>
+    public static string ExpensiveQueriesSqlFor(ExpensiveQueriesRoute route)
+    {
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var ceiling = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{route.CeilingHourUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
+        var trailing = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{route.TrailingStartUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
+
+        return $@"
+WITH parts AS (
+    SELECT f.database_name, f.sql_handle, f.query_hash,
+           f.worker_time_sum AS cpu, f.logical_reads_sum AS reads, f.execution_count_sum AS execs
+    FROM collect.{TimescaleSupport.QueryStatsIoHourlyView} AS f
+    WHERE f.server_id = $1
+    AND   f.bucket >= {ceiling}
+    AND   f.bucket <  {trailing}
+
+    UNION ALL
+
+    SELECT database_name, sql_handle, query_hash, delta_worker_time, delta_logical_reads, delta_execution_count
+    FROM query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <  {ceiling}
+    AND   {TimescaleSupport.IntervalHonestSourceFilter}
+
+    UNION ALL
+
+    SELECT database_name, sql_handle, query_hash, delta_worker_time, delta_logical_reads, delta_execution_count
+    FROM query_stats
+    WHERE server_id = $1
+    AND   collection_time >= {trailing}
+    AND   {TimescaleSupport.IntervalHonestSourceFilter}
+),
+top AS (
+    SELECT database_name, sql_handle, query_hash,
+           SUM(cpu) AS cpu, SUM(reads) AS reads, SUM(execs) AS executions
+    FROM parts
+    GROUP BY database_name, sql_handle, query_hash
+    HAVING SUM(cpu) > 0
+    ORDER BY SUM(cpu) DESC, database_name, sql_handle, query_hash
+    LIMIT $3
+)
+SELECT
+    t.database_name,
+    t.cpu / 1000.0 AS total_cpu_ms,
+    CAST(t.cpu / 1000.0 / NULLIF(t.executions, 0) AS DECIMAL(19,2)) AS avg_cpu_ms,
+    t.reads AS total_reads,
+    CAST(t.reads * 1.0 / NULLIF(t.executions, 0) AS DECIMAL(19,0)) AS avg_reads,
+    t.executions,
+    LEFT(tx.query_text, 200) AS query_preview,
+    tx.query_text AS full_query_text,
+    pl.query_plan_xml,
+    pl.query_plan_gz,
+    t.query_hash
+FROM top AS t
+LEFT JOIN LATERAL (
+    SELECT COALESCE(q.query_text, d.query_text) AS query_text
+    FROM query_stats AS q
+    LEFT JOIN query_text_dim AS d ON d.digest = q.query_text_digest
+    WHERE q.server_id = $1
+    AND   q.query_hash = t.query_hash
+    AND   q.database_name IS NOT DISTINCT FROM t.database_name
+    AND   q.sql_handle IS NOT DISTINCT FROM t.sql_handle
+    AND   q.collection_time >= $2
+    AND   (q.query_text IS NOT NULL OR d.digest IS NOT NULL)
+    ORDER BY q.collection_time DESC, q.collection_id DESC
+    LIMIT 1
+) AS tx ON TRUE
+LEFT JOIN LATERAL (
+    SELECT COALESCE(q.query_plan_xml, p.query_plan_xml) AS query_plan_xml, p.query_plan_gz
+    FROM query_stats AS q
+    LEFT JOIN query_plan_dim AS p ON p.digest = q.query_plan_digest
+    WHERE q.server_id = $1
+    AND   q.query_hash = t.query_hash
+    AND   q.database_name IS NOT DISTINCT FROM t.database_name
+    AND   q.sql_handle IS NOT DISTINCT FROM t.sql_handle
+    AND   q.collection_time >= $2
+    AND   (q.query_plan_xml IS NOT NULL OR p.digest IS NOT NULL)
+    ORDER BY q.collection_time DESC, q.collection_id DESC
+    LIMIT 1
+) AS pl ON TRUE
+ORDER BY t.cpu DESC, t.database_name, t.sql_handle, t.query_hash";
+    }
+
+    /// <summary>Reads the top-N statements, from the hourly rollup where the store has one that covers the window (<see cref="ExpensiveQueriesSqlFor"/>),
+    /// from raw otherwise (<see cref="ExpensiveQueriesSql"/>). The caller clamps <paramref name="cutoffUtc"/> to the horizon that still
     /// retains query text, because no rollup carries per-row text.</summary>
     public static async Task<List<ExpensiveQuery>> GetExpensiveQueriesAsync(
         NpgsqlDataSource dataSource, int serverId, DateTime cutoffUtc, int topN, int commandTimeoutSeconds, CancellationToken cancellationToken)
     {
-        await using var command = dataSource.CreateCommand(ExpensiveQueriesSql);
+        /* #8552: the hourly rollup answers every whole hour of the window when the store has one that covers it; raw otherwise. */
+        var route = await ResolveExpensiveQueriesRouteAsync(dataSource, cutoffUtc, commandTimeoutSeconds, cancellationToken);
+        await using var command = dataSource.CreateCommand(route is { } r ? ExpensiveQueriesSqlFor(r) : ExpensiveQueriesSql);
         command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoffUtc, DateTimeKind.Unspecified) });

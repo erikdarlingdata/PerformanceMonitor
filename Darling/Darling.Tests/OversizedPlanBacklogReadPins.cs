@@ -35,7 +35,7 @@ namespace Darling.Tests;
 /// had two silent fallback readers; what it did not have was any way to see the sweep's verdicts, so the
 /// failure this read exists to prevent is a plausible-looking answer rather than a missing one. Each pin
 /// below covers one way this read could return numbers that look right and are not: counting "pending"
-/// differently from the sweep's own claim, letting the three verdict buckets overlap or leave a gap,
+/// differently from the sweep's own claim, letting the verdict buckets overlap or leave a gap,
 /// reporting a CHARACTER count under a byte-shaped name, and losing rows whose server has left the
 /// registry. Every one of those reads as a smaller or larger backlog than exists, with nothing to say
 /// so.</para>
@@ -56,12 +56,13 @@ public sealed class OversizedPlanBacklogReadPins
     private const string ToolSource =
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpOversizedPlanBacklogTools.cs";
 
-    /// <summary>The three statements this read is built from, as one sequence for the pins that hold a
+    /// <summary>The statements this read is built from, as one sequence for the pins that hold a
     /// property across all of them.</summary>
     private static string[] AllReadSql =>
     [
         DarlingOversizedPlanBacklogReader.PerServerRollupSql,
         DarlingOversizedPlanBacklogReader.CollectorCensusSql,
+        DarlingOversizedPlanBacklogReader.CollectorCensusForServerSql,
         DarlingOversizedPlanBacklogReader.RowsSql,
     ];
 
@@ -163,7 +164,8 @@ public sealed class OversizedPlanBacklogReadPins
             expected,
             DarlingOversizedPlanBacklogReader.VerdictOf(
                 captured ? at : null,
-                expired ? at : null));
+                expired ? at : null,
+                captured || expired ? at : null));
     }
 
     [Fact]
@@ -171,7 +173,8 @@ public sealed class OversizedPlanBacklogReadPins
     {
         /* The SQL half of the partition, and the arm that is easiest to "simplify" into
            expired_at IS NOT NULL on its own — at which point a both-stamps row is counted twice and
-           pending + captured + expired exceeds total_rows, which reads as a bigger backlog than exists. */
+           pending + captured + expired exceeds total_rows, which reads as a bigger backlog than exists. The
+           attempt arm keeps a row the trim dropped unfetched out of it: that row is the dropped bucket's. */
         foreach (var sql in new[]
         {
             DarlingOversizedPlanBacklogReader.PerServerRollupSql,
@@ -179,7 +182,7 @@ public sealed class OversizedPlanBacklogReadPins
         })
         {
             Assert.Contains(
-                "count(*) filter (where captured_at is null and expired_at is not null) as expired_rows",
+                "count(*) filter (where captured_at is null and expired_at is not null and last_attempt_at is not null) as expired_rows",
                 Normalize(sql),
                 StringComparison.Ordinal);
         }
@@ -228,13 +231,21 @@ public sealed class OversizedPlanBacklogReadPins
            real rather than remembered. */
         var roundWithPrecision = new Regex(@"round\s*\([^()]*(?:\([^()]*\)[^()]*)*,", RegexOptions.IgnoreCase);
 
+        /* #8570: the rollup and the fleet census read the discrete percentile through an index (the value at
+           position ceil(n / 2), as an OFFSET of the ordered column), which is the same discrete value; the live
+           tests compare it with percentile_disc row for row. The one-server census still spells the aggregate. */
+        Assert.Contains(
+            "percentile_disc(0.5) WITHIN GROUP (ORDER BY b.observed_bytes)",
+            DarlingOversizedPlanBacklogReader.CollectorCensusForServerSql,
+            StringComparison.Ordinal);
+
         foreach (var sql in new[]
         {
             DarlingOversizedPlanBacklogReader.PerServerRollupSql,
             DarlingOversizedPlanBacklogReader.CollectorCensusSql,
+            DarlingOversizedPlanBacklogReader.CollectorCensusForServerSql,
         })
         {
-            Assert.Contains("percentile_disc(0.5) WITHIN GROUP (ORDER BY b.observed_bytes)", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("percentile_cont", sql, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("double precision", sql, StringComparison.OrdinalIgnoreCase);
             Assert.False(roundWithPrecision.IsMatch(sql),
@@ -259,6 +270,7 @@ public sealed class OversizedPlanBacklogReadPins
 
         /* And the census carries no registry join at all, so it cannot lose a row that way either. */
         Assert.DoesNotContain("JOIN servers", DarlingOversizedPlanBacklogReader.CollectorCensusSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("JOIN servers", DarlingOversizedPlanBacklogReader.CollectorCensusForServerSql, StringComparison.Ordinal);
     }
 
     /* ---- the statements address the shipped table ---------------------------------------------------- */

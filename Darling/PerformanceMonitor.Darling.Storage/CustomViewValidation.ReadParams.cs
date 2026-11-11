@@ -30,6 +30,7 @@ public static partial class CustomViewValidation
             ["get_session_stats"] = new ReadPanelParam[] { new("server", false) },
             ["get_waiting_tasks"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("limit", false), new("database_name", false), new("as_of", false), new("include_monitor", false) },
             ["get_alert_history"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("limit", false), new("as_of", false), new("include_dismissed", false), new("metric_name", false), new("family", false), new("include_streak", false) },
+            ["get_alert_badge_summary"] = Array.Empty<ReadPanelParam>(),
             ["get_alert_settings"] = Array.Empty<ReadPanelParam>(),
             ["get_daily_health_report"] = new ReadPanelParam[] { new("date", false) },
             ["get_alert_details"] = new ReadPanelParam[] { new("server_id", true), new("metric_name", true), new("alert_time", true) },

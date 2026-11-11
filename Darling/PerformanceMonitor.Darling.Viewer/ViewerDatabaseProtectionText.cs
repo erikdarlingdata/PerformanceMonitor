@@ -38,22 +38,21 @@ public static class ViewerDatabaseProtectionText
     private const string Dash = "-";
 
     /// <summary>
-    /// The status line: the summary sentence and when the newest capture was taken. The capture time is stored naive UTC and belongs to
-    /// the picked server, so it reads in the display mode's zone on that server's <paramref name="clock"/> (#7343), stamped to the second
-    /// with the zone's label ("UTC", the server's offset such as "UTC+05:30", or this machine's zone name), as the grids stamp their times.
+    /// The status line: the summary sentence and when the newest capture was taken. The capture time is stored naive UTC and is stamped
+    /// to the second with its zone's label on the same clock as the tab's "Last refreshed" stamp (#8576), through
+    /// <see cref="ViewerTimeHelper.FormatFleetWide(DateTime, string, TimeDisplayMode)"/>: this machine's zone in Local mode, UTC in
+    /// every other mode, so the Server Time setting reads UTC here as it does beside it. It used to read the server's own offset
+    /// ("UTC-05:00") next to a refresh stamp in UTC, so one tab showed two clocks.
     /// </summary>
-    public static string StatusLine(ViewerDatabaseProtectionRead read, ServerClock clock)
+    public static string StatusLine(ViewerDatabaseProtectionRead read)
     {
         ArgumentNullException.ThrowIfNull(read);
-        ArgumentNullException.ThrowIfNull(clock);
         if (read.Summary is null || read.CapturedAt is not { } captured)
         {
             return read.Message ?? NoCapture;
         }
 
-        var mode = ViewerTimeHelper.CurrentDisplayMode;
-        var when = ViewerTimeHelper.FormatForDisplay(captured, ViewerTimeHelper.DisplayZoneFor(mode, clock), "yyyy-MM-dd HH:mm:ss")
-            + " " + ViewerTimeHelper.GetTimezoneLabel(mode, clock, captured);
+        var when = ViewerTimeHelper.FormatFleetWide(captured, "yyyy-MM-dd HH:mm:ss", ViewerTimeHelper.CurrentDisplayMode);
         return $"{read.Summary.Text}   Captured: {when}";
     }
 

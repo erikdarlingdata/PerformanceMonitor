@@ -496,7 +496,7 @@ public class LiteRecommendationsReaderTests
             Finding("DEADLOCKS", 1.9, analysisTime: t),            // Critical (higher raw)
         };
 
-        var items = LiteRecommendationsReader.MapFindings(findings, ServerName);
+        var items = LiteRecommendationsReader.MapFindings(findings, ServerName, lens: null, forcePlanStates: null, forcePlanStateUnavailableReason: null);
 
         Assert.Equal(4, items.Count);
         // Critical (1.9) -> Critical (1.6) -> Warning (0.8) -> Info (0.5)
@@ -519,7 +519,7 @@ public class LiteRecommendationsReaderTests
             Finding("BLOCKING_EVENTS", 1.6, analysisTime: older),
         };
 
-        var items = LiteRecommendationsReader.MapFindings(findings, ServerName);
+        var items = LiteRecommendationsReader.MapFindings(findings, ServerName, lens: null, forcePlanStates: null, forcePlanStateUnavailableReason: null);
         Assert.Single(items);
         // RootFactKey is no longer surfaced on the card; verify the newer batch (CPU_SQL_PERCENT)
         // won via its mapped Title (same fallback MapFinding uses: advice headline, else the key).
@@ -531,7 +531,7 @@ public class LiteRecommendationsReaderTests
     [Fact]
     public void MapFindings_Empty_ReturnsEmpty()
     {
-        Assert.Empty(LiteRecommendationsReader.MapFindings(Array.Empty<AnalysisFinding>(), ServerName));
+        Assert.Empty(LiteRecommendationsReader.MapFindings(Array.Empty<AnalysisFinding>(), ServerName, lens: null, forcePlanStates: null, forcePlanStateUnavailableReason: null));
     }
 
     // Correlate-and-focus slice 1 (review §1d): each card's advice gains a "what else fired in this
@@ -544,7 +544,7 @@ public class LiteRecommendationsReaderTests
         {
             Finding("CPU_SQL_PERCENT", 1.6, analysisTime: t),
             Finding("BLOCKING_EVENTS", 1.0, analysisTime: t),
-        }, ServerName);
+        }, ServerName, lens: null, forcePlanStates: null, forcePlanStateUnavailableReason: null);
 
         Assert.Equal(2, items.Count);
         Assert.All(items, i => Assert.Contains("Also surfaced in this analysis window:", i.AdviceText!));
@@ -557,7 +557,7 @@ public class LiteRecommendationsReaderTests
     public void MapFindings_NoCoFiredLine_ForSingleFinding()
     {
         var items = LiteRecommendationsReader.MapFindings(
-            new List<AnalysisFinding> { Finding("CPU_SQL_PERCENT", 1.6) }, ServerName);
+            new List<AnalysisFinding> { Finding("CPU_SQL_PERCENT", 1.6) }, ServerName, lens: null, forcePlanStates: null, forcePlanStateUnavailableReason: null);
 
         Assert.Single(items);
         Assert.DoesNotContain("Also surfaced in this analysis window:", items[0].AdviceText ?? string.Empty);

@@ -293,7 +293,7 @@ public static partial class PgTargetAdvice
 
         var countText = count.ToString("N0", CultureInfo.InvariantCulture);
         var plural = Math.Abs(count - 1) < 0.5 ? string.Empty : "s";
-        var rateText = rate.ToString("0.#", CultureInfo.InvariantCulture);
+        var rateText = PerformanceMonitor.Common.DailyHealthBandCalculator.RatePerHourText(rate, "0.#");
         var hours = fact.Metadata.GetValueOrDefault("observed_hours");
         var over = hours > 0 ? $" over {hours.ToString("0.#", CultureInfo.InvariantCulture)} observed hours" : string.Empty;
         var topDb = string.IsNullOrEmpty(fact.DatabaseName) ? string.Empty : $" {fact.DatabaseName} had the most.";
@@ -333,7 +333,7 @@ public static partial class PgTargetAdvice
             Headline = $"The deadlock rate reached {rateText}/hour, about {FactAdvice.RatioText(ratio)}× its baseline for this time of week",
             Investigation =
                 $"The engine counted {countText} deadlock{plural}{over}: {rateText} per observed hour, about " +
-                $"{FactAdvice.RatioText(ratio)}× the {baselineRate.ToString("0.#", CultureInfo.InvariantCulture)}/hour this server normally " +
+                $"{FactAdvice.RatioText(ratio)}× the {PerformanceMonitor.Common.DailyHealthBandCalculator.RatePerHourText(baselineRate, "0.#")}/hour this server normally " +
                 $"sees at this hour-of-week (pg_stat_database.deadlocks differenced with stats_reset honoured).{topDb}" + s_anomalyHedge,
         };
     }

@@ -1424,11 +1424,12 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                DeadlockRatePerHour gives: a PostgreSQL target's raw count is a structural zero, and a rate derived
                from it would publish 0.0/hr against a severity that reads Unknown (#3539 A3). */
             MaxSnapshotWaitMs = blocking.PeakSnapshotWaitMs,
-            BlockingRatePerHour = isPostgres
+            /* #8572: rounded by the one rate rule (two places, and two significant digits for a rare rate), as the health reads round the same rate. Nothing reads this field back, so no band sees the rounding. */
+            BlockingRatePerHour = TrendPayloads.RoundRate(isPostgres
                 ? ServerHealthClassifier.PostgresBlockingRatePerHour(blockingForBand, pgBlocking?.CapturesTotal ?? 0)
                 : blockingForBand.HasValue
                 ? ServerHealthClassifier.BlockingRatePerHour(blockingForBand.Value, deadlockWindow)
-                : null,
+                : null, 2),
             BlockingWindow = deadlockWindow,
             BlockingSeverity = isPostgres
                 ? ServerHealthClassifier.PostgresBlockingSeverity(blockingForBand, pgBlocking?.CapturesTotal ?? 0, blockingTiers)
@@ -1485,6 +1486,23 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             MetricCount = totalMetrics,
         };
     }
+
+    /// <summary>Whether a card is on the needs-attention list: its band is Warning or worse, or it is Healthy and
+    /// carries an advisory tile (#7561).</summary>
+    internal static bool NeedsAttention(FleetServerCard card) =>
+        card.Band != FleetHealthBand.Healthy || card.HasAdvisoryTile;
+
+    /// <summary>
+    /// The cards worst first (#8654), the one order <c>worst_servers</c> and a budgeted cards page share: the
+    /// needs-attention cards lead, then <see cref="ServerHealthClassifier.FleetHealthScore"/> descending (band first,
+    /// Offline over Critical over Warning over Healthy), then display name. <c>worst_servers</c> is the head of this
+    /// list, so a page cut anywhere in it keeps every card that ranks above the first one it leaves out.
+    /// </summary>
+    internal static List<FleetServerCard> WorstFirst(IEnumerable<FleetServerCard> cards) => cards
+        .OrderByDescending(NeedsAttention)
+        .ThenByDescending(c => ServerHealthClassifier.FleetHealthScore(c.Band, c.ToHealthMetrics()))
+        .ThenBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase)
+        .ToList();
 
     /// <summary>Reduces the pre-banded cards to the fleet rollup — band counts, cross-server totals (summed from
     /// the cards), and the worst-first ranking. Pure so the reduction is unit-testable without a store.</summary>
@@ -1562,11 +1580,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             if (card.DeadlockSeverity > deadlockTileSeverity) deadlockTileSeverity = card.DeadlockSeverity;
         }
 
-        var problems = cards
-            .Where(c => c.Band != FleetHealthBand.Healthy || c.HasAdvisoryTile)
-            .OrderByDescending(c => ServerHealthClassifier.FleetHealthScore(c.Band, c.ToHealthMetrics()))
-            .ThenBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        var problems = WorstFirst(cards.Where(NeedsAttention));
 
         var worst = problems
             .Take(worstCount)
@@ -1697,7 +1711,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                fact; the rate is added because it is the banded one. An unrateable window prints the count
                alone, which is exactly what the band had to go on. */
             parts.Add(c.DeadlockRatePerHour.HasValue
-                ? $"Deadlocks {c.DeadlockCount} ({c.DeadlockRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr)"
+                ? $"Deadlocks {c.DeadlockCount} ({DailyHealthBandCalculator.RatePerHourText(c.DeadlockRatePerHour.Value)}/hr)"
                 : $"Deadlocks {c.DeadlockCount}");
         }
 

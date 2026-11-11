@@ -147,7 +147,7 @@ public static class ComparisonBanding
     /// </summary>
     public static object BandRulesPayload => new
     {
-        baseline = $"delta_sigma is the reading's delta in robust-sigma units (MAD-based) of this server's own hour-of-day x day-of-week baseline for the comparison window's hour; stable within ±{StableWithinRobustSigmas:0.#}σ, worse/better beyond. Used only when that baseline is trustworthy (baseline_confidence > 0); beyond_anomaly_cutoff says whether the move also clears the anomaly detector's own cutoff for the metric.",
+        baseline = $"delta_sigma is the reading's delta in robust-sigma units (MAD-based) of this server's own hour-of-day x day-of-week baseline for the comparison window's hour; stable within ±{StableWithinRobustSigmas:0.#}σ, worse/better beyond. Used only when that baseline is trustworthy (baseline_confidence > 0); beyond_anomaly_cutoff says whether the move also clears the anomaly detector's own cutoff for the metric. A fact the scorer grades and rates negligible (severity 0) in BOTH windows gets no verdict (status stable), the same negligible-move rule the absolute band applies: delta_sigma and beyond_anomaly_cutoff stay on the row so the move is still visible, and the row is not counted in worse / better or in families_worse / families_better. A context fact the scorer never grades (SESSION_STATS, PG_TPS, PG_WAL_VOLUME_SHIFT) is banded on its baseline alone. A row banded on a reading other than the baseline_value / comparison_value it shows (PG_CONNECTION_SATURATION: peak sessions; PG_WAL_VOLUME_SHIFT: peak bytes per second) carries that reading for both windows in baseline_banded_value / comparison_banded_value, with banded_metric and banded_unit, and its verdict follows those readings, not the shown values.",
         absolute = $"no per-key dispersion is stored, so a status changes only when BOTH the value moved at least {MinimumRelativeMove:P0} of the larger side (relative_move) AND the larger side sits at least {MinimumLadderPosition:0.##} up the key's own base-severity ladder (ladder_position): a move between two values the scorer grades as negligible is not a verdict.",
         presence = $"a key present in one window only is a new or resolved issue only when its base severity reaches {MinimumLadderPosition:0.##}; a noise-level appearance or disappearance is stable. BAD_ACTOR_* keys never take this path: their appearance is plan-cache identity churn, reported under plan_cache_churn and excluded from new_issues / resolved_issues."
     };
@@ -268,6 +268,22 @@ public static class ComparisonBanding
         PgTargetFactKeys.WalVolumeShift =>
             fact.Metadata.TryGetValue(PgWalPeakBytesPerSecKey, out var walPeak) ? walPeak : null,
         _ => fact.Value
+    };
+
+    /// <summary>#8574: the name and unit of the reading a row is banded on when that reading is not the fact's shown value.</summary>
+    public sealed record BandedReading(string Metric, string Unit);
+
+    /// <summary>
+    /// #8574: the reading <see cref="BaselinedValueFor"/> returns in place of <see cref="Fact.Value"/>, named, or null
+    /// for a key banded on the value the row shows. Kept beside <see cref="BaselinedValueFor"/> so a key that gains a
+    /// separate banded reading there is named here: a row whose verdict rests on a number the reply does not carry
+    /// reads as a contradiction (a fraction that fell 4.4% banded <c>worse</c> on a rise in peak sessions).
+    /// </summary>
+    public static BandedReading? BandedReadingFor(string key) => key switch
+    {
+        PgTargetFactKeys.ConnectionSaturation => new BandedReading(PgSessionPeakCountKey, "sessions"),
+        PgTargetFactKeys.WalVolumeShift => new BandedReading(PgWalPeakBytesPerSecKey, "bytes_per_second"),
+        _ => null
     };
 
     /// <summary>
@@ -526,7 +542,15 @@ public static class ComparisonBanding
            collapse either); a reader is given the values and the sigma to see it, and the two-sided reading is
            a v3 item on #3691, not something to fake here by inverting a key whose fall can be either an outage
            or a quiet hour. */
-        var status = !moved ? StatusStable : readingDelta > 0 ? StatusWorse : StatusBetter;
+        /* #8574: a move between two values the scorer GRADES and rates severity 0 on both sides is not a verdict, the
+           absolute band's negligible-move rule: a connection-saturation fraction under its bar in both windows is
+           not a "worse" family. The row keeps delta_sigma and beyond_anomaly_cutoff so the move stays visible. A fact
+           the scorer never grades (SESSION_STATS, PG_TPS, PG_WAL_VOLUME_SHIFT) is at severity 0 because it is
+           context, not because it was judged negligible, so the baseline stays its only band (#3691). */
+        var negligible = baseline.Severity <= 0 && comparison.Severity <= 0
+            && FactScorer.IsGraded(baseline) && FactScorer.IsGraded(comparison);
+        var status = !moved || negligible ? StatusStable : readingDelta > 0 ? StatusWorse : StatusBetter;
+        var banded = BandedReadingFor(key);
 
         return new ComparisonRow
         {
@@ -550,6 +574,10 @@ public static class ComparisonBanding
             BaselineConfidence = Math.Round(bucket.Confidence, 2),
             BaselineTier = bucket.Tier.ToString(),
             BaselineMetric = metric,
+            BaselineBandedValue = banded is null ? null : Math.Round(baselineReading, 6),
+            ComparisonBandedValue = banded is null ? null : Math.Round(comparisonReading, 6),
+            BandedMetric = banded?.Metric,
+            BandedUnit = banded?.Unit,
             BeyondAnomalyCutoff = Math.Abs(rawDeltaSigma) >= AnomalyThresholds.ModifiedZThresholdFor(metric),
             CoverageCaveat = coverageCaveat
         };
@@ -669,6 +697,13 @@ public sealed class ComparisonRow
     public double? BaselineConfidence { get; init; }
     public string? BaselineTier { get; init; }
     public string? BaselineMetric { get; init; }
+    /// <summary>#8574: the readings the row was banded on, set only when that is not the value the row shows
+    /// (<see cref="ComparisonBanding.BandedReadingFor"/>). Null on every other row, which then serializes with no
+    /// banded_* field.</summary>
+    public double? BaselineBandedValue { get; init; }
+    public double? ComparisonBandedValue { get; init; }
+    public string? BandedMetric { get; init; }
+    public string? BandedUnit { get; init; }
     public bool? BeyondAnomalyCutoff { get; init; }
     public bool CoverageCaveat { get; init; }
 
@@ -695,7 +730,38 @@ public sealed class ComparisonRow
         CoverageCaveat = CoverageCaveat
     };
 
-    public object ToPayload() => new
+    public object ToPayload() => BandedMetric is null ? BaseShapePayload() : new
+    {
+        key = Key,
+        source = Source,
+        family = Family,
+        presence = Presence,
+        baseline_value = BaselineValue,
+        comparison_value = ComparisonValue,
+        baseline_severity = BaselineSeverity,
+        comparison_severity = ComparisonSeverity,
+        severity_delta = SeverityDelta,
+        value_delta = ValueDelta,
+        relative_move = RelativeMove,
+        ladder_position = LadderPosition,
+        status = Status,
+        band_source = BandSource,
+        delta_sigma = DeltaSigma,
+        baseline_sigma = BaselineSigma,
+        baseline_median = BaselineMedian,
+        baseline_confidence = BaselineConfidence,
+        baseline_tier = BaselineTier,
+        baseline_metric = BaselineMetric,
+        baseline_banded_value = BaselineBandedValue,
+        comparison_banded_value = ComparisonBandedValue,
+        banded_metric = BandedMetric,
+        banded_unit = BandedUnit,
+        beyond_anomaly_cutoff = BeyondAnomalyCutoff,
+        coverage_caveat = CoverageCaveat
+    };
+
+    /// <summary>The row's shape when it is banded on the value it shows: unchanged since before #8574.</summary>
+    private object BaseShapePayload() => new
     {
         key = Key,
         source = Source,

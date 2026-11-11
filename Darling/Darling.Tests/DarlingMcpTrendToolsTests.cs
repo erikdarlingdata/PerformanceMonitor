@@ -148,8 +148,9 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.True(at > 0, "SerializeTrend moved — re-anchor this pin");
         var end = source.IndexOf("\n    }\n", at, StringComparison.Ordinal);
         var body = source[at..end];
-        Assert.Contains("elapsed_ms_per_second = p.Value", body, StringComparison.Ordinal);
-        Assert.Contains("executions_per_second = p.ExecutionsPerSecond", body, StringComparison.Ordinal);
+        /* #8572: each rate is rounded on its way out, so the pin names the members and not the expression. */
+        Assert.Contains("elapsed_ms_per_second = ", body, StringComparison.Ordinal);
+        Assert.Contains("executions_per_second = ", body, StringComparison.Ordinal);
         Assert.DoesNotContain("percentile", body, StringComparison.OrdinalIgnoreCase);
 
         /* And the whole catalogue: "percentile" only ever as a negation. */

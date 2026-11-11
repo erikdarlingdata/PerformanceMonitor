@@ -25,6 +25,7 @@ public partial class PlanViewerControl
     private void RenderStatement(PlanStatement statement)
     {
         _currentStatement = statement;
+        UpdateToolbarState();
         PlanCanvas.Children.Clear();
         _selectedNodeBorder = null;
         PlanScrollViewer.ScrollToHome();

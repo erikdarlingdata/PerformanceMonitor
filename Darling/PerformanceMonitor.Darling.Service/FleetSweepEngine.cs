@@ -575,7 +575,7 @@ public static class FleetSweepEngine
         }
         else if (baselineReset)
         {
-            notes.Add("Service restarted since the previous sweep — the pass-counter baseline reset, so counter advance "
+            notes.Add("Service restarted since the previous sweep: the pass-counter baseline reset, so counter advance "
                 + "is not judgeable this sweep.");
         }
 
@@ -938,8 +938,8 @@ public static class FleetSweepEngine
             collection_runs = reading.Signals.CollectionRuns,
             high_cpu_events = reading.Signals.HighCpuEvents,
             blocking_events = reading.Signals.BlockingEvents,
-            blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(
-                reading.Signals.BlockingEvents, reading.Signals.Window),
+            blocking_rate_per_hour = TrendPayloads.RoundRate(ServerHealthClassifier.BlockingRatePerHour(
+                reading.Signals.BlockingEvents, reading.Signals.Window), 2), // #8572
             memory_pressure_events = reading.Signals.MemoryPressureEvents,
             memory_critical_events = reading.Signals.MemoryCriticalEvents,
             alert_count = reading.Signals.AlertCount,

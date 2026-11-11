@@ -158,7 +158,50 @@ public partial class MainWindow
     /// <summary>Tooltip shown on disabled tag editors, so the read-only seat is TOLD why (#2008's
     /// complaint was the silence, and greying-out without a reason is only half an answer).</summary>
     private const string ReadOnlyTagToolTip =
-        "This seat is connected with the read-only viewer role — tag editing needs the admin connection.";
+        "This seat is connected with the read-only viewer role: tag editing needs the admin connection.";
+
+    /// <summary>Tooltip on the server-row menu's write items (Remove, Silence, Unsilence) on a read-only seat (#8547).</summary>
+    internal const string ReadOnlyServerWriteToolTip =
+        "This seat is connected with the read-only viewer role, so removing and silencing servers needs the admin connection.";
+
+    /// <summary>
+    /// Sets the server-row context menu's write items. Silence / Unsilence are mutually exclusive (#2031): the inapplicable one is
+    /// DISABLED, never hidden (Lite's semantics), driven from the polled <paramref name="silenced"/> flag so opening the menu costs no
+    /// store read. A read-only seat (#8547) disables Remove, Silence and Unsilence with a reason, the way the Assign Tags item is
+    /// gated, because each of them is a store write. Items are located by Tag, not by header text, which carries an Alt mnemonic.
+    /// </summary>
+    internal static void ApplyServerRowWriteGate(ContextMenu menu, bool silenced, bool readOnly)
+    {
+        var silenceItem = menu.Items.OfType<MenuItem>().FirstOrDefault(m => (m.Tag as string) == "SilenceServer");
+        var unsilenceItem = menu.Items.OfType<MenuItem>().FirstOrDefault(m => (m.Tag as string) == "UnsilenceServer");
+        var removeItem = menu.Items.OfType<MenuItem>().FirstOrDefault(m => (m.Tag as string) == "RemoveServer");
+
+        if (silenceItem is not null && unsilenceItem is not null)
+        {
+            silenceItem.IsEnabled = !silenced && !readOnly;
+            silenceItem.ToolTip = readOnly
+                ? ReadOnlyServerWriteToolTip
+                : silenced
+                    ? "Already silenced: use Unsilence to restore alert delivery"
+                    : "Mute every alert for this server until you Unsilence it";
+            ToolTipService.SetShowOnDisabled(silenceItem, true);
+
+            unsilenceItem.IsEnabled = silenced && !readOnly;
+            unsilenceItem.ToolTip = readOnly
+                ? ReadOnlyServerWriteToolTip
+                : silenced
+                    ? "Remove this server's whole-server alert silence"
+                    : "Not silenced: there is nothing to remove";
+            ToolTipService.SetShowOnDisabled(unsilenceItem, true);
+        }
+
+        if (removeItem is not null)
+        {
+            removeItem.IsEnabled = !readOnly;
+            removeItem.ToolTip = readOnly ? ReadOnlyServerWriteToolTip : null;
+            ToolTipService.SetShowOnDisabled(removeItem, true);
+        }
+    }
 
     /// <summary>Disables the tag-only actions on the Favorites / Untagged pseudo-groups, which have no
     /// tag — and EVERY action here when the seat is read-only (all five entries mutate the tag tree or
@@ -374,24 +417,7 @@ public partial class MainWindow
            from the polled IsSilenced flag so opening the menu costs no store read; the click handlers re-check
            the live rules anyway, so a stale flag degrades to a status-bar note, never a wrong write. Runs
            BEFORE the tag gating's early returns so the pair is gated on every seat. */
-        var silenceItem = fe.ContextMenu.Items.OfType<MenuItem>().FirstOrDefault(m => (m.Tag as string) == "SilenceServer");
-        var unsilenceItem = fe.ContextMenu.Items.OfType<MenuItem>().FirstOrDefault(m => (m.Tag as string) == "UnsilenceServer");
-        if (silenceItem is not null && unsilenceItem is not null)
-        {
-            var silenced = row.Server.IsSilenced;
-
-            silenceItem.IsEnabled = !silenced;
-            silenceItem.ToolTip = silenced
-                ? "Already silenced — use Unsilence to restore alert delivery"
-                : "Mute every alert for this server until you Unsilence it";
-            ToolTipService.SetShowOnDisabled(silenceItem, true);
-
-            unsilenceItem.IsEnabled = silenced;
-            unsilenceItem.ToolTip = silenced
-                ? "Remove this server's whole-server alert silence"
-                : "Not silenced — there is nothing to remove";
-            ToolTipService.SetShowOnDisabled(unsilenceItem, true);
-        }
+        ApplyServerRowWriteGate(fe.ContextMenu, row.Server.IsSilenced, _dataService?.IsReadOnly == true);
 
         /* Located by Tag, not by header text — the header carries an Alt mnemonic now. */
         var assignItem = fe.ContextMenu.Items.OfType<MenuItem>().FirstOrDefault(m => (m.Tag as string) == "AssignTags");

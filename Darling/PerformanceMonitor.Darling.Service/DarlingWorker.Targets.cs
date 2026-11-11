@@ -480,12 +480,13 @@ public sealed partial class DarlingWorker
                 var attentionEnabled = StoreConfigProvider.ResolveSchedule("attention", server.Config.ServerId, _scheduleOverrides).Enabled;
                 var captureOutcome = new DarlingXeSessions.CaptureEnsureOutcome();
                 var attentionFault = await DarlingXeSessions.EnsureAllAsync(runtime, runner, _logger, cancellationToken, attentionEnabled, captureOutcome);
-                server.AttentionXePermissionFault = attentionFault?.Message;
-                captureOutcome.CarryForwardTransient(server.CaptureEnsure);
-                server.CaptureEnsure = captureOutcome;
                 server.AttentionXeEnsuredWhileEnabled = attentionEnabled;
                 server.XeSessionsEnsuredAtUtc = DateTime.UtcNow;
-                ApplyTransientEnsureRetry(server, captureOutcome, DateTime.UtcNow);
+
+                /* #8528: the same hand-off as the sweep's ensure, so a session this connect's ensure started awaits its read too. A
+                   capture run that recorded SESSION_MISSING before the connection was dropped is not a capture that is down once the
+                   reconnect has started its session. */
+                ApplyCaptureEnsure(server, captureOutcome, attentionFault, DateTime.UtcNow);
             }
 
             /* On-load config snapshots (effective FrequencyMinutes 0) run once per connect, then every
@@ -848,10 +849,12 @@ public sealed partial class DarlingWorker
     /// The capture counts while the <c>query_store_health</c> collector's effective schedule lets it refresh on this server;
     /// disabled, the capture is frozen: a PRIMARY or SECONDARY role overrules it, and under any other role the newest query_store run
     /// decides, so a failover reaches the gate while a readable standby whose run reads nothing stays gated, as the reads judge it
-    /// (#8402). The read runs in the
+    /// (#8402). #8541: the collector's own newest run that stored no row keeps the gate closed for an hour whatever the capture
+    /// and the role read (the forwarder of a distributed availability group reads PRIMARY, and a capture ages out of retention),
+    /// then one run goes through and reads each database's <c>readonly_reason</c> again. The read runs in the
     /// sweep body and carries the sweep deadline like every other store command there. False when the store cannot answer, so the collector runs.
     /// </summary>
-    internal async Task<bool> IsQueryStoreReadableSecondaryAsync(ServerLoopState server, ServerRuntime runtime, CancellationToken cancellationToken)
+    internal async Task<bool> QueryStoreHintsStandsDownAsync(ServerLoopState server, ServerRuntime runtime, CancellationToken cancellationToken)
     {
         if (QueryStoreReadableSecondaryOverride is { } answer)
         {
@@ -864,9 +867,8 @@ public sealed partial class DarlingWorker
         }
 
         var healthCaptureRefreshes = StoreConfigProvider.ResolveSchedule(QueryStoreHealthCollector.Instance.Name, runtime.ServerId, _scheduleOverrides).Enabled;
-        var message = await DarlingQueryStoreReadableSecondary.MessageAsync(
+        return await DarlingQueryStoreReadableSecondary.GateStandsDownAsync(
             _postgres, runtime.ServerId, server.Config.DisplayName, healthCaptureRefreshes, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
-        return message is not null;
     }
 
     /// <summary>
@@ -1102,17 +1104,19 @@ public sealed partial class DarlingWorker
                        statement skips such a database (readonly_reason & 8), so a run there reads the database list, collects
                        nothing and logs a success with zero rows every slot, which get_collection_health reads as a run that needs
                        a look. The slot is served like the backoff's above (counted, the stamp moved on) and the run is skipped, so
-                       no collection_log row is written. The role is the server's last known one in the store, the facts the Query
-                       Store reads' not_collected answer is built from: the newest query_store_health capture, and ag_replica_role
-                       when that capture has no database Query Store is read for. It is asked again at every slot, so a server that
-                       becomes the primary runs the collector at its next slot and one that becomes a secondary stops at its next.
+                       no collection_log row is written. The answer comes from three facts in the store: the
+                       newest query_store_health capture, ag_replica_role when that capture has no database Query Store is read
+                       for, and the collector's own newest run, which is the only one left once the capture has aged out of
+                       retention. It is asked again at every slot. A server that becomes a secondary stops at its next slot; one
+                       stood down on its own run that stored no row runs again once that run is an hour old, so a promoted
+                       forwarder is found within the hour.
                        A store that cannot answer runs the collector. get_collection_health lists the collector as not_collected
                        with the same sentence. */
                     if (string.Equals(name, QueryStoreHintsCollector.Instance.Name, StringComparison.Ordinal)
-                        && await IsQueryStoreReadableSecondaryAsync(server, runtime, cancellationToken))
+                        && await QueryStoreHintsStandsDownAsync(server, runtime, cancellationToken))
                     {
                         _logger.LogDebug(
-                            "  [{Server}] {Collector} not run this slot: every Query Store database on the server is a readable secondary, so there is nothing for it to read (#8361)",
+                            "  [{Server}] {Collector} not run this slot: its last run found no database to capture, or every Query Store database on the server is a readable secondary, so there is nothing for it to read (#8361, #8541)",
                             server.Config.DisplayName, name);
                         continue;
                     }
@@ -1224,6 +1228,9 @@ public sealed partial class DarlingWorker
         var taken = server.CycleSkips.TryTake(now, DarlingCycleSkip.RowMinInterval);
         if (taken is null)
         {
+            /* #8539: no row from this body (nothing is pending, or the last row is under RowMinInterval old). What it
+               measured stays with any slots still pending, so the row that reports them can name it. */
+            server.CycleSkips.NoteCauses(causes);
             return;
         }
 
@@ -1239,6 +1246,11 @@ public sealed partial class DarlingWorker
         if (written)
         {
             server.CycleSkips.Commit(taken, now);
+        }
+        else
+        {
+            /* The slots stay pending for the next body, and so does what this one measured. */
+            server.CycleSkips.NoteCauses(causes);
         }
     }
 
@@ -2779,6 +2791,11 @@ LIMIT 1";
             _postgres!, runtime, collectorName, status, rowsCollected, sqlMs, storageMs, errorMessage, fanout, phases, drain,
             fetchPhases, sweepPeerMaxMs, logger, cancellationToken, readSource);
         RecordRunForBackoff(server, runtime, collectorName, status, errorMessage);
+
+        /* #8528: the row just written is the collector's own reading after any session start the ensure made, so a capture session
+           marked as started and awaiting its read has been read: the Capture Down self-alert judges this collector's newest row as it
+           stands. A row that is not SESSION_MISSING also ends the collector's run of missing-session rows. */
+        server.CaptureSessionRestarts.RowWritten(collectorName, status);
     }
 
     /// <summary>
@@ -3002,6 +3019,21 @@ LIMIT 1";
 
         try
         {
+            /* #8528: the instance's identity moved since the capture sessions were last ensured: an earlier run saw it (wait_stats and
+               cpu_utilization observe the identity, on a sweep where one of them is due and its read succeeds) and cleared the ensure
+               stamp (ForgetLongQueryTraceLatch), after the sweep body's own ensure had already passed as not due. A restart or a failover
+               leaves the sessions stopped, and the read of a stopped session records SESSION_MISSING, which the Capture Down self-alert
+               fires on, although the next sweep's ensure starts it. So the ensure runs here, before the read, and the read sees the
+               started session; the stamp it sets keeps the other capture collectors of this sweep from ensuring again. A capture run
+               that comes before the identity is observed is covered at its read (CaptureReadThatStartsAStoppedSession). */
+            var ensuredBeforeRead = false;
+            if (IsCaptureSessionCollector(collectorName) && server.XeSessionsEnsuredAtUtc is null)
+            {
+                await EnsureAlwaysOnXeSessionsAsync(
+                    server, runner, DateTime.UtcNow, _logger, cancellationToken, attentionEnabled: AttentionCollectorEnabled(server));
+                ensuredBeforeRead = true;
+            }
+
             /* #3754: the long-query completion session is ensured by the per-sweep reconcile, not by this
                run, and until now nothing carried the reconcile's failure here. So on a target where the
                CREATE was refused in every database the collector still ran, its tolerant ring-buffer read
@@ -3041,6 +3073,13 @@ LIMIT 1";
                 await RaiseCaptureEnsureFaultAsync(
                     collectorName, runtime.Target.IsAzureSqlDb, captureFault,
                     () => run(runner, runtime, cancellationToken), _logger, server.Config.DisplayName);
+            }
+
+            /* #8528: a capture run that finds its session stopped ensures the sessions once and reads again before any row is written,
+               whichever collector ran first and whether or not the identity was observed. */
+            if (IsCaptureSessionCollector(collectorName))
+            {
+                run = CaptureReadThatStartsAStoppedSession(server, collectorName, ensuredBeforeRead, run);
             }
 
             var result = await run(runner, runtime, cancellationToken);
@@ -3301,8 +3340,18 @@ LIMIT 1";
                 "  [{Server}] {Collector} => XE session missing (capture down): {Message}",
                 server.Config.DisplayName, collectorName, ex.Message);
 
+            /* #8528: the last ensure of this capture's session failed with a transient error, so nothing is known about the session
+               until its retry (DarlingXeSessions.TransientRetryInterval). The row below stands; the Capture Down self-alert holds its
+               verdict for the collector until the retry has run, once per streak of SESSION_MISSING rows, so a retry that fails again
+               fires. The hold is set before the row is written, so a pass that reads the row finds the hold. */
+            if (IsCaptureSessionCollector(collectorName) && server.CaptureEnsure.IsTransientFor(collectorName))
+            {
+                server.CaptureSessionRestarts.TryHoldForRetry(collectorName);
+            }
+
             await LogRunAsync(
                 server, runtime, collectorName, "SESSION_MISSING", 0, runClock.ElapsedMilliseconds, 0, ex.Message, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+
             return 0;
         }
         catch (Exception ex) when (AwsRoleConfigurationFault(ex) is { } assume)
@@ -4075,6 +4124,90 @@ LIMIT 1";
     private sealed class DarlingXeSessionDeniedException : Exception
     {
         public DarlingXeSessionDeniedException(string message) : base(message) { }
+    }
+
+    /// <summary>
+    /// #8528: the read of a capture collector (deadlocks, blocked_process_report, attention), which starts a session it finds stopped
+    /// before any row is written. The ensure before the read runs only when another collector has already observed the instance's
+    /// new identity; a capture run that comes first, or a sweep where the collectors that observe it are not due or fail, reads a
+    /// stopped session. So a read that finds the session missing ensures the sessions once, through the same
+    /// <see cref="EnsureAlwaysOnXeSessionsAsync"/>, and reads again: a session the ensure started is read as running and the run
+    /// records what that read finds, with a note on its row that nothing was captured while the session was stopped. It does not
+    /// ensure when this run already did before its read; when the ensure of this collector's own session failed transiently and has
+    /// its retry pending; or when <see cref="CaptureSessionRestarts.TryBeginReadEnsure"/> refuses: an ensure has run since this
+    /// collector's previous row (one ensure per sweep), an earlier run of the same streak of SESSION_MISSING rows already ensured
+    /// (the run whose read-time start recorded SUCCESS included), or the session was started at a read twice within the hour. A
+    /// session that stays unreadable is left to the hourly pass, and one that keeps stopping records SESSION_MISSING, so Capture
+    /// Down fires. An ensure that left a fault for the run ends it the way the gates before the read do (PERMISSIONS for a
+    /// refusal, SESSION_MISSING otherwise).
+    /// </summary>
+    /// <summary>#8528: the note on the row of a capture run whose ensure at its read started the stopped session.</summary>
+    internal const string SessionStartedAtReadNote =
+        "The session was stopped and was started before this read; events between the stop and this start were not captured.";
+
+    private DispatchEntry CaptureReadThatStartsAStoppedSession(
+        ServerLoopState server, string collectorName, bool ensuredBeforeRead, DispatchEntry read) =>
+        async (runner, runtime, cancellationToken) =>
+        {
+            try
+            {
+                return await read(runner, runtime, cancellationToken);
+            }
+            catch (DarlingXeSessionMissingException)
+            {
+                var ensuredAtRead = !ensuredBeforeRead
+                    && !server.CaptureEnsure.IsTransientFor(collectorName)
+                    && server.CaptureSessionRestarts.TryBeginReadEnsure(collectorName, DateTime.UtcNow);
+                if (!ensuredAtRead)
+                {
+                    NoteCaptureCheckedAfterMissingRead(server, collectorName, ensured: ensuredBeforeRead);
+                    throw;
+                }
+
+                server.XeSessionsEnsuredAtUtc = null;
+                await EnsureAlwaysOnXeSessionsAsync(
+                    server, runner, DateTime.UtcNow, _logger, cancellationToken, attentionEnabled: AttentionCollectorEnabled(server));
+
+                if (AttentionPermissionFaultFor(collectorName, server) is { } attentionFault)
+                {
+                    throw new DarlingXeSessionDeniedException(attentionFault);
+                }
+
+                if (CaptureEnsureFaultFor(collectorName, server) is { } captureFault)
+                {
+                    await RaiseCaptureEnsureFaultAsync(
+                        collectorName, runtime.Target.IsAzureSqlDb, captureFault,
+                        () => read(runner, runtime, cancellationToken), _logger, server.Config.DisplayName);
+                }
+
+                try
+                {
+                    var started = await read(runner, runtime, cancellationToken);
+
+                    /* The session was stopped and this run started it. The start is counted, and the row carries a note, so its
+                       SUCCESS does not read as a quiet server: nothing was captured between the stop and this start. */
+                    server.CaptureSessionRestarts.NoteStartedAtRead(collectorName, DateTime.UtcNow);
+                    return started with { HostNote = EnumeratedCollectorDriver.MergeNotes(started.HostNote, SessionStartedAtReadNote) };
+                }
+                catch (DarlingXeSessionMissingException)
+                {
+                    NoteCaptureCheckedAfterMissingRead(server, collectorName, ensured: true);
+                    throw;
+                }
+            }
+        };
+
+    /// <summary>
+    /// #8528: records that an ensure in this collector's own run completed, left no failure for it and started nothing, and the read
+    /// still found the session stopped. Only then may the Capture Down detail say the service's check found nothing to start.
+    /// </summary>
+    private static void NoteCaptureCheckedAfterMissingRead(ServerLoopState server, string collectorName, bool ensured)
+    {
+        var outcome = server.CaptureEnsure;
+        if (ensured && !outcome.IsTransientFor(collectorName) && !outcome.Started.Contains(collectorName))
+        {
+            server.CaptureSessionRestarts.NoteCheckedAfterMissingRead(collectorName);
+        }
     }
 
     private static async Task<CollectorRunResult> RunXeTolerantAsync<TRow>(

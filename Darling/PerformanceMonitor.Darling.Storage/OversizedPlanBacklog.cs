@@ -35,21 +35,29 @@ namespace PerformanceMonitor.Darling.Storage;
 /// carries many statements at different offsets. A re-sighting touches <c>last_seen_at</c>; it does not
 /// insert a second row and does not re-fetch content already held.</para>
 ///
-/// <para><b>Growth is bounded by the horizon, not by a queue design.</b> Retention prunes on
+/// <para><b>Growth is bounded twice: by the horizon, and by what the sweep can reach.</b> Retention prunes on
 /// <c>last_seen_at</c> (<c>DarlingRetention</c>), so a plan that stops recurring leaves with the fact rows
-/// it explained rather than accumulating forever — and that horizon is the only bound there is, because
+/// it explained rather than accumulating forever. That horizon alone does not hold the table down, because
 /// arrival is not uniformly a trickle. One production store class presents a handful of long-lived cache
 /// residents per server: 13 plans over the cap at once on its outlier server, compile ages from 13.6 hours
-/// to 144.6 days. Another presents ~1,400 new over-cap identities an hour fleet-wide and never saturates,
-/// because plan-cache churn re-keys the same logical queries under fresh <c>plan_handle</c> and offsets. The
-/// drain rate is sized for the second (<c>OversizedPlanBacklogSweep.MaxPlansPerServerPerTick</c>); this
-/// table holds either population without a different shape.</para>
+/// to 144.6 days. Another re-keys the same logical queries under fresh <c>plan_handle</c> and offsets as the
+/// plan cache churns, and those rows arrive many times faster than the sweep's claim
+/// (<c>OversizedPlanBacklogSweep.MaxPlansPerServerPerTick</c>) drains them. So each pass first drops, unfetched,
+/// the never-tried rows no claim is going to serve (#8567): every row last sighted before the newest sighting
+/// of its query (<see cref="SupersedeSql"/>), then the least recently sighted rows past the pending cap
+/// (<see cref="DropOverCapSql"/>). A dropped row keeps its place for a day so the read can count it, and then
+/// leaves (<see cref="PurgeDroppedSql"/>).</para>
 ///
-/// <para><b>One index, deliberately: the primary key.</b> Its leading column is <c>server_id</c>, which is
-/// the leading predicate of all three access paths — the sweep's claim, the read-surface fallback and the
-/// sighting upsert — so at this table's size every one of them is served or is a scan of a few thousand
-/// narrow rows. A second index chosen for an ORDER BY nobody has measured would be a guess; the ORDER BYs
-/// below name the index to add if it ever stops being one.</para>
+/// <para><b>Two indexes: the primary key, and one for the purge.</b> The key's leading column is
+/// <c>server_id</c>, which is the leading predicate of every access path — the sweep's trim and claim, the
+/// read-surface fallback and the sighting upsert — so each one is served or is a scan of one server's rows, which
+/// the trim holds to the pending cap plus what the sweep itself stamped inside the horizon.
+/// <c>idx_oversized_plan_backlog_dropped</c> (V258) is on <c>(server_id, expired_at)</c> and partial to the rows
+/// dropped unfetched, so <see cref="PurgeDroppedSql"/> reads the rows it deletes and not the server's every row.
+/// It names no column a re-sighting changes on a waiting row, so the upsert stays a heap-only update. An index on
+/// <c>last_seen_at</c> would end that for every re-sighting, which is why retention's daily DELETE has none. An
+/// index chosen for an ORDER BY nobody has measured would be a guess; the ORDER BYs below name the index to add if
+/// it ever stops being one.</para>
 ///
 /// <para><b>Not a collector table.</b> It is absent from <see cref="CollectorCatalog"/>, so
 /// <see cref="TimescaleSupport"/>'s catalog-driven hypertable conversion and
@@ -64,13 +72,15 @@ public static class OversizedPlanBacklog
     /// <see cref="StorageCommandDeadlines.McpReadSeconds"/>, whose regime is an interactive MCP read, and
     /// rather than an inherited Npgsql default, which is the defect class that constant exists to close.
     ///
-    /// <para>Every statement here is a primary-key-matched single row against a table bounded at a few
-    /// thousand narrow rows, so 30 s is orders of magnitude above the work. The one with real work is the
-    /// capture UPDATE, which writes the fetched plan XML — megabytes of TOAST for the tail this exists to
-    /// reach — and nothing encloses it: the sweep's per-plan budget bounds the TARGET fetch, and abandoning
-    /// the store write afterwards would discard content already paid for. So the deadline is set low enough
-    /// that a stalled write is reported rather than held, and high enough that the largest plan measured on
-    /// the fleet (8.7 MB) is not close to it.</para>
+    /// <para>The outcome statements and the sighting upsert are primary-key-matched single rows, so 30 s is
+    /// orders of magnitude above the work. The one of those with real work is the capture UPDATE, which writes
+    /// the fetched plan XML — megabytes of TOAST for the tail this exists to reach — and nothing encloses it:
+    /// the sweep's per-plan budget bounds the TARGET fetch, and abandoning the store write afterwards would
+    /// discard content already paid for. So the deadline is set low enough that a stalled write is reported
+    /// rather than held, and high enough that the largest plan measured on the fleet (8.7 MB) is not close to
+    /// it. The claim and the trim statements read one server's rows and the trim writes at most
+    /// <c>OversizedPlanBacklogSweep.MaxRowsDroppedPerServerPerTick</c> narrow rows a statement, which is what
+    /// keeps them under the same deadline on a server whose backlog is far over the cap.</para>
     /// </summary>
     public const int CommandTimeoutSeconds = 30;
 
@@ -301,6 +311,141 @@ SET last_attempt_at = $7" + KeyPredicate + ";";
 UPDATE collect.oversized_plan_backlog
 SET last_attempt_at = $7,
     attempt_count = attempt_count + 1" + KeyPredicate + ";";
+
+    /// <summary>
+    /// The key of one row, in the order every statement here lists it after <c>server_id</c>.
+    /// </summary>
+    private const string RowKeyColumns = @"collector_name,
+        plan_handle,
+        sql_handle,
+        statement_start_offset,
+        statement_end_offset";
+
+    /// <summary>
+    /// The rows a trim statement may drop: waiting, and never attempted. A row the sweep has tried stays in the
+    /// claim's round-robin whatever arrives after it, so an attempt is never discarded unjudged, and it keeps
+    /// <c>last_attempt_at</c>, which is how a row dropped unfetched is told from one a fetch expired.
+    /// </summary>
+    private const string NeverTriedPendingPredicate = @"captured_at IS NULL
+        AND   expired_at IS NULL
+        AND   last_attempt_at IS NULL";
+
+    /// <summary>
+    /// The tail of both trim statements: stamps the listed rows, and only those of them still waiting untried,
+    /// so a row the sweep attempted or a collector re-sighted in between is left as it now is.
+    /// </summary>
+    private const string StampDroppedRows = @") AS dropped
+WHERE b.server_id = $1
+AND   b.collector_name = dropped.collector_name
+AND   b.plan_handle = dropped.plan_handle
+AND   b.sql_handle = dropped.sql_handle
+AND   b.statement_start_offset = dropped.statement_start_offset
+AND   b.statement_end_offset = dropped.statement_end_offset
+AND   b.captured_at IS NULL
+AND   b.expired_at IS NULL
+AND   b.last_attempt_at IS NULL;";
+
+    /// <summary>
+    /// #8567: drops, unfetched, every never-tried pending row of one server ($1) that was last sighted before
+    /// the newest sighting among the never-tried pending rows of its query, stamping <c>expired_at</c> with $2,
+    /// at most $3 rows.
+    ///
+    /// <para><b>One query, many keys.</b> Plan-cache churn re-keys one query's plan under a fresh
+    /// <c>plan_handle</c> every time it recompiles, and an ad hoc workload gives one <c>query_hash</c> a fresh
+    /// <c>sql_handle</c> for every literal, so the key that makes a sighting an upsert admits a new row for a
+    /// plan the table already waits on. The read surfaces serve the latest capture for a query
+    /// (<see cref="QueryStatsFallbackSql"/> keys on <c>query_hash</c> and the database), so the rows of a
+    /// query's latest sighting are all a fetch can add, and theirs are the handles most likely still in
+    /// cache.</para>
+    ///
+    /// <para><b>Only a LATER sighting supersedes.</b> Rows of one query sighted in the same collection are plans
+    /// that were in cache together, so all of them keep waiting and each is claimable. Keeping one of them would
+    /// drop the others before every claim while the collector's next sighting returned them to pending, and
+    /// they would read as waiting without ever being claimed.</para>
+    ///
+    /// <para>A row with no <c>query_hash</c> is left alone: the module-grain collector describes none, and its
+    /// fallbacks key on the handles, so each such row is a plan of its own. A dropped row is not gone for good:
+    /// a re-sighting clears the stamp (<see cref="UpsertSightingSql"/>) and it waits again.</para>
+    ///
+    /// <para>Oldest sighting first under the limit, so a server far over it sheds its stalest rows first and
+    /// the rest on later passes.</para>
+    /// </summary>
+    public const string SupersedeSql = @"
+UPDATE collect.oversized_plan_backlog AS b
+SET expired_at = $2
+FROM
+(
+    SELECT
+        " + RowKeyColumns + @"
+    FROM
+    (
+        SELECT
+            " + RowKeyColumns + @",
+            last_seen_at,
+            max(last_seen_at) OVER
+            (
+                PARTITION BY collector_name, database_name, query_hash
+            ) AS newest_sighting_at
+        FROM collect.oversized_plan_backlog
+        WHERE server_id = $1
+        AND   query_hash IS NOT NULL
+        AND   " + NeverTriedPendingPredicate + @"
+    ) AS sighted
+    WHERE last_seen_at < newest_sighting_at
+    ORDER BY last_seen_at, " + RowKeyColumns + @"
+    LIMIT $3
+" + StampDroppedRows;
+
+    /// <summary>
+    /// #8567: drops, unfetched, the never-tried pending rows of one server ($1) past the pending cap ($3), least
+    /// recently sighted first, stamping <c>expired_at</c> with $2, at most $4 rows.
+    ///
+    /// <para>The claim takes never-tried rows largest first, so on a server whose distinct plans arrive faster
+    /// than the claim drains them a small plan is never reached, and nothing but the retention horizon removed
+    /// it. The cap is what the sweep's ceiling drains in one retention period
+    /// (<c>OversizedPlanBacklogSweep.PendingRowsPerServerCap</c>). What is kept is the most recently sighted,
+    /// because a collector only sees a row while its plan is in cache, so those are the handles most likely to
+    /// still resolve.</para>
+    /// </summary>
+    public const string DropOverCapSql = @"
+UPDATE collect.oversized_plan_backlog AS b
+SET expired_at = $2
+FROM
+(
+    SELECT
+        " + RowKeyColumns + @"
+    FROM
+    (
+        SELECT
+            " + RowKeyColumns + @",
+            row_number() OVER
+            (
+                ORDER BY last_seen_at DESC, first_seen_at DESC, observed_bytes DESC,
+                         collector_name, plan_handle, sql_handle, statement_start_offset, statement_end_offset
+            ) AS sighting_rank
+        FROM collect.oversized_plan_backlog
+        WHERE server_id = $1
+        AND   " + NeverTriedPendingPredicate + @"
+    ) AS ranked
+    WHERE sighting_rank > $3
+    ORDER BY sighting_rank DESC
+    LIMIT $4
+" + StampDroppedRows;
+
+    /// <summary>
+    /// #8567: removes one server's ($1) rows that were dropped unfetched before $2. A dropped row has no content
+    /// and no attempt to keep, so it is held only for the day the read counts it in
+    /// (<c>OversizedPlanBacklogSweep.DroppedRowHold</c>), which is what lets the table level off. A row a fetch
+    /// expired carries <c>last_attempt_at</c> and is not matched: it leaves on the retention horizon. These
+    /// conditions imply the predicate of <c>idx_oversized_plan_backlog_dropped</c> (V258), which is what lets the
+    /// statement read that index.
+    /// </summary>
+    public const string PurgeDroppedSql = @"
+DELETE FROM collect.oversized_plan_backlog
+WHERE server_id = $1
+AND   captured_at IS NULL
+AND   last_attempt_at IS NULL
+AND   expired_at < $2;";
 
     /// <summary>
     /// The read-surface fallback for <c>query_stats</c>: the most recently captured over-cap plan for a

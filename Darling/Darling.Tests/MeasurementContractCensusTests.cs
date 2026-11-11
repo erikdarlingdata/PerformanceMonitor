@@ -936,6 +936,10 @@ public sealed class MeasurementContractCensusTests
     private static readonly (string View, string Predicate)[] EquivalentPredicates =
     {
         (TimescaleSupport.QueryStatsBaselineView, "delta_execution_count > 0"),
+        /* #8549: the daily wait totals sum delta_wait_time_ms over rows with a positive delta, which is the Daily Summary's own filter and
+           must stay so for the two reads to agree. The unknowable row (interval 0) stores a zero delta, so it is excluded by the same
+           predicate, and a sum over it would add nothing either way. */
+        (TimescaleSupport.WaitStatsDailyView, "delta_wait_time_ms > 0"),
     };
 
     /// <summary>One continuous aggregate's CREATE, as read off <see cref="TimescaleSupport"/>.</summary>

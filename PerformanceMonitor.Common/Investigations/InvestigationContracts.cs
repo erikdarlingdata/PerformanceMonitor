@@ -323,8 +323,20 @@ public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired)
 /// </summary>
 public sealed record AgentAction(Guid RequestId, Guid ClaimId, string AgentId, string Reason, string EvidenceJson);
 
-/// <summary>What a Level 2 change targets (#5912): the server, the object's id when it has one, and the database.</summary>
-public sealed record AgentActionTarget(int ServerId, string ServerName, string? Id, string? Database);
+/// <summary>
+/// What a Level 2 change targets (#5912): the server, the object's id when it has one, and the database. A target that names no
+/// server (a rule for every server, an id that matches nothing) is built with <see cref="NoServer"/>. Every whole number other
+/// than 0 is a server's id, so no id stands for "no server": the gate reads <see cref="NamesServer"/> and refuses such a target
+/// as another server's, whatever the request's server id is.
+/// </summary>
+public sealed record AgentActionTarget(int ServerId, string ServerName, string? Id, string? Database)
+{
+    /// <summary>False for a target that names no server. Its <see cref="ServerId"/> is 0, which is no server's id.</summary>
+    public bool NamesServer { get; init; } = true;
+
+    /// <summary>A target that names no server. <paramref name="description"/> is what a refusal calls it.</summary>
+    public static AgentActionTarget NoServer(string description, string? id) => new(0, description, id, null) { NamesServer = false };
+}
 
 /// <summary>
 /// The fixed list of server actions (#5632, step 5), the words of <c>config.config_server_actions.action</c>'s CHECK. Nothing

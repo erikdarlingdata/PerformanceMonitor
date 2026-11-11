@@ -295,6 +295,8 @@ public sealed class PgFactCollectorTests
                Stripping both rather than loosening the assertion: the point of this guard is that every
                real relation reference resolves, and that must stay exact. */
             var scanSql = Regex.Replace(sql, @"--[^\n]*", " ");
+            /* Block comments are the same case as the `--` ones: prose that says "join to" is not a relation. */
+            scanSql = Regex.Replace(scanSql, @"/\*.*?\*/", " ", RegexOptions.Singleline);
             scanSql = Regex.Replace(scanSql, @"\bIS\s+(?:NOT\s+)?DISTINCT\s+FROM\b", " ", RegexOptions.IgnoreCase);
 
             /* CTE names defined by this query are legal FROM targets too (WITH x AS ( / , y AS (). */
@@ -312,6 +314,10 @@ public sealed class PgFactCollectorTests
                 Assert.True(
                     views.Contains(target) || tables.Contains(target) || ctes.Contains(target)
                         || target == QueryStoreIntervalLatest.TableName
+                        /* #8570: the plan advisory reads plan content for its ten winners by digest, and tests the
+                           dimension row for presence, rather than reading v_query_stats, whose join carried every
+                           row's plan into the rank's sort. */
+                        || target == PayloadDimensions.QueryPlanDimTable
                         /* #5448: the daily-totals twin reads the per-day table beside it. */
                         || target == "plan_regression_daily"
                         /* #5630: the PLAN_REGRESSION read joins the statement text dimension for the recompile hint, as

@@ -299,7 +299,8 @@ placed AS
         interval_start_time_utc AS point_time,
         interval_end_time_utc,
         execution_count,
-        avg_duration_us
+        avg_duration_us,
+        snapshot_time
     FROM
     (
         SELECT
@@ -307,6 +308,7 @@ placed AS
             interval_end_time_utc,
             execution_count,
             avg_duration_us,
+            collection_time AS snapshot_time,
             ROW_NUMBER() OVER
             (
                 PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
@@ -334,7 +336,8 @@ placed AS
         collection_time AS point_time,
         CAST(NULL AS timestamp) AS interval_end_time_utc,
         execution_count,
-        avg_duration_us
+        avg_duration_us,
+        CAST(NULL AS timestamp) AS snapshot_time
     FROM query_store_stats
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -351,7 +354,13 @@ raw_points AS
         /* #4765: the interval's OWN length, its stored end less its start. NULL when no row of the point
            stored an end (collected before the column); the rated step below then falls back to the spacing
            to the previous point. Computed here, where the end can still be aggregated per point. */
-        extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))) AS own_interval_seconds
+        extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))) AS own_interval_seconds,
+        /* #8575: an interval whose end is still in the future is OPEN: it has run only until the newest snapshot that
+           stored one of its rows, so that is the time its totals cover. NULL for a closed interval. A rollup point is
+           never open: the corrected hourly's refresh policy keeps an hour behind the clock. */
+        CASE WHEN date_trunc('second', MAX(interval_end_time_utc)) > date_trunc('second', timezone('UTC', now()))
+             THEN extract(epoch FROM (date_trunc('second', MAX(snapshot_time)) - date_trunc('second', point_time)))
+        END AS open_covered_seconds
     FROM placed
     GROUP BY point_time
 ),
@@ -361,9 +370,9 @@ united AS
        same instant twice. Each point carries its CLASS, because the two classes are rated over different
        denominators below. A rollup point has no own length to carry (its denominator is the bucket width),
        so its column is an untyped NULL that takes the raw arm's type. */
-    SELECT point_time, total_duration_ms, total_executions, NULL AS own_interval_seconds, TRUE AS from_rollup FROM rollup_points
+    SELECT point_time, total_duration_ms, total_executions, NULL AS own_interval_seconds, NULL AS open_covered_seconds, TRUE AS from_rollup FROM rollup_points
     UNION ALL
-    SELECT point_time, total_duration_ms, total_executions, own_interval_seconds, FALSE AS from_rollup FROM raw_points
+    SELECT point_time, total_duration_ms, total_executions, own_interval_seconds, open_covered_seconds, FALSE AS from_rollup FROM raw_points
 ),
 rated AS
 (
@@ -401,8 +410,25 @@ rated AS
         CASE WHEN from_rollup
              THEN {DurationTrendRouting.HourlyBucketSecondsSql}
              ELSE COALESCE(own_interval_seconds, extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))))
-        END AS interval_seconds
+        END AS interval_seconds,
+        open_covered_seconds
     FROM united
+),
+rated_open AS
+(
+    /* #8575: an open raw interval is partial when its covered time is under its whole length. It is then rated over that
+       covered time, and left unrated (NULL, so no rate below) when that is under 60 seconds: a rate over a few seconds is
+       noise. A closed interval and every rollup point have no covered time and keep interval_seconds. */
+    SELECT
+        point_time,
+        total_duration_ms,
+        total_executions,
+        CASE WHEN open_covered_seconds < interval_seconds
+             THEN CASE WHEN open_covered_seconds >= 60 THEN open_covered_seconds END
+             ELSE interval_seconds
+        END AS interval_seconds,
+        CASE WHEN open_covered_seconds < interval_seconds THEN open_covered_seconds END AS covered_seconds
+    FROM rated
 )
 SELECT
     point_time AS collection_time,
@@ -415,8 +441,10 @@ SELECT
     CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second,
     /* #8073: the point's stored executions (an hour's sum on the rollup arm, the interval's on the raw arms), a count
        the store holds whether or not the point's length is knowable. */
-    CAST(total_executions AS bigint) AS execution_count
-FROM rated
+    CAST(total_executions AS bigint) AS execution_count,
+    /* #8575: the seconds an OPEN interval's rates cover, null on a closed interval and on every rollup point. */
+    covered_seconds
+FROM rated_open
 ORDER BY point_time
 """;
     }

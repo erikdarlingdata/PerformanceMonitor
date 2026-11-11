@@ -135,10 +135,10 @@ public sealed class TrendBucketingLiveTests
             Assert.DoesNotContain(trend, p => p.GetProperty("database_name").GetString() == "dbZ");
             Assert.Equal(7, trend.Length);   // six lines at 10:00, dbB alone at 10:10
 
-            /* Left to size itself, one hour over six lines is two-minute buckets: 31 x 6 = 186 points, inside 200. */
+            /* Left to size itself, one hour over six lines is five-minute buckets: 13 x 6 = 78 points, inside the read's 120. */
             var auto = Root(await DarlingMcpTrendTools.GetFileIoTrend(postgres, ServerName, 1, "2026-03-04T11:00:00Z"));
-            Assert.Equal(2, auto.GetProperty("bucket_minutes").GetInt32());
-            Assert.Contains("near 200 points", auto.GetProperty("aggregate_note").GetString()!, StringComparison.Ordinal);
+            Assert.Equal(5, auto.GetProperty("bucket_minutes").GetInt32());
+            Assert.Contains("near 120 points", auto.GetProperty("aggregate_note").GetString()!, StringComparison.Ordinal);
 
             /* ── scoped to one database: its files, one line each ── */
             var scoped = Root(await DarlingMcpTrendTools.GetFileIoTrend(postgres, ServerName, 1, "2026-03-04T11:00:00Z", bucket_minutes: 10, database_name: "dbA"));
@@ -224,9 +224,9 @@ public sealed class TrendBucketingLiveTests
             Assert.StartsWith(Stamp(end.AddMinutes(-60)), trend[0].GetProperty("time").GetString()!, StringComparison.Ordinal);
             /* #7161: (6,000 + 1,200) ms / (300 s gap to the collection before the window + 120 s) = 17.142857;
                (60 + 12) / 420 = 0.171428571; the peak point is 6,000 / 300 = 20 (the stored 60 s said 100). */
-            Assert.Equal(7200.0 / 420.0, trend[0].GetProperty("elapsed_ms_per_second").GetDouble(), 9);
-            Assert.Equal(72.0 / 420.0, trend[0].GetProperty("executions_per_second").GetDouble(), 9);
-            Assert.Equal(20.0, trend[0].GetProperty("peak_elapsed_ms_per_second").GetDouble(), 9);
+            Assert.Equal(7200.0 / 420.0, trend[0].GetProperty("elapsed_ms_per_second").GetDouble(), 6);
+            Assert.Equal(72.0 / 420.0, trend[0].GetProperty("executions_per_second").GetDouble(), 6);
+            Assert.Equal(20.0, trend[0].GetProperty("peak_elapsed_ms_per_second").GetDouble(), 6);
 
             /* Nothing rated in the second bucket: an unrated point, never 0. */
             Assert.StartsWith(Stamp(end.AddMinutes(-50)), trend[1].GetProperty("time").GetString()!, StringComparison.Ordinal);

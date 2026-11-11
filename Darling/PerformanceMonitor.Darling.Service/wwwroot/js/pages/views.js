@@ -256,8 +256,8 @@ function firstRunHero(canEdit, servers) {
     el("div", {
       class: "hero-pitch",
       text:
-        "Build a DASHBOARD — pick a metric, aggregate it, group and filter it, and chart it as a line, bar, pie, " +
-        "stacked area, or stat — or a NOTEBOOK that mixes markdown notes with those same charts into a guided " +
+        "Build a DASHBOARD: pick a metric, aggregate it, group and filter it, and chart it as a line, bar, pie, " +
+        "stacked area, or stat. Or build a NOTEBOOK that mixes markdown notes with those same charts into a guided " +
         "investigation. Both save for every seat and re-scope live by server and time range. No SQL to write.",
     }),
     el("div", { class: "hero-ctas" }, [
@@ -698,7 +698,7 @@ export async function renderView(main, id, opts) {
   /* #6214: another person's personal view can be read but not changed, so Edit goes and Delete is disabled. */
   const access = viewAccess(view, session);
   const canEdit = !!session.can_edit && !access.readOnly;
-  const readSet = new Set((catalog.reads || []).map((r) => r.name));
+  const readSet = new Map((catalog.reads || []).map((r) => [r.name, r])); /* a Map: the name check is .has, and #8630 reads each read's parameters */
   const sourceSet = new Set(((catalog.compose || {}).measures || []).map((m) => m.source));
 
   const status = el("div", { class: "view-status" });
@@ -842,8 +842,15 @@ export async function renderNotebookDoc(main, opts) {
      uses: a read the catalog lists must render, not fail as "Unknown read" (it did while this was always the
      empty catalog). The empty catalog is only what an alert-mode caller that passes none gets. */
   const catalog = isAlert ? (opts.catalog || { reads: [], compose: {} }) : opts.catalog;
-  const readSet = new Set((catalog.reads || []).map((r) => r.name));
+  const readSet = new Map((catalog.reads || []).map((r) => [r.name, r])); /* a Map: the name check is .has, and #8630 reads each read's parameters */
   const sourceSet = new Set(((catalog.compose || {}).measures || []).map((m) => m.source));
+
+  /* #8555: a row that declares no notebook (the report rows) shows only the notes its caller drew: no "Alert notebook" header,
+     no Save as notebook or Open live buttons, no "no cells yet" line, none of which has anything to act on. */
+  if (isAlert && opts.noNotebook) {
+    mount(main, []);
+    return;
+  }
 
   const status = el("div", { class: "view-status" });
   const head = isAlert
@@ -1013,7 +1020,7 @@ function renderAlertCell(cell, index, readSet, sourceSet, scope, opts, limiter) 
     if (!cell.read || !readSet.has(cell.read) || !cell.viz || !VIZ[cell.viz]) {
       return panelErrorCard(cell.title, "Unknown read '" + (cell.read || "") + "' or visualization '" + (cell.viz || "") + "'.");
     }
-    return gatedCell(opts, limiter, (release) => renderPanel(resolveReadTable(cell), release));
+    return gatedCell(opts, limiter, (release) => renderPanel(resolveReadTable(withAsOfSupport(cell, readSet)), release));
   }
   /* A markdown cell is prose: no load, so no slot — the same air-gapped renderMarkdown a saved notebook uses. */
   if (cell.type === "markdown") {
@@ -1321,7 +1328,16 @@ function panelOrError(p, readSet, sourceSet, scope, onSettled, slot = null, gate
   /* #8492: a read table that carries its own columns takes the catalog's words and rules for the same keys (withCatalogWords), so a saved
      view's alert-history table shows a state-only row's stored zeros as the dash Alert History shows. A panel with no columns of its own
      is unchanged. */
-  return renderPanel(withCatalogWords(p), onSettled, gate);
+  return renderPanel(withCatalogWords(withAsOfSupport(p, readSet)), onSettled, gate);
+}
+
+/* #8630: a read cell that names an `as_of` is drawn "Pinned" only when its tool takes one. The catalog lists each read's parameters, so a
+   read with no `as_of` of its own (get_server_summary, get_collection_health) is marked `asOfIgnored` and the cell says it shows the
+   current state. This covers a template cell and a custom notebook's alike, so no template has to drop its `as_of`. */
+function withAsOfSupport(cell, readSet) {
+  const read = cell && cell.read ? readSet.get(cell.read) : null;
+  if (!read || !cell.params || cell.params.as_of == null) return cell;
+  return (read.params || []).some((x) => x.name === "as_of") ? cell : { ...cell, asOfIgnored: true };
 }
 
 /* Why a panel cannot start a read (the catalog check), as {title, message}, or null when it can. A panel with a problem

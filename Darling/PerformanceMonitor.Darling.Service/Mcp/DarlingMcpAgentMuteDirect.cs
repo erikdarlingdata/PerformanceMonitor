@@ -128,7 +128,7 @@ internal static class DarlingMcpAgentMuteDirect
         && InvestigationToolCore.ParseAgentAction(agentAction, out _)?.Reason == AgentActionCodes.Required;
 
     /// <summary>The agent id of a call with no <c>agent_action</c>: the named token's own name, else a fixed word for the legacy token.</summary>
-    internal static string AgentIdOf(DarlingAgentActionSeat seat) => seat.Policy.AgentTokenName ?? "legacy-token";
+    internal static string AgentIdOf(DarlingAgentActionSeat seat) => seat.Policy.AgentTokenName ?? InvestigationToolCore.LegacyTokenAgent;
 
     /// <summary>
     /// The expiry bound, judged on the instant the rule would carry after the write. UTC throughout: <paramref name="nowUtc"/> is the service

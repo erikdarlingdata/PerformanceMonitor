@@ -88,6 +88,8 @@
             <Setter Property="ui:DataGridSortBehavior.SortDescendingFirst" Value="True"/>
             <Setter Property="ui:DataGridFillColumn.Enabled" Value="True"/>
             <Setter Property="ui:DataGridHeaderFit.Enabled" Value="True"/>
+            <!-- #8634: a keyed style does not inherit the theme's implicit DataGrid style, so a text column with no element style cut a long value at the cell edge. -->
+            <Setter Property="ui:DataGridCellTrimming.Enabled" Value="True"/>
             <Setter Property="ui:ScrollPanBehavior.EnableMiddleClickPanning" Value="True"/>
             <Setter Property="AutoGenerateColumns" Value="False"/>
             <Setter Property="IsReadOnly" Value="True"/>
@@ -416,7 +418,7 @@
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 Margin="0,8,0,0"
-                                ToolTip="Viewer settings — defaults for newly-opened server tabs">
+                                ToolTip="Viewer settings: defaults for newly-opened server tabs">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="12"
                                            VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -439,12 +441,13 @@
 
                 <TextBlock x:Name="ServersHintText"
                            DockPanel.Dock="Bottom"
-                           Text="no servers registered — is the Darling service running?"
+                           Text="no servers registered: is the Darling service running?"
                            Foreground="{DynamicResource ForegroundMutedBrush}"
                            TextWrapping="Wrap"
                            Margin="2,8,2,0"
                            Visibility="Collapsed"/>
                 <ui:InvokableListBox x:Name="ServerList" AutomationProperties.AutomationId="ServerPicker"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                          Style="{DynamicResource {x:Type ListBox}}"
                          ItemInvoked="ServerList_ItemInvoked"
                          Background="{DynamicResource BackgroundDarkBrush}"
@@ -510,7 +513,7 @@
                                         <MenuItem Header="_Edit..." Click="ServerContextMenu_Edit_Click">
                                             <MenuItem.Icon><TextBlock Text="&#x270F;"/></MenuItem.Icon>
                                         </MenuItem>
-                                        <MenuItem Header="_Remove" Click="ServerContextMenu_Remove_Click">
+                                        <MenuItem Header="_Remove" Tag="RemoveServer" Click="ServerContextMenu_Remove_Click">
                                             <MenuItem.Icon><TextBlock Text="&#x1F5D1;"/></MenuItem.Icon>
                                         </MenuItem>
                                         <Separator/>
@@ -601,7 +604,7 @@
                                         <!-- A greyed vector bell with a slash (never an emoji), shown only while a
                                              whole-server alert silence is active. -->
                                         <Viewbox Width="11" Height="11" Margin="0,0,6,0" VerticalAlignment="Center"
-                                                 ToolTip="Alerts silenced for this server — right-click → Unsilence to restore">
+                                                 ToolTip="Alerts silenced for this server: right-click → Unsilence to restore">
                                             <Viewbox.Style>
                                                 <Style TargetType="Viewbox">
                                                     <Setter Property="Visibility" Value="Collapsed"/>
@@ -624,6 +627,7 @@
                                     <!-- Server name -->
                                     <TextBlock Grid.Column="1" Grid.Row="0"
                                                Text="{Binding Server.DisplayName}"
+                                               TextTrimming="CharacterEllipsis"
                                                ToolTip="{Binding Server.SameMachineTooltip}"
                                                FontSize="13" FontWeight="SemiBold"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
@@ -823,7 +827,7 @@
                                              is what stops a filtered grid reading as an unfiltered one. -->
                                         <CheckBox x:Name="OverviewAttentionOnlyCheck" Content="Needs attention only"
                                                   FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"
-                                                  ToolTip="Show only the cards that are not Healthy — Critical, Warning, Offline, or awaiting a first collection. Uncheck to show the whole fleet again."
+                                                  ToolTip="Show only the cards that are not Healthy: Critical, Warning, Offline, or awaiting a first collection. Uncheck to show the whole fleet again."
                                                   Checked="OverviewAttentionOnlyCheck_Changed"
                                                   Unchecked="OverviewAttentionOnlyCheck_Changed"/>
                                         <TextBlock x:Name="OverviewAttentionCountText" FontSize="11" VerticalAlignment="Center"
@@ -1230,7 +1234,10 @@
                                                         <TextBlock Text="{Binding DatabaseStateDetail}" ToolTip="{Binding DatabaseStateDetail}" Background="Transparent" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"/>
                                                     </DockPanel>
                                                     <TextBlock Grid.Row="10" Grid.Column="1" Text="Last Collect:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
-                                                    <TextBlock Grid.Row="10" Grid.Column="2" Text="{Binding LastCollectionDisplay}" FontSize="11" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
+                                                    <!-- The value spans the value and detail columns and wraps: a dated stamp with its Server Time offset,
+                                                         "2026-11-07 14:48:55 (UTC-05:00)", is wider than the room beside the label, and a span keeps it
+                                                         from widening the value column every other row shares. -->
+                                                    <TextBlock Grid.Row="10" Grid.Column="2" Grid.ColumnSpan="2" Text="{Binding LastCollectionDisplay}" FontSize="11" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="0,2,8,2" TextWrapping="Wrap"/>
                                                 </Grid>
                                             </StackPanel>
                                             <!-- An offline card carries no overlay (#8304): the status line under the name already says Offline, the
@@ -1463,7 +1470,7 @@
                             <Button x:Name="RecommendationsGenerateButton" Content="Generate now" Margin="8,0,0,0" Padding="12,4"
                                     Style="{StaticResource DarkButton}"
                                     Click="RecommendationsGenerateNow_Click"
-                                    ToolTip="Ask the Darling service to run analysis for this server now, then refresh"/>
+                                    ToolTip="{x:Static local:ViewerCollectorRun.GenerateNowReadyTip}"/>
                             <TextBlock x:Name="RecommendationsStatusText" Margin="12,0,0,0" VerticalAlignment="Center"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
                         </StackPanel>
@@ -1484,7 +1491,7 @@
 
                             <TextBlock x:Name="RecommendationsEmptyText"
                                        Style="{StaticResource EmptyHint}"
-                                       Text="All clear — no current recommendations."/>
+                                       Text="All clear. No current recommendations."/>
 
                             <!-- Insufficient data: the analysis pass has not cleared its 24h data-span
                                  gate yet (the persisted V19 marker). Text is set from the view-model. -->

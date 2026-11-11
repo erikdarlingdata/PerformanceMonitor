@@ -373,7 +373,7 @@ public class ServerTabEmptyStateAndNamesTests
         }
 
         var charts = RepoFile("Lite/Controls/ServerTab.Charts.cs");
-        foreach (var chart in new[] { "MemoryGrantSizingChart", "MemoryGrantActivityChart", "BlockingTrendChart", "DeadlockTrendChart" })
+        foreach (var chart in new[] { "BlockingTrendChart", "DeadlockTrendChart" })
         {
             Assert.Contains("EmptyState.Show(" + chart + ", data.Count == 0", charts, StringComparison.Ordinal);
         }

@@ -106,6 +106,7 @@ public static partial class DarlingWebEndpoints
         "get_alert_details",
         "get_overview_baselines",
         "get_block_chain",
+        "get_alert_badge_summary",
     };
 
     /// <summary>The tool names deliberately absent from the <c>/api/read/*</c> 1:1 read surface. <c>analyze_server</c>
@@ -706,14 +707,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                         int? scopedServerId = null;
                         (int ServerId, string ServerName, string DisplayName)? scopedServer = null;
                         int[]? allowedServerIds = null;
+                        string? registryFault = null;
                         if (allowedTagIds is not null)
                         {
                             allowedServerIds = await AllowedWebServerIdsAsync(postgres, context, context.RequestAborted);
                             if (!IsScopedFleetRead(name) || !string.IsNullOrWhiteSpace(Server(context)))
                             {
-                                scopedServer = await AuthorizedWebServerRowAsync(postgres, context, allowedTagIds, allowedServerIds);
+                                var authorized = await AuthorizedWebServerRowAsync(postgres, context, allowedTagIds, allowedServerIds);
+                                scopedServer = authorized.Row;
                                 scopedServerId = scopedServer?.ServerId;
-                                if (scopedServerId is null)
+                                registryFault = authorized.StoreFault;
+                                if (authorized.Refused)
                                 {
                                     /* The fixed sentence, swept like every other answer, with the seat's 403; never the registry's names. */
                                     return new WebReadAnswer(ToHttpResult("""{"error":"Server data is unavailable to this token."}""",
@@ -733,14 +737,21 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                             context.Request.QueryString = context.Request.QueryString.Add("as_of", askedAsOf);
                         }
 
-                        if (allowedServerIds is not null)
+                        if (registryFault is not null)
+                        {
+                            /* The registry could not be read, so no grant was checked and no read ran. The sentence is the answer the
+                               read itself gives an unscoped reader for the same fault, and it takes the same path from here: one log
+                               line, the fixed failure body, and a read recorded by what the sentence says. */
+                            result = registryFault;
+                        }
+                        else if (allowedServerIds is not null)
                         {
                             result = await DarlingServerResolver.ReadWebScopeAsync(allowedServerIds, allowedTagIds!,
                                 () => scopedServer is { } pinnedServer
                                     ? DarlingServerResolver.ReadWebServerAsync(pinnedServer, () => handler(context, postgres, analysis))
                                     : handler(context, postgres, analysis));
-                            /* Only an answer that writes separately_monitored_databases (the fleet overview and the blocking reads) is reshaped;
-                               every other answer is handed on byte for byte. */
+                            /* Only an answer that writes separately_monitored_databases (get_blocking and get_deadlocks, at the top level) is
+                               reshaped; every other answer is handed on byte for byte. */
                             if (result.Contains("\"separately_monitored_databases\"", StringComparison.Ordinal)
                                 && System.Text.Json.Nodes.JsonNode.Parse(result) is System.Text.Json.Nodes.JsonObject scopedResult)
                             {

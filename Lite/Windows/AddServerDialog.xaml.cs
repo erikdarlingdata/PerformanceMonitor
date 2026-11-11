@@ -455,9 +455,9 @@ public partial class AddServerDialog : Window
 
         StatusText.Text =
             EntraMfaAuthRadio.IsChecked == true
-                ? "Testing connection — please complete authentication in the popup window..."
+                ? "Testing connection: please complete authentication in the popup window..."
                 : EntraDeviceCodeAuthRadio.IsChecked == true
-                    ? "Testing connection — a window with a sign-in code will appear; enter it in a browser..."
+                    ? "Testing connection: a window with a sign-in code will appear; enter it in a browser..."
                     : "Testing connection...";
 
         bool connected = false;

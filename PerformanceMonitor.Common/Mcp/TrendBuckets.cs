@@ -101,6 +101,14 @@ internal static class TrendBuckets
     /// <summary><c>get_file_io_trend</c>: about 220 bytes a point.</summary>
     public const int FileIoMaxPoints = 1000;
 
+    /// <summary><c>get_file_io_trend</c>'s own MCP auto-sizing target (#8568), narrower than the shared
+    /// <see cref="McpPointBudget"/> for the same reason as <see cref="PgIoMcpAutoPoints"/>: a point measured about
+    /// 240 bytes with its envelope on a production store, so a day across six databases at the shared target's
+    /// hourly points (150) answered 35.7 KB, over <see cref="McpResponseBudget.DefaultBytes"/> (32 KB). 120 keeps
+    /// the answer under about 29 KB at any window: a day across six databases is two-hour points, across one
+    /// database 15-minute ones, and an hour or less still auto-sizes to one-minute points for a single database.</summary>
+    public const int FileIoMcpAutoPoints = 120;
+
     /// <summary><c>get_lock_wait_trend</c>: about 120 bytes a point.</summary>
     public const int LockWaitMaxPoints = 2000;
 
@@ -123,6 +131,14 @@ internal static class TrendBuckets
     /// <summary><c>get_pg_database_trend</c>: about 270 bytes a point.</summary>
     public const int PgDatabaseMaxPoints = 1000;
 
+    /// <summary><c>get_pg_database_trend</c>'s own MCP auto-sizing target (#8568), narrower than the shared
+    /// <see cref="McpPointBudget"/> for the same reason as <see cref="PgIoMcpAutoPoints"/>: a point measured about
+    /// 280 bytes with its envelope on a production store, so a day at the shared target's 10-minute points (145)
+    /// answered 41 KB, over <see cref="McpResponseBudget.DefaultBytes"/> (32 KB). 90 keeps the answer under about
+    /// 26 KB at any window: a day is 30-minute points, four hours 5-minute ones, and an hour or less still
+    /// auto-sizes to one-minute points.</summary>
+    public const int PgDatabaseMcpAutoPoints = 90;
+
     /* The rest of the trend family (#3960), sized the same way. */
 
     /// <summary><c>get_wait_trend</c>: about 170 bytes a point.</summary>
@@ -133,6 +149,14 @@ internal static class TrendBuckets
 
     /// <summary><c>get_tempdb_trend</c>: about 300 bytes a point.</summary>
     public const int TempDbMaxPoints = 800;
+
+    /// <summary><c>get_tempdb_trend</c>'s own MCP auto-sizing target (#8568), narrower than the shared
+    /// <see cref="McpPointBudget"/> for the same reason as <see cref="PgIoMcpAutoPoints"/>: a point measured about
+    /// 305 bytes with its envelope on a production store, so a day at the shared target's 10-minute points (144)
+    /// answered 44 KB, over <see cref="McpResponseBudget.DefaultBytes"/> (32 KB). 90 keeps the answer under about
+    /// 28 KB at any window: a day is 30-minute points, four hours 5-minute ones, and an hour or less still
+    /// auto-sizes to one-minute points.</summary>
+    public const int TempDbMcpAutoPoints = 90;
 
     /// <summary><c>get_memory_trend</c>: about 200 bytes a point.</summary>
     public const int MemoryMaxPoints = 1200;
@@ -160,6 +184,13 @@ internal static class TrendBuckets
     /// <summary><c>get_pg_cpu_utilization</c> (#4193): about 500 bytes a point, the widest of the family — the
     /// CPU/ACU pair (each with its own peak), the capacity trio and the six V136 host-memory columns.</summary>
     public const int PgCpuMaxPoints = 500;
+
+    /// <summary><c>get_pg_cpu_utilization</c>'s own MCP auto-sizing target (#8568), narrower than the shared
+    /// <see cref="McpPointBudget"/> for the same reason as <see cref="PgIoMcpAutoPoints"/>: at about 500 bytes a
+    /// point the read's default four hours at the shared target's two-minute points (121) answered 60 KB, over
+    /// <see cref="McpResponseBudget.DefaultBytes"/> (32 KB). 55 keeps the answer under about 28 KB at any window:
+    /// four hours are 5-minute points, a day 30-minute ones, and an hour 2-minute ones.</summary>
+    public const int PgCpuMcpAutoPoints = 55;
 
     /// <summary>Lite's <c>get_query_trend</c> (#7907): about 330 bytes a point, sixteen fields of one query's summed
     /// deltas, weighted averages, DOP pair and plan facts.</summary>

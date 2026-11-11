@@ -187,19 +187,20 @@ module AS (
        CONVERT(varchar(130), ..., 1) handle text, so the join key lines up; unmatched -> ad hoc.
        #7256: this one stays on v_procedure_stats. Its answer is the NEWEST row of each handle over all history, not the window's, so
        reading the hot table alone could drop a module whose only row is archived. */
+    /* #8549: the newest row of each handle comes from one aggregate, no sort. This was a ROW_NUMBER over every row of the ranked
+       handles, which sorts them (295 ms against 64 ms for 3.46 million procedure_stats rows). arg_max over (collection_time,
+       collection_id) keeps the same tie-break, the row collected last. The three names travel in one struct so they come from the
+       same row: arg_max skips a NULL argument, and a module whose newest row has NULL names must still answer NULL, as before. */
     SELECT
         sql_handle,
-        object_name,
-        schema_name,
-        database_name
+        newest.o AS object_name,
+        newest.s AS schema_name,
+        newest.d AS database_name
     FROM
     (
         SELECT
             sql_handle,
-            object_name,
-            schema_name,
-            database_name,
-            ROW_NUMBER() OVER (PARTITION BY sql_handle ORDER BY collection_time DESC, collection_id DESC) AS rn
+            arg_max({'o': object_name, 's': schema_name, 'd': database_name}, (collection_time, collection_id)) AS newest
         FROM v_procedure_stats
         WHERE server_id = $1
         AND   sql_handle IS NOT NULL
@@ -210,8 +211,8 @@ module AS (
            sql_handle alone, so a handle outside the ranked groups was never used, and a handle inside them keeps the
            same newest row. */
         AND   sql_handle IN (SELECT sql_handle FROM ranked)
-    ) ranked_modules
-    WHERE rn = 1
+        GROUP BY sql_handle
+    ) AS ranked_modules
 ),
 texts AS (
     /* #5381: the representative text is fetched AFTER the ranking, for the candidate groups only, and from the
@@ -2178,6 +2179,12 @@ public class QueryTrendPoint
     /// <summary>How many of a bucketed point's collections had no knowable rate and were left out of it (#3897).
     /// Null on an unbucketed point, which is its own single collection — unrated or not, per <see cref="HasRate"/>.</summary>
     public long? UnratedInBucket { get; set; }
+
+    /// <summary>#8575: set only on a Query Store point whose interval was still OPEN when it was last captured: the seconds its
+    /// totals cover (the newest snapshot that stored one of its rows, less the interval's start), shorter than the interval's length.
+    /// The rates are over this, not over the whole interval, and are null when it is under 60 seconds. Null on a closed interval and
+    /// on every other trend. Darling's twin is <c>QueryDurationTrendPoint.PartialCoveredSeconds</c>.</summary>
+    public double? PartialCoveredSeconds { get; set; }
 }
 
 public class QueryStatsRow

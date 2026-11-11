@@ -40,6 +40,22 @@ public partial class FinOpsTab : UserControl
     private List<ServerPropertyRow>? _serverInventoryCache;
     private DateTime _serverInventoryCacheTime;
 
+    /* True until the tab's first show after start-up has re-read the Server Inventory's collected overlay (see
+       ReloadUnfinishedSizeGridsOnShow). */
+    private bool _inventoryFirstShowPending = true;
+
+    /* When the last read of that overlay began (UTC), by a whole inventory load or by a re-read. The re-read is gated on the
+       start, as the per-server reload is, so a read still running is never taken for a stale one. */
+    private DateTime? _inventoryOverlayReadStartedUtc;
+
+    /// <summary>True while the Server Inventory rows of the last load are under five minutes old.</summary>
+    private bool ServerInventoryCacheIsFresh =>
+        _serverInventoryCache != null && (DateTime.Now - _serverInventoryCacheTime).TotalMinutes < 5;
+
+    /// <summary>The re-read of the Server Inventory's collected overlay the tab's last show or collection notice started, or a
+    /// completed task when neither has started one. A new one does not start while it runs. A test awaits it.</summary>
+    internal System.Threading.Tasks.Task ServerInventoryReload { get; private set; } = System.Threading.Tasks.Task.CompletedTask;
+
     private readonly Dictionary<DataGrid, IDataGridFilterManager> _filterManagers = new();
 
     /* #2306: suppresses ServerSelector_SelectionChanged while RefreshServerList reselects the SAME
@@ -118,6 +134,12 @@ public partial class FinOpsTab : UserControl
         ObjectHeatmapWindowPicker.Value = TimeRangePresets.FromLegacyHours(720)!;
         InitializeFilterManagers();
         IsVisibleChanged += (_, _) => ReloadUnfinishedSizeGridsOnShow();
+        Loaded += (_, _) =>
+        {
+            ServerTimeHelper.DisplayModeChanged -= OnDisplayModeChanged;
+            ServerTimeHelper.DisplayModeChanged += OnDisplayModeChanged;
+        };
+        Unloaded += (_, _) => ServerTimeHelper.DisplayModeChanged -= OnDisplayModeChanged;
     }
 
     /// <summary>
@@ -207,19 +229,26 @@ public partial class FinOpsTab : UserControl
         server == null || server.ViewFilterDatabases.Count == 0 ? null : server.ViewFilterDatabases.ToList();
 
     /// <summary>
-    /// The two Index Analysis grids are wider than the page, so a horizontal scroll bar is right only while they hold rows: on an empty
-    /// grid it would scroll a header row and nothing else.
+    /// The two Index Analysis grids show only while a run has rows. Before a run, or after one that finds nothing, both stay collapsed
+    /// and the one message over them (Grid.RowSpan 2) is the whole empty state, instead of a message under a bare summary grid (#8621).
+    /// The horizontal scroll bar follows the same rule: the grids are wider than the page, so it is right only while they hold rows.
     /// </summary>
     private void IndexAnalysisGridsHoldRows(bool hasRows)
     {
-        var visibility = hasRows ? ScrollBarVisibility.Auto : ScrollBarVisibility.Hidden;
-        IndexAnalysisSummaryGrid.HorizontalScrollBarVisibility = visibility;
-        IndexAnalysisDetailGrid.HorizontalScrollBarVisibility = visibility;
+        var scroll = hasRows ? ScrollBarVisibility.Auto : ScrollBarVisibility.Hidden;
+        var visibility = hasRows ? Visibility.Visible : Visibility.Collapsed;
+        IndexAnalysisSummaryGrid.HorizontalScrollBarVisibility = scroll;
+        IndexAnalysisDetailGrid.HorizontalScrollBarVisibility = scroll;
+        IndexAnalysisSummaryGrid.Visibility = visibility;
+        IndexAnalysisDetailGrid.Visibility = visibility;
     }
 
     /// <summary>
-    /// Lists the server's current databases in the Index Analysis picker, keeping whatever name is already typed. The box stays
-    /// usable as a free text field when the store knows no databases.
+    /// Lists the server's databases in the Index Analysis picker (<see cref="LocalDataService.GetIndexAnalysisDatabaseListAsync"/>: its
+    /// current ones, or the ones in its newest size snapshot of the last seven days when the store has no recent state snapshot),
+    /// keeping whatever name is already typed. A list taken from a size snapshot says when it was collected, on the box and on
+    /// each entry's tooltip, since a database dropped since may be in it. The box stays usable as a free text field when the
+    /// store knows no databases.
     /// </summary>
     private async System.Threading.Tasks.Task PopulateIndexAnalysisDatabasesAsync(int serverId)
     {
@@ -227,16 +256,49 @@ public partial class FinOpsTab : UserControl
         var gen = _loads.Claim(nameof(PopulateIndexAnalysisDatabasesAsync));
         try
         {
-            var databases = await Task.Run(() => _dataService.GetCurrentDatabasesAsync(serverId));
+            var databases = await Task.Run(() => _dataService.GetIndexAnalysisDatabaseListAsync(serverId));
             if (_loads.Superseded(nameof(PopulateIndexAnalysisDatabasesAsync), gen)) return;
             var typed = IndexAnalysisDatabaseInput.Text;
-            IndexAnalysisDatabaseInput.ItemsSource = databases ?? [];
+            IndexAnalysisDatabaseInput.ItemsSource = databases.Names;
             IndexAnalysisDatabaseInput.Text = typed;
+
+            /* #8645: the note names the snapshot's time on the PICKED server's clock, never the last-opened tab's. A current list
+               carries no time, so it reads no clock. */
+            string? note = null;
+            if (databases.AsOfUtc is not null)
+            {
+                var zone = await SelectedServerDayZoneAsync(serverId);
+                if (_loads.Superseded(nameof(PopulateIndexAnalysisDatabasesAsync), gen)) return;
+                note = IndexAnalysisListNote(databases.AsOfUtc, zone);
+            }
+
+            IndexAnalysisDatabaseInput.ToolTip = note;
+            if (note is null)
+            {
+                IndexAnalysisDatabaseInput.ClearValue(ItemsControl.ItemContainerStyleProperty);
+            }
+            else
+            {
+                var entryStyle = new Style(typeof(ComboBoxItem), TryFindResource(typeof(ComboBoxItem)) as Style);
+                entryStyle.Setters.Add(new Setter(ToolTipProperty, note));
+                IndexAnalysisDatabaseInput.ItemContainerStyle = entryStyle;
+            }
         }
         catch (Exception ex)
         {
             AppLogger.Error("FinOps", $"Failed to list databases for index analysis: {ex.Message}", ex);
         }
+    }
+
+    /// <summary>What the Index Analysis picker says about a list taken from a size snapshot: when it was collected, in the selected
+    /// time display on <paramref name="zone"/>, and that a database dropped since may be in it. Null for the current list.
+    /// #8645: <paramref name="zone"/> is the picked server's zone (<see cref="SelectedServerDayZoneAsync"/>), not the last-opened
+    /// server tab's.</summary>
+    internal static string? IndexAnalysisListNote(DateTime? asOfUtc, TimeZoneInfo zone)
+    {
+        if (asOfUtc is not { } asOf) return null;
+        var when = ServerTimeHelper.FormatInstant(asOf, zone, "yyyy-MM-dd HH:mm");
+        return $"Databases as of {when}, from the newest size snapshot. There is no recent database list, so a database dropped since may be listed";
     }
 
     private int GetSelectedServerId()
@@ -776,6 +838,16 @@ public partial class FinOpsTab : UserControl
     private void ReloadUnfinishedSizeGridsOnShow()
     {
         if (!IsVisible || _dataService == null) return;
+
+        /* The Server Inventory lists every server, so it does not wait for a selected one. Its start-up load read the collected
+           overlay (Status, Health, Avg CPU, Storage, Idle DBs) before any collection, against a store whose newest CPU sample
+           may be days old. The first show reads that overlay again whatever its age, and a later show once the last read is
+           old enough (FinOpsShowReloadPolicy). Only the overlay: the live read of every server stays with start-up and the
+           Refresh button. */
+        var firstInventoryShow = _inventoryFirstShowPending;
+        _inventoryFirstShowPending = false;
+        ReReadServerInventoryOverlay(firstInventoryShow);
+
         var serverId = GetSelectedServerId();
         if (serverId == 0) return;
 
@@ -810,6 +882,9 @@ public partial class FinOpsTab : UserControl
         if (FinOpsShowReloadPolicy.ShouldReloadAfterCollection(_lastPerServerLoadUtc, collected, DateTime.UtcNow))
         {
             _ = LoadPerServerDataAsync();
+
+            /* A tab left open since before the first collection: the Server Inventory's overlay follows the collection too. */
+            ReReadServerInventoryOverlay(firstShow: false);
         }
     }
 
@@ -858,10 +933,10 @@ public partial class FinOpsTab : UserControl
                     var only = data.Select(d => d.DatabaseName).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
                     scopeNote = only.Count == 1
-                        ? $" — Azure SQL Database: only the CONNECTED database ('{only[0]}') is visible from "
+                        ? $". Azure SQL Database: only the CONNECTED database ('{only[0]}') is visible from "
                           + "this connection, so its siblings are not missing, they are unreachable. Add a server "
                           + "entry per database to see more."
-                        : " — Azure SQL Database: each connection sees only its own database, so this grid "
+                        : ". Azure SQL Database: each connection sees only its own database, so this grid "
                           + "covers the databases you have registered rather than every database on the server.";
                 }
             }
@@ -974,22 +1049,76 @@ public partial class FinOpsTab : UserControl
         ServerTab.MarkAllZero(PvsTrendChart); // #8144: "0 throughout" in the card header
     }
 
+    /// <summary>
+    /// Starts a re-read of the Server Inventory's collected overlay onto the rows already loaded, unless one is still running or
+    /// the last read of it began too recently (<see cref="FinOpsShowReloadPolicy.ShouldReloadOnShow"/>; a first show skips the
+    /// age check). With no rows loaded yet there is nothing to lay it on: the load in flight binds its own.
+    /// </summary>
+    private void ReReadServerInventoryOverlay(bool firstShow)
+    {
+        if (!ServerInventoryReload.IsCompleted) return;
+        if (!FinOpsShowReloadPolicy.ShouldReloadOnShow(_inventoryOverlayReadStartedUtc, DateTime.UtcNow, firstShow)) return;
+        ServerInventoryReload = ReReadServerInventoryOverlayAsync();
+    }
+
+    /// <summary>One store read (the fleet overlay), laid onto the cached rows. Each row raises a change for the cells that moved,
+    /// so the grid keeps its rows, its selection and its scroll position. A good read shows each row what a load over the same
+    /// overlay shows it, so a value missing from the store leaves its cell. A failed read is logged by
+    /// <see cref="FinOpsServerInventory.TryReadCollectedMetricsAsync"/> and keeps the values the rows have; a cell with none
+    /// then reads "Could not read". Rows a whole load replaced while the read ran are left to that load.</summary>
+    private async System.Threading.Tasks.Task ReReadServerInventoryOverlayAsync()
+    {
+        var rows = _serverInventoryCache;
+        var dataService = _dataService;
+        if (rows == null || dataService == null) return;
+
+        _inventoryOverlayReadStartedUtc = DateTime.UtcNow;
+        var (overlay, readFailed) = await FinOpsServerInventory.TryReadCollectedMetricsAsync(async () => await Task.Run(() => dataService.GetServerMetricsAsync()));
+        if (!ReferenceEquals(rows, _serverInventoryCache)) return;
+
+        FinOpsServerInventory.ReapplyCollectedMetrics(rows, overlay, readFailed);
+    }
+
+    /// <summary>The time display changed: the Server Inventory's Last Updated cells are computed text, so each loaded row raises
+    /// a change for it and the cells and the column's filter read the new mode together. The grid keeps its rows and selection.</summary>
+    private void OnDisplayModeChanged(object? sender, EventArgs e)
+    {
+        if (Dispatcher.CheckAccess())
+        {
+            RedrawInventoryTimes();
+        }
+        else
+        {
+            Dispatcher.BeginInvoke(new Action(RedrawInventoryTimes));
+        }
+    }
+
+    private void RedrawInventoryTimes()
+    {
+        if (_serverInventoryCache is not { } rows) return;
+        foreach (var row in rows)
+        {
+            row.NotifyTimeDisplayChanged();
+        }
+    }
+
     private async System.Threading.Tasks.Task LoadServerInventoryAsync(bool forceRefresh = false)
     {
         using var _profiler = Helpers.MethodProfiler.StartTiming("FinOps-ServerInventory");
         if (_dataService == null || _serverManager == null || _credentialResolver == null) return;
 
-        var gen = _loads.Claim(nameof(LoadServerInventoryAsync));
-
         // Use cache if available and less than 5 minutes old
-        if (!forceRefresh && _serverInventoryCache != null
-            && (DateTime.Now - _serverInventoryCacheTime).TotalMinutes < 5)
+        if (!forceRefresh && _serverInventoryCache != null && ServerInventoryCacheIsFresh)
         {
             _serverInventoryFilterMgr!.UpdateData(_serverInventoryCache);
             NoServerInventoryMessage.Visibility = _serverInventoryCache.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             ServerInventoryCountIndicator.Text = _serverInventoryCache.Count > 0 ? CountText.Plural(_serverInventoryCache.Count, "server") : "";
             return;
         }
+
+        /* Claimed after the cached repaint: a repaint reads nothing, so it must not supersede a load in flight. */
+        var gen = _loads.Claim(nameof(LoadServerInventoryAsync));
+        _inventoryOverlayReadStartedUtc = DateTime.UtcNow;
 
         try
         {
@@ -1004,17 +1133,33 @@ public partial class FinOpsTab : UserControl
                monitor never shows up even while its collected rows wait out retention. */
             /* A server that cannot be reached keeps its place from the newest server_properties row the store holds for it, marked
                last known with that row's collection time. One with no collected row either is left out, and the empty sentence says so. */
+            /* #4766: each row reads its Last Updated on its OWN server's clock (that server's collected clock, else its open tab's,
+               else the machine's), as the Application Connections rows do: this grid lists every server, whichever tab is open.
+               The open tabs are asked here, on the UI thread, because the tabs are UI objects. */
+            var openTabClocks = new Dictionary<int, ServerClock?>();
+            foreach (var server in servers)
+            {
+                var id = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+                openTabClocks[id] = _openTabClock.Invoke(id);
+            }
+
             var build = await FinOpsServerInventory.BuildAsync(
                 servers,
                 server => LocalDataService.GetServerPropertiesLiveAsync(_credentialResolver.GetConnectionString(server)),
                 server => Task.Run(() => _dataService!.GetLatestServerPropertiesAsync(
                     RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server)))),
-                async () => await Task.Run(() => _dataService!.GetServerMetricsAsync()));
+                async () => await Task.Run(() => _dataService!.GetServerMetricsAsync()),
+                async server =>
+                {
+                    var id = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+                    var collected = await Task.Run(() => _dataService!.GetServerClockAsync(id));
+                    return ServerTimeHelper.ClockForServer(collected, openTabClocks.GetValueOrDefault(id));
+                });
             if (_loads.Superseded(nameof(LoadServerInventoryAsync), gen)) return;
             var data = build.Rows;
 
             /* The Health column comes with the collected overlay (FinOpsServerInventory.ApplyCollectedMetrics): the same score the Utilization
-               tab shows for the server, from its p95 CPU, buffer pool and free space. A server with no CPU sample has none (a dash). */
+               tab shows for the server, from its p95 CPU, buffer pool and free space. A server with no CPU sample has none (the cell says Not collected). */
 
             _serverInventoryCache = data;
             _serverInventoryCacheTime = DateTime.Now;
@@ -1418,7 +1563,7 @@ public partial class FinOpsTab : UserControl
                    Databases cannot work on Azure either — and failing per-database would half-fill the grid
                    with whichever database the connection happened to open. */
                 IndexAnalysisStatusText.Text =
-                    "Azure SQL Database cannot analyse across databases — clear \u201CAll Databases\u201D and name one, "
+                    "Azure SQL Database cannot analyse across databases. Clear \u201CAll Databases\u201D and name one, "
                     + "with sp_IndexCleanup installed in it.";
                 return;
             }
@@ -1469,7 +1614,7 @@ public partial class FinOpsTab : UserControl
                 ? Visibility.Visible : Visibility.Collapsed;
             IndexAnalysisStatusText.Text = details.Count > 0
                 ? CountText.Plural(details.Count, "index", "indexes") + " found"
-                : "Analysis complete — no index issues found";
+                : "Analysis complete: no index issues found";
         }
         catch (Exception ex)
         {

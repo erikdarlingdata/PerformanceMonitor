@@ -115,7 +115,10 @@ public sealed class DailySummaryNotCarriedTests
                each stays a per-day SubPlan; the candidate days are a fenced subquery holding probe one, and probe
                two filters its output, so the source is probed only on the days the rollup probe found empty.
                DailySummaryProbePlanLiveTests proves the resulting plan on a store. */
-            var member = lf[lf.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal)..];
+            /* The member ends where the next CTE (deadlocks) starts: it used to run to the end of the statement, so a fence in a later
+               CTE (#8549's bounded probe in coll) counted as one of this member's. */
+            var memberStart = lf.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal);
+            var member = lf[memberStart..lf.IndexOf("deadlocks AS (", memberStart, StringComparison.Ordinal)];
             Assert.Equal(3, member.Split("OFFSET 0").Length - 1);
             var rollupProbeAt = member.IndexOf($"SELECT 1 FROM collect.{relation} AS r", StringComparison.Ordinal);
             var fenceAt = member.IndexOf("        OFFSET 0\n    ) AS b\n    WHERE EXISTS (", StringComparison.Ordinal);

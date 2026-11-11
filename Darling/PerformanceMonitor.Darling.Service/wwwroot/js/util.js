@@ -984,6 +984,30 @@ export function axisTime(date, withDate, withSeconds = false, withZone = false) 
   return date.toLocaleTimeString([], time);
 }
 
+/** A normalized pin's display label ("last 2 days" / "8/21/26, 12:00 AM → 8/22/26, 12:00 AM") — shared with
+ *  the notebook editor's pin strip, a read cell's pinned window (#8577) and the composed cell's badge, so every surface describes a pin identically. */
+export function pinRangeLabel(range) {
+  return range.windowStart ? pinWindowLabel(range.windowStart, range.windowEnd) : "last " + pinHoursLabel(range.hours);
+}
+
+/** The badge's window text for an absolute pin — compact local date+time, "start → end". */
+export function pinWindowLabel(startIso, endIso) {
+  const from = new Date(startIso);
+  const to = new Date(endIso);
+  if (isNaN(from.getTime()) || isNaN(to.getTime())) return "custom window";
+  const opts = { dateStyle: "short", timeStyle: "short" };
+  return from.toLocaleString(undefined, opts) + " → " + to.toLocaleString(undefined, opts);
+}
+
+/** The badge's window text for a relative pin (whole days render as days, mirroring the range picker's labels). */
+function pinHoursLabel(hours) {
+  if (hours % 24 === 0 && hours >= 24) {
+    const d = hours / 24;
+    return d + (d === 1 ? " day" : " days");
+  }
+  return hours + (hours === 1 ? " hour" : " hours");
+}
+
 /**
  * The x-axis DOMAIN window for a "last N hours" trend chart (#2802): [now - hours, now] as UTC-epoch ms, for
  * renderLineChart's windowStart/windowEnd. windowEnd is the client's render-time now, NOT the last data point —
@@ -993,9 +1017,10 @@ export function axisTime(date, withDate, withSeconds = false, withZone = false) 
  * tick labels). Anchoring to the last data point instead would slide an old sparse burst to the right edge and
  * read as current — the #2802 bug. Returns null for a missing/non-positive hours so the chart falls back to its
  * data-extent domain unchanged (byte-for-byte the pre-#2802 behavior). `Date.now()` is a UTC epoch, directly
- * comparable to the parseUtc'd data times.
+ * comparable to the parseUtc'd data times. With an `asOf` in the past (a read cell pinned to the time of an alert, #8577) the window
+ * ends there instead, the same end the read was asked for.
  */
-export function windowFromHours(hours) {
+export function windowFromHours(hours, asOf = null) {
   const h = Number(hours);
   if (!isFinite(h) || h < 1) return null;
   /* A custom range's own reads span the exact pair the reader picked, not the whole hours they were fetched over. */
@@ -1004,8 +1029,44 @@ export function windowFromHours(hours) {
   if (liveRange() && h === activeRange.narrowedTo) {
     return { windowStart: Math.max(activeRange.startMs, activeRange.endMs - h * 3600000), windowEnd: activeRange.endMs };
   }
-  const windowEnd = Date.now();
+  /* #8577: a read that names an `as_of` in the past covers the `hours` ending there, so its axis ends there too. */
+  const pinned = pinnedEndMs(asOf);
+  const windowEnd = pinned != null ? pinned : Date.now();
   return { windowStart: windowEnd - h * 3600000, windowEnd };
+}
+
+/**
+ * #8577: the end of a read's pinned window in UTC-epoch ms, or null when the read is not pinned. A read pins its window with `as_of`
+ * (an alert notebook's read cells name the time of the alert). An `as_of` that is missing, unreadable, or not before now is no pin:
+ * the service anchors that read at its own clock, so its window ends now and so does the axis.
+ */
+export function pinnedEndMs(asOf) {
+  if (asOf == null || asOf === "") return null;
+  const d = parseUtc(String(asOf));
+  const ms = d ? d.getTime() : NaN;
+  return Number.isFinite(ms) && ms < Date.now() ? ms : null;
+}
+
+/**
+ * #8577: the window a read cell with an `as_of` covers, as { windowStart, windowEnd } in UTC-epoch ms, or null for a read that ends now.
+ * `hours` is the width the read answered for (the cell's own, or the hours a kept-history retry narrowed it to).
+ */
+export function readPinWindow(params, hours) {
+  const h = Number(hours != null ? hours : params && params.hours);
+  const end = params ? pinnedEndMs(params.as_of) : null;
+  if (end == null || !isFinite(h) || h < 1) return null;
+  return { windowStart: end - h * 3600000, windowEnd: end };
+}
+
+/**
+ * #8577: a read's own sentence says "in the last 4 hours", which is true of a window that ends now and false of a pinned one. With a
+ * pinned window the phrase names where the window ends ("in the 4 hours ending 11/9/26, 5:33 PM"). Text with no such phrase is
+ * returned as it came.
+ */
+export function pinnedWindowText(text, win) {
+  if (typeof text !== "string" || !win) return text;
+  const end = new Date(win.windowEnd).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+  return text.replace(/\b(in|over|during|for) the last (\d+(?:\.\d+)? hours?(?:\(s\))?)/gi, (m, prep, span) => prep + " the " + span + " ending " + end);
 }
 
 /* #7386: the shortest axis a data start may produce (two points of the slowest, 15 minute, collector cadence), and the run-in
@@ -1123,6 +1184,13 @@ export function fmtNum(v, d = 1) {
   if (v == null) return "—";
   const n = Number(v);
   return isFinite(n) ? n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }) : "—";
+}
+/* A per-hour rate to one decimal place, for the text beside the count it was made from. A positive rate that one
+   decimal place would write as zero reads "<0.1", so a count that happened never sits beside a rate of none (#8532).
+   Every other rate reads as fmtNum writes it, and a true 0 reads 0.0. */
+export function fmtPerHour(v) {
+  const text = fmtNum(v);
+  return Number(v) > 0 && text === fmtNum(0) ? "<" + fmtNum(0.1) : text;
 }
 /* A per-second rate. From 1 up it reads as fmtNum does without padding (66, 1,234.57). Below 1 it keeps two
    significant digits (0.22, 0.0033, 0.000012), so a real rate never reads as 0: one deadlock in a 300 s collection
@@ -1572,11 +1640,30 @@ const joinedReads = new Map();
    every visitor; this one is the page's share of it.
    The connection hold is an HTTP/1.1 matter: the plain-HTTP listeners (loopback, and the network listener without a certificate)
    and a front door reached over plain HTTP. Over TLS the browser negotiates HTTP/2, one connection carries every request as its
-   own stream, and the gate changes nothing there but how many of the four heavy reads run side by side. */
+   own stream, and the gate changes nothing there but how many of the four heavy reads run side by side.
+
+   #8554: a caller can send a read through the same gate with `options.heavy` (readTool). The Overview does for the reads that took
+   4 to 10 s each on a server's first visit, all four ending within 300 ms of one another: the daily summary range, the baseline
+   read and the three 24 h trends. The service's read path gives them nothing to wait on together but the store itself (no per-server
+   lock, no shared connection, and its own long-read limit is per process, not per page), so four cold scans at once share the store's
+   disk and CPU and the slowest read holds the others back. Sent two at a time, in the order asked (the trends the strips draw from
+   first, the baseline and the daily summary last), the strips paint after the first rounds and the slow reads no longer sit on the
+   browser's connections beside the page's own. */
 const HEAVY_PAGE_READS = new Set(["get_query_store_clutter", "get_query_store_regressions", "get_query_heatmap", "get_plan_corrections"]);
 const HEAVY_READ_CAP = 2;
+/* #8632: the Queries tab's other long reads. On a server's first visit the three duration trends and the two top lists at
+   detail=full took 3 to 6 s each, were sent at once with the rest of the tab, and held five of the browser's six connections
+   until they landed, so the page's own ping, store host and alert badge queued 3.4 to 4.5 s behind them although the service
+   answered each in 30 to 280 ms. They go through the gate beside the heavy reads, under one cap on the connections the gate holds,
+   GATED_READ_CAP, which stays below the six a browser opens so that some connections are always free for the reads nothing gates.
+   The heavy reads keep their own cap inside it (HEAVY_READ_CAP), and a read that is next in line but not allowed yet does not hold
+   back one behind it that is. */
+const LONG_TAB_READS = new Set(["get_query_duration_trend", "get_procedure_duration_trend", "get_query_store_duration_trend"]);
+const LONG_TOP_READS = new Set(["get_top_queries_by_cpu", "get_top_procedures_by_cpu"]);
+const GATED_READ_CAP = 4;
 let heavyInFlight = 0;
-const heavyWaiting = [];
+let gatedInFlight = 0;
+const gateWaiting = [];
 
 /** True for a read the page sends through the heavy-read gate (#8452): the Queries tab's four Query Store reads. The gate keeps
  *  them from holding the browser's connections over HTTP/1.1; over HTTP/2 it only limits how many of them run side by side. */
@@ -1584,20 +1671,33 @@ export function isHeavyPageRead(tool) {
   return HEAVY_PAGE_READS.has(tool);
 }
 
-/* Resolves true when a heavy slot is this request's, in the order asked, or false if `signal` aborted while it waited. */
-function takeHeavySlot(signal) {
-  if (heavyInFlight < HEAVY_READ_CAP && heavyWaiting.length === 0) {
-    heavyInFlight++;
+/** True for one of the Queries tab's five other long reads (#8632), which go through the gate beside the heavy ones: the three duration
+ *  trends, and the two top lists when asked at detail=full (the CPU tab's plain top list is small and goes at once). */
+export function isLongTabRead(tool, params) {
+  return LONG_TAB_READS.has(tool) || (LONG_TOP_READS.has(tool) && !!params && params.detail === "full");
+}
+
+const canTakeGateSlot = (heavy) => gatedInFlight < GATED_READ_CAP && (!heavy || heavyInFlight < HEAVY_READ_CAP);
+
+function grantGateSlot(heavy) {
+  gatedInFlight++;
+  if (heavy) heavyInFlight++;
+}
+
+/* Resolves true when a slot is this request's, in the order asked, or false if `signal` aborted while it waited. */
+function takeGateSlot(signal, heavy) {
+  if (gateWaiting.length === 0 && canTakeGateSlot(heavy)) {
+    grantGateSlot(heavy);
     return Promise.resolve(true);
   }
   return new Promise((resolve) => {
-    const waiter = { resolve };
-    heavyWaiting.push(waiter);
+    const waiter = { resolve, heavy };
+    gateWaiting.push(waiter);
     if (signal) {
       signal.addEventListener("abort", () => {
-        const i = heavyWaiting.indexOf(waiter);
+        const i = gateWaiting.indexOf(waiter);
         if (i >= 0) {
-          heavyWaiting.splice(i, 1);
+          gateWaiting.splice(i, 1);
           resolve(false);
         }
       }, { once: true });
@@ -1605,21 +1705,30 @@ function takeHeavySlot(signal) {
   });
 }
 
-function releaseHeavySlot() {
-  heavyInFlight--;
-  while (heavyInFlight < HEAVY_READ_CAP && heavyWaiting.length > 0) {
-    heavyInFlight++;
-    heavyWaiting.shift().resolve(true);
+function releaseGateSlot(heavy) {
+  gatedInFlight--;
+  if (heavy) heavyInFlight--;
+  for (let i = 0; i < gateWaiting.length && gatedInFlight < GATED_READ_CAP; ) {
+    const waiter = gateWaiting[i];
+    if (canTakeGateSlot(waiter.heavy)) {
+      gateWaiting.splice(i, 1);
+      grantGateSlot(waiter.heavy);
+      waiter.resolve(true);
+    } else {
+      i++;
+    }
   }
 }
 
-/* fetchBody for a heavy read: the request is sent when a slot is free and the slot is given back when the body has landed. */
-async function gatedFetchBody(path, signal) {
-  if (!(await takeHeavySlot(signal))) return { aborted: true };
+/* fetchBody for a gated read: the request is sent when a slot is free and the slot is given back when the body has landed.
+   `gate` is "heavy" or "long". */
+async function gatedFetchBody(path, signal, gate) {
+  const heavy = gate === "heavy";
+  if (!(await takeGateSlot(signal, heavy))) return { aborted: true };
   try {
     return await fetchBody(path, signal);
   } finally {
-    releaseHeavySlot();
+    releaseGateSlot(heavy);
   }
 }
 
@@ -1633,10 +1742,10 @@ async function gatedFetchBody(path, signal) {
  * Nothing outlives the response: a caller that starts after it landed sends a fresh request, so no page renders an
  * older answer than it would have. Each caller classifies (so parses) the shared body for itself, so every panel owns
  * the rows it was handed. A caller's `signal` (#4191) cancels only that caller: it gets { kind: "aborted" } at once,
- * and the request itself is cancelled only when no caller is left waiting on it. A `heavy` read (#8452, isHeavyPageRead) is
- * sent through the heavy-read gate above, once per joined request rather than once per caller.
+ * and the request itself is cancelled only when no caller is left waiting on it. A `gate` ("heavy", #8452 isHeavyPageRead, or "long", #8632 isLongTabRead) sends the
+ * read through the read gate above, once per joined request rather than once per caller.
  */
-export async function apiGetJoined(path, signal, heavy) {
+export async function apiGetJoined(path, signal, gate) {
   if (signal && signal.aborted) return { kind: "aborted" };
   const scope = pageReads;
   scope.n++;
@@ -1649,7 +1758,7 @@ export async function apiGetJoined(path, signal, heavy) {
     if (!entry) {
       const controller = new AbortController();
       const joined = { controller, waiters: 0, body: null };
-      joined.body = (heavy ? gatedFetchBody(path, controller.signal) : fetchBody(path, controller.signal)).finally(() => {
+      joined.body = (gate ? gatedFetchBody(path, controller.signal, gate) : fetchBody(path, controller.signal)).finally(() => {
         if (joinedReads.get(key) === joined) joinedReads.delete(key);
       });
       joinedReads.set(key, joined);
@@ -1692,11 +1801,47 @@ const fleetRequests = new Map();
  * read — so every visible tab computed the whole overview twice a minute. The second caller of a tick now joins
  * the first's request instead of sending its own.
  *
- * Nothing outlives the response: a caller that starts after it has landed sends a fresh request, exactly as
- * before, so no page renders an older roll-up than it would have — only the duplicate is gone. And each caller
- * classifies (so parses) the shared body for itself, so every page still owns the cards it was handed.
+ * Nothing outlives the response, except the one case apiGetFleetShell keeps for the poll (#8633): a caller that
+ * starts after it has landed sends a fresh request, exactly as before, so no page renders an older roll-up than it
+ * would have — only the duplicate is gone. And each caller classifies (so parses) the shared body for itself, so
+ * every page still owns the cards it was handed.
  */
 export async function apiGetFleet(store) {
+  return readFleet(store, false);
+}
+
+/* #8633: the request the shell's sidebar sent for each store on its last refresh, kept after it lands for the page's own
+   poll re-render to take (once), with the time it started. See apiGetFleetShell. */
+const shellFleets = new Map();
+
+/* How old the sidebar's kept roll-up may be when the page's poll takes it. The page's re-render trails the sidebar's
+   refresh by the length of its last render (its next poll is counted from where that render settled, the sidebar's from
+   where its refresh started), a few seconds on a store that answers quickly. A page that trails further reads for itself. */
+const SHELL_FLEET_SHARE_MS = 20000;
+
+/* Whether the page render in progress is the poll's (or the Refresh button's) re-render of the page already on screen, as
+   against a navigation. app.js sets it from the render's start to its settle. */
+let pollRender = false;
+export function setPollRender(on) {
+  pollRender = on === true;
+}
+
+/**
+ * The shell's own fleet read (the sidebar, one per store). Same request, same sharing as apiGetFleet, and the request is
+ * kept for the page. The page's poll re-render starts about two seconds after the shell's refresh: its next poll is
+ * counted from where its last render settled, the shell's from where its refresh began, so the two never meet in the
+ * same synchronous pass and the page sent the store a second roll-up a moment after the first landed (#8633, the idle
+ * Fleet Overview behind three stores read it six times a minute).
+ *
+ * The page's poll render takes the kept request ONCE, and only while it is no older than SHELL_FLEET_SHARE_MS: the next
+ * poll (a 15 second page interval, say) reads for itself. A read that is not a poll's, a navigation or an action on the
+ * page, never takes it, so it never gets a roll-up older than its own request, the #3895 rule. A read that failed is not kept.
+ */
+export async function apiGetFleetShell(store) {
+  return readFleet(store, true);
+}
+
+async function readFleet(store, shell) {
   const scope = pageReads;
   scope.n++;
   try {
@@ -1704,14 +1849,22 @@ export async function apiGetFleet(store) {
        is the current store's, and without a front door the one key and the one request it always was. */
     const key = frontDoorOn ? (store != null && store !== "" ? store : pickedStore || "") : "";
     let request = fleetRequests.get(key);
+    if (!shell && pollRender) {
+      const kept = shellFleets.get(key);
+      shellFleets.delete(key);
+      if (!request && kept && Date.now() - kept.at <= SHELL_FLEET_SHARE_MS) request = kept.request;
+    }
     if (!request) {
       request = fetchBody("/api/fleet", undefined, frontDoorOn ? key : undefined).finally(() => {
         if (fleetRequests.get(key) === request) fleetRequests.delete(key);
       });
+      request.startedAt = Date.now();
       fleetRequests.set(key, request);
     }
+    if (shell) shellFleets.set(key, { request, at: request.startedAt ?? Date.now() });
 
     const shared = await request;
+    if (shell && !shared.ok && shellFleets.get(key)?.request === request) shellFleets.delete(key);
     if (shared.transportError) return { kind: "error", message: shared.transportError };
     const res = await classifyResponse({ ok: shared.ok, status: shared.status, url: shared.url, text: async () => shared.raw });
     if (res.kind === "data") stampFleetWindow(res.data);
@@ -2067,7 +2220,9 @@ export function alertDeliveryState(a) {
   return ALERT_STATE_LABELS[a.notification_type] || null;
 }
 
-/** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). `options.wholeWindow` (#6359): under
+/** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). `options.heavy` (#8554) sends the
+ *  read through the heavy-read gate, as the Queries tab's four Query Store reads always go. The tab's duration trends and detail=full
+ *  top lists (isLongTabRead, #8632) go through the same gate on their own, under the gate's combined cap. `options.wholeWindow` (#6359): under
  *  a custom range the read is still anchored at the range's end, but its rows are NOT cut to the exact picked pair, so a read
  *  that answers over the whole hours the grid ranked over (a row's History) shows all of that window. */
 export function readTool(tool, params, signal, options) {
@@ -2079,7 +2234,7 @@ export function readTool(tool, params, signal, options) {
      a table, a stat or any other caller passes none and its read keeps the old budget, and so does a read of a level (withPlotPoints). */
   const plotPx = options && options.plotPx > 0 ? options.plotPx : 0;
   const sized = withPlotPoints(tool, plan.params, plotPx);
-  return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, sized)), signal, isHeavyPageRead(tool))
+  return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, sized)), signal, isHeavyPageRead(tool) || !!(options && options.heavy) ? "heavy" : isLongTabRead(tool, params) ? "long" : null)
     .then(localizeWindowNote)
     .then((res) => finishCustomRange(res, plan, bucketStarts))
     .then((res) => (selection && res && res.kind === "data" ? { ...res, data: trimToRange(res.data, selection.startMs, selection.endMs, 0, bucketStarts) } : res));

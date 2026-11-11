@@ -221,14 +221,14 @@ WITH activity AS
         a.wait_event_type,
         a.wait_event,
         {queryId}                                              AS query_id,
-        /* The redaction tell, and it has to be this rather than 'state IS NULL'. Without pg_monitor
+        " + /* The redaction tell, and it has to be this rather than 'state IS NULL'. Without pg_monitor
            PostgreSQL does not refuse the read: it returns the row with every privileged column NULL and
            substitutes this exact literal for the query text. But a NULL state is ALSO the honest answer for
            a background worker under full privilege — checkpointer, walwriter and the autovacuum launcher all
            report NULL state and NULL query — so testing state alone would flag a healthy instance as
-           unprivileged. The literal is unambiguous. */
+           unprivileged. The literal is unambiguous. */ $@"
         coalesce(a.query, '') = '<insufficient privilege>'      AS state_is_redacted,
-        /* The command keyword, whitelisted rather than substringed.
+        " + /* The command keyword, whitelisted rather than substringed.
 
            A substring of query text is a data-leak vector wearing a formatting decision: plenty of ORMs
            prepend a SQL comment block, so the first token can be a comment opener followed by anything the
@@ -244,7 +244,7 @@ WITH activity AS
            shipped string against a live instance.
 
            NULL query with a NULL state is a background worker, which has no command to report; NULL query
-           with a live state is a session that has run nothing yet on this connection. Both are '(idle)'. */
+           with a live state is a session that has run nothing yet on this connection. Both are '(idle)'. */ $@"
         CASE
             WHEN coalesce(a.query, '') = '<insufficient privilege>' THEN '(redacted)'
             WHEN coalesce(btrim(a.query), '') = '' THEN '(idle)'
@@ -263,14 +263,14 @@ WITH activity AS
         (extract(epoch FROM (clock_timestamp() - a.backend_start)) * 1000)::bigint AS backend_duration_ms,
         age(a.backend_xmin)::bigint                             AS xmin_age,
         age(a.backend_xid)::bigint                              AS xid_age,
-        /* The causal link to the xmin horizon, and the reason it is stamped here rather than derived on
+        " + /* The causal link to the xmin horizon, and the reason it is stamped here rather than derived on
            read. A session pins the horizon through EITHER its snapshot (backend_xmin, which is what a
            REPEATABLE READ transaction holds) or its transaction id (backend_xid, which is what a READ
            COMMITTED transaction that has written holds after releasing its snapshot). Neither column alone
            sees both cases, and the greater of the two ages is what actually sets the floor. -1, not 0, when
            the session holds neither: 0 would read as 'holding the newest possible xid', which is the
            opposite finding from 'holding nothing', and an idle-in-transaction session holding nothing is
-           the common healthy case rather than an edge one. */
+           the common healthy case rather than an edge one. */ $@"
         CASE
             WHEN a.backend_xmin IS NULL
              AND a.backend_xid IS NULL
@@ -282,19 +282,19 @@ WITH activity AS
         coalesce(a.state, '') LIKE 'idle in transaction%'       AS is_idle_in_transaction
     FROM pg_stat_activity AS a
     WHERE a.pid IS NOT NULL
-    /* Never report the collector's own session. Darling's read sits in pg_stat_activity with an open
+    " + /* Never report the collector's own session. Darling's read sits in pg_stat_activity with an open
        transaction and a backend_xmin like anything else, so without this it is a PERMANENT row: the
        zero-rows-when-healthy state becomes unreachable and every denominator is padded by one.
-       pg_blocking and pg_xmin_horizon leave out their own session for the same reason. */
+       pg_blocking and pg_xmin_horizon leave out their own session for the same reason. */ $@"
     AND   a.pid <> pg_backend_pid()
-    /* Nor any other connection this service holds open (#7381). The wait sampler runs its 30 second batch
+    " + /* Nor any other connection this service holds open (#7381). The wait sampler runs its 30 second batch
        on a second connection, inside a transaction with a snapshot, so pg_sleep sat here as a Critical
        'horizon holder'. Excluded by application_name, the same two names the sampler uses for the same
        reason (PgWaitSamplingCollector.SamplerSnapshotSql). The client sets this name, so an application
        that names itself the same way drops out as well. The sampler accepts the same risk, and a check on
-       the login would not cover a remediation login that differs from the collection login. */
+       the login would not cover a remediation login that differs from the collection login. */ $@"
     AND   coalesce(a.application_name, '') NOT IN ('{PgWaitSamplingCollector.ServiceApplicationName}', '{PgWaitSamplingCollector.ServiceRemediationApplicationName}')
-    /* Parallel workers are not independent sessions. They share the leader's transaction, so including them
+    " + /* Parallel workers are not independent sessions. They share the leader's transaction, so including them
        would report one long transaction as N rows with identical durations and inflate every count here by
        the instance's parallelism. The leader represents them. The '<> pid' guard rather than a bare NULL
        check because leader_pid is documented NULL for a plain leader but is set to the process's OWN pid for
@@ -305,29 +305,29 @@ WITH activity AS
        every backend the login does not own and this guard stops excluding anything - a parallel worker
        would come through as its own row. That errs toward INCLUDING rather than dropping, which is the safe
        direction for a guard whose only job is to avoid double-counting, and state_is_redacted already tells
-       the reader the whole row is untrustworthy. */
+       the reader the whole row is untrustworthy. */ $@"
     AND   {parallelWorkerFilter}
 ),
-/* Capture-wide context, computed once and carried on every row.
+" + /* Capture-wide context, computed once and carried on every row.
 
    Repeating four integers per row is a deliberate denormalisation. A read that filters to
    is_idle_in_transaction still has to answer 'out of how many', and 'two sessions idle in transaction' is a
    different finding on a six-connection instance than on a four-thousand-connection one. Carrying it on the
    row means any single stored row is self-describing, and no read can accidentally drop the denominator by
    filtering. It does NOT survive a capture with zero reportable sessions — nothing does — which is what the
-   read's collection_log capture counts are for. */
+   read's collection_log capture counts are for. */ $@"
 totals AS
 (
     SELECT
-        /* EVERY backend the view reports, background workers included — checkpointer, walwriter, the
+        " + /* EVERY backend the view reports, background workers included — checkpointer, walwriter, the
            autovacuum launcher and any autovacuum workers, minus this collector's own session, minus this
            service's other connections (#7381) and minus parallel workers. Not filtered to backend_type = 'client backend', deliberately: backend_type is
            in the privileged column set, so that filter would come back NULL for every row on a target
            without pg_monitor and collapse the denominator to zero — losing it precisely where the numerator
            is already unreliable. A handful of background rows inflates the count on a quiet instance and
-           changes nothing on a busy one, which is the cheaper error. */
+           changes nothing on a busy one, which is the cheaper error. */ $@"
         count(*)::int                                                       AS total_sessions,
-        /* Both are derived from state, which redaction nulls - so under redaction they count only the
+        " + /* Both are derived from state, which redaction nulls - so under redaction they count only the
            backends the monitoring login OWNS. Redaction is per-BACKEND and ownership-based rather than
            per-role-wide (measured: an unprivileged role sees its OWN backend with a live state and a real
            query while every other row is redacted), and this collector already excludes its own session,
@@ -335,16 +335,16 @@ totals AS
 
            Either way these two UNDER-report rather than reporting nothing, which is the more dangerous
            shape of the two: state_is_redacted on the row is what says the numbers cannot be read at face
-           value. */
+           value. */ $@"
         count(*) FILTER (WHERE state = 'active')::int                       AS active_sessions,
         count(*) FILTER (WHERE is_idle_in_transaction)::int                 AS idle_in_transaction_sessions,
-        /* The oldest holder outside this service's own connections (#7381), or NULL when nothing else holds
+        " + /* The oldest holder outside this service's own connections (#7381), or NULL when nothing else holds
            the horizon. Computed over the whole activity CTE rather than over the reportable subset: a young
            transaction can be the oldest holder, and calling a filtered survivor 'the holder' would name the
            wrong session precisely when the real one fell below the floor. It is not the instance-wide oldest:
            when a service connection is older, the next-oldest session is marked. That session is younger
            than the service connection's own work: the sampler's 30 second batch, or another collector's
-           command timeout. The 2-sample floor keeps it out of Critical. */
+           command timeout. The 2-sample floor keeps it out of Critical. */ $@"
         max(horizon_age) FILTER (WHERE horizon_age >= 0)                    AS oldest_horizon_age
     FROM activity
 ),
@@ -355,10 +355,10 @@ reportable AS
         t.total_sessions,
         t.active_sessions,
         t.idle_in_transaction_sessions,
-        /* One row is force-included regardless of duration: whichever session actually holds the oldest
+        " + /* One row is force-included regardless of duration: whichever session actually holds the oldest
            xmin or xid. That is the entire causal claim this collector makes, and it must not be lost to a
            duration floor — a horizon holder below the floor is the answer to 'what is pinning it', and
-           reporting nothing there would leave the reader exactly where pg_xmin_horizon already left them. */
+           reporting nothing there would leave the reader exactly where pg_xmin_horizon already left them. */ $@"
         (t.oldest_horizon_age IS NOT NULL AND a.horizon_age = t.oldest_horizon_age) AS is_horizon_holder
     FROM activity AS a
     CROSS JOIN totals AS t
@@ -386,8 +386,8 @@ SELECT
     f.wait_event,
     f.command_tag,
     f.query_id,
-    /* -1 rather than NULL for every duration, matching pg_blocking's sentinel convention. A backend with no
-       open transaction has no transaction duration to report and 0 would read as 'started this instant'. */
+    " + /* -1 rather than NULL for every duration, matching pg_blocking's sentinel convention. A backend with no
+       open transaction has no transaction duration to report and 0 would read as 'started this instant'. */ $@"
     coalesce(f.state_duration_ms, -1)                           AS state_duration_ms,
     coalesce(f.xact_duration_ms, -1)                            AS xact_duration_ms,
     coalesce(f.query_duration_ms, -1)                           AS query_duration_ms,
@@ -403,8 +403,8 @@ SELECT
     f.idle_in_transaction_sessions,
     f.reportable_sessions
 FROM filtered AS f
-/* Worst first, so the row cap keeps the findings and discards the routine. Horizon holders lead because they
-   are the only rows carrying a proven causal claim; then the longest-held transactions. */
+" + /* Worst first, so the row cap keeps the findings and discards the routine. Horizon holders lead because they
+   are the only rows carrying a proven causal claim; then the longest-held transactions. */ $@"
 ORDER BY f.is_horizon_holder DESC, f.horizon_age DESC, f.xact_duration_ms DESC NULLS LAST, f.pid
 LIMIT {MaxRowsPerCapture}";
     }

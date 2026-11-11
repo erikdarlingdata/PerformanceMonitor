@@ -32,7 +32,7 @@
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Grid.Column="0" VerticalAlignment="Center">
                                     <TextBlock x:Name="PART_Title" Style="{DynamicResource PanelTitleText}" Text="{TemplateBinding Title}" TextTrimming="CharacterEllipsis"/>
-                                    <TextBlock x:Name="PART_Subtitle" Style="{DynamicResource PanelSubtitleText}" Text="{TemplateBinding Subtitle}" Margin="0,4,0,0" TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock x:Name="PART_Subtitle" Style="{DynamicResource PanelSubtitleText}" Text="{TemplateBinding Subtitle}" Margin="0,4,0,0" TextWrapping="Wrap"/>
                                 </StackPanel>
                                 <ContentPresenter Grid.Column="1" Content="{TemplateBinding HeaderContent}" Margin="8,0,0,0" VerticalAlignment="Center"/>
                             </Grid>

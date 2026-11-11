@@ -137,33 +137,61 @@ public sealed class ViewerFinOpsPagesReadabilityTests
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
+    /// <summary>
+    /// Before a read the Index Analysis page shows one message over both grids and their titles, not a message under a bare
+    /// rollup grid (#8621). A read that returns rows swaps the message for the grids, and an empty one swaps them back.
+    /// </summary>
     [Fact]
-    public void TheIndexAnalysisGrids_ShowNoHorizontalScrollBar_WhileTheyAreEmpty()
+    public void TheIndexAnalysisPage_ShowsOneEmptyState_UntilAReadReturnsRows()
     {
         var problems = StaTestThread.Run(() => WithTheme(() => WithTab(MinimumTabWidth, 600, (tab, window) =>
         {
             var rollup = (DataGrid)tab.FindName("FinOpsIndexAnalysisRollupGrid");
             var detail = (DataGrid)tab.FindName("FinOpsIndexAnalysisDetailGrid");
+            var titles = new[] { ("rollup title", (FrameworkElement)tab.FindName("FinOpsIndexAnalysisRollupTitle")), ("recommendations title", (FrameworkElement)tab.FindName("FinOpsIndexAnalysisDetailTitle")) };
+            var message = (TextBlock)tab.FindName("FinOpsIndexAnalysisNoDataMessage");
+            var holdRows = typeof(FinOpsTab).GetMethod("IndexAnalysisGridsHoldRows", BindingFlags.Instance | BindingFlags.NonPublic)!;
             Reveal(rollup);
             Settle(window);
 
             var found = new List<string>();
-            foreach (var (name, grid) in new[] { ("rollup", rollup), ("detail", detail) })
+            void Expect(string moment, bool shown)
             {
-                if (grid.Items.Count != 0)
+                foreach (var (name, element) in new[] { ("rollup grid", (FrameworkElement)rollup), ("recommendations grid", detail) }.Concat(titles))
                 {
-                    found.Add($"the {name} grid holds {grid.Items.Count} rows before a read");
-                }
-                var scroller = Descendants(grid).OfType<ScrollViewer>().FirstOrDefault();
-                if (scroller is null)
-                {
-                    found.Add($"the {name} grid has no scroll viewer");
-                }
-                else if (scroller.ComputedHorizontalScrollBarVisibility == Visibility.Visible)
-                {
-                    found.Add($"the empty {name} grid shows a horizontal scroll bar");
+                    if (element.IsVisible != shown)
+                    {
+                        found.Add($"{moment}: the {name} IsVisible is {element.IsVisible}, expected {shown}");
+                    }
                 }
             }
+
+            Expect("before a read", shown: false);
+            if (!message.IsVisible)
+            {
+                found.Add("before a read: the empty message is not showing");
+            }
+            if (Grid.GetRow(message) != 0 || Grid.GetRowSpan(message) != 4)
+            {
+                found.Add($"the message sits in row {Grid.GetRow(message)} spanning {Grid.GetRowSpan(message)} rows; it must cover both grids");
+            }
+
+            holdRows.Invoke(tab, [true]);
+            message.Visibility = Visibility.Collapsed;
+            Settle(window);
+            Expect("after a read with rows", shown: true);
+            foreach (var (name, grid) in new[] { ("rollup", rollup), ("recommendations", detail) })
+            {
+                if (grid.HorizontalScrollBarVisibility != ScrollBarVisibility.Auto)
+                {
+                    found.Add($"after a read with rows: the {name} grid's horizontal scroll bar is {grid.HorizontalScrollBarVisibility}, expected Auto");
+                }
+            }
+
+            holdRows.Invoke(tab, [false]);
+            message.Visibility = Visibility.Visible;
+            Settle(window);
+            Expect("after a read with no rows", shown: false);
             return found;
         })));
 

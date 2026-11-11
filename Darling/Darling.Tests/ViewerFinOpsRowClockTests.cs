@@ -81,13 +81,42 @@ public sealed class ViewerFinOpsRowClockTests : IDisposable
 
         /* 14:30Z is 10:30 in US Eastern (the row's server) and 20:00 in India (the active tab's). */
         var row = Inventory(Utc(2026, 7, 1, 14, 30), Utc(2026, 7, 1, 14, 30), Eastern);
-        Assert.Equal("2026-07-01 10:30", row.InventoryAsOfText);
-        Assert.Equal("2026-07-01 10:30", row.LastCollectedText);
+        Assert.Equal("2026-07-01 10:30 (UTC-04:00)", row.InventoryAsOfText);
+        /* Last Collected names the offset of the clock it is worded on: the grid lists every server, each on its own. */
+        Assert.Equal("2026-07-01 10:30 (UTC-04:00)", row.LastCollectedText);
 
         ViewerTimeHelper.ActiveServerClock = Eastern;
         var indian = Inventory(Utc(2026, 7, 1, 14, 30), Utc(2026, 7, 1, 14, 30), India);
-        Assert.Equal("2026-07-01 20:00", indian.InventoryAsOfText);
-        Assert.Equal("2026-07-01 20:00", indian.LastCollectedText);
+        Assert.Equal("2026-07-01 20:00 (UTC+05:30)", indian.InventoryAsOfText);
+        Assert.Equal("2026-07-01 20:00 (UTC+05:30)", indian.LastCollectedText);
+    }
+
+    /// <summary>#8634: Start Time, Inventory As Of and Last Collected carry the same zone label in Server Time and none in UTC. Start Time is
+    /// the server's own wall clock as stored, so it is moved to its instant by the collected zone before it is shown on the page's clock.</summary>
+    [Fact]
+    public void Inventory_AllThreeTimeColumns_AreLabelledTheSameWay()
+    {
+        ViewerTimeHelper.ActiveServerClock = India;
+        var row = Inventory(Utc(2026, 11, 11, 8, 14), Utc(2026, 11, 11, 9, 18), Eastern);
+        row.SqlServerStartTime = Utc(2026, 9, 9, 0, 41); /* 00:41 on the server's own clock, which was -04:00 in September. */
+        row.UtcOffsetMinutes = -300;
+        row.TimeZoneId = "Eastern Standard Time";
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.Equal("2026-09-09 00:41 (UTC-04:00)", row.StartTimeText);
+        Assert.Equal("2026-11-11 03:14 (UTC-05:00)", row.InventoryAsOfText);
+        Assert.Equal("2026-11-11 04:18 (UTC-05:00)", row.LastCollectedText);
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+        Assert.Equal("2026-09-09 04:41", row.StartTimeText);
+        Assert.Equal("2026-11-11 08:14", row.InventoryAsOfText);
+        Assert.Equal("2026-11-11 09:18", row.LastCollectedText);
+
+        /* No zone id and no offset: nothing to move the reading by or to name, so it shows as stored, unlabelled. */
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        var legacy = new ServerPropertyRow { SqlServerStartTime = Utc(2026, 9, 9, 0, 41), Clock = Eastern };
+        Assert.Equal("2026-09-09 00:41", legacy.StartTimeText);
+        Assert.Equal("", new ServerPropertyRow { Clock = Eastern }.StartTimeText);
     }
 
     [Fact]

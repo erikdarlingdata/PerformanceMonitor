@@ -9,7 +9,6 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -25,7 +24,9 @@ namespace PerformanceMonitorLite.Controls
     /// top-queries grid (mirror of Dashboard's QueryPerformanceContent.BarCells). Each bar fills to
     /// <c>value / max</c> for its column; recomputed whenever the grid's ItemsSource changes (initial
     /// load + every filter) via a DependencyPropertyDescriptor so we don't hook each setter. The
-    /// cells bind these by RelativeSource to the host ServerTab.
+    /// cells bind these by RelativeSource to the host ServerTab. The descriptor is watched only while
+    /// the tab is loaded (#8566), and each load recomputes, so rows a refresh set while the tab was
+    /// switched away from are counted when it is selected again.
     /// </summary>
     public partial class ServerTab
     {
@@ -61,10 +62,12 @@ namespace PerformanceMonitorLite.Controls
             set => SetValue(BarMaxTotalReadsProperty, value);
         }
 
+        private LoadedValueWatch? _barCellMaxesWatch;
+
         private void SetupBarCellMaxes()
         {
-            var dpd = DependencyPropertyDescriptor.FromProperty(ItemsControl.ItemsSourceProperty, typeof(DataGrid));
-            dpd?.AddValueChanged(QueryStatsGrid, (_, _) => RecomputeBarCellMaxes());
+            _barCellMaxesWatch = LoadedValueWatch.Attach(
+                this, QueryStatsGrid, ItemsControl.ItemsSourceProperty, typeof(DataGrid), RecomputeBarCellMaxes, runAtLoad: true);
         }
 
         private void RecomputeBarCellMaxes()

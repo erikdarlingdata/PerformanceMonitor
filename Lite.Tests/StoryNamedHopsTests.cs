@@ -241,6 +241,32 @@ public class StoryNamedHopsTests
     }
 
     /// <summary>
+    /// #8572: a PARAMETER_SENSITIVITY root that walks to QUERY_SPILLS names "most spilled query X" and gives X's OWN pages (232,588),
+    /// not the window total the fact's value holds (274,106) as the sentence did before.
+    /// </summary>
+    [Fact]
+    public void ParameterSensitivityRootConsumingQuerySpills_GivesTheNamedQuerysOwnPages_NotTheWindowTotal()
+    {
+        var facts = new List<Fact>
+        {
+            new() { Source = "queries", Key = "PARAMETER_SENSITIVITY", Value = 12, BaseSeverity = 1.0, Severity = 1.0,
+                    Metadata = new() { ["worst_ratio"] = 12, ["spill_divergence"] = 1 } },
+            new() { Source = "queries", Key = "QUERY_SPILLS", Value = 274_106, BaseSeverity = 0.4, Severity = 0.4, ObjectName = "Sales/0xAB",
+                    Metadata = new() { ["total_spills"] = 274_106, ["spilling_query_count"] = 2 },
+                    Ranked = [new("Sales/0xAB", "Sales", 232_588), new("Sales/0xCD", "Sales", 41_518)] },
+        };
+        var story = Assert.Single(new InferenceEngine(new RelationshipGraph()).BuildStories(facts), s => s.RootFactKey == "PARAMETER_SENSITIVITY");
+        Assert.Contains("QUERY_SPILLS", story.Path);
+
+        FactAdvice.PopulateStoryText([story], facts);
+
+        var sentence = Investigation(story);
+        var hop = sentence[sentence.IndexOf("most spilled query `Sales/0xAB`", StringComparison.Ordinal)..];
+        Assert.Contains("232,588 pages", hop, StringComparison.Ordinal);
+        Assert.DoesNotContain("274,106", hop, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The SQL Server twin of the exit check's PostgreSQL defect: LCK at 1.0 (a tenth of the window in lock waits)
     /// walks to BLOCKING_CHAIN at 0.7 (depth 3, sleeping apex ×1.4) and consumes it — before this change the only
     /// card said "lock waits" and the session at the head of the chain was named nowhere. Now the LCK card's

@@ -117,8 +117,8 @@ public sealed class ViewerServerEntry
     {
         AuthenticationTypes.EntraMFA => "Microsoft Entra MFA",
         AuthenticationTypes.SqlServer => "SQL Server",
-        AuthenticationTypes.ServicePrincipal => "Azure — Service Principal",
-        AuthenticationTypes.ManagedIdentity => "Azure — Managed Identity",
+        AuthenticationTypes.ServicePrincipal => "Azure: Service Principal",
+        AuthenticationTypes.ManagedIdentity => "Azure: Managed Identity",
         _ => "Windows"
     };
 

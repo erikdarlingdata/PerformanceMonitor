@@ -52,15 +52,18 @@ public sealed class ProvisioningTrendRow
         MemoryRatio = dto.MemoryRatio,
         Status = dto.Status,
         StolenMemoryPct = dto.StolenMemoryPct,
-        StatusReason = dto.StatusReason
+        StatusReason = dto.StatusReason,
+        IsPartial = dto.IsPartial
     };
 
     /// <summary>Stolen memory as a share of total server memory over the day; null when the day has no memory sample.</summary>
     public decimal? StolenMemoryPct { get; set; }
     /// <summary>Why the day read UNDER PROVISIONED, in the badge's words; null for any other verdict.</summary>
     public string? StatusReason { get; set; }
+    /// <summary>True for a day that has not ended (today): the row is judged on the hours collected so far.</summary>
+    public bool IsPartial { get; set; }
 
-    public string DayDisplay => Day.ToString("ddd MM/dd");
+    public string DayDisplay => ProvisioningTrendWindow.DayLabel(Day, IsPartial);
     public string StatusDisplay => ProvisioningVerdict.StatusLabel(Status);
 }
 
@@ -528,7 +531,7 @@ public sealed class ServerPropertyRow
     public long? PhysicalMemoryMb { get => FinOpsInventoryFigures.PhysicalMemoryMb(EngineEdition, _physicalMemoryMb); set => _physicalMemoryMb = value ?? 0L; }
     public int? SocketCount { get => FinOpsInventoryFigures.SocketCount(EngineEdition, _socketCount); set => _socketCount = value; }
     public int? CoresPerSocket { get => FinOpsInventoryFigures.CoresPerSocket(EngineEdition, _coresPerSocket); set => _coresPerSocket = value; }
-    /// <summary>The server's LOCAL start clock (sys.dm_os_sys_info) — stored verbatim, shown as-is like Lite.</summary>
+    /// <summary>The server's LOCAL start clock (sys.dm_os_sys_info), stored verbatim. The grid shows <see cref="StartTimeText"/>.</summary>
     public DateTime? SqlServerStartTime { get; set; }
 
     /// <summary>The server's UTC offset in minutes when the row was collected (<c>server_properties.utc_offset_minutes</c>), the fallback
@@ -563,9 +566,28 @@ public sealed class ServerPropertyRow
     /// repeated autumn hour, and nothing for a server with no snapshot. The column binds this and sorts by
     /// <see cref="InventoryAsOf"/>.
     /// </summary>
-    public string InventoryAsOfText => InventoryAsOfUtc.HasValue
-        ? ViewerTimeHelper.FormatForDisplay(InventoryAsOfUtc.Value, ApplicationConnectionRow.DisplayZoneNow(Clock), "yyyy-MM-dd HH:mm")
-        : "";
+    public string InventoryAsOfText => InventoryAsOfUtc.HasValue ? ZoneLabelledText(InventoryAsOfUtc.Value) : "";
+
+    /// <summary>#8634: one instant as this row's time column words it: the display mode's zone on this row's own clock, then that clock's
+    /// offset in Server Time. Start Time, Inventory As Of and Last Collected all go through it, so a row never shows one column with a
+    /// zone label and its neighbours without.</summary>
+    private string ZoneLabelledText(DateTime naiveUtc) =>
+        ViewerTimeHelper.WithServerZoneLabel(
+            ViewerTimeHelper.FormatForDisplay(naiveUtc, ApplicationConnectionRow.DisplayZoneNow(Clock), "yyyy-MM-dd HH:mm"),
+            ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock, naiveUtc);
+
+    /// <summary>
+    /// What the Start Time column shows (#8634). <see cref="SqlServerStartTime"/> is the server's own wall clock, so it is moved to its UTC
+    /// instant by the zone collected with it (the way <see cref="UptimeSecondsAt"/> does) and worded like the other two time columns: the
+    /// display mode's zone, with the server's offset after it in Server Time. A row with neither a zone id nor an offset has no zone to
+    /// move it by or to name, so its clock reading is shown as it was stored, with no label. The column sorts by
+    /// <see cref="SqlServerStartTime"/>.
+    /// </summary>
+    public string StartTimeText => SqlServerStartTime is not { } start
+        ? ""
+        : UtcOffsetMinutes is null && string.IsNullOrWhiteSpace(TimeZoneId)
+            ? start.ToString("yyyy-MM-dd HH:mm")
+            : ZoneLabelledText(ServerClock.Resolve(TimeZoneId, UtcOffsetMinutes).ToUtc(start));
 
     /// <summary>
     /// The clock of THIS row's server, stamped by the loader (#4766): its collected clock, else the viewer machine's
@@ -585,10 +607,10 @@ public sealed class ServerPropertyRow
     /// <summary>The UTC instant behind <see cref="LastCollected"/>; see <see cref="InventoryAsOfUtc"/>.</summary>
     public DateTime? LastCollectedUtc { get; set; }
 
-    /// <summary>What the Last Collected column shows (#4766); see <see cref="InventoryAsOfText"/>. The column sorts by <see cref="LastCollected"/>.</summary>
-    public string LastCollectedText => LastCollectedUtc.HasValue
-        ? ViewerTimeHelper.FormatForDisplay(LastCollectedUtc.Value, ApplicationConnectionRow.DisplayZoneNow(Clock), "yyyy-MM-dd HH:mm")
-        : "";
+    /// <summary>What the Last Collected column shows (#4766); see <see cref="InventoryAsOfText"/>. In Server Time each row is on its
+    /// own server's clock, so the text ends with that clock's offset, "2026-07-01 10:30 (UTC-04:00)". The column sorts by
+    /// <see cref="LastCollected"/>.</summary>
+    public string LastCollectedText => LastCollectedUtc.HasValue ? ZoneLabelledText(LastCollectedUtc.Value) : "";
     public bool? IsHadrEnabled { get; set; }
     public bool? IsClustered { get; set; }
     public string AgReplicaRole { get; set; } = "Standalone";
@@ -661,19 +683,28 @@ public sealed class ServerPropertyRow
     }
     public string HadrDisplay => IsHadrEnabled.HasValue ? (IsHadrEnabled.Value ? "Yes" : "No") : "";
     public string ClusteredDisplay => IsClustered.HasValue ? (IsClustered.Value ? "Yes" : "No") : "";
-    public string AgReplicaRoleDisplay => string.Equals(AgReplicaRole, "Standalone", StringComparison.OrdinalIgnoreCase) ? "—" : AgReplicaRole;
-    public string ProvisioningDisplay => string.IsNullOrEmpty(ProvisioningStatus) ? "" : ProvisioningVerdict.StatusLabel(ProvisioningStatus);
+    public string AgReplicaRoleDisplay => string.Equals(AgReplicaRole, "Standalone", StringComparison.OrdinalIgnoreCase) ? "-" : AgReplicaRole;
+    public string ProvisioningDisplay => string.IsNullOrEmpty(ProvisioningStatus) ? ProvisioningVerdict.NotCollectedLabel : ProvisioningVerdict.StatusLabel(ProvisioningStatus);
+
+    /// <summary>The tooltip on a Status cell that reads <see cref="ProvisioningVerdict.NotCollectedLabel"/>: what was not collected,
+    /// and over what window; null when there is a verdict.</summary>
+    public string? ProvisioningNote => string.IsNullOrEmpty(ProvisioningStatus) ? ProvisioningVerdict.NoStatusNote : null;
 
     /// <summary>License-limit warning for Standard edition (CPU/RAM caps). Same math as Lite.</summary>
     public string? LicenseWarning => FinOpsInventoryFigures.LicenseWarning(Edition, EngineEdition, _cpuCount, _physicalMemoryMb);
 
-    /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server: the grid shows a dash,
-    /// not a score built from the memory and storage defaults (<see cref="FinOpsUtilizationFigures.HealthScore(bool, decimal, int, int, decimal)"/>).</summary>
+    /// <summary>The Server Inventory health score, or null when the last 24 hours hold no CPU sample for the server or it has no memory
+    /// sample: the grid says which (<see cref="HealthDisplay"/>), not a score built from the memory and storage defaults (<see cref="FinOpsUtilizationFigures.HealthScore(bool, decimal, int, int, decimal)"/>).</summary>
     public int? HealthScore { get; set; }
     public string HealthScoreColor => HealthScore is int score ? FinOpsHealthCalculator.ScoreColor(score) : FinOpsHealthCalculator.NoScoreColor;
 
-    /// <summary>The tooltip on the dash shown in place of a score; null when there is a score.</summary>
-    public string? HealthScoreNote => HealthScore.HasValue ? null : FinOpsHealthCalculator.NoInventoryScoreNote;
+    /// <summary>The Health cell: the score, or the input the score lacks (<see cref="ProvisioningVerdict.NoHealthScoreLabel"/>): "Not
+    /// collected" for a server with no verdict, "No memory sample" beside a verdict. The column sorts on <see cref="HealthScore"/>.</summary>
+    public string HealthDisplay => HealthScore is int score ? score.ToString(System.Globalization.CultureInfo.CurrentCulture)
+        : ProvisioningVerdict.NoHealthScoreLabel(ProvisioningStatus);
+
+    /// <summary>The tooltip on the words shown in place of a score, naming the one cause that applies; null when there is a score.</summary>
+    public string? HealthScoreNote => HealthScore.HasValue ? null : ProvisioningVerdict.NoHealthScoreNote(ProvisioningStatus);
 }
 
 /// <summary>Per-database storage growth vs 7d/30d ago (Storage Growth parent grid).</summary>

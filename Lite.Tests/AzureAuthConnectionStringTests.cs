@@ -153,13 +153,13 @@ public class AzureAuthConnectionStringTests
     // ---- AuthenticationDisplay switch -----------------------------------------------------
 
     [Theory]
-    [InlineData(AuthenticationTypes.ServicePrincipal, "Azure — Service Principal")]
-    [InlineData(AuthenticationTypes.ManagedIdentity, "Azure — Managed Identity")]
+    [InlineData(AuthenticationTypes.ServicePrincipal, "Azure: Service Principal")]
+    [InlineData(AuthenticationTypes.ManagedIdentity, "Azure: Managed Identity")]
     [InlineData(AuthenticationTypes.EntraMFA, "Microsoft Entra MFA")]
     [InlineData(AuthenticationTypes.SqlServer, "SQL Server")]
     [InlineData(AuthenticationTypes.Windows, "Windows")]
-    [InlineData(AuthenticationTypes.EntraDefaultCredential, "Azure — Existing Sign-In (az login)")]
-    [InlineData(AuthenticationTypes.EntraDeviceCode, "Azure — Device Code (browser on any device)")]
+    [InlineData(AuthenticationTypes.EntraDefaultCredential, "Azure: Existing Sign-In (az login)")]
+    [InlineData(AuthenticationTypes.EntraDeviceCode, "Azure: Device Code (browser on any device)")]
     public void AuthenticationDisplay_MapsEachMode(string authType, string expected)
     {
         var server = new ServerConnection { AuthenticationType = authType };

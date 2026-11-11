@@ -147,15 +147,6 @@ VALUES ($1, $2, $3, 'IdleSrv', 'DbElsewhere', '0xE', 1, 10, 20, 1)", _nextId++, 
         Assert.True(coverage >= 0 && read > coverage);
         Assert.Contains("IdleDatabasesNoDataMessage.Text = LocalDataService.IdleDatabasesEmptyText(covered);", body, StringComparison.Ordinal);
     }
-
-    [Fact]
-    public void TheServerInventoryIdleCountAndHealthCells_ShowADashWhenThereIsNoValue()
-    {
-        var xaml = ParitySource.ReadFile("Lite/Controls/FinOpsTab.xaml");
-
-        Assert.Contains("Binding=\"{Binding IdleDbCount, TargetNullValue='-'}\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("Binding=\"{Binding HealthScore, TargetNullValue='-'}\"", xaml, StringComparison.Ordinal);
-    }
 }
 
 /// <summary>
@@ -171,9 +162,27 @@ public sealed class FinOpsInventoryHealthScoreTests
 
         Assert.Null(row.HealthScore);
         Assert.Equal(FinOpsHealthCalculator.NoScoreColor, row.HealthScoreColor);
-        Assert.Equal(FinOpsHealthCalculator.NoInventoryScoreNote, row.HealthScoreNote);
-        // L5: the dash also shows for a server with no memory sample, so the note must not blame the CPU alone.
-        Assert.Contains("memory sample", row.HealthScoreNote, StringComparison.Ordinal);
+        // No verdict: the window holds no CPU sample, and the cell and its note name that input alone.
+        Assert.Equal("Not collected", row.HealthDisplay);
+        Assert.Equal("No health score: the last 24 hours hold no CPU sample", row.HealthScoreNote);
+    }
+
+    /// <summary>A server with a verdict has its CPU sample, so a missing score means the memory sample is the input not collected:
+    /// the cell says that beside the verdict, and its note names the memory sample alone. A verdict that arrives on a row already
+    /// drawn moves the cell.</summary>
+    [Fact]
+    public void NoScoreBesideAVerdict_NamesTheMemorySample_TheInputThatIsMissing()
+    {
+        var row = new ServerPropertyRow { HealthScore = null };
+        var raised = new System.Collections.Generic.List<string?>();
+        row.PropertyChanged += (_, e) => raised.Add(e.PropertyName);
+
+        row.ProvisioningStatus = PerformanceMonitor.Common.ProvisioningVerdict.RightSized;
+
+        Assert.Equal("No memory sample", row.HealthDisplay);
+        Assert.Equal("No health score: no memory sample has been collected", row.HealthScoreNote);
+        Assert.Contains(nameof(ServerPropertyRow.HealthDisplay), raised);
+        Assert.Contains(nameof(ServerPropertyRow.HealthScoreNote), raised);
     }
 
     [Fact]

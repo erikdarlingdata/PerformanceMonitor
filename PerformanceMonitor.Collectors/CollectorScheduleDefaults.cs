@@ -450,9 +450,9 @@ public static class CollectorScheduleDefaults
     /// collection-health surface, so none of them can pick a different row.
     /// </summary>
     /// <param name="collectorName">The collector.</param>
-    /// <param name="serverId">The server the cadence is wanted for.</param>
+    /// <param name="serverId">The server the cadence is wanted for, or null for no server: only the fleet-wide row applies.</param>
     /// <param name="overrides">The override rows to pick from, or null for none.</param>
-    public static (T? PerServer, T? Fleet) SelectScheduleOverrides<T>(string collectorName, int serverId, IEnumerable<T>? overrides)
+    public static (T? PerServer, T? Fleet) SelectScheduleOverrides<T>(string collectorName, int? serverId, IEnumerable<T>? overrides)
         where T : class, IScheduleFrequencyOverride
     {
         T? perServer = null;
@@ -466,13 +466,13 @@ public static class CollectorScheduleDefaults
                     continue;
                 }
 
-                if (o.ServerId == serverId)
-                {
-                    perServer = o;
-                }
-                else if (o.ServerId is null)
+                if (o.ServerId is null)
                 {
                     fleet = o;
+                }
+                else if (o.ServerId == serverId)
+                {
+                    perServer = o;
                 }
             }
         }
@@ -492,9 +492,9 @@ public static class CollectorScheduleDefaults
     /// picked rows (<see cref="SelectScheduleOverrides{T}"/>, <see cref="ResolveFrequencyMinutes"/>).</para>
     /// </summary>
     /// <param name="collectorName">The collector.</param>
-    /// <param name="serverId">The server the cadence is wanted for.</param>
+    /// <param name="serverId">The server the cadence is wanted for, or null for no server: only the fleet-wide row applies.</param>
     /// <param name="overrides">The override rows to resolve from, or null for none.</param>
-    public static int? ResolveEffectiveIntervalMinutes<T>(string collectorName, int serverId, IEnumerable<T>? overrides)
+    public static int? ResolveEffectiveIntervalMinutes<T>(string collectorName, int? serverId, IEnumerable<T>? overrides)
         where T : class, IScheduleFrequencyOverride
     {
         if (!All.ContainsKey(collectorName))

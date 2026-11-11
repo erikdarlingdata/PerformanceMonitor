@@ -178,7 +178,20 @@ public static class FactAdvice
     /// it with any generated remediation T-SQL. Returns null if no advice
     /// matches the root fact key.
     /// </summary>
-    public static AdviceBlock? GetForFinding(AnalysisFinding finding)
+    public static AdviceBlock? GetForFinding(AnalysisFinding finding) =>
+        GetForFinding(finding, forcePlanStates: null);
+
+    /// <summary>
+    /// <see cref="GetForFinding(AnalysisFinding)"/> with the read-time forcing and automatic-plan-correction
+    /// state of the finding's force-plan targets (#8542), so the generated T-SQL gives no statement for
+    /// a target that state blocks. A null <paramref name="forcePlanStates"/> withholds nothing; when the
+    /// read failed, <paramref name="forcePlanStateUnavailableReason"/> says why and the T-SQL opens by
+    /// saying no target was checked.
+    /// </summary>
+    public static AdviceBlock? GetForFinding(
+        AnalysisFinding finding,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? forcePlanStates,
+        string? forcePlanStateUnavailableReason = null)
     {
         if (finding is null)
             return null;
@@ -189,7 +202,7 @@ public static class FactAdvice
         if (advice is null)
             return null;
 
-        var tsql = FactRemediation.GenerateForFinding(finding);
+        var tsql = FactRemediation.GenerateForFinding(finding, forcePlanStates, forcePlanStateUnavailableReason);
         if (tsql is not null)
             advice = advice with { RemediationTsql = tsql };
 
@@ -375,12 +388,31 @@ public static class FactAdvice
         var investigation = new StringBuilder(advice.Investigation ?? string.Empty);
         foreach (var hop in story.NamedHops)
         {
-            var sentence = FactIdentity.Sentence(hop, Compose(hop.Key, byKey)?.Headline);
+            var sentence = FactIdentity.Sentence(hop, HopHeadline(hop, byKey));
             if (investigation.Length == 0)
                 sentence = sentence.TrimStart();
             investigation.Append(sentence);
         }
         return advice with { Investigation = investigation.ToString() };
+    }
+
+    /// <summary>
+    /// The headline a named hop's sentence carries after its identity (#8572). The composed headline is about the whole fact, and for
+    /// QUERY_SPILLS that is the window's total pages, 274,106 beside "most spilled query X" whose own figure was 232,588. A named
+    /// query's sentence gives the query's own pages from the fact's ranked list, where the collector already stored them. A hop whose
+    /// ranked list does not hold the named query keeps the composed headline.
+    /// </summary>
+    private static string? HopHeadline(NamedHop hop, IReadOnlyDictionary<string, Fact> byKey)
+    {
+        if (hop.Key == "QUERY_SPILLS"
+            && byKey.TryGetValue(hop.Key, out var spills)
+            && !string.IsNullOrWhiteSpace(spills.ObjectName)
+            && spills.Ranked.FirstOrDefault(o => string.Equals(o.ObjectName, spills.ObjectName, StringComparison.Ordinal)) is { } own)
+        {
+            return $"{SpilledPagesText(own.Value)} spilled to tempdb by that query: memory grants too small for their sorts/hashes";
+        }
+
+        return Compose(hop.Key, byKey)?.Headline;
     }
 
     /// <summary>
@@ -1144,6 +1176,20 @@ public static class FactAdvice
     internal static string Plural(double n, string noun) =>
         $"{n:N0} {PluralNoun(noun, Math.Abs(n - 1) < 0.5)}";
 
+    /// <summary><see cref="Plural"/> with the count in the invariant convention, for a count written beside a
+    /// per-hour rate: <see cref="PerHourClause"/> writes the rate invariant, so "1,234 deadlocks this window, about
+    /// 7.3 per hour" reads in one convention on every desktop.</summary>
+    private static string InvariantPlural(double n, string noun) =>
+        $"{n.ToString("N0", CultureInfo.InvariantCulture)} {PluralNoun(noun, Math.Abs(n - 1) < 0.5)}";
+
+    /// <summary>The rate that follows a count: ", about 7.3 per hour", with one optional decimal place. A positive
+    /// rate too small for that place reads ", under 0.1 per hour": the bound is exact, so it takes no "about".</summary>
+    private static string PerHourClause(double perHour)
+    {
+        var rate = PerformanceMonitor.Common.DailyHealthBandCalculator.RatePerHourText(perHour, "0.#");
+        return rate.StartsWith('<') ? $", under {rate[1..]} per hour" : $", about {rate} per hour";
+    }
+
     /// <summary>The irregular half of <see cref="Plural"/>: a noun ending in a consonant immediately before a
     /// trailing "y" pluralizes to "ies", not "ys" ("query" → "queries", not "querys"). A vowel before the "y"
     /// ("day") keeps the plain "s" rule, which is every other noun <see cref="Plural"/>'s callers pass.</summary>
@@ -1322,9 +1368,10 @@ public static class FactAdvice
         var maxWait = FactMeta(facts, "BLOCKING_EVENTS", "max_wait_time_ms");
         var sleepers = FactMeta(facts, "BLOCKING_EVENTS", "sleeping_blocker_count");
 
-        var inv = new StringBuilder($"{Plural(count.Value, "blocking event")} this window");
+        var counted = InvariantPlural(count.Value, "blocking event");
+        var inv = new StringBuilder($"{counted} this window");
         if (perHour is > 0)
-            inv.Append($", about {perHour.Value:0.#} per hour");
+            inv.Append(PerHourClause(perHour.Value));
         inv.Append('.');
         // #7537: say what is counted. A blocked process report row is not a wait; the spike anomaly counts rows.
         inv.Append(" Each is one wait: a blocked session waiting on one blocker counts once, however many blocked process reports it produced.");
@@ -1349,7 +1396,7 @@ public static class FactAdvice
 
         return fallback with
         {
-            Headline = $"{Plural(count.Value, "blocking event")} this window: sessions stalled waiting on locks others held",
+            Headline = $"{counted} this window: sessions stalled waiting on locks others held",
             Investigation = inv.ToString(),
             Remediation = rem.ToString()
         };
@@ -1370,13 +1417,14 @@ public static class FactAdvice
 
         var perHour = FactMeta(facts, "DEADLOCKS", "deadlocks_per_hour");
         var peakHour = FactMeta(facts, "DEADLOCKS", "peak_1h_deadlock_count");
-        var inv = new StringBuilder($"{Plural(count.Value, "deadlock")} this window");
+        var counted = InvariantPlural(count.Value, "deadlock");
+        var inv = new StringBuilder($"{counted} this window");
         if (perHour is > 0)
-            inv.Append($", about {perHour.Value:0.#} per hour");
+            inv.Append(PerHourClause(perHour.Value));
         /* The busiest hour is what the fact grades, so it is named whenever it stands above the average (by more than
            the average's one-decimal rounding); a steady rate would only repeat the figure before it. */
         if (peakHour is > 0 && peakHour.Value > (perHour ?? 0) + 0.05)
-            inv.Append($", up to {peakHour.Value:N0} in the busiest hour");
+            inv.Append($", up to {peakHour.Value.ToString("N0", CultureInfo.InvariantCulture)} in the busiest hour");
         inv.Append(". A deadlock is two sessions each holding a lock the other needs; SQL Server kills the cheaper one as the victim and rolls it back. This reports a window that has already passed: the deadlock graphs were captured at the time, so the work now is stopping the recurrence.");
 
         var rem = new StringBuilder(
@@ -1387,7 +1435,7 @@ public static class FactAdvice
 
         return fallback with
         {
-            Headline = $"{Plural(count.Value, "deadlock")} this window: sessions killed and rolled back over circular lock waits",
+            Headline = $"{counted} this window: sessions killed and rolled back over circular lock waits",
             Investigation = inv.ToString(),
             Remediation = rem.ToString()
         };
@@ -2059,7 +2107,7 @@ public static class FactAdvice
 
         var unverified = FactMeta(facts, "PLAN_REGRESSION", "inputs_unverified_count");
         var rem = paramSensitive
-            ? "Parameter sensitivity fired for this server too, so do not force a query that also shows that signature: forcing the cheaper plan can lock in the wrong shape for other parameter values and make the slow calls slower. The fix is the parameter sensitivity: OPTION (RECOMPILE) on the statement, or branch the procedure by parameter."
+            ? "Parameter sensitivity fired for this server too, so be cautious about forcing a query that also shows that signature: forcing the cheaper plan can lock in the wrong shape for other parameter values and make the slow calls slower. The statement for such a query carries a caution. Fix the parameter sensitivity first: OPTION (RECOMPILE) on the statement, or branch the procedure by parameter."
             : forceFailing
             ? "Fix the failing force first: the recorded plan force is not taking effect (the plan was likely evicted or invalidated); re-force the good plan or clear the broken force, then confirm it sticks. Then address WHY the plan regressed, usually stale statistics or a parameter-sensitivity swing."
             : basis == 2
@@ -2905,6 +2953,12 @@ public static class FactAdvice
     /// PERMUTES on frequent-lightweight vs rare-heavyweight (the fix differs). The fact is keyed by
     /// the full BAD_ACTOR_{hash}, so the value reads use that key directly.
     /// </summary>
+    /// <summary>A bad-actor query is called "individually cheap" only when one execution costs under this much CPU (#8572).</summary>
+    internal const double BadActorCheapEachMaxCpuMs = 100;
+
+    /// <summary>...and under this many reads. Past either, a frequent query is expensive each time as well.</summary>
+    internal const double BadActorCheapEachMaxReads = 10_000;
+
     private static AdviceBlock ComposeBadActor(string key, IReadOnlyDictionary<string, Fact> facts)
     {
         var fallback = _byKey["BAD_ACTOR"];
@@ -2920,18 +2974,25 @@ public static class FactAdvice
         if (exec > 0)
             inv.Append($": {Plural(exec, "execution")}");
         if (cpu > 0)
-            inv.Append($", averaging {cpu:0.#} ms CPU");
+            inv.Append($", averaging {cpu:#,##0.#} ms CPU");
         if (reads > 0)
             inv.Append($" and {reads:N0} reads each");
         inv.Append(". ");
         var frequent = exec >= 1000;
-        inv.Append(frequent
+        /* #8572: "individually cheap" is a claim about one execution, so it is chosen from the per-execution cost and not from the count alone. A
+           query that costs a second of CPU and 250,000 reads each time is frequent AND expensive. A figure that is absent does not make it expensive. */
+        var expensiveEach = cpu >= BadActorCheapEachMaxCpuMs || reads >= BadActorCheapEachMaxReads;
+        inv.Append(frequent && expensiveEach
+            ? "It is a high-frequency query that is also expensive each time it runs, so the total cost is large from both directions: the win is reducing how often it runs (caching, batching at the application) and tuning the single execution (the right indexes, a better plan shape)."
+            : frequent
             ? "It is a high-frequency, individually-cheap query run so often that the total cost is large: the win is reducing how often it runs (caching, batching at the application) or shaving its per-execution cost."
             : "It is a low-frequency but very expensive query (run rarely, costly each time), so the win is tuning the single execution: the right indexes and a better plan shape.");
 
         var rem =
             "The attached detail has the query text and a live plan analysis. " +
-            (frequent
+            (frequent && expensiveEach
+                ? "For a frequent query that is also expensive each time, first ask whether it needs to run this often at all; then tune the single execution: eliminate the scans and spills its plan shows, add a covering index, tighten the predicate, or cache the result."
+                : frequent
                 ? "For a frequent query, first ask whether it needs to run this often at all; then make each execution cheap: a covering index, a tighter predicate, a cached result."
                 : "For a heavyweight query, tune the single execution: eliminate the scans and spills its plan shows, and give it the indexes it needs.");
 

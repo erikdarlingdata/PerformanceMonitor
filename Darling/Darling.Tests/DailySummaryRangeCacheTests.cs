@@ -492,4 +492,40 @@ public sealed class DailySummaryRangeCacheTests
 
         Assert.Equal((D(1), D(26)), Assert.Single(store.Reads));
     }
+
+    /// <summary>
+    /// #8549: the warmer builds the Overview's 31-day block, and an MCP call with only server_name asks for 30 days,
+    /// the same days under another key. Before, that call read the whole month cold. Now it starts from the 31-day
+    /// block's closed days: its statement runs over the open days only, and its rows equal a fresh full read.
+    /// </summary>
+    [Fact]
+    public async Task GetRangeAsync_ShorterRangeEndingTheSameDay_ReusesTheLongerBlock_AndRunsOnlyTheOpenDays()
+    {
+        var now = new DateTime(2026, 9, 25, 12, 0, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+        var store = Enumerable.Range(1, 25).ToDictionary(n => D(n), n => n * 10);
+        var runs = new List<(DateTime Start, DateTime End)>();
+
+        Task<List<TestRow>> Fresh(DateTime start, DateTime end, CancellationToken ct)
+        {
+            runs.Add((start, end));
+            return Task.FromResult(store.Where(kv => kv.Key >= start && kv.Key < end)
+                .OrderBy(kv => kv.Key).Select(kv => new TestRow(kv.Key, kv.Value)).ToList());
+        }
+
+        var toDate = D(26);
+        await cache.GetRangeAsync("store", ServerId, D(1), toDate, RoutedSql, true, r => r.Day, Fresh, CancellationToken.None);
+        Assert.Single(runs);
+
+        var shorter = await cache.GetRangeAsync("store", ServerId, D(2), toDate, RoutedSql, true, r => r.Day, Fresh, CancellationToken.None);
+
+        Assert.Equal(2, runs.Count);
+        Assert.Equal((D(25), toDate), runs[1]); // today only: no second full read
+        Assert.Equal(await Fresh(D(2), toDate, CancellationToken.None), shorter);
+
+        /* A range that starts BEFORE the block has no donor and reads in full, as it always did. */
+        runs.Clear();
+        await cache.GetRangeAsync("store", ServerId, D(1).AddDays(-1), toDate, RoutedSql, true, r => r.Day, Fresh, CancellationToken.None);
+        Assert.Equal((D(1).AddDays(-1), toDate), Assert.Single(runs));
+    }
 }

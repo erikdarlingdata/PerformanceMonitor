@@ -16,14 +16,13 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
-using PerformanceMonitor.Darling.Analysis;
 
-namespace PerformanceMonitor.Darling.Service.Mcp;
+namespace PerformanceMonitor.Darling.Analysis;
 
 /// <summary>
 /// The Postgres read behind <c>FactRemediation.BuildStructuredRemediation</c>'s state-taking overload
 /// (#3652) — Lite's <c>ForcePlanTargetStateReader</c> ported, kept shape-for-shape with it the way
-/// <see cref="DarlingPlanCorrectionReader"/> twins the Viewer's plan-correction reads: same CTEs, same
+/// <c>DarlingPlanCorrectionReader</c> twins the Viewer's plan-correction reads: same CTEs, same
 /// column list in the same order, so the Lite.Tests parity pin can hold the two texts equal but for the
 /// view names and the parameter casts, and the two SKUs cannot reach different verdicts from the same
 /// facts. The mechanism remarks live on the Lite twin; what is Darling-specific is here.
@@ -50,7 +49,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// DuckDB infers from the bound value and the Lite twin omits them. That, and the view names, are the
 /// whole of the difference.</para>
 /// </summary>
-internal static class DarlingForcePlanTargetStateReader
+public static class DarlingForcePlanTargetStateReader
 {
     /// <summary>$1 server_id, $2 lookback start (naive UTC), $3.. the targets, three per row.</summary>
     public const string SqlTemplate = @"
@@ -205,7 +204,8 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
     /// (the same clock that stamped <c>collection_time</c>), exposed so a rig test can pin the window edge.
     /// </summary>
     public static async Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> TryReadAsync(
-        NpgsqlDataSource postgres, int serverId, IEnumerable<AnalysisFinding> findings, DateTime? nowUtc = null,
+        NpgsqlDataSource postgres, int serverId, IEnumerable<AnalysisFinding> findings, int commandTimeoutSeconds,
+        DateTime? nowUtc = null,
         /* Before cancellationToken so that stays the last parameter (CA1068). DI-resolved like postgres in
            an MCP tool method (no [Description] there); null is the accepted degraded state for a caller
            with no host logger behind it, same as get_sweep_reports's logger seat (#3473 review, #4316). */
@@ -224,7 +224,7 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
 
         try
         {
-            return (await ReadAsync(postgres, serverId, targets, nowUtc ?? DateTime.UtcNow, cancellationToken: cancellationToken), null);
+            return (await ReadAsync(postgres, serverId, targets, nowUtc ?? DateTime.UtcNow, commandTimeoutSeconds, cancellationToken), null);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -245,15 +245,18 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
 
     /// <summary>Runs the statement. Distinct targets only (a finding can carry one key twice across
     /// replicas, #1882).</summary>
-    /// <param name="commandTimeoutSeconds">The deadline regime of the CALLER, not of this file: the MCP
-    /// tools take <see cref="McpCommandDeadlines.ReadSeconds"/> (the default), and the force-plan bot
-    /// (#3654) passes its own <c>ServiceCommandDeadlines.PostAnalysisForcePlanSeconds</c>, because the same
-    /// statement issued from a post-analysis hook holding a sweep permit is bounded by the pass it rides on,
-    /// not by an agent's patience. A timeout there is not a fault the bot recovers from — it journals
-    /// <c>state_unavailable</c> and forces nothing.</param>
+    /// <param name="commandTimeoutSeconds">The deadline regime of the CALLER, not of this file, so it is
+    /// required: the MCP tools pass <c>McpCommandDeadlines.ReadSeconds</c>, the Viewer passes its
+    /// interactive read deadline, and the force-plan bot (#3654) passes its own
+    /// <c>ServiceCommandDeadlines.PostAnalysisForcePlanSeconds</c>, because the same statement issued from a
+    /// post-analysis hook holding a sweep permit is bounded by the pass it rides on, not by an agent's
+    /// patience. A timeout there is not a fault the bot recovers from — it journals
+    /// <c>state_unavailable</c> and forces nothing. The worker's notification read (#8542) is awaited
+    /// inside the same passes and passes <c>ServiceCommandDeadlines.NotificationForcePlanStateSeconds</c>;
+    /// a timeout there sends the message with its not-checked line.</param>
     public static async Task<IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>> ReadAsync(
         NpgsqlDataSource postgres, int serverId, IReadOnlyList<ForcePlanTarget> targets, DateTime nowUtc,
-        int? commandTimeoutSeconds = null, CancellationToken cancellationToken = default)
+        int commandTimeoutSeconds, CancellationToken cancellationToken = default)
     {
         var result = new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer);
         var keys = targets.Select(ForcePlanTargetKey.Of).Distinct(ForcePlanTargetKey.Comparer).ToList();
@@ -263,7 +266,7 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
         }
 
         await using var command = postgres.CreateCommand(BuildSql(keys.Count));
-        command.CommandTimeout = commandTimeoutSeconds ?? McpCommandDeadlines.ReadSeconds;
+        command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - ForcePlanTargetState.Lookback, DateTimeKind.Unspecified));
         foreach (var key in keys)

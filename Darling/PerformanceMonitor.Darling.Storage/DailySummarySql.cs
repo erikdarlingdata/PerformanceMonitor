@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Linq;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
@@ -123,17 +124,63 @@ public static class DailySummarySql
             WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
             GROUP BY 1
         ),
+        /* #8549: coll counts runs and errors per day, and it read the raw log for the whole window. On a busy store the
+           uncompressed chunks hold every server's rows on shared pages, so one server's rows sit two to a heap block and
+           a bitmap scan of one chunk read about 4,000 blocks (5.5 s cold for the 30-day window, 19,800 blocks for 40,400
+           rows). The hourly rollup (V186, collect.collection_log_hourly, the table the 7-day health read uses) already
+           holds the same two counts per closed hour, from the same cycle-row exclusion, for the last 7 days: exactly
+           the chunks that are expensive. So closed hours come from it, summed per day, and the raw log is read only for
+           the hours it does not hold: the window's partial edge hours, any closed hour the rollup pass has not reached
+           or failed on (the viewer reads the store directly, so that happens), the open hour, and everything older than
+           the table keeps, which is compressed and cheap. The same island shape as CollectionHealthStatements.ComposedSql,
+           bounded by the window on both ends. A rolled hour's row holds every collector that ran in it, so an hour with
+           no row is read raw and found empty, which is the raw answer. */
+        coll_rolled AS MATERIALIZED (
+            SELECT hr.hour_start, SUM(hr.total_runs) AS runs, SUM(hr.error_count) AS errs
+            FROM collect.collection_log_hourly AS hr
+            WHERE hr.server_id = $1 AND hr.hour_start >= $2 AND hr.hour_start <= $3 - INTERVAL '1 hour'
+            GROUP BY hr.hour_start
+        ),
+        coll_raw_ranges AS (
+            /* The window's hours the rollup does not hold, as islands of consecutive hours, clipped to the window. */
+            SELECT GREATEST(MIN(g.hour_start), $2) AS range_start,
+                   LEAST(MAX(g.hour_start) + INTERVAL '1 hour', $3) AS range_end
+            FROM (
+                SELECT s.hour_start,
+                       s.hour_start - ROW_NUMBER() OVER (ORDER BY s.hour_start) * INTERVAL '1 hour' AS island
+                FROM generate_series(date_trunc('hour', $2::timestamp), date_trunc('hour', $3::timestamp - INTERVAL '1 microsecond'), INTERVAL '1 hour') AS s(hour_start)
+                WHERE NOT EXISTS (SELECT 1 FROM coll_rolled AS r WHERE r.hour_start = s.hour_start)
+            ) AS g
+            GROUP BY g.island
+        ),
+        coll_raw AS (
+            /* #5506's bounded probe per range: OFFSET 0 keeps the planner from flattening the LATERAL into a join over
+               the server's whole window, the plan that read every uncompressed chunk. */
+            SELECT date_trunc('day', l.collection_time) AS d,
+                   COUNT(*) AS runs,
+                   COUNT(*) FILTER (WHERE status = 'ERROR') AS errs
+            FROM coll_raw_ranges AS rr
+            CROSS JOIN LATERAL (
+                SELECT x.collection_time, x.status
+                FROM v_collection_log AS x
+                WHERE x.server_id = $1
+                AND   x.collection_time >= rr.range_start AND x.collection_time < rr.range_end
+                AND   x.{CollectionCycleRow.NotCycleRowSql}
+                OFFSET 0
+            ) AS l
+            GROUP BY 1
+        ),
         coll AS (
             /* Any run (all statuses) marks the day as collected -> it appears even if every metric is quiet
                (a quiet monitored day is Healthy/green, not No-Data/grey). runs is also the denominator the
                error SHARE bands on (#3539 A2); errs alone used to make the day Critical on presence. */
-            SELECT date_trunc('day', collection_time) AS d,
-                   COUNT(*) AS runs,
-                   COUNT(*) FILTER (WHERE status = 'ERROR') AS errs
-            FROM v_collection_log
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-            AND   {CollectionCycleRow.NotCycleRowSql}
-            GROUP BY 1
+            SELECT p.d, SUM(p.runs)::bigint AS runs, SUM(p.errs)::bigint AS errs
+            FROM (
+                SELECT date_trunc('day', hour_start) AS d, runs, errs FROM coll_rolled
+                UNION ALL
+                SELECT d, runs, errs FROM coll_raw
+            ) AS p
+            GROUP BY p.d
         ),
         mem AS (
             /* #7691: one event is one (second, notification), however many memory nodes reported it. The distinct pairs come from one GROUP BY
@@ -505,6 +552,18 @@ public static class DailySummarySql
 
         var width = (long)target.BucketWidth.TotalSeconds;
 
+        /* #8549: a daily whose source is itself a rollup (the hourly it is hierarchical from) reads the days it lacks from that
+           hourly for the hours the hourly holds, and from raw only for the rest. The hourly tier's relations read raw as their
+           source, so there is nothing between them and raw and their text is unchanged. */
+        var hourlySource = IsRollup(target.Source) ? target.Source : null;
+        var closedHours = hourlySource is null
+            ? string.Empty
+            : ClosedHoursMember(
+                "(SELECT raw_from FROM queries_ceiling)",
+                $"EXISTS (SELECT 1 FROM collect.{hourlySource} AS s WHERE s.server_id = $1 AND s.bucket = g.h OFFSET 0)",
+                (hourlySource, string.Empty));
+        var rawTailGate = hourlySource is null ? string.Empty : "\n                  AND (SELECT raw_from FROM queries_ceiling) IS NULL";
+
         /* #7505: the partial ceiling day's raw rows are counted with the rollup's own source filter, so that day
            is not read higher than the rollup would have read it once it catches up (a restart row's hash counts in
            raw and not in the interval-honest successor). Days past the ceiling keep reading raw unfiltered, as they
@@ -545,7 +604,7 @@ public static class DailySummarySql
                 SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
                 FROM v_query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-                  AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling), $2){partialDayFilter}
+                  AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling), $2){partialDayFilter}{rawTailGate}{closedHours}
             ) AS x
             GROUP BY x.d
             UNION ALL
@@ -578,6 +637,69 @@ public static class DailySummarySql
             GROUP BY u.d
         ),
         """;
+    }
+
+    /// <summary>Whether <paramref name="view"/> is a registered rollup, so a daily whose source is that name is hierarchical from it (#8549).</summary>
+    private static bool IsRollup(string view)
+        => TimescaleSupport.RollupCoverageProbeTargets.Any(t => string.Equals(t.View, view, StringComparison.Ordinal));
+
+    /// <summary>
+    /// The member of the daily <c>queries</c> CTE that counts the days at and after the daily rollup's ceiling (#8549). The daily's refresh
+    /// leaves yesterday out until the next UTC midnight, so for a day it lacks, a closed day, the old raw tail read every raw row of
+    /// the day: 381 of the 482 buffers of a 30-day read on a test store. This member reads the HOURLY rollup for the hours it holds and raw
+    /// only for the hours neither rollup holds, plus the open day's last hours (the hourly stops an hour short of now).
+    ///
+    /// <para><b>The grid and the held test.</b> One row per hour from <paramref name="rawFrom"/>, the first day the daily does not hold whole,
+    /// to the end of the window. An hour is held when it lies wholly inside <c>[$2, $3)</c> and <paramref name="heldProbe"/> finds an
+    /// hourly bucket for the server at that hour. A window edge that cuts an hour reads that hour from raw, clamped to the window, because
+    /// the rollup cannot split an hour. Every other hour with a bucket is read from the hourly by one range, so the hourly is never
+    /// probed per row. The probe carries <c>OFFSET 0</c> so each hour is one index probe and the grid is not joined into the hourly's
+    /// history, the same fence as the not-carried probes (#3905).</para>
+    ///
+    /// <para><b>One count per day over both halves.</b> A day can hold held hours and raw hours, and two counts of distinct hashes cannot
+    /// be added, so the two halves are combined with <c>UNION</c> (which removes a hash seen in both) before the one <c>COUNT</c> per day.
+    /// The member returns only those pairs, to be placed inside the raw tail's pair set: the tail's gate is closed whenever this grid is
+    /// not empty, so the two never overlap, and the tail's one <c>COUNT(x.query_hash)</c> per day (a count of distinct pairs, never a
+    /// <c>COUNT(DISTINCT</c>) counts them. Days past the ceiling never meet the daily half, which ends at the ceiling, or the not-carried
+    /// member, which stops there too.</para>
+    ///
+    /// <para>With no ceiling (<paramref name="rawFrom"/> NULL, an empty daily) the grid is empty and the raw tail reads the window as before:
+    /// reading a month of the hourly for a daily that holds nothing is the read this member avoids.</para>
+    /// </summary>
+    private static string ClosedHoursMember(string rawFrom, string heldProbe, params (string Relation, string Predicate)[] hourlyReads)
+    {
+        var hourly = string.Concat(hourlyReads.Select(read => $"""
+                SELECT date_trunc('day', s.bucket) AS d, s.query_hash
+                FROM collect.{read.Relation} AS s
+                WHERE s.server_id = $1 AND s.bucket >= $2 AND s.bucket + INTERVAL '1 hour' <= $3
+                  AND s.bucket >= {rawFrom}{read.Predicate}
+                UNION
+
+            """));
+
+        return "\n" + $"""
+            /* #8549: the hours at and after the daily's ceiling. A held hour is read from the hourly rollup, every other hour from raw,
+               and the pairs are UNIONed with the raw tail's (empty here, its gate is closed) under the tail's one count per day. See ClosedHoursMember.
+               The interval hourly's count skips restart rows (sample_interval_seconds = 0) by design: unique queries counts queries with credited
+               executions in the window (#8651). */
+            UNION
+            {hourly}                SELECT date_trunc('day', q.h) AS d, r.query_hash
+                FROM (
+                    SELECT g.h,
+                           (g.h >= $2 AND g.h + INTERVAL '1 hour' <= $3 AND {heldProbe}) AS held
+                    FROM generate_series(date_trunc('hour', GREATEST($2::timestamp, {rawFrom})), $3::timestamp - INTERVAL '1 microsecond', INTERVAL '1 hour') AS g(h)
+                    WHERE {rawFrom} IS NOT NULL
+                    OFFSET 0
+                ) AS q
+                CROSS JOIN LATERAL (
+                    SELECT DISTINCT c.query_hash
+                    FROM collect.query_stats AS c
+                    WHERE c.server_id = $1
+                      AND c.collection_time >= GREATEST(q.h, $2)
+                      AND c.collection_time < LEAST(q.h + INTERVAL '1 hour', $3)
+                ) AS r
+                WHERE NOT q.held
+            """;
     }
 
     /// <summary>
@@ -631,12 +753,27 @@ public static class DailySummarySql
         var successorFilter = TimescaleSupport.MaterializationHoleSourceFilterFor(successorTarget.CreateSql);
         var successorSourceFilter = successorFilter.Length == 0 ? string.Empty : $"\n          AND {successorFilter}";
         var boundaryDay = successorFloor == successorFloor.Date ? successorFloor : successorFloor.Date.AddDays(1);
-        var boundary = $"TIMESTAMP '{boundaryDay:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var boundary = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{boundaryDay:yyyy-MM-dd HH:mm:ss.ffffff}'");
         /* #7505: the partial ceiling day's raw rows carry the owning side's source filter. See QueriesCteForCagg. */
         var partialDaySuccessor = successorFilter.Length == 0 ? "TRUE" : $"({successorFilter})";
         var partialDayLegacy = legacyFilter.Length == 0 ? "TRUE" : $"({legacyFilter})";
         var legacyWidth = (long)legacyTarget.BucketWidth.TotalSeconds;
         var successorWidth = (long)successorTarget.BucketWidth.TotalSeconds;
+
+        /* #8549: the closed-hours member, when both dailies read an hourly rollup. Hours before the boundary day read the legacy
+           hourly and hours from it the successor's, the split the daily halves already make. See QueriesCteForCagg. */
+        const string stitchedRawFrom = "COALESCE((SELECT raw_from FROM queries_ceiling_successor), (SELECT raw_from FROM queries_ceiling_legacy))";
+        var hierarchical = IsRollup(legacyTarget.Source) && IsRollup(successorTarget.Source);
+        var closedHours = hierarchical
+            ? ClosedHoursMember(
+                stitchedRawFrom,
+                $"CASE WHEN g.h < {boundary} THEN EXISTS (SELECT 1 FROM collect.{legacyTarget.Source} AS s WHERE s.server_id = $1 AND s.bucket = g.h OFFSET 0) "
+                + $"ELSE EXISTS (SELECT 1 FROM collect.{successorTarget.Source} AS s WHERE s.server_id = $1 AND s.bucket = g.h OFFSET 0) END",
+                (legacyTarget.Source, $" AND s.bucket < {boundary}"),
+                (successorTarget.Source, $" AND s.bucket >= {boundary}"))
+            : string.Empty;
+        var rawTailGate = hierarchical ? $"\n                  AND {stitchedRawFrom} IS NULL" : string.Empty;
 
         return $"""
         /* #7505: raw_from is the day in which each side's newest bucket ends, the first day that side does not
@@ -682,7 +819,7 @@ public static class DailySummarySql
                   AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling_successor), (SELECT raw_from FROM queries_ceiling_legacy), $2)
                   AND (collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_successor), (SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_legacy), $2)
                        OR ((SELECT last_day FROM queries_ceiling_successor) IS NOT NULL AND {partialDaySuccessor})
-                       OR ((SELECT last_day FROM queries_ceiling_successor) IS NULL AND {partialDayLegacy}))
+                       OR ((SELECT last_day FROM queries_ceiling_successor) IS NULL AND {partialDayLegacy})){rawTailGate}{closedHours}
             ) AS x
             GROUP BY x.d
             UNION ALL
@@ -793,7 +930,7 @@ public static class DailySummarySql
     /// registry <see cref="RollupCoverage.StitchedRelationSql"/> reads, rather than a second lookup that could
     /// drift from it.
     /// </summary>
-    public static string RangeSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc)
+    private static string RangeSqlForQueries(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc)
     {
         ArgumentNullException.ThrowIfNull(coverage);
 
@@ -846,6 +983,92 @@ public static class DailySummarySql
         }
 
         return routed;
+    }
+
+    /// <summary>
+    /// The <c>wait_per_spelling</c> part exactly as it appears in <see cref="RangeSql"/>: the per-day, per-stored-name wait totals, summed
+    /// from raw <c>wait_stats</c>. The part a 30-day window pays for most (#8549): it reads and groups a month of raw rows, 2.2 s of a
+    /// 2.7 s statement on a test store of 11.76 M rows.
+    /// </summary>
+    private const string WaitPerSpellingRaw = """
+        WITH wait_per_spelling AS (
+            SELECT date_trunc('day', collection_time) AS d, wait_type, SUM(delta_wait_time_ms) AS ms
+            FROM v_wait_stats
+            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 AND delta_wait_time_ms > 0
+            GROUP BY 1, 2
+        ),
+        """;
+
+    /// <summary>
+    /// <see cref="WaitPerSpellingRaw"/> over the daily wait totals (#8549). The rollup answers a day when it holds that day for the server
+    /// and the day lies WHOLLY inside <c>[$2, $3)</c>; every other day reads raw, one lateral probe each: the open day, the day or two the
+    /// refresh has not reached, a hole in the middle, and the first or last day of a window that does not start or end at midnight (a
+    /// partial day must sum only the rows inside the window, which the rollup cannot split).
+    ///
+    /// <para><b>The day boundary.</b> Daily Summary days are <c>date_trunc('day', collection_time)</c> over the naive-UTC column, so they are
+    /// UTC days, and <c>time_bucket('1 day')</c> on that column buckets to the same midnight. A day the window covers whole therefore
+    /// has the same rows in both places. A window of any other shape reads those days from raw, so the result does not depend on the
+    /// rollup's day boundary matching the window's.</para>
+    ///
+    /// <para>The day list is <c>generate_series</c> over the window, <c>OFFSET 0</c> so the planner keeps it as one list, and the
+    /// last instant of the window is <c>$3</c> less a microsecond, the finest step a <c>timestamp</c> holds, so a window ending a hair
+    /// past midnight still reads that day. The raw lateral term groups by the stored spelling as the raw statement does, so the
+    /// <c>rtrim</c> merge in <c>wait_per_type</c> is unchanged and the rows of both branches have the same shape.</para>
+    /// </summary>
+    private const string WaitPerSpellingFromRollup = """
+        WITH wait_covered AS (
+            SELECT bucket AS d
+            FROM collect.wait_stats_daily
+            WHERE server_id = $1 AND bucket >= $2 AND bucket + INTERVAL '1 day' <= $3
+            GROUP BY bucket
+        ),
+        wait_per_spelling AS (
+            SELECT bucket AS d, wait_type, delta_wait_time_ms AS ms
+            FROM collect.wait_stats_daily
+            WHERE server_id = $1 AND bucket >= $2 AND bucket + INTERVAL '1 day' <= $3
+            UNION ALL
+            SELECT x.d, r.wait_type, r.ms
+            FROM (
+                SELECT g.d
+                FROM generate_series(date_trunc('day', $2::timestamp), $3::timestamp - INTERVAL '1 microsecond', INTERVAL '1 day') AS g(d)
+                WHERE NOT EXISTS (SELECT 1 FROM wait_covered AS c WHERE c.d = g.d)
+                OFFSET 0
+            ) AS x
+            CROSS JOIN LATERAL (
+                SELECT w.wait_type, SUM(w.delta_wait_time_ms) AS ms
+                FROM v_wait_stats AS w
+                WHERE w.server_id = $1
+                AND   w.collection_time >= GREATEST(x.d, $2)
+                AND   w.collection_time < LEAST(x.d + INTERVAL '1 day', $3)
+                AND   w.delta_wait_time_ms > 0
+                GROUP BY w.wait_type
+            ) AS r
+        ),
+        """;
+
+    /// <summary>
+    /// <see cref="RangeSqlFor(RetentionTier, string)"/>'s coverage-aware form (#3653), with the wait totals read from
+    /// <c>collect.wait_stats_daily</c> for the closed days it holds when the store has it (#8549,
+    /// <see cref="RollupCoverage.HasWaitStatsDaily"/>), on the hourly and daily tiers. The raw tier is a window of a few days and keeps the
+    /// raw part. A store without the relation (an older build's store, or one whose sweep has not made it yet) gets exactly the text it
+    /// got before: the existence probe decides, so the read can never name a relation that is not there.
+    /// </summary>
+    public static string RangeSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc)
+    {
+        var routed = RangeSqlForQueries(tier, coverage, windowStartUtc);
+        if (tier == RetentionTier.Raw || !coverage.HasWaitStatsDaily)
+        {
+            return routed;
+        }
+
+        var withRollup = routed.Replace(WaitPerSpellingRaw, WaitPerSpellingFromRollup, StringComparison.Ordinal);
+        if (string.Equals(withRollup, routed, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Daily-summary wait rollup routing found no wait_per_spelling CTE to replace: WaitPerSpellingRaw has drifted from RangeSql (#8549).");
+        }
+
+        return withRollup;
     }
 
 }

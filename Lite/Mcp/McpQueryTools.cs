@@ -11,7 +11,20 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpQueryTools
 {
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start says where the answer begins. Row cap is top (not limit). <<GUIDE>> Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spilled pages (total_spills counts 8 KB pages written to tempdb, not spill events), and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc): groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed: totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism when Query Store is on: find the statement in get_query_store_top (filter by database_name, match on query_hash) and pass that row's database_name and plan_id to analyze_query_store_plan, which fetches the compiled plan from the monitored server's Query Store (Lite keeps no plans, so analyze_query_plan cannot answer). Reads the raw tier only, which on a store with a lowered retention_days or less history than the window can be shorter than hours_back: window_truncated is the store's retention floor, not a page cut, and effective_start / effective_hours_back say where the answer begins. With no database_name, rows from a database the server no longer lists rank after the listed ones and carry database_dropped: true." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    /// <summary>The most characters of <c>query_text</c> a get_top_queries_by_cpu row carries, what <c>full_text</c>
+    /// gets; the default is <see cref="QueryTextPreviewLength"/> (#8568).</summary>
+    internal const int TopQueryTextFullLength = 2000;
+
+    /// <summary>
+    /// The way on from a get_top_queries_by_cpu page cut for the budget (#8568), as Darling's twin words it. The page
+    /// is heaviest first, so the queries left out are lighter ones and a smaller top returns the heaviest again: a
+    /// filter lists them, and so do the previews when the page carries the longer text.
+    /// </summary>
+    internal static string TopQueriesCutRemedy(bool fullText) => fullText
+        ? "Omit full_text to fit more queries as 400-character previews, or narrow the page with database_name or tag to read the ones left out."
+        : "Narrow the page with database_name or tag to read the queries left out.";
+
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start says where the answer begins. Row cap is top (not limit). <<GUIDE>> Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spilled pages (total_spills counts 8 KB pages written to tempdb, not spill events), and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc): groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed: totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism when Query Store is on: find the statement in get_query_store_top (filter by database_name, match on query_hash) and pass that row's database_name and plan_id to analyze_query_store_plan, which fetches the compiled plan from the monitored server's Query Store (Lite keeps no plans, so analyze_query_plan cannot answer). Reads the raw tier only, which on a store with a lowered retention_days or less history than the window can be shorter than hours_back: window_truncated is the store's retention floor, not a page cut, and effective_start / effective_hours_back say where the answer begins. With no database_name, rows from a database the server no longer lists rank after the listed ones and carry database_dropped: true. query_text is a 400-character preview (query_text_truncated says it was cut); full_text = true returns up to 2,000 characters. The page is held to the 32,768-byte response budget, heaviest first, whole rows only: truncated = true says rows were left off the end for it, and budget_note says how many of how many fit." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static async Task<string> GetTopQueriesByCpu(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -22,10 +35,14 @@ public sealed class McpQueryTools
         [Description("If true, only return queries whose cached plan has EVER run at DOP > 1 (a LIFETIME max_dop; can read stale after a MAXDOP change). See the tool's reading guide.")] bool parallel_only = false,
         [Description("Minimum DOP to filter on. Implies parallel filtering. Filters the same lifetime-max value as parallel_only, not current parallelism.")] int min_dop = 0,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description(QueryTagReadScope.ParameterDescription)] string? tag = null)
+        [Description(QueryTagReadScope.ParameterDescription)] string? tag = null,
+        [Description("Return each row's query_text up to 2,000 characters instead of a 400-character preview. Default false.")] bool full_text = false)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
+
+        /* #8568: the row's query_text is a preview unless the caller asks for the longer cut, as Darling's twin prints it. */
+        var queryTextLength = full_text ? TopQueryTextFullLength : QueryTextPreviewLength;
 
         try
         {
@@ -173,8 +190,8 @@ public sealed class McpQueryTools
                 execution_count = r.TotalExecutions,
                 total_cpu_ms = r.TotalCpuMs,
                 total_elapsed_ms = r.TotalElapsedMs,
-                avg_cpu_ms = r.AvgCpuMs,
-                avg_elapsed_ms = r.AvgElapsedMs,
+                avg_cpu_ms = Math.Round(r.AvgCpuMs, 2), // #8572
+                avg_elapsed_ms = Math.Round(r.AvgElapsedMs, 2),
                 min_cpu_ms = r.MinCpuMs,
                 max_cpu_ms = r.MaxCpuMs,
                 min_elapsed_ms = r.MinElapsedMs,
@@ -191,13 +208,14 @@ public sealed class McpQueryTools
                 total_physical_reads = r.TotalPhysicalReads,
                 total_rows = r.TotalRows,
                 total_spills = r.TotalSpills,
-                avg_reads = r.AvgReads,
+                avg_reads = Math.Round(r.AvgReads, 2),
                 // #2012 stage 2: same annotations as Darling's twin — the host object joins the
                 // grouping key, so proc-hosted INSERT...EXEC callers sharing a hash land in
                 // separate, correctly-labeled rows; null = ad-hoc/prepared text (or pre-upgrade
                 // history, which ages out with retention).
                 host_object = r.HostObjectName,
-                query_text = McpHelpers.TruncateStatement(r.QueryText, 2000),
+                query_text = McpHelpers.TruncateStatement(r.QueryText, queryTextLength),
+                query_text_truncated = (SensitiveStatements.Text(r.QueryText)?.Length ?? 0) > queryTextLength,
                 distinct_texts = r.DistinctTexts,
                 text_note = r.DistinctTexts > 1
                     ? $"this group blends {r.DistinctTexts} distinct statement texts (ad-hoc literal variants; or history predating the host-object split for INSERT...EXEC callers); query_text is one representative"
@@ -239,7 +257,9 @@ public sealed class McpQueryTools
                 DroppedDatabaseMark.Mark(queryRows, rows.Select(r => (string?)r.DatabaseName).ToList(), droppedDatabases);
             }
 
-            return payload.ToJsonString(McpHelpers.JsonOptions);
+            /* #8568: the page ends at the last whole row that fits the response budget, heaviest first, and says so
+               (truncated, budget_note), as Darling's twin does. */
+            return McpResponseBudget.CapPage(payload, "queries", "heaviest first", "queries", TopQueriesCutRemedy(full_text));
         }
         catch (Exception ex)
         {
@@ -373,8 +393,8 @@ public sealed class McpQueryTools
                 execution_count = r.TotalExecutions,
                 total_cpu_ms = r.TotalCpuMs,
                 total_elapsed_ms = r.TotalElapsedMs,
-                avg_cpu_ms = r.AvgCpuMs,
-                avg_elapsed_ms = r.AvgElapsedMs,
+                avg_cpu_ms = Math.Round(r.AvgCpuMs, 2), // #8572
+                avg_elapsed_ms = Math.Round(r.AvgElapsedMs, 2),
                 min_cpu_ms = r.MinCpuMs,
                 max_cpu_ms = r.MaxCpuMs,
                 min_elapsed_ms = r.MinElapsedMs,
@@ -382,7 +402,7 @@ public sealed class McpQueryTools
                 /* #2235: same lifetime-extremes flag as the queries tool. Mirrors Darling. */
                 extremes_note = QueryStatExtremes.LifetimeExtremeNote(
                     r.TotalCpuMs, r.MaxCpuMs, r.TotalElapsedMs, r.MaxElapsedMs),
-                avg_reads = r.AvgReads,
+                avg_reads = Math.Round(r.AvgReads, 2),
                 total_logical_reads = r.TotalLogicalReads,
                 total_logical_writes = r.TotalLogicalWrites,
                 total_physical_reads = r.TotalPhysicalReads,
@@ -1364,7 +1384,7 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration and executions per second, summed across every query, each interval counted once, at the hour it ran. not_collected: engine cannot run Query Store. unavailable: never sampled here. empty: quiet on Lite always; on Darling, empty can also be a rollup coverage gap (window predates the corrected rollup, run --backfill-rollups). Only a point that stored no interval end and has no earlier point to rate against has null rates, never 0 (unrated_points, unrated_note says why). window_truncated marks the retention floor, not a page cut. <<GUIDE>> Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. Each point is a rate over its own stored interval, its end minus its start. A point with no stored end (a row collected before the end was recorded) falls back to the gap since the PREVIOUS point, so only such a point, when it is the window's first collection and has no previous one to difference against, carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + McpHelpers.UtcStampsDescription + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration and executions per second, summed across every query, each interval counted once, at the hour it ran. not_collected: engine cannot run Query Store. unavailable: never sampled here. empty: quiet on Lite always; on Darling, empty can also be a rollup coverage gap (window predates the corrected rollup, run --backfill-rollups). Only a point that stored no interval end and has no earlier point to rate against has null rates, never 0 (unrated_points, unrated_note says why). window_truncated marks the retention floor, not a page cut. <<GUIDE>> Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. Each point is a rate over its own stored interval, its end minus its start. A point with no stored end (a row collected before the end was recorded) falls back to the gap since the PREVIOUS point, so only such a point, when it is the window's first collection and has no previous one to difference against, carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why). The newest point is usually the Query Store interval still OPEN: it is rated over the time it has covered so far (the newest snapshot that stored one of its rows, less the interval's start), not over its whole length, and it carries partial: true and covered_seconds; a closed interval carries neither. An open interval that had run under 60 seconds when last captured has null rates and counts in unrated_points." + McpHelpers.UtcStampsDescription + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryStoreDurationTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -2092,6 +2112,21 @@ public sealed class McpQueryTools
     /// <c>value</c> named no unit, and a reasoning agent charted it as whatever it guessed. The named field is
     /// the one to read; <c>value</c> stays for the consumer already reading it.</para>
     /// </summary>
+    /// <summary>#8575: a Query Store interval still open is rated over the time it has covered, and left unrated (null rates, counted in
+    /// <c>unrated_points</c>) when that is under this many seconds, since a rate over a few seconds is noise. The same 60 is written into
+    /// the SQL. Darling's twin is <c>DarlingMcpTrendTools.PartialIntervalMinSeconds</c>.</summary>
+    internal const int PartialIntervalMinSeconds = 60;
+
+    /// <summary>#8575: a Query Store point whose interval was still open when last captured, with the two keys that say so after its own:
+    /// <c>partial</c> is true and <c>covered_seconds</c> is how long the interval had run. A closed interval's point never carries them.</summary>
+    private static JsonObject MarkPartial(object point, double coveredSeconds)
+    {
+        var node = JsonSerializer.SerializeToNode(point, McpHelpers.JsonOptions)!.AsObject();
+        node["partial"] = true;
+        node["covered_seconds"] = coveredSeconds;
+        return node;
+    }
+
     private static string SerializeTrend(
         string serverName, int hours_back, DateTime startUtc, DateTime windowEndUtc, List<QueryTrendPoint> points, TrendGrain grain,
         IReadOnlyList<BaselineDiscontinuity> discontinuities, string? database)
@@ -2113,22 +2148,32 @@ public sealed class McpQueryTools
            and the same sentence as Darling's twin, byte-identical — pinned by McpMissMessageParityPinTests. */
         var unrated = points.Count(p => !p.HasRate);
         var unratedCollections = points.Sum(p => p.UnratedInBucket ?? (p.HasRate ? 0 : 1));
+        /* #8575: an open Query Store interval captured for under PartialIntervalMinSeconds is one of the unrated points. */
+        var unratedOpenIntervals = points.Count(p => p.PartialCoveredSeconds.HasValue && !p.HasRate);
         envelope["unrated_points"] = unrated;
         /* #3897: a bucket leaves an unknowable collection out of its rates, so the collections are counted apart
            from the points — a restart inside a rated bucket is still reported. Darling's key, at Darling's position. */
         envelope["unrated_collections"] = unratedCollections;
         envelope["unrated_note"] = unratedCollections == 0
             ? null
-            : $"{CountText.Plural(unratedCollections, "collection")} had no knowable rate: a rate is a collection's work divided by the seconds it accrued over, and that denominator is unknowable two ways, the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the collection is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0: such a collection is left out of its point's rates rather than counted as zero, and a point that held nothing else carries null rates ({unrated} here).";
-        envelope["trend"] = points.Select(p => new
+            : $"{CountText.Plural(unratedCollections, "collection")} had no knowable rate: a rate is a collection's work divided by the seconds it accrued over, and that denominator is unknowable two ways, the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the collection is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0: such a collection is left out of its point's rates rather than counted as zero, and a point that held nothing else carries null rates ({unrated} here)."
+              + (unratedOpenIntervals == 0
+                  ? ""
+                  : $" Of those, {unratedOpenIntervals} {(unratedOpenIntervals == 1 ? "is a Query Store interval" : "are Query Store intervals")} still open that had run under {PartialIntervalMinSeconds} seconds when last captured: a rate over so few seconds is noise, so the rates are null (covered_seconds says how long each had run).");
+        envelope["trend"] = points.Select(p =>
         {
-            time = p.CollectionTime.ToString("o"),
-            value = p.Value,
-            elapsed_ms_per_second = p.Value,
-            execution_count = p.ExecutionCount,
-            executions_per_second = p.ExecutionsPerSecond,
-            /* #3897: the bucket's worst single collection; null where a point is not a bucket of collections. */
-            peak_elapsed_ms_per_second = p.PeakElapsedMsPerSecond,
+            var point = new
+            {
+                time = p.CollectionTime.ToString("o"),
+                /* #8572: the rates go through the one rate rounding rule the perfmon trends use (13 decimals of float noise otherwise). */
+                value = TrendPayloads.RoundRate(p.Value, 6),
+                elapsed_ms_per_second = TrendPayloads.RoundRate(p.Value, 6),
+                execution_count = p.ExecutionCount,
+                executions_per_second = TrendPayloads.RoundRate(p.ExecutionsPerSecond, 6),
+                /* #3897: the bucket's worst single collection; null where a point is not a bucket of collections. */
+                peak_elapsed_ms_per_second = TrendPayloads.RoundRate(p.PeakElapsedMsPerSecond, 6),
+            };
+            return p.PartialCoveredSeconds is double covered ? MarkPartial(point, covered) : (object)point;
         });
         /* #3653 A5: trailing, after the points, on the data envelope only — the window's baseline
            discontinuities, the same key and shape Darling's SerializeTrend writes (BaselineDiscontinuities). */

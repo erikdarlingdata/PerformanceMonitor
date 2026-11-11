@@ -358,9 +358,10 @@ internal static class TrendPayloads
             ["trend"] = points.Select(p => new
             {
                 time = Stamp(p.BucketStart),
-                wait_time_ms_per_second = p.WaitTimeMsPerSecond,
-                signal_wait_time_ms_per_second = p.SignalWaitTimeMsPerSecond,
-                peak_wait_time_ms_per_second = p.PeakWaitTimeMsPerSecond,
+                /* #8572: the same three places the wait-stats rate above carries, where the reply is built (257.70384995064165 otherwise). */
+                wait_time_ms_per_second = Math.Round(p.WaitTimeMsPerSecond, 3),
+                signal_wait_time_ms_per_second = Math.Round(p.SignalWaitTimeMsPerSecond, 3),
+                peak_wait_time_ms_per_second = McpHelpers.RoundTo(p.PeakWaitTimeMsPerSecond, 3),
             }),
             /* #3653 A5: trailing, after the points, on the data envelope only. */
             ["discontinuities"] = discontinuities,
@@ -699,16 +700,19 @@ internal static class TrendPayloads
     /// <see cref="PerfmonLatestRow"/> publish is rounded here, so Lite and Darling publish the same number for the same
     /// count over the same span.
     /// </summary>
-    internal static double RoundRate(double rate)
+    internal static double RoundRate(double rate, int minDecimals = 4)
     {
         if (rate == 0 || !double.IsFinite(rate))
         {
             return rate;
         }
 
-        var decimals = Math.Clamp(1 - (int)Math.Floor(Math.Log10(Math.Abs(rate))), 4, 15);
+        var decimals = Math.Clamp(1 - (int)Math.Floor(Math.Log10(Math.Abs(rate))), minDecimals, 15);
         return Math.Round(rate, decimals);
     }
+
+    /// <summary><see cref="RoundRate(double, int)"/> for a rate that may be absent: null stays null (#8572).</summary>
+    internal static double? RoundRate(double? rate, int minDecimals = 4) => rate is { } r ? RoundRate(r, minDecimals) : null;
 
     /// <summary>A cumulative counter's delta and the seconds it accrued over, one class at a time: the rated
     /// collections' where any exist; else the unknowable ones' with an interval of 0, the marker a caller must not

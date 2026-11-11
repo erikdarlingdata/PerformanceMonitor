@@ -214,14 +214,16 @@ LEFT JOIN grants g ON true";
     /// <summary>
     /// Gets 7-day daily provisioning classification trend. Each row is one day as <paramref name="dayZone"/> counts days (see
     /// <see cref="DisplayDays"/>): the selected time display's zone from the tab, UTC when null. The Day the row carries is that
-    /// zone's calendar day, so its label reads in the same clock as every other time on the page.
+    /// zone's calendar day, so its label reads in the same clock as every other time on the page. The days are the seven of
+    /// <see cref="ProvisioningTrendWindow"/>: the six whole days before today and today so far, whose row is marked partial.
     /// </summary>
     public async Task<List<ProvisioningTrendRow>> GetProvisioningTrendAsync(int serverId, TimeZoneInfo? dayZone = null)
     {
         using var connection = await OpenConnectionAsync();
 
         var nowUtc = DateTime.UtcNow;
-        var cutoff = nowUtc.AddDays(-7);
+        var zone = dayZone ?? TimeZoneInfo.Utc;
+        var cutoff = DisplayZone.ToUtcBound(ProvisioningTrendWindow.FirstDay(DisplayZone.ToDisplay(nowUtc, zone)), zone, BoundSide.From);
 
         /* The window's newest CPU sample, read first so the days table runs through it (#8503): the collector can stamp a sample after
            this read took its clock, and a sample at or after the last day's end would otherwise match no day and leave the table. The
@@ -246,10 +248,18 @@ AND   collection_time >= $2";
 
         var daysEnd = newest > nowUtc ? newest : nowUtc;
 
+        /* Never more than the trend's seven days: a sample stamped past today's end adds a day, and the oldest then leaves. */
+        var days = DisplayDays(cutoff, daysEnd, zone);
+        if (days.Count > ProvisioningTrendWindow.Days)
+        {
+            days = days.GetRange(days.Count - ProvisioningTrendWindow.Days, ProvisioningTrendWindow.Days);
+        }
+        var dayEnds = days.ToDictionary(d => d.Day, d => d.EndUtc);
+
         using var command = connection.CreateCommand();
         command.CommandText = $@"
 WITH days(day, start_utc, end_utc) AS (
-    VALUES {DayBucketValues(DisplayDays(cutoff, daysEnd, dayZone))}
+    VALUES {DayBucketValues(days)}
 ),
 daily_cpu AS (
     SELECT
@@ -367,9 +377,12 @@ ORDER BY c.day";
                     : ProvisioningVerdict.StolenMemoryPercent(Convert.ToDouble(reader.GetValue(14)), Convert.ToDouble(reader.GetValue(15))),
                 isAgSecondary: ProvisioningVerdict.IsSecondaryReplicaRole(reader.IsDBNull(16) ? null : reader.GetString(16)));
 
+            var day = reader.GetDateTime(0);
             items.Add(new ProvisioningTrendRow
             {
-                Day = reader.GetDateTime(0),
+                Day = day,
+                /* A day that has not ended is judged on the hours collected so far, and its row says so. */
+                IsPartial = dayEnds.TryGetValue(day, out var dayEnd) && dayEnd > nowUtc,
                 AvgCpuPct = avgCpu,
                 MaxCpuPct = maxCpu,
                 P95CpuPct = p95Cpu,

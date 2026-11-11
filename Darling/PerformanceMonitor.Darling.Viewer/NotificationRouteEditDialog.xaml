@@ -120,7 +120,7 @@
 
             <TextBlock Grid.Row="2" Grid.Column="0" Text="Generic webhook URL" VerticalAlignment="Center" Margin="0,0,8,6"/>
             <TextBox Grid.Row="2" Grid.Column="1" x:Name="GenericUrlBox" Margin="0,0,0,6"
-                     ToolTip="Headers, body template and proxy come from the Notifications section — a route redirects the POST, it does not re-author it."/>
+                     ToolTip="Headers, body template and proxy come from the Notifications section: a route redirects the POST, it does not re-author it."/>
 
             <!-- #5998: the signing key of this route's own generic URL. Made, rotated and removed here at once, not with OK. -->
             <TextBlock Grid.Row="3" Grid.Column="0" Text="Signing key" VerticalAlignment="Top" Margin="0,4,8,6"/>
@@ -142,7 +142,7 @@
 
             <TextBlock Grid.Row="4" Grid.Column="0" Text="PagerDuty routing key" VerticalAlignment="Center" Margin="0,0,8,6"/>
             <TextBox Grid.Row="4" Grid.Column="1" x:Name="PagerDutyKeyBox" Margin="0,0,0,6"
-                     ToolTip="An Events API v2 integration key — a different PagerDuty SERVICE for this family. The EU-region flag and proxy come from the Notifications section."/>
+                     ToolTip="An Events API v2 integration key: a different PagerDuty SERVICE for this family. The EU-region flag and proxy come from the Notifications section."/>
 
             <TextBlock Grid.Row="5" Grid.Column="0" Text="Email recipients" VerticalAlignment="Center" Margin="0,0,8,6"/>
             <TextBox Grid.Row="5" Grid.Column="1" x:Name="SmtpRecipientsBox" Margin="0,0,0,6"

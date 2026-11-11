@@ -97,6 +97,7 @@ jobs:
       legs: ${{ steps.plan.outputs.legs }}
       legs_json: ${{ steps.plan.outputs.legs_json }}
       exporter: ${{ steps.exporter.outputs.exporter }}
+      harness_restore: ${{ steps.harness_restore.outputs.harness_restore }}
     steps:
       # Depth 2: a pull request run checks out the merge commit, and the plan reads the pull request's own change as
       # HEAD^1..HEAD (the map selection below, #7728). A dev push checks out the pushed commit and reads the same range (#7819).
@@ -279,6 +280,37 @@ jobs:
           print("exporter=" + ("true" if run else "false"))
           PY
 
+      # The WPF smoke harness (tools/ui-smoke-wpf) is outside the solution and referenced by no test project, so the build
+      # job's restore of the two test projects does not reach its lock file. Without the build job's harness restore, the first
+      # run to restore it after a package bump is the nightly's WPF smoke (#6790, #8529). The build job runs that restore, in
+      # locked mode, when this step answers true: a restore input changed (a csproj, props, targets or solution file,
+      # global.json, nuget.config or any packages.lock.json) or a file of the harness itself, or the run is one the exporter
+      # rule above treats as untrusted or whole-tree. The rule is ci-select.py's harness_restore, which reads the same
+      # build-input names and suffixes as the slow-class skip, and ci-plan-test.py holds its rows. CI runs those rows only
+      # on a "CI scripts only" plan (script_tests, #7743): a change to the rule that also touches a file outside
+      # .github/scripts/ plans every area, which runs no Python check, so such a change needs the rows run by hand.
+      - name: Decide whether the build job restores the WPF smoke harness
+        id: harness_restore
+        if: steps.skip.outputs.skip != 'true'
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref || github.ref_name }}
+          PLAN_AREAS: ${{ steps.plan.outputs.areas }}
+        run: |
+          set -euo pipefail
+
+          python -I - <<'PY' >> "${GITHUB_OUTPUT}"
+          import importlib.util, os, sys
+          spec = importlib.util.spec_from_file_location("ci_select", ".github/scripts/ci-select.py")
+          mod = importlib.util.module_from_spec(spec)
+          sys.modules["ci_select"] = mod
+          spec.loader.exec_module(mod)
+          files = [ln.strip() for ln in open("changed.txt", encoding="utf-8") if ln.strip()]
+          run = mod.harness_restore(os.environ["EVENT_NAME"], os.environ["BASE_REF"], os.environ["PLAN_AREAS"], files)
+          print("harness_restore=" + ("true" if run else "false"))
+          PY
+
       # Pending from the moment the plan says the run goes. A fork's read-only token cannot write it: for a fork pull request,
       # fork-ci-result.yml writes the final state from this run's `CI verdict` job conclusion once the run completes (#8188).
       # A run on the dev ref that plans every area also marks `CI full suite` pending (#7819); the verdict
@@ -356,13 +388,34 @@ jobs:
 
       # Locked mode and `set -euo pipefail`: a multi-line run block under the default shell reports only its last
       # command's exit code, so the first restore could fail unseen (LockedModeRestoreCoverageTests enforces both).
+      # This is the step a pull request fails when a lock file inside the solution is behind, so its ERR trap carries
+      # the message build.yml's restore step carries: a title that says only that a restore failed, and both
+      # regeneration commands, offered for NU1004 alone.
       - name: Restore the test projects
         shell: bash
         run: |
           set -euo pipefail
 
+          trap 'echo "::error title=A locked-mode restore failed::If the errors above are NU1004, a lock file is out of step with its package graph: regenerate with '"'"'dotnet restore PerformanceMonitor.sln --force-evaluate'"'"' and, on Windows, '"'"'dotnet restore tools/ui-smoke-wpf/UiSmokeWpf.csproj --force-evaluate'"'"' (the WPF smoke harness is outside the solution, so the first command does not rewrite its lock file), and commit every packages.lock.json they rewrite. Do not remove --locked-mode: the lock files are the only pin on the transitive closure, and the props diff does not show it moving. Any other error is not a lock file mismatch, and regenerating does not clear it."' ERR
+
           dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
+
+      # The WPF smoke harness is outside the solution and referenced by no test project, so the step above never reaches its
+      # lock file (the plan job's harness_restore output says when a restore input changed, #8529). The same shell and errexit
+      # line as the step above, so the restore is able to fail this job. The message rides an ERR trap, as build.yml's does.
+      # The trap fires on any failed restore, so its title says only that the restore failed, and the remedy is offered for
+      # NU1004 alone. The remedy names the harness's own project: a solution restore does not rewrite a lock file outside
+      # the solution.
+      - name: Restore the WPF smoke harness (locked)
+        if: needs.plan.outputs.harness_restore == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          trap 'echo "::error title=The WPF smoke harness failed its locked-mode restore::If the errors above are NU1004, the harness lock file is out of step with its package graph: regenerate it on Windows with '"'"'dotnet restore tools/ui-smoke-wpf/UiSmokeWpf.csproj --force-evaluate'"'"' and commit tools/ui-smoke-wpf/packages.lock.json. The harness is outside PerformanceMonitor.sln, so a solution restore does not rewrite it. Do not remove --locked-mode. Any other error is not a lock file mismatch, and regenerating does not clear it."' ERR
+
+          dotnet restore tools/ui-smoke-wpf/UiSmokeWpf.csproj --locked-mode
 
       - name: Build the Darling test project
         shell: bash

@@ -164,8 +164,55 @@ export const READ_FIELDS = {
       rowsKey: "trend",
       xKey: "time",
       format: "int",
-      emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
+      emptyText: "No deadlocks in this window: an empty trend here means none happened, not that nothing was collected.",
       series: [{ key: "count", label: "Deadlocks" }],
+    },
+  },
+  /* #8553: the PostgreSQL deadlock reads a deadlock alert's notebook carries on a PostgreSQL target. The columns are the
+     Activity tab's (PG_DEADLOCK_COLUMNS, PG_DEADLOCK_GRAPH_COLUMNS in server-tabs/pg-activity.js). */
+  get_pg_deadlocks: {
+    table: {
+      rowsKey: "deadlocks",
+      emptyText: "No deadlock in this window. If you expected one, the server log may not be readable.",
+      noteKey: "truncation_note",
+      columns: [
+        { key: "occurred_at", label: "When", format: "time" },
+        { key: "victim_pid", label: "Victim PID", format: "id" },
+        { key: "participant_count", label: "Sessions", format: "int" },
+        { key: "lock_modes", label: "Lock Modes" },
+        { key: "resources", label: "Resources" },
+        { key: "victim_statement", label: "Victim Statement", wrap: true },
+        { key: "times_seen", label: "Sightings", format: "int" },
+      ],
+    },
+  },
+  get_pg_deadlock_detail: {
+    table: {
+      rowsKey: "deadlocks",
+      emptyText: "No deadlock graph stored for this server.",
+      columns: [
+        { key: "occurred_at", label: "When", format: "time" },
+        { key: "victim_pid", label: "Victim PID", format: "id" },
+        { key: "graph", label: "Graph", wrap: true },
+      ],
+    },
+  },
+  /* #8584: the PostgreSQL blocking notebook cell. One row per sampled chain, worst first by victim count. */
+  get_pg_blocking: {
+    table: {
+      rowsKey: "chains",
+      emptyText: "No blocking was sampled in this window. Captures are periodic, so a shorter episode leaves no trace.",
+      columns: [
+        { key: "captured_at", label: "Captured", format: "time" },
+        { key: "root_pid", label: "Root PID", format: "int" },
+        { key: "root_application", label: "Application" },
+        { key: "root_state", label: "Root State" },
+        { key: "total_victims", label: "Victims", format: "int" },
+        { key: "worst_victim_wait_ms", label: "Worst Wait", format: "ms" },
+        { key: "root_xact_duration_ms", label: "Root Xact", format: "ms" },
+        { key: "root_query", label: "Root Query", wrap: true },
+        { key: "recommended_action", label: "Action", wrap: true },
+      ],
     },
   },
   get_pg_wait_stats: {
@@ -815,7 +862,9 @@ export const READ_FIELDS = {
       columns: [
         { key: "opened_at", label: "Opened", format: "time" },
         { key: "state", label: "State" },
-        { key: "server_name", label: "Server" },
+        /* #8578: the registry's display name, which every row carries (it falls back to the name the request was opened with). server_name is the
+           label the opening alert or finding carried, so requests opened before that was one name show one server under two. */
+        { key: "display_name", label: "Server" },
         { key: "first_metric", label: "Metric" },
         { key: "family", label: "Family" },
         { key: "alert_count", label: "Alerts", format: "int" },

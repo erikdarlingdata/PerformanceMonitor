@@ -57,6 +57,9 @@ public static class SystemEventSignificance
     /// <summary>A memory-broker ratio change is significant when its notification is SHRINK (#7466; the broker carries STABLE, GROW or SHRINK). Delegates to <see cref="SystemHealthSignificance"/>.</summary>
     public static bool IsSignificant(MemoryBrokerRecord record) => SystemHealthSignificance.IsSignificant(record);
 
+    /// <summary>The significant memory-broker records of the event XML, in its order. Delegates to <see cref="SystemHealthSignificance"/>.</summary>
+    public static List<MemoryBrokerRecord> SignificantBrokerRecords(IEnumerable<string> eventXmls) => SystemHealthSignificance.SignificantBrokerRecords(eventXmls);
+
     /// <summary>Every recorded memory-node OOM is significant. Delegates to <see cref="SystemHealthSignificance"/>.</summary>
     public static bool IsSignificant(MemoryNodeOomRecord record) => SystemHealthSignificance.IsSignificant(record);
 

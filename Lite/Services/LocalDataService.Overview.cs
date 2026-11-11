@@ -483,10 +483,10 @@ public static class ServerCardStatusRules
     /// word and a colour left the reader guessing which axis they were about.</summary>
     public static string Headline(this ServerCardStatus status) => status switch
     {
-        ServerCardStatus.CollectorErrors => "Warning — one or more collectors are failing on this server",
-        ServerCardStatus.Online => "Online — the last connection check succeeded",
-        ServerCardStatus.Offline => "Offline — the last connection check failed",
-        _ => "Connecting — the first connection check has not finished yet",
+        ServerCardStatus.CollectorErrors => "Warning: one or more collectors are failing on this server",
+        ServerCardStatus.Online => "Online: the last connection check succeeded",
+        ServerCardStatus.Offline => "Offline: the last connection check failed",
+        _ => "Connecting: the first connection check has not finished yet",
     };
 }
 
@@ -698,7 +698,7 @@ public class ServerSummaryItem
     /// else its open tab's, else the machine's (<see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/>),
     /// the chain Alert History and Job History use. <see cref="LastCollectionDisplay"/> converts on it in Server
     /// mode, so the card reads the same wall clock as that server's alert and job rows. Null on a hand-built item,
-    /// which then takes the active server's clock.
+    /// which then takes the machine's clock (#8645), never the active server tab's.
     /// </summary>
     public ServerClock? Clock { get; set; }
 
@@ -706,13 +706,17 @@ public class ServerSummaryItem
     /// The Last Collect time as the card words it: <paramref name="lastCollectionUtc"/> (naive UTC) in the selected
     /// "Show timestamps in" mode on <paramref name="clock"/> (the same zone choice as the Alert History and Job History
     /// rows), as "HH:mm:ss" when that wall time falls on today's date in the same zone, and with its date
-    /// ("yyyy-MM-dd HH:mm:ss") otherwise, so a collection from nine days ago does not read as one from this morning.
+    /// ("yyyy-MM-dd HH:mm:ss") otherwise, so a collection from nine days ago does not read as one from this morning. In Server
+    /// Time each card is on its own server's clock, so the text ends with that clock's offset, "12:30:15 (UTC-08:00)"
+    /// (<see cref="ServerTimeHelper.WithServerZoneLabel"/>).
     /// </summary>
     internal static string FormatLastCollect(DateTime lastCollectionUtc, TimeDisplayMode mode, ServerClock? clock, DateTime nowUtc)
     {
-        var zone = ServerTimeHelper.DisplayZoneFor(mode, clock ?? ServerTimeHelper.ActiveServerClock);
+        var onClock = clock ?? ServerTimeHelper.ClockForServer(null, null); /* #8645: never the last-opened server tab's clock */
+        var zone = ServerTimeHelper.DisplayZoneFor(mode, onClock);
         var isToday = DisplayZone.ToDisplay(lastCollectionUtc, zone).Date == DisplayZone.ToDisplay(nowUtc, zone).Date;
-        return ServerTimeHelper.FormatInstant(lastCollectionUtc, zone, isToday ? "HH:mm:ss" : "yyyy-MM-dd HH:mm:ss");
+        var text = ServerTimeHelper.FormatInstant(lastCollectionUtc, zone, isToday ? "HH:mm:ss" : "yyyy-MM-dd HH:mm:ss");
+        return ServerTimeHelper.WithServerZoneLabel(text, mode, onClock, lastCollectionUtc);
     }
 
     /// <summary>
@@ -771,13 +775,13 @@ public class ServerSummaryItem
     public string? CollectionFreshnessTooltip => CollectionFreshness switch
     {
         ServerFreshness.Fresh =>
-            $"Collection is current — something landed within the last {Minutes(ServerHealthThresholds.StaleThreshold)}.",
+            $"Collection is current: something landed within the last {Minutes(ServerHealthThresholds.StaleThreshold)}.",
         ServerFreshness.Stale =>
-            $"Collection is stale — nothing has landed for over {Minutes(ServerHealthThresholds.StaleThreshold)}.\n" +
+            $"Collection is stale: nothing has landed for over {Minutes(ServerHealthThresholds.StaleThreshold)}.\n" +
             "This is about collection stopping, not about the server's metrics: the connection check can " +
             "still be passing and no collector reporting an error.",
         ServerFreshness.Offline =>
-            $"Collection has stopped — nothing has landed for over {Minutes(ServerHealthThresholds.OfflineThreshold)}.\n" +
+            $"Collection has stopped: nothing has landed for over {Minutes(ServerHealthThresholds.OfflineThreshold)}.\n" +
             "This is about collection stopping, not about the server's metrics: the connection check can " +
             "still be passing and no collector reporting an error.",
         ServerFreshness.NeverCollected =>

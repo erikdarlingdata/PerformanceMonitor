@@ -257,17 +257,20 @@ SELECT
     candidate_entries
 FROM
 (
-    /* DISTINCT ON, and it is not tidiness - see VanillaFetchSql for the full reasoning. One queryid comes
+    " + /* DISTINCT ON, and it is not tidiness - see VanillaFetchSql for the full reasoning. One queryid comes
        back once per user and database that ran it, the upsert keys on (server_id, queryid), and it meets
        those duplicates as '21000: ON CONFLICT DO UPDATE command cannot affect row a second time'.
 
        That error aborts the STATEMENT, so the batch's non-duplicate rows are lost with it - a single
-       repeated queryid stores nothing at all, not merely one row fewer. Measured on the pgmon fleet before
-       this fix: 50 of 50 Aurora servers failing, zero succeeding, get_pg_top_queries returning
+       repeated queryid stores nothing at all, not merely one row fewer. Measured on a test fleet of Aurora
+       servers before this fix: every server failing, none succeeding, get_pg_top_queries returning
        query_text: null on every row.
 
        Any of the duplicates would do - the text is the normalized statement and is identical across them -
-       so the costliest is taken, which is the same thing the outer ORDER BY is choosing for. */
+       so the costliest is taken, which is the same thing the outer ORDER BY is choosing for.
+
+       #8665: this comment is a C# comment between two string pieces, not part of the SQL, because the SQL goes to
+       every monitored server with each fetch and is kept in its statement statistics. */ @"
     SELECT DISTINCT ON (s.queryid)
         s.queryid AS queryid,
         s.query AS query_text,
@@ -303,7 +306,7 @@ SELECT
     candidate_entries
 FROM
 (
-    /* DISTINCT ON, and it is not tidiness. pg_stat_statements keys on
+    " + /* DISTINCT ON, and it is not tidiness. pg_stat_statements keys on
        (queryid, userid, dbid, toplevel), so ONE queryid comes back once per user and database that ran
        it - and the upsert below keys on (server_id, queryid), which meets those duplicates as
        '21000: ON CONFLICT DO UPDATE command cannot affect row a second time' and abandons the whole
@@ -312,7 +315,10 @@ FROM
        deliberately treats a text-refresh error as non-fatal.
 
        Any of the duplicates would do - the text is the normalized statement and is identical across
-       them - so the costliest is taken, which is the same thing the outer ORDER BY is choosing for. */
+       them - so the costliest is taken, which is the same thing the outer ORDER BY is choosing for.
+
+       #8665: this comment is a C# comment between two string pieces, not part of the SQL, because the SQL goes to
+       every monitored server with each fetch and is kept in its statement statistics. */ @"
     SELECT DISTINCT ON (s.queryid)
         s.queryid AS queryid,
         s.query AS query_text,

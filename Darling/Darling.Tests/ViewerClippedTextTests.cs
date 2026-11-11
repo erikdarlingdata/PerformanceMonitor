@@ -101,6 +101,35 @@ public sealed class ViewerClippedTextTests
         Assert.True(clipped.Count == 0, ClippedTextProbe.Describe(clipped));
     }
 
+    /// <summary>#8662: the PostgreSQL sentence Job History shows in an empty grid is longer than the grid is wide (it was drawn on one line, 2,162 px
+    /// in a 1,600 px grid, cut at both ends). It wraps to the grid's width, so the server's name at its start and the "nothing can change
+    /// it" ending are both on screen.</summary>
+    [Fact]
+    public void JobHistory_EmptyGridSentenceForAPostgresServer_WrapsToTheGridsWidth()
+    {
+        var (clipped, lines) = StaTestThread.Run(() =>
+        {
+            var tab = new JobHistoryTab();
+            var window = new Window { Content = tab, Width = 1100, Height = 925 };
+            window.Resources.MergedDictionaries.Add(Theme());
+            StaTestThread.ShowOffScreen(window);
+            var pg = new DarlingServer(
+                7, "pg-a", "pg-a", true, null, engineKind: PerformanceMonitor.Collectors.MonitoredEngineKind.Postgres, postgresMajorVersion: 16);
+            var message = (TextBlock)tab.FindName("NoJobsMessage");
+            message.Text = JobHistoryTab.EmptyNote(7, ViewerDataService.ServersOf([pg]));
+            message.Visibility = Visibility.Visible;
+            ClippedTextProbe.Settle(window);
+            var found = ClippedTextProbe.Clipped(tab, tab);
+            var height = message.ActualHeight;
+            var oneLine = message.FontSize * 1.2;
+            window.Close();
+            return (found, height / oneLine);
+        });
+
+        Assert.True(clipped.Count == 0, ClippedTextProbe.Describe(clipped));
+        Assert.True(lines > 1.5, $"the sentence should take more than one line in a 1,100 px window, took {lines:0.0}");
+    }
+
     [Fact]
     public void AColumnHeader_StaysInFull_WhenItsTitleGrowsAfterTheTabOpens()
     {

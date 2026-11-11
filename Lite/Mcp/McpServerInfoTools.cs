@@ -156,8 +156,10 @@ public sealed class McpServerInfoTools
                     /* A file with no allocated size (the Hyperscale log file, in the log service) adds nothing,
                        so a Hyperscale database's total is its data file alone, and used sums over the same files.
                        Used is null when none of those files has a used size: that is unknown, not 0 MB. */
-                    ["total_size_mb"] = g.Sum(r => r.TotalSizeMb ?? 0),
-                    ["used_size_mb"] = UsedSizeTotalMb(g)
+                    /* #8572: summed doubles carry float noise (985829.2999999999), so the totals are rounded to the two places a megabyte
+                       figure carries elsewhere. */
+                    ["total_size_mb"] = Math.Round(g.Sum(r => r.TotalSizeMb ?? 0), 2),
+                    ["used_size_mb"] = McpHelpers.RoundTo(UsedSizeTotalMb(g), 2)
                 };
                 if (g.Any(r => r.IsAzureSiblingRow))
                     database[AzureSiblingDatabaseSize.RowNoteKey] = AzureSiblingDatabaseSize.LogNote;
@@ -208,8 +210,8 @@ public sealed class McpServerInfoTools
         {
             ["file_name"] = r.FileName,
             ["file_type"] = r.FileTypeDesc,
-            ["total_size_mb"] = r.TotalSizeMb,
-            ["used_size_mb"] = r.UsedSizeMb
+            ["total_size_mb"] = McpHelpers.RoundTo(r.TotalSizeMb, 2),
+            ["used_size_mb"] = McpHelpers.RoundTo(r.UsedSizeMb, 2)
         };
         if (r.IsAzureSiblingRow)
             file[AzureSiblingDatabaseSize.RowNoteKey] = AzureSiblingDatabaseSize.LogNote;

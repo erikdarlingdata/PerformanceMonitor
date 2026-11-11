@@ -200,7 +200,8 @@ public sealed class DarlingMcpHealthTools
                 data_state = DailySummaryRetention.Label(row.DataState),
                 data_note = row.RetentionHorizon is { } horizon ? DailySummaryRetention.Note(row.DataState, horizon, row.SignalSourcesPresent) : null,
                 retention_horizon = row.RetentionHorizon?.ToString("yyyy-MM-dd"),
-                total_wait_time_sec = row.TotalWaitTimeSec,
+                /* #8572: the store's numeric carries sixteen decimals (9387.6560000000000000); the source is whole milliseconds, so three places. */
+                total_wait_time_sec = Math.Round(row.TotalWaitTimeSec, 3),
                 top_wait_type = row.TopWaitType,
                 unique_queries = row.UniqueQueries,
                 deadlock_count = row.DeadlockCount,
@@ -219,7 +220,7 @@ public sealed class DarlingMcpHealthTools
                    when the window was too short to normalise). The window is the row's own clamp against
                    its ReferenceUtc, so an anchored read rates against its as_of, not the process clock. */
                 collection_runs = row.CollectionRuns,
-                blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window),
+                blocking_rate_per_hour = TrendPayloads.RoundRate(ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window), 2), // #8572: 0.32255504310332606 otherwise
                 /* #3653 A6, additive and trailing: the ONE key name the range tool spells the same way. A
                    unique_queries of null above means the rollup tier never carried this day for this server
                    (DarlingHealthReader.DailySummaryReadRow says what that is); this names the day so a caller
@@ -345,7 +346,7 @@ public sealed class DarlingMcpHealthTools
                     health_band = row.HealthBand.ToString(),
                     data_state = DailySummaryRetention.Label(row.DataState),
                     data_note = DailySummaryRetention.Note(row.DataState, range.RetentionHorizon, row.SignalSourcesPresent),
-                    total_wait_time_sec = row.TotalWaitTimeSec,
+                    total_wait_time_sec = Math.Round(row.TotalWaitTimeSec, 3),
                     top_wait_type = row.TopWaitType,
                     unique_queries = row.UniqueQueries,
                     deadlock_count = row.DeadlockCount,
@@ -359,7 +360,7 @@ public sealed class DarlingMcpHealthTools
                     peak_snapshot_wait_ms = row.PeakSnapshotWaitMs,
                     /* #3539 A2/A3, additive — see get_daily_summary's members of the same names. */
                     collection_runs = row.CollectionRuns,
-                    blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window),
+                    blocking_rate_per_hour = TrendPayloads.RoundRate(ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window), 2), // #8572: 0.32255504310332606 otherwise
                 }),
                 /* #3653 A6, additive and TRAILING: the days whose unique_queries above is null — the rollup
                    tier that answered this window never carried them for this server while its source still

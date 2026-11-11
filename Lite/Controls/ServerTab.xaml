@@ -402,7 +402,7 @@
                                                Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                                Background="#22FFAA00"/>
                                     <WrapPanel Orientation="Horizontal" Margin="0,0,0,8">
-                                        <TextBlock Text="Currently Running Queries" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Captured queries" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
                                         <Button x:Name="LiveSnapshotButton" Content="Live Snapshot"
                                                 Click="LiveSnapshot_Click" Padding="12,4" Margin="16,0,8,0"
                                                 VerticalAlignment="Center"/>
@@ -1104,10 +1104,10 @@
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
-                                    <!-- #1980: the inline plan affordance the sibling grids always had — opens the
-                                         STORED Query Store plan (already on the row) in the Plan Viewer, the same
-                                         path the history window's View Plan uses. Gated on HasQueryPlan. Lives in
-                                         the payload region right of the #1949 anchor, next to the text it belongs to. -->
+                                    <!-- #1980: the inline plan affordance the sibling grids always had. The row carries no plan:
+                                         the button fetches the plan from the monitored server's Query Store by the row's plan id
+                                         and opens it in the Plan Viewer, as the row's context menu does. Gated on HasQueryPlan.
+                                         Lives in the payload region right of the #1949 anchor, next to the text it belongs to. -->
                                     <DataGridTemplateColumn Header="Query Plan" Width="Auto" MinWidth="70">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
@@ -1361,7 +1361,7 @@
                                 <TextBlock Grid.Row="0" Margin="8,4,0,4" FontSize="11"
                                            Foreground="{DynamicResource ForegroundMutedBrush}"
                                            TextWrapping="Wrap"
-                                           Text="The engine's own automatic plan correction findings — sys.dm_db_tuning_recommendations, with the regressed query's text resolved through Query Store at collection time. The engine keeps recommendations only until it restarts, so a captured row can be the only surviving record that a regression happened. Per-database enablement state is on the Configuration tab's Automatic Tuning sub-tab."/>
+                                           Text="The engine's own automatic plan correction findings, from sys.dm_db_tuning_recommendations, with the regressed query's text resolved through Query Store at collection time. The engine keeps recommendations only until it restarts, so a captured row can be the only surviving record that a regression happened. Per-database enablement state is on the Configuration tab's Automatic Tuning sub-tab."/>
                                 <!-- #4966: "Showing since <time>" when the stored plan corrections start after the range's start. -->
                                 <TextBlock Grid.Row="1" x:Name="PlanCorrectionsWindowTruncatedBanner" Visibility="Collapsed"
                                            Padding="8,4" FontWeight="Bold"
@@ -2911,8 +2911,10 @@
                             </Grid.RowDefinitions>
                             <!-- #8226: the two cycle summaries share one card over the grid, with a semibold title and a muted subtitle. #8307: the card
                                  sits on the Health Summary sub-tab, the one that opens first, so the Collection Log and Duration Trends sub-tabs keep the
-                                 page's whole height. -->
-                            <ui:ChartPanel Grid.Row="0" x:Name="CollectionHealthCard" Title="Collection Cycles" Subtitle="Skipped slots and connection failures in the last 24 hours" Margin="0,0,0,8">
+                                 page's whole height. #8533: the subtitle captions the skipped-cycles line, a 24 h read and the one line the card always
+                                 draws. The connection-failure line reads the grid's rows, which hold the trailing 7 days, and says so in its own sentence,
+                                 so a card without that line makes no seven-day claim. Neither line follows the range picker. -->
+                            <ui:ChartPanel Grid.Row="0" x:Name="CollectionHealthCard" Title="Collection Cycles" Subtitle="Skipped slots in the last 24 hours" Margin="0,0,0,8">
                                 <StackPanel>
                                     <!-- #5643: the late collection cycles of the last 24 h. Always shown, above the grid, so a reader sees at once whether
                                          the loop has been skipping slots; the all-clear says so plainly. -->

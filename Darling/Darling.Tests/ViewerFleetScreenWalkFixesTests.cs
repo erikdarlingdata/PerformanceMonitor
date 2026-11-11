@@ -72,6 +72,23 @@ public sealed class ViewerFleetScreenWalkFixesTests : IDisposable
         Assert.Equal("2026-10-07 23:30:00", text);
     }
 
+    /// <summary>In Server Time the card's Last Collect names the offset of the clock it is worded on; in UTC it is the stored
+    /// instant with no label.</summary>
+    [Fact]
+    public void LastCollect_InServerTime_NamesTheOffsetOfTheClockItReads()
+    {
+        /* A fixed day in the past, so the stamp carries its date whatever today is. */
+        var card = new ServerSummaryItem { LastCollectionTime = Utc(2026, 9, 25, 9, 56, 40), Clock = ServerClock.FixedOffset(-240) };
+
+        /* The card reads its own server's clock (#8645), never the last-opened tab's, so a different active clock must change nothing. */
+        ViewerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(120);
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.Equal("2026-09-25 05:56:40 (UTC-04:00)", card.LastCollectionDisplay);
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+        Assert.Equal("2026-09-25 09:56:40", card.LastCollectionDisplay);
+    }
+
     // ── D5: one named clock on the time columns ─────────────────────────────────────────────────────
 
     [Theory]

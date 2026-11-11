@@ -144,13 +144,12 @@ public sealed class ViewerQueriesSqlTests
     public void TopQueriesSql_StitchesModuleByHandle_DedupsToLatest_LeftJoinsForAdHocFallback()
     {
         /* #1568: read-time attribution. A dedicated CTE picks ONE procedure_stats identity per sql_handle
-           (latest collection_time, via ROW_NUMBER + WHERE rn = 1 — Postgres has no QUALIFY), then a LEFT
+           (latest collection_time; #8549 finds it with a hash aggregate and a lateral probe, not a ROW_NUMBER, and
+           TopQueriesModuleLiveTests runs it against the old statement's answers), then a LEFT
            JOIN on the shared normalized handle surfaces db.schema.object; unmatched rows stay ad hoc. */
         var sql = ViewerDataService.TopQueriesSql;
-        Assert.Contains("module AS (", sql, StringComparison.Ordinal);
+        Assert.Contains("module AS", sql, StringComparison.Ordinal);
         Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("ROW_NUMBER() OVER (PARTITION BY sql_handle ORDER BY collection_time DESC) AS rn", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE rn = 1", sql, StringComparison.Ordinal);
         Assert.Contains("LEFT JOIN module AS m ON m.sql_handle = r.sql_handle", sql, StringComparison.Ordinal);
         Assert.Contains("m.object_name AS module_object_name", sql, StringComparison.Ordinal);
         Assert.Contains("m.schema_name AS module_schema_name", sql, StringComparison.Ordinal);
@@ -242,7 +241,10 @@ public sealed class ViewerQueriesSqlTests
     [Theory]
     [InlineData(nameof(ViewerDataService.QueryStoreTopSql))]
     [InlineData(nameof(ViewerDataService.QueryStoreComparisonSql))]
-    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql))]
+    /* #8549: QueryStoreSlicerSql left this row. Its dedupe is DISTINCT ON now, and this pin's rule for it was the window
+       function's spelling (PARTITION BY ... AS rn ... WHERE rn = 1). What the row stood for, a latest-snapshot-per-interval
+       dedupe whose key holds the interval identity and breaks ties on execution_count, NULL count first, is bounded by
+       QueryStoreSlicerCompressedLiveTests, which runs the statement on rows that tie. */
     [InlineData(nameof(ViewerDataService.QueryStoreRegressionsSql))]
     public void QueryStoreAggregates_DedupToTheLatestSnapshotPerInterval_BeforeAggregating(string sqlName)
     {
@@ -343,7 +345,7 @@ public sealed class ViewerQueriesSqlTests
     [Theory]
     [InlineData(nameof(ViewerDataService.QueryStatsSlicerSql), "query_stats", "COUNT(DISTINCT query_hash)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time")]
     [InlineData(nameof(ViewerDataService.ProcStatsSlicerSql), "procedure_stats", "COUNT(DISTINCT object_name)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time")]
-    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(DISTINCT query_id)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), TIMESTAMP '2000-01-01 00:00:00')", "COALESCE(interval_start_time_utc, collection_time)")]
+    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(query_id) FILTER (WHERE qrn = 1)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), TIMESTAMP '2000-01-01 00:00:00')", "COALESCE(interval_start_time_utc, collection_time)")]
     public void SlicerSql_BucketsAtTheWindowsWidth_SevenColumnShape(string sqlName, string table, string distinctCount, string bucketExpression, string windowFilter)
     {
         var sql = SqlByName(sqlName);

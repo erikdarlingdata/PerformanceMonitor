@@ -43,8 +43,9 @@ public sealed class DarlingMcpCustomViewCatalogSizeTests
     /// 25 bytes of one <c>,"labelSuffix":" (ratio)"</c> entry. #7428: +30 bytes, the longer display name of
     /// <c>pg_waitsample_backend_count</c>. #7565: +1,418 bytes, the perfmon_stats rate measure and its divisor, the new <c>note</c> on
     /// three measures, and the longer display names of the two perfmon measures that were already there. Review round: +217 bytes, the
-    /// rate measure's note and the perfmon_value note now say the rate needs one counter, one instance and one server per series.</summary>
-    private const int CurrentFullDetailBytes = PreFixFullDetailBytes + 275 + 30 + 1_418 + 217;
+    /// rate measure's note and the perfmon_value note now say the rate needs one counter, one instance and one server per series. #8573: +1,015 bytes, the
+    /// pg_db_connected_backends measure (connected backends per database, summed per capture).</summary>
+    private const int CurrentFullDetailBytes = PreFixFullDetailBytes + 275 + 30 + 1_418 + 217 + 1_015;
 
     [Fact]
     public async Task FullDetail_MatchesTheMeasuredShape()

@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -429,13 +430,16 @@ public sealed class ViewerSigningKeyLiveTests
             ViewerWebhookSealing.ResolveSettingsRow(second, null, sealer, null);
             Task<string>? generate = null;
             var finishedInsideTheWindow = false;
+            string? waitFailure = null;
             await viewer.UpsertNotificationCheckingSigningKeysAsync(second, (state, ids) =>
             {
                 generate = Task.Run(() => other.GenerateSettingsSigningKeyAsync(sealer, ct), ct);
-                finishedInsideTheWindow = Task.WhenAny(generate, Task.Delay(TimeSpan.FromSeconds(2), ct)).GetAwaiter().GetResult() == generate;
+                waitFailure = WaitUntilABackendWaitsOnALockAsync(scratch.ConnectionString, generate, ct).GetAwaiter().GetResult();
+                finishedInsideTheWindow = generate.IsCompleted;
                 return null;
             }, ct);
 
+            Assert.Null(waitFailure);
             Assert.False(finishedInsideTheWindow);
             await Assert.ThrowsAsync<ViewerPasswordRefusedException>(() => generate!);
             Assert.False((await viewer.GetSettingsSigningKeyStateAsync(ct))!.HasKey);
@@ -447,6 +451,37 @@ public sealed class ViewerSigningKeyLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
             await scratch.DisposeAsync();
         }
+    }
+
+    /* Holds the check-then-write window open until the generate is known to be blocked on a lock (#8565). A fixed wait cannot tell
+       "blocked on the settings row" from "had not reached the database yet", and on a loaded runner the generate can start only after
+       the save has committed, then read the new proxy and succeed. The scratch database belongs to this test alone, so the only
+       backend that can show wait_event_type = 'Lock' there, other than the save (which holds the lock, not waits on it), is the
+       generate. Returns null once the wait shows, or a message saying why it never did. */
+    private static async Task<string?> WaitUntilABackendWaitsOnALockAsync(string connectionString, Task generate, CancellationToken ct)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        while (DateTime.UtcNow < deadline)
+        {
+            await using var command = new NpgsqlCommand(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'",
+                connection);
+            if ((long)(await command.ExecuteScalarAsync(ct))! > 0)
+            {
+                return null;
+            }
+
+            if (generate.IsCompleted)
+            {
+                return "The generate finished inside the save's window before any backend waited on a lock.";
+            }
+
+            await Task.Delay(25, ct);
+        }
+
+        return "No backend waited on a lock within 60 seconds, so the generate never blocked on the settings row.";
     }
 
     [Fact]
@@ -490,13 +525,16 @@ public sealed class ViewerSigningKeyLiveTests
             ViewerWebhookSealing.ResolveSettingsRow(second, null, sealer, null);
             Task<string>? generate = null;
             var finishedInsideTheWindow = false;
+            string? waitFailure = null;
             await viewer.UpsertNotificationCheckingSigningKeysAsync(second, (state, ids) =>
             {
                 generate = Task.Run(() => other.GenerateRouteSigningKeyAsync(routeId, sealer, ct), ct);
-                finishedInsideTheWindow = Task.WhenAny(generate, Task.Delay(TimeSpan.FromSeconds(2), ct)).GetAwaiter().GetResult() == generate;
+                waitFailure = WaitUntilABackendWaitsOnALockAsync(scratch.ConnectionString, generate, ct).GetAwaiter().GetResult();
+                finishedInsideTheWindow = generate.IsCompleted;
                 return null;
             }, ct);
 
+            Assert.Null(waitFailure);
             Assert.False(finishedInsideTheWindow);
             await Assert.ThrowsAsync<ViewerPasswordRefusedException>(() => generate!);
             Assert.False((await viewer.GetRouteSigningKeyStateAsync(routeId, ct))!.HasKey);

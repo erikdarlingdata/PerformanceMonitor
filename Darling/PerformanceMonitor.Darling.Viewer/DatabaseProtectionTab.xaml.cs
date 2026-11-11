@@ -90,12 +90,9 @@ public partial class DatabaseProtectionTab : UserControl
             var read = await _dataService.ReadDatabaseProtectionAsync(server, DateTime.UtcNow);
             if (_loads.Superseded(nameof(LoadAsync), gen)) return;
 
-            var clock = await _dataService.GetServerClockOrMachineAsync(server.ServerId, System.Threading.CancellationToken.None);
-            if (_loads.Superseded(nameof(LoadAsync), gen)) return;
-
-            Show(read, clock);
+            Show(read);
             LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.RefreshedStamp();
-            StatusChanged?.Invoke($"database protection — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+            StatusChanged?.Invoke($"database protection: refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
@@ -105,7 +102,7 @@ public partial class DatabaseProtectionTab : UserControl
         }
     }
 
-    private void Show(ViewerDatabaseProtectionRead? read, ServerClock? clock = null)
+    private void Show(ViewerDatabaseProtectionRead? read)
     {
         if (read is null)
         {
@@ -116,7 +113,7 @@ public partial class DatabaseProtectionTab : UserControl
             return;
         }
 
-        StatusLine.Text = ViewerDatabaseProtectionText.StatusLine(read, clock ?? ViewerTimeHelper.ActiveServerClock);
+        StatusLine.Text = ViewerDatabaseProtectionText.StatusLine(read);
         var rows = ViewerDatabaseProtectionText.Rows(read);
         DatabasesDataGrid.ItemsSource = rows;
         PlatformColumn.Visibility = ViewerDatabaseProtectionText.ShowsPlatformColumn(rows) ? Visibility.Visible : Visibility.Collapsed;

@@ -369,7 +369,21 @@ public class QueryStoreHealthRow
 
     /// <summary>#4966: when this row's snapshot was captured, to the second, in the display zone (the grid's Collected column,
     /// which sorts by <see cref="CaptureTime"/>). Query Store health is captured hourly, so this is how old the shown value can be.</summary>
-    public string CaptureTimeLocal => ServerTimeHelper.FormatServerTime(CaptureTime);
+    public string CaptureTimeLocal => CollectedText(DateTime.UtcNow);
+
+    /// <summary>#8576: the interval in minutes the <c>query_store_health</c> collector runs at on this server, set by the loader. Zero
+    /// (not read) gives the Collected cell no age cue.</summary>
+    public int CollectorIntervalMinutes { get; set; }
+
+    /// <summary>#8576: <see cref="CaptureTimeLocal"/> as of <paramref name="nowUtc"/>: the capture time, with its age after it
+    /// ("2026-10-20 12:00:00 (20 days 21 hours old)") once the row is older than two cycles of its collector, as the Viewer's cell says it.</summary>
+    public string CollectedText(DateTime nowUtc)
+    {
+        var text = ServerTimeHelper.FormatServerTime(CaptureTime);
+        var cue = PerformanceMonitor.Common.QueryStoreSnapshotStaleness.AgeCue(
+            DateTime.SpecifyKind(CaptureTime, DateTimeKind.Utc), nowUtc, CollectorIntervalMinutes);
+        return cue is null ? text : $"{text} ({cue})";
+    }
     public string DatabaseName { get; set; } = "";
     public string ActualState { get; set; } = "";
     public string DesiredState { get; set; } = "";

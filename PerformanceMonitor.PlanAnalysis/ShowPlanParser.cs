@@ -39,11 +39,8 @@ public static class ShowPlanParser
 
         // The input is already an in-memory string here, so a length check is the guard; the
         // limit is in characters, not bytes.
-        if (xml.Length > MaxParseCharacters)
-        {
-            plan.ParseError = string.Create(CultureInfo.InvariantCulture, $"Plan XML exceeds the supported size limit of {MaxParseCharacters:N0} characters.");
+        if (RefusedForSize(xml, plan))
             return plan;
-        }
 
         var (thread, tcs) = StartParseThread(xml, plan, cancellationToken);
         thread.Join();
@@ -67,11 +64,8 @@ public static class ShowPlanParser
     {
         var plan = new ParsedPlan { RawXml = xml };
 
-        if (xml.Length > MaxParseCharacters)
-        {
-            plan.ParseError = string.Create(CultureInfo.InvariantCulture, $"Plan XML exceeds the supported size limit of {MaxParseCharacters:N0} characters.");
+        if (RefusedForSize(xml, plan))
             return Task.FromResult(plan);
-        }
 
         var (_, tcs) = StartParseThread(xml, plan, cancellationToken);
         return tcs.Task;
@@ -119,6 +113,18 @@ public static class ShowPlanParser
         };
         thread.Start();
         return (thread, tcs);
+    }
+
+    // The size refusal Parse and ParseAsync share: text over MaxParseCharacters is not read, and the plan carries the
+    // refusal's message and its flag together.
+    private static bool RefusedForSize(string xml, ParsedPlan plan)
+    {
+        if (xml.Length <= MaxParseCharacters)
+            return false;
+
+        plan.ParseError = string.Create(CultureInfo.InvariantCulture, $"Plan XML exceeds the supported size limit of {MaxParseCharacters:N0} characters.");
+        plan.ExceedsParseLimit = true;
+        return true;
     }
 
     // This runs on the dedicated thread started by StartParseThread, not a thread-pool thread.
@@ -170,6 +176,9 @@ public static class ShowPlanParser
             cancellationToken.ThrowIfCancellationRequested();
             var root = doc.Root;
             if (root == null) return;
+
+            // Recorded before the walk, so a plan the walk refuses or throws on is still known to be a plan.
+            plan.IsShowPlanXml = root.Name == Ns + "ShowPlanXML";
 
             plan.BuildVersion = root.Attribute("Version")?.Value;
             plan.Build = root.Attribute("Build")?.Value;

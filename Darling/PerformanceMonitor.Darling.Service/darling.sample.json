@@ -439,22 +439,22 @@
     // Uncomment to serve claim_investigation_request and submit_investigation_report to your own agent (#5632).
     // They write investigation state, need a bearer token (mcp.network.encryptedToken or token), and stay
     // off while "allowWrites" is on: one token cannot tell an agent from a person. Default off. The same
-    // setting serves the 13 Level 2 agent action tools: each call needs an "agent_action" argument and a live
-    // claim, and agent_actions_enabled (default on). The 9 store actions need a Level 2 route. The 4 server
-    // actions (session kill, plan force, unforce and evict) need a Level 3 request, the server's own action
-    // switch (default off) and a remediation login reference.
+    // setting serves the 16 Level 2 agent action tools: each call needs an "agent_action" argument and a live
+    // claim, and agent_actions_enabled (default on). The 9 store actions need a Level 2 route. The 7 server
+    // actions (session kill, plan force, unforce, evict, recompile, plan guide create and drop) need a Level 3
+    // request, the server's own action switch (default off) and a remediation login reference.
     // "allowInvestigations": true,
 
     // Default on. With "allowInvestigations" on, an agent token can create, change, enable, disable and delete a
-    // mute or digest rule with no claim: one server or all servers, a named metric, expiring within 7 days of the
-    // rule's creation, with a reason, each write journaled (#7414). Set false to refuse those calls. The claim-based
-    // Level 2 and 3 tools are not affected.
+    // mute or digest rule with no claim: a named metric, expiring within 7 days of the rule's creation, with a
+    // reason, each write journaled (#7414). A mute names one server. Only a digest can
+    // cover all servers. Set false to refuse those calls. The claim-based Level 2 and 3 tools are not affected.
     // "allowAgentMuteRules": false,
 
     // Uncomment to give an operator and your investigation agents their own tokens on one service (#6542).
-    // Each token has a name (1-64 of A-Za-z0-9._:-) and a role, "operator" (the reads and the write tools) or
-    // "agent" (the reads, the investigation tools and the Level 2 action tools). An agent's agent_id must be the
-    // token's name. Each name and each value is used once. Every request, loopback included, must present a token.
+    // Each token has a name (1-64 of A-Za-z0-9._:-) and a role: "operator" (the reads and the write tools, with
+    // "allowWrites" off too), "agent" (the reads, the investigation tools and the Level 2 action tools, with
+    // "allowInvestigations" off too) or "reader" (the reads only). An agent's agent_id must be the token's name. Each name and each value is used once. Every request, loopback included, must present a token.
     // "tokens": [
     //   { "name": "ops-lead",   "encryptedToken": "<from --encrypt-password>", "role": "operator" },
     //   { "name": "triage-bot", "encryptedToken": "<from --encrypt-password>", "role": "agent" }
@@ -544,15 +544,18 @@
     // Uncomment to serve local browsers with no token (see TOKEN above). Default off.
     // "allowTokenlessLoopback": true,
 
-    // On the managed store the dashboard reads as the read-only "viewer" login. A person signed in to the dashboard
+    // On the managed store the dashboard signs in as the least-privilege "web" login. A person signed in to the dashboard
     // as an admin (the shared web token or an OIDC admin) can also make its Admin writes (routes and environment
     // profiles, threshold overrides, report feedback, server actions, note decisions, undoing an agent change and
     // the agent switch, closing a request, writing a note, practice requests, case export), when this is true:
     // it opens a second small connection pool that signs in as the managed "admin" login (the one the Viewer uses).
-    // A darling.json WITHOUT this key keeps it false (the dashboard stays list-only on the managed store), so an
+    // A darling.json WITHOUT this key keeps it false (those Admin writes stay off on the managed store), so an
     // upgrade from 3.11 changes nothing until you set it. The installer and the compose sample write true for a
-    // new install. With OIDC on and no role mapping every signed-in user is an admin, so map roles
-    // (network.oidc.roleClaim, adminRoles, viewerRoles) before you turn this on. Restart to change.
+    // new install. False turns off those Admin writes and nothing else: a sign-in that can edit still adds and
+    // edits monitored servers and writes mute rules, dismissals and custom alert rules.
+    // With OIDC on and no role mapping every signed-in user can edit: each one can add a server whatever this
+    // says, and with this true each one is an admin. Map roles (network.oidc.roleClaim, adminRoles, viewerRoles)
+    // to limit who can edit. Restart to change.
     // A store you bring yourself is not affected.
     "allowAdminWrites": true,
 

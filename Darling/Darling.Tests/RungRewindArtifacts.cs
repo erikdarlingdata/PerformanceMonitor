@@ -760,7 +760,17 @@ DROP TABLE IF EXISTS collect.schema_capture_passes;"),
         // V257 (#8464): the status-leading collection_log index. The probe's sentinel is the index itself, so the rewind drops it and a re-run
         // of V257 makes it again. Safe on a store that never had it.
         new(257, "hasCollectionLogStatusTimeIndex", "DROP INDEX IF EXISTS collect.idx_collection_log_status_time;"),
-        new(258, "hasWebAccessGroups", """
+        // V258 (#8567): the oversized-plan backlog's dropped-row index. The probe's sentinel is the index itself, so the rewind drops it and a
+        // re-run of V258 makes it again. Safe on a store that never had it.
+        new(258, "hasOversizedPlanBacklogDroppedIndex", "DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_dropped;"),
+        // V259 (#8549): the daily wait totals. The probe's sentinel is the relation itself, a continuous aggregate or the plain view, so the
+        // rewind drops whichever shape stands (the product's own discriminating drop), and a re-run of V259 or the ensure sweep makes it
+        // again. Safe on a store that never had it.
+        new(259, "hasWaitStatsDaily", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.WaitStatsDailyView)),
+        // V260 (#8570): the oversized-plan backlog's two median indexes. The probe's sentinel is the first of them, so the rewind drops both and
+        // a re-run of V260 makes them again. Safe on a store that never had them.
+        new(260, "hasOversizedPlanBacklogMedianIndexes", "DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_server_bytes; DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_collector_bytes;"),
+        new(261, "hasWebAccessGroups", """
             DROP TRIGGER IF EXISTS web_access_tag_deleted ON config.server_tags;
             DROP TABLE IF EXISTS config.web_access_group_tags, config.web_access_group_events, config.web_access_groups CASCADE;
             DROP FUNCTION IF EXISTS config.manage_web_access_group(text,uuid,bigint,text,text,integer[],uuid,text,boolean,text);
@@ -770,7 +780,7 @@ DROP TABLE IF EXISTS collect.schema_capture_passes;"),
             DROP FUNCTION IF EXISTS config.web_access_owner_guard();
             DROP FUNCTION IF EXISTS config.harden_web_access_groups();
             """),
-        new(259, "hasAdvancedWebAccess", """
+        new(262, "hasAdvancedWebAccess", """
             DROP FUNCTION IF EXISTS config.set_web_access_advanced(boolean);
             DROP FUNCTION IF EXISTS config.harden_web_access_advanced();
             DROP TABLE IF EXISTS config.web_access_advanced;

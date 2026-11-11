@@ -36,7 +36,8 @@ export function initNarrowNav(appRoot, button, sidebar) {
     /* The page behind an open menu is not reachable by Tab or a screen reader's virtual cursor. */
     if (main) main.inert = open;
     if (open) {
-      const first = sidebar.querySelector(".nav a:not([hidden])") || sidebar;
+      /* #8578: with the page links folded away there is no link to land on, so the fold button takes the focus. */
+      const first = sidebar.querySelector(".nav:not([hidden]) a:not([hidden])") || sidebar.querySelector(".nav-collapse") || sidebar;
       if (first === sidebar) sidebar.setAttribute("tabindex", "-1");
       first.focus();
     } else if (moveFocus || hadFocusInside) {

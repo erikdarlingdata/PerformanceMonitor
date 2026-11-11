@@ -295,11 +295,11 @@ public partial class MainWindow : Window
 
         if (members.Count > 0)
         {
-            _unreadableSettingsValues.Add($"{fileName} — {string.Join(", ", members)}");
+            _unreadableSettingsValues.Add($"{fileName}: {string.Join(", ", members)}");
             return;
         }
 
-        _unreadableSettingsFiles.Add($"{fileName} — {problem}");
+        _unreadableSettingsFiles.Add($"{fileName}: {problem}");
     }
 
     /// <summary>
@@ -352,7 +352,7 @@ public partial class MainWindow : Window
 
         message
             .Append("The files have been left exactly as they are. Fix the JSON and restart to get those ")
-            .Append("settings back — or save from the Settings window, which copies an unreadable file ")
+            .Append("settings back, or save from the Settings window, which copies an unreadable file ")
             .Append("aside as '.unreadable-<timestamp>' before replacing it.");
 
         MessageBox.Show(message.ToString(), "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -489,8 +489,9 @@ public partial class MainWindow : Window
            else when it fails. */
         _ = _dataService.WarmRollupCoverageAsync();
 
-        /* A read-only seat cannot command the service, so "Generate now" (analyze_now) is disabled. */
-        RecommendationsGenerateButton.IsEnabled = !_dataService.IsReadOnly;
+        /* A read-only seat cannot command the service, so "Generate now" (analyze_now) is disabled, with the read-only reason as its
+           tooltip (#8576), as Collection Health's run buttons have it (#8103). */
+        ApplyGenerateNowState(analyzing: false);
 
         /* The Alerts tab is a self-loading control (all-servers by default); give it the store and let
            it surface load/dismiss/mute outcomes on the shared status bar. */
@@ -930,14 +931,14 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             ViewerLogger.Warn("AlertToasts", $"Snooze of {metricName} on {serverName} was not saved: {ex.Message}");
-            StatusText.Text = $"Snooze not saved — {metricName} on {serverName} will keep alerting: {ex.Message}";
+            StatusText.Text = $"Snooze not saved: {metricName} on {serverName} will keep alerting ({ex.Message})";
             return;
         }
 
         _viewerMuteRules.Add(rule);
         StatusText.Text =
-            $"Snoozed {metricName} on {serverName} for {label} — tray toasts stop now; the service applies it within "
-            + $"{ViewerDataService.ServiceReloadTickSeconds} s — {ViewerTimeHelper.RefreshedStamp()}";
+            $"Snoozed {metricName} on {serverName} for {label}: tray toasts stop now; the service applies it within "
+            + $"{ViewerDataService.ServiceReloadTickSeconds} s ({ViewerTimeHelper.RefreshedStamp()})";
     }
 
     /// <summary>
@@ -1097,6 +1098,8 @@ public partial class MainWindow : Window
         if (MainTabs.SelectedItem is TabItem { Content: ViewerServerTab activated })
         {
             activated.ApplyServerClockToHelper();
+            /* #8549: the tab's first-open clock starts here, so a wait behind another tab's refresh counts in a slow first open's line. */
+            activated.BeginFirstOpen();
         }
 
         await RefreshVisibleAsync();
@@ -1162,22 +1165,22 @@ public partial class MainWindow : Window
         SeatText.Text = ViewerSeatIndicator.Text(state);
         SeatText.ToolTip = ViewerSeatIndicator.ToolTip(state, _dataService?.StoreIsOnThisMachine ?? true);
 
-        /* TryFindResource rather than the hard FindResource the sibling status fields use, and the reason is
-           the call site rather than doubt about the keys: all three brushes exist in all three shipped
-           themes, but ApplySeatState is called from INSIDE the catch that handles an unreachable store. A
-           ResourceReferenceKeyNotFoundException thrown from a catch block is unhandled, so a missing key in
-           some future theme would turn "the service is down" into "the viewer crashed" - the one moment the
-           viewer most needs to stay up and explain itself. Falling back to the muted foreground costs a
-           colour and nothing else. */
-        SeatText.Foreground =
-            (state switch
-            {
-                ViewerSeatState.Unreachable => TryFindResource("ErrorBrush"),
-                ViewerSeatState.ReadOnly => TryFindResource("WarningBrush"),
-                _ => TryFindResource("ForegroundMutedBrush"),
-            } as System.Windows.Media.Brush)
-            ?? TryFindResource("ForegroundMutedBrush") as System.Windows.Media.Brush
-            ?? SeatText.Foreground;
+        /* A resource reference, so the colour follows a theme changed at run time (#8540): a brush looked up once keeps the
+           theme it was read under, and the Dark theme's warning colour is unreadable on the Light and Cool Breeze bars. The key is
+           checked with TryFindResource first and falls back to the muted foreground. All three keys exist in all three
+           shipped themes, but ApplySeatState is called from INSIDE the catch that handles an unreachable store, and a
+           ResourceReferenceKeyNotFoundException thrown from a catch block is unhandled, so a missing key in some future
+           theme would turn "the service is down" into "the viewer crashed" - the one moment the viewer most needs to stay
+           up and explain itself. Falling back costs a colour and nothing else. */
+        var key = state switch
+        {
+            ViewerSeatState.Unreachable => "ErrorBrush",
+            ViewerSeatState.ReadOnly => "WarningBrush",
+            _ => "ForegroundMutedBrush",
+        };
+        SeatText.SetResourceReference(
+            System.Windows.Controls.TextBlock.ForegroundProperty,
+            TryFindResource(key) is System.Windows.Media.Brush ? key : "ForegroundMutedBrush");
     }
 
     private async Task LoadServersAsync(bool preserveSelection = false)
@@ -1253,7 +1256,7 @@ public partial class MainWindow : Window
             }
             else
             {
-                StatusText.Text = $"connected — no servers registered yet ({ViewerTimeHelper.RefreshedStamp()})";
+                StatusText.Text = $"connected: no servers registered yet ({ViewerTimeHelper.RefreshedStamp()})";
             }
 
             /* Seed the sidebar status dots + the status bar's collector-health / collection / database-size
@@ -1342,7 +1345,7 @@ public partial class MainWindow : Window
             switch (selected)
             {
                 case TabItem { Content: ViewerServerTab serverTab }:
-                    /* The tab writes its own line, "<display name> — refreshed …" or "refresh failed: …", through the writer wired in OpenServerTab. */
+                    /* The tab writes its own line, "<display name>: refreshed …" or "refresh failed: …", through the writer wired in OpenServerTab. */
                     await serverTab.RefreshActiveInnerTabAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, OverviewTab):
@@ -1351,7 +1354,7 @@ public partial class MainWindow : Window
                 case TabItem tab when ReferenceEquals(tab, RecommendationsTab):
                     await LoadRecommendationsAsync();
                     break;
-                /* Each fleet tab below writes its own line through the writer wired to it in the constructor: "<tab> — refreshed …" when
+                /* Each fleet tab below writes its own line through the writer wired to it in the constructor: "<tab>: refreshed …" when
                    its load finishes, or its failure line when a read fails. Its refresh returns normally either way, so nothing here
                    writes after it. */
                 case TabItem tab when ReferenceEquals(tab, AlertsTab):
@@ -1871,7 +1874,7 @@ public partial class MainWindow : Window
         _overviewRegisteredCount = list.Count;
         ApplyFleetRollup(OverviewCardView.BuildRollup(cards, totals, list.Count, OverviewSearchBox?.Text));
 
-        SetTabStatus(OverviewTab, $"overview — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+        SetTabStatus(OverviewTab, $"overview: refreshed {ViewerTimeHelper.RefreshedStamp()}");
     }
 
     /// <summary>
@@ -2123,6 +2126,12 @@ public partial class MainWindow : Window
         /* #5558: the shared note when this server's node holds a secondary availability group copy of any database. */
         var replicaNote = await _dataService.GetSecondaryReplicaNoteAsync(server.ServerId);
 
+        /* The store's forcing and automatic-plan-correction state for the force-plan targets these findings carry: a
+           card gives no force statement for a plan the store blocks. A failed read does not fail the tab; the states
+           are then null and the reason opens each force-plan card's copy-paste text. */
+        var (forcePlanStates, forcePlanStateUnavailableReason) =
+            await _dataService.GetForcePlanTargetStatesAsync(server.ServerId, rows);
+
         ApplyRecommendationsViewModel(
             RecommendationsViewModel.FromFindings(
                 rows, server.DisplayName, serverClock,
@@ -2130,7 +2139,9 @@ public partial class MainWindow : Window
                 insufficientDataMessage: analysisState?.Message,
                 windowEmpty: analysisState?.WindowEmpty == true,
                 windowEmptyMessage: analysisState?.Message,
-                isPostgres: server.IsPostgres).WithReplicaNote(replicaNote));
+                isPostgres: server.IsPostgres,
+                forcePlanStates: forcePlanStates,
+                forcePlanStateUnavailableReason: forcePlanStateUnavailableReason).WithReplicaNote(replicaNote));
 
         /* #4766: the status line's time and the zone named after it both come from the selected server's clock in
            the display mode now in force. It used to end in a fixed "(local)" on a time that follows the display
@@ -2138,12 +2149,12 @@ public partial class MainWindow : Window
            last server tab set, which may be another server's. */
         RecommendationsStatusText.Text = rows.Count > 0
             ? RecommendationsViewModel.FormatLastAnalyzed(
-                rows[0].Finding.AnalysisTime, ViewerTimeHelper.CurrentDisplayMode, serverClock)
+                rows[0].Finding.AnalysisTime, ViewerTimeHelper.CurrentDisplayMode)
             : string.Empty;
         /* #6135: an offline server's findings are the last it collected; say so beside the time they came from. */
         RecommendationsStatusText.Text = RecommendationsViewModel.WithOfflineNote(
             RecommendationsStatusText.Text, server.CardStatus == ServerCollectionStatus.Offline);
-        SetTabStatus(RecommendationsTab, $"{server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+        SetTabStatus(RecommendationsTab, $"{server.DisplayName}: refreshed {ViewerTimeHelper.RefreshedStamp()}");
     }
 
     /// <summary>Swaps the visible content region to match the view-model's state (mirrors Lite's ApplyViewModel).</summary>
@@ -2237,14 +2248,14 @@ public partial class MainWindow : Window
             return;
         }
 
-        RecommendationsGenerateButton.IsEnabled = false;
+        ApplyGenerateNowState(analyzing: true);
         RecommendationsStatusText.Text = $"Analyzing {server.DisplayName}...";
         try
         {
             var result = await _dataService.RequestAnalyzeNowAsync(server.ServerId);
             if (result is null)
             {
-                RecommendationsStatusText.Text = "Analysis is still running — refresh in a moment.";
+                RecommendationsStatusText.Text = "Analysis is still running: refresh in a moment.";
             }
             else if (result.Status != ViewerDataService.StatusSucceeded)
             {
@@ -2267,8 +2278,17 @@ public partial class MainWindow : Window
         }
         finally
         {
-            RecommendationsGenerateButton.IsEnabled = _dataService?.IsReadOnly == false;
+            ApplyGenerateNowState(analyzing: false);
         }
+    }
+
+    /// <summary>#8576: "Generate now"'s enabled state and tooltip from the seat and whether its own analysis is in flight (<see cref="ViewerCollectorRun.GenerateNowState"/>).
+    /// No store yet reads as read-only, as the button's old enabled check did.</summary>
+    private void ApplyGenerateNowState(bool analyzing)
+    {
+        var (isEnabled, toolTip) = ViewerCollectorRun.GenerateNowState(_dataService?.IsReadOnly != false, analyzing);
+        RecommendationsGenerateButton.IsEnabled = isEnabled;
+        RecommendationsGenerateButton.ToolTip = toolTip;
     }
 
     /// <summary>
@@ -2338,7 +2358,7 @@ public partial class MainWindow : Window
         var server = FindManagedServerById(card.ServerId);
         if (server is null)
         {
-            RecommendationsStatusText.Text = "Cannot open Active Queries — the finding's server is no longer registered.";
+            RecommendationsStatusText.Text = "Cannot open Active Queries: the finding's server is no longer registered.";
             return;
         }
 
@@ -2674,7 +2694,7 @@ public partial class MainWindow : Window
             /* No connection string means config never resolved (e.g. darling.json missing) — there
                is nothing to probe, and the overlay message already says what to fix. */
             ViewerLogger.Warn(ViewerConfigDiagnostics.LogSource,
-                "Self-test requested, but no store connection string resolved — fix the configuration first.");
+                "Self-test requested, but no store connection string resolved. Fix the configuration first.");
             return;
         }
 

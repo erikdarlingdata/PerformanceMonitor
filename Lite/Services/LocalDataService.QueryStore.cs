@@ -376,7 +376,6 @@ SELECT
     r.query_plan_hash,
     r.is_forced_plan,
     r.plan_forcing_type,
-    NULL AS query_plan_text,
     r.execution_type_desc,
     r.first_execution_time,
     r.avg_clr_time_ms,
@@ -462,41 +461,40 @@ ORDER BY p.page_ord";
                 QueryPlanHash = reader.IsDBNull(16) ? "" : reader.GetString(16),
                 IsForcedPlan = !reader.IsDBNull(17) && reader.GetBoolean(17),
                 PlanForcingType = reader.IsDBNull(18) ? "" : reader.GetString(18),
-                QueryPlanText = reader.IsDBNull(19) ? null : reader.GetString(19),
-                ExecutionTypeDesc = reader.IsDBNull(20) ? "" : reader.GetString(20),
-                FirstExecutionTime = reader.IsDBNull(21) ? (DateTime?)null : reader.GetDateTime(21),
-                AvgClrTimeMs = reader.IsDBNull(22) ? 0 : ToDouble(reader.GetValue(22)),
-                AvgTempdbSpaceUsed = reader.IsDBNull(23) ? 0 : ToDouble(reader.GetValue(23)),
-                AvgLogBytesUsed = reader.IsDBNull(24) ? 0 : ToDouble(reader.GetValue(24)),
-                PlanType = reader.IsDBNull(25) ? "" : reader.GetString(25),
-                ForceFailureCount = reader.IsDBNull(26) ? 0 : Convert.ToInt64(reader.GetValue(26)),
-                LastForceFailureReason = reader.IsDBNull(27) ? "" : reader.GetString(27),
-                CompatibilityLevel = reader.IsDBNull(28) ? 0 : Convert.ToInt32(reader.GetValue(28)),
-                MinDurationMs = reader.IsDBNull(29) ? 0 : ToDouble(reader.GetValue(29)),
-                MaxDurationMs = reader.IsDBNull(30) ? 0 : ToDouble(reader.GetValue(30)),
-                MinCpuTimeMs = reader.IsDBNull(31) ? 0 : ToDouble(reader.GetValue(31)),
-                MaxCpuTimeMs = reader.IsDBNull(32) ? 0 : ToDouble(reader.GetValue(32)),
-                MinLogicalReads = reader.IsDBNull(33) ? 0 : ToDouble(reader.GetValue(33)),
-                MaxLogicalReads = reader.IsDBNull(34) ? 0 : ToDouble(reader.GetValue(34)),
-                MinLogicalWrites = reader.IsDBNull(35) ? 0 : ToDouble(reader.GetValue(35)),
-                MaxLogicalWrites = reader.IsDBNull(36) ? 0 : ToDouble(reader.GetValue(36)),
-                MinPhysicalReads = reader.IsDBNull(37) ? 0 : ToDouble(reader.GetValue(37)),
-                MaxPhysicalReads = reader.IsDBNull(38) ? 0 : ToDouble(reader.GetValue(38)),
-                MinClrTimeMs = reader.IsDBNull(39) ? 0 : ToDouble(reader.GetValue(39)),
-                MaxClrTimeMs = reader.IsDBNull(40) ? 0 : ToDouble(reader.GetValue(40)),
-                MinRowcount = reader.IsDBNull(41) ? 0 : ToDouble(reader.GetValue(41)),
-                MaxRowcount = reader.IsDBNull(42) ? 0 : ToDouble(reader.GetValue(42)),
-                MinLogBytesUsed = reader.IsDBNull(43) ? 0 : ToDouble(reader.GetValue(43)),
-                MaxLogBytesUsed = reader.IsDBNull(44) ? 0 : ToDouble(reader.GetValue(44)),
-                MinTempdbSpaceUsed = reader.IsDBNull(45) ? 0 : ToDouble(reader.GetValue(45)),
-                MaxTempdbSpaceUsed = reader.IsDBNull(46) ? 0 : ToDouble(reader.GetValue(46)),
-                AvgMemoryMb = reader.IsDBNull(47) ? 0 : ToDouble(reader.GetValue(47)),
-                MinMemoryMb = reader.IsDBNull(48) ? 0 : ToDouble(reader.GetValue(48)),
-                MaxMemoryMb = reader.IsDBNull(49) ? 0 : ToDouble(reader.GetValue(49)),
-                AvgNumPhysicalIoReads = reader.IsDBNull(50) ? 0 : ToDouble(reader.GetValue(50)),
-                MinNumPhysicalIoReads = reader.IsDBNull(51) ? 0 : ToDouble(reader.GetValue(51)),
-                MaxNumPhysicalIoReads = reader.IsDBNull(52) ? 0 : ToDouble(reader.GetValue(52)),
-                ReplicaRole = reader.IsDBNull(53) ? null : reader.GetString(53)
+                ExecutionTypeDesc = reader.IsDBNull(19) ? "" : reader.GetString(19),
+                FirstExecutionTime = reader.IsDBNull(20) ? (DateTime?)null : reader.GetDateTime(20),
+                AvgClrTimeMs = reader.IsDBNull(21) ? 0 : ToDouble(reader.GetValue(21)),
+                AvgTempdbSpaceUsed = reader.IsDBNull(22) ? 0 : ToDouble(reader.GetValue(22)),
+                AvgLogBytesUsed = reader.IsDBNull(23) ? 0 : ToDouble(reader.GetValue(23)),
+                PlanType = reader.IsDBNull(24) ? "" : reader.GetString(24),
+                ForceFailureCount = reader.IsDBNull(25) ? 0 : Convert.ToInt64(reader.GetValue(25)),
+                LastForceFailureReason = reader.IsDBNull(26) ? "" : reader.GetString(26),
+                CompatibilityLevel = reader.IsDBNull(27) ? 0 : Convert.ToInt32(reader.GetValue(27)),
+                MinDurationMs = reader.IsDBNull(28) ? 0 : ToDouble(reader.GetValue(28)),
+                MaxDurationMs = reader.IsDBNull(29) ? 0 : ToDouble(reader.GetValue(29)),
+                MinCpuTimeMs = reader.IsDBNull(30) ? 0 : ToDouble(reader.GetValue(30)),
+                MaxCpuTimeMs = reader.IsDBNull(31) ? 0 : ToDouble(reader.GetValue(31)),
+                MinLogicalReads = reader.IsDBNull(32) ? 0 : ToDouble(reader.GetValue(32)),
+                MaxLogicalReads = reader.IsDBNull(33) ? 0 : ToDouble(reader.GetValue(33)),
+                MinLogicalWrites = reader.IsDBNull(34) ? 0 : ToDouble(reader.GetValue(34)),
+                MaxLogicalWrites = reader.IsDBNull(35) ? 0 : ToDouble(reader.GetValue(35)),
+                MinPhysicalReads = reader.IsDBNull(36) ? 0 : ToDouble(reader.GetValue(36)),
+                MaxPhysicalReads = reader.IsDBNull(37) ? 0 : ToDouble(reader.GetValue(37)),
+                MinClrTimeMs = reader.IsDBNull(38) ? 0 : ToDouble(reader.GetValue(38)),
+                MaxClrTimeMs = reader.IsDBNull(39) ? 0 : ToDouble(reader.GetValue(39)),
+                MinRowcount = reader.IsDBNull(40) ? 0 : ToDouble(reader.GetValue(40)),
+                MaxRowcount = reader.IsDBNull(41) ? 0 : ToDouble(reader.GetValue(41)),
+                MinLogBytesUsed = reader.IsDBNull(42) ? 0 : ToDouble(reader.GetValue(42)),
+                MaxLogBytesUsed = reader.IsDBNull(43) ? 0 : ToDouble(reader.GetValue(43)),
+                MinTempdbSpaceUsed = reader.IsDBNull(44) ? 0 : ToDouble(reader.GetValue(44)),
+                MaxTempdbSpaceUsed = reader.IsDBNull(45) ? 0 : ToDouble(reader.GetValue(45)),
+                AvgMemoryMb = reader.IsDBNull(46) ? 0 : ToDouble(reader.GetValue(46)),
+                MinMemoryMb = reader.IsDBNull(47) ? 0 : ToDouble(reader.GetValue(47)),
+                MaxMemoryMb = reader.IsDBNull(48) ? 0 : ToDouble(reader.GetValue(48)),
+                AvgNumPhysicalIoReads = reader.IsDBNull(49) ? 0 : ToDouble(reader.GetValue(49)),
+                MinNumPhysicalIoReads = reader.IsDBNull(50) ? 0 : ToDouble(reader.GetValue(50)),
+                MaxNumPhysicalIoReads = reader.IsDBNull(51) ? 0 : ToDouble(reader.GetValue(51)),
+                ReplicaRole = reader.IsDBNull(52) ? null : reader.GetString(52)
             };
             candidateRows.Add(candidate);
         }
@@ -1205,7 +1203,8 @@ WITH placed AS
         interval_start_time_utc AS point_time,
         interval_end_time_utc,
         execution_count,
-        avg_duration_us
+        avg_duration_us,
+        snapshot_time
     FROM
     (
         SELECT
@@ -1213,6 +1212,7 @@ WITH placed AS
             interval_end_time_utc,
             execution_count,
             avg_duration_us,
+            collection_time AS snapshot_time,
             ROW_NUMBER() OVER
             (
                 PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
@@ -1246,7 +1246,8 @@ WITH placed AS
         collection_time AS point_time,
         CAST(NULL AS TIMESTAMP) AS interval_end_time_utc,
         execution_count,
-        avg_duration_us
+        avg_duration_us,
+        CAST(NULL AS TIMESTAMP) AS snapshot_time
     FROM v_query_store_stats
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -1263,9 +1264,30 @@ raw AS
         -- interval with no executions, so the gap to the previous stored point is the interval's length PLUS
         -- every quiet interval before it. Only a point whose rows stored no end (collected before the column)
         -- keeps that gap, as sample_interval_seconds does (#3540).
-        COALESCE(extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))), extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))) AS interval_seconds
+        COALESCE(extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))), extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))) AS interval_seconds,
+        -- #8575: an interval whose end is still in the future is OPEN: it has run only until the newest snapshot that stored one of
+        -- its rows, so that is the time its totals cover. NULL for a closed interval, whose own length stays the denominator.
+        CASE WHEN date_trunc('second', MAX(interval_end_time_utc)) > date_trunc('second', timezone('UTC', now()))
+             THEN extract(epoch FROM (date_trunc('second', MAX(snapshot_time)) - date_trunc('second', point_time)))
+        END AS open_covered_seconds
     FROM placed
     GROUP BY point_time
+),
+rated AS
+(
+    -- #8575: an open interval is partial when its covered time is under its whole length. It is then rated over that covered time,
+    -- and left unrated (NULL, so no rate below) when that is under 60 seconds: a rate over a few seconds is noise. A closed
+    -- interval has no covered time and keeps its own interval_seconds.
+    SELECT
+        point_time,
+        total_duration_ms,
+        total_executions,
+        CASE WHEN open_covered_seconds < interval_seconds
+             THEN CASE WHEN open_covered_seconds >= 60 THEN open_covered_seconds END
+             ELSE interval_seconds
+        END AS interval_seconds,
+        CASE WHEN open_covered_seconds < interval_seconds THEN open_covered_seconds END AS covered_seconds
+    FROM raw
 )
 SELECT
     point_time AS collection_time,
@@ -1274,8 +1296,10 @@ SELECT
     CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
     CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second,
     /* #8073: the interval's stored executions, a count the store holds whether or not the interval's length is knowable. */
-    CAST(total_executions AS BIGINT) AS execution_count
-FROM raw
+    CAST(total_executions AS BIGINT) AS execution_count,
+    /* #8575: the seconds an OPEN interval's rates cover, null on a closed interval. */
+    covered_seconds
+FROM rated
 ORDER BY point_time";
 
         command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
@@ -1296,7 +1320,9 @@ ORDER BY point_time";
                 CollectionTime = reader.GetDateTime(0),
                 Value = reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1)),
                 ExecutionCount = reader.IsDBNull(3) ? null : ToInt64(reader.GetValue(3)),
-                ExecutionsPerSecond = reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2))
+                ExecutionsPerSecond = reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2)),
+                /* #8575: the open interval's covered seconds, the statement's last column; null on a closed one. */
+                PartialCoveredSeconds = reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4))
             });
         }
         return items;
@@ -1342,7 +1368,6 @@ public class QueryStoreRow
     public string QueryPlanHash { get; set; } = "";
     public bool IsForcedPlan { get; set; }
     public string PlanForcingType { get; set; } = "";
-    public string? QueryPlanText { get; set; }
     public string ExecutionTypeDesc { get; set; } = "";
     public DateTime? FirstExecutionTime { get; set; }
     public double AvgClrTimeMs { get; set; }
@@ -1379,7 +1404,11 @@ public class QueryStoreRow
     public double AvgNumPhysicalIoReads { get; set; }
     public double MinNumPhysicalIoReads { get; set; }
     public double MaxNumPhysicalIoReads { get; set; }
-    public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlanText);
+    /// <summary>
+    /// Whether the row's plan can be asked for: it names a plan. The grid's read carries no plan text, so the inline View
+    /// button fetches the plan from the monitored server's Query Store by this plan id when it is clicked.
+    /// </summary>
+    public bool HasQueryPlan => PlanId > 0;
     public string FirstExecutionTimeLocal => ServerTimeHelper.FormatServerTime(FirstExecutionTime);
     public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerTime(LastExecutionTime);
     public double TotalCpuMs => TotalExecutions * AvgCpuTimeMs;

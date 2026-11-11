@@ -73,7 +73,7 @@ internal static class ServerActionGate
         }
 
         /* The legacy token's agent_id is free text. One that is a served named agent's name would put the action in that agent's journal, and
-           one that is a reserved placeholder (invalid, unclaimed) would make its rows read as a refusal's, so it is refused and journaled
+           one that is a reserved placeholder (invalid, unclaimed, legacy-token) would make its rows read as a refusal's, so it is refused and journaled
            under no agent's name. */
         if (agentTokenName is null && DarlingAgentActionGate.IsRefusedLegacyAgentId(namedAgentNames, action!.AgentId))
         {

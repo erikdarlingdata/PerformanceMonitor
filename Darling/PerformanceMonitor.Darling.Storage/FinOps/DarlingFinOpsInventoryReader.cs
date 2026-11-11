@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -138,29 +139,41 @@ size_latest AS (
         LIMIT 1
     ) AS latest_time
 ),
+/* #8570: both reads of the newest snapshot probe v_database_size_stats once per server, by (server_id, collection_time), in a LATERAL. A plain
+   JOIN on the snapshot time was planned as a hash join that read EVERY chunk of the table (twice, once here and once for latest_dbs), so the
+   read grew with the size-history retention instead of with the 42 snapshots it needs. The aggregate / DISTINCT inside each LATERAL keeps the
+   planner from folding it back into a join. Same rows as the join: the snapshot time came from a row of this table, so each server has one. */
 storage_totals AS (
     SELECT
         sl.server_id,
-        SUM(vd.total_size_mb) / 1024.0 AS total_storage_gb,
-        /* The allocated and free totals the Utilization view scores storage from (FinOpsUtilizationFigures.LatestStorageTotalsSql) at the same
-           newest snapshot: a row with no total adds nothing to either, a row with no used size has no free space. */
-        COALESCE(SUM(vd.total_size_mb), 0) AS alloc_mb,
-        COALESCE(SUM(CASE WHEN vd.total_size_mb IS NOT NULL AND vd.used_size_mb IS NOT NULL THEN vd.total_size_mb - vd.used_size_mb END), 0) AS free_mb
+        t.total_storage_gb,
+        t.alloc_mb,
+        t.free_mb
     FROM size_latest sl
-    JOIN v_database_size_stats vd
-      ON vd.server_id = sl.server_id
-     AND vd.collection_time = sl.collection_time
-    GROUP BY sl.server_id
+    CROSS JOIN LATERAL (
+        SELECT
+            SUM(vd.total_size_mb) / 1024.0 AS total_storage_gb,
+            /* The allocated and free totals the Utilization view scores storage from (FinOpsUtilizationFigures.LatestStorageTotalsSql) at the same
+               newest snapshot: a row with no total adds nothing to either, a row with no used size has no free space. */
+            COALESCE(SUM(vd.total_size_mb), 0) AS alloc_mb,
+            COALESCE(SUM(CASE WHEN vd.total_size_mb IS NOT NULL AND vd.used_size_mb IS NOT NULL THEN vd.total_size_mb - vd.used_size_mb END), 0) AS free_mb
+        FROM v_database_size_stats vd
+        WHERE vd.server_id = sl.server_id
+        AND   vd.collection_time = sl.collection_time
+    ) AS t
 ),
 latest_dbs AS (
-    SELECT DISTINCT
+    SELECT
         sl.server_id,
         vd.database_name
     FROM size_latest sl
-    JOIN v_database_size_stats vd
-      ON vd.server_id = sl.server_id
-     AND vd.collection_time = sl.collection_time
-    WHERE vd.database_name NOT IN ('master', 'model', 'msdb', 'tempdb', 'PerformanceMonitor')
+    CROSS JOIN LATERAL (
+        SELECT DISTINCT d.database_name
+        FROM v_database_size_stats d
+        WHERE d.server_id = sl.server_id
+        AND   d.collection_time = sl.collection_time
+        AND   d.database_name NOT IN ('master', 'model', 'msdb', 'tempdb', 'PerformanceMonitor')
+    ) AS vd
 ),
 active_dbs AS (
     SELECT DISTINCT server_id, database_name
@@ -270,9 +283,11 @@ WHERE s.server_id <> 0";
     /// </summary>
     private static string IdleCoverageForCagg(string relationSql, DateTime watermarkUtc, DateTime idleCutoffUtc)
     {
-        var watermark = $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var watermark = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
         var floorHour = TimescaleSupport.AlignDown(idleCutoffUtc, TimescaleSupport.HourlyBucket);
-        var oldestBucketBefore = $"TIMESTAMP '{floorHour:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var oldestBucketBefore = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{floorHour:yyyy-MM-dd HH:mm:ss.ffffff}'");
 
         return $@"idle_coverage AS (
     SELECT d.server_id
@@ -319,8 +334,9 @@ WHERE s.server_id <> 0";
     /// </summary>
     private static string IdleActiveDbsForCagg(string relationSql, DateTime ceilingHourUtc, DateTime watermarkUtc)
     {
-        var ceiling = $"TIMESTAMP '{ceilingHourUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
-        var watermark = $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var ceiling = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{ceilingHourUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
+        var watermark = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
 
         return $@"active_dbs AS (
     SELECT DISTINCT server_id, database_name

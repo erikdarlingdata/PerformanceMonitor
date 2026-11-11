@@ -43,12 +43,13 @@ public sealed class AnalysisFindingsTabTests
         Assert.Equal(1, tabs.Split("analysisFindingsTab,", StringSplitOptions.None).Length - 1);
     }
 
-    private static JsonElement Run(string scenario)
+    private static JsonElement Run(string scenario, string? session = null)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "analysis-findings-harness.mjs"));
         psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
         psi.ArgumentList.Add(scenario);
+        if (session is not null) psi.Environment["HARNESS_SESSION"] = session;
         Process proc;
         try { proc = Process.Start(psi)!; }
         catch (Win32Exception) { Assert.Skip("Node is not installed, so the shipped page script cannot be run."); return default; }
@@ -125,6 +126,25 @@ public sealed class AnalysisFindingsTabTests
         Assert.Equal("THE PROMPT", Assert.Single(Strings(r.GetProperty("clipboard"))));
         Assert.Equal("AI prompt copied", r.GetProperty("label").GetString());
         Assert.Equal(4, r.GetProperty("buttons").GetInt32());
+    }
+
+    /// <summary>#7988: a scoped session's cards carry no Ask AI button, because the prompt read behind it is not one a scoped token
+    /// is served, so the button could only reach the refusal. The cards, the fix copy and the tab links are the same as any other
+    /// reader's, and a reader whose session is not scoped keeps the button on every card.</summary>
+    [Theory]
+    [InlineData("""{"can_edit":false,"scoped":true}""", true, 0)]
+    [InlineData("""{"can_edit":false,"scoped":false}""", false, 4)]
+    public void AScopedSessionsCards_HaveNoAskAiButton_AndEveryOtherReadersDo(string session, bool scoped, int askAiButtons)
+    {
+        var r = Run("sessionButtons", session);
+
+        Assert.Equal(scoped, r.GetProperty("scoped").GetBoolean());
+        Assert.Equal(4, r.GetProperty("cards").GetInt32());
+        var buttons = Strings(r.GetProperty("buttons"));
+        Assert.Equal(askAiButtons, buttons.Count(b => b == "Ask AI"));
+        Assert.Equal(1, buttons.Count(b => b == "Copy fix"));
+        Assert.Equal(3, r.GetProperty("links").GetInt32());
+        Assert.Equal(["/api/read/get_analysis_findings"], Strings(r.GetProperty("reads")));
     }
 
     [Fact]

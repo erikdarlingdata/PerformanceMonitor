@@ -3,13 +3,14 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Name="Root">
     <!--
-      A navigable month heatmap: 6 weeks x 7 days of cells, each washed with its composite daily
+      A navigable month heatmap: the weeks the month spans (four to six) x 7 days of cells, each washed with its composite daily
       health band (green / amber / red / muted-grey for no-data). Prev/next/Today navigate months
       (raising MonthChanged so the host can fetch that month's data); clicking an in-month day opens
       the built-in day-detail panel, whose drill buttons raise DayDrillRequested so the host can scope
       and navigate. All colors are theme DynamicResources resolved from the host app — this control
       ships no theme of its own.
     -->
+    <ScrollViewer x:Name="CalendarScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" SizeChanged="CalendarScroll_SizeChanged"><!-- #8532: scrolls when the day cells and the day-detail panel cannot both keep their height -->
     <Grid Margin="4">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -72,7 +73,7 @@
         </ItemsControl>
 
         <!-- Row 2: day cells -->
-        <ItemsControl Grid.Row="2" ItemsSource="{Binding Cells, ElementName=Root}">
+        <ItemsControl Grid.Row="2" x:Name="DayCells" ItemsSource="{Binding Cells, ElementName=Root}">
             <ItemsControl.ItemsPanel>
                 <ItemsPanelTemplate>
                     <UniformGrid Columns="7"/>
@@ -82,6 +83,7 @@
                 <DataTemplate>
                     <!-- Cell chrome. Transparent background makes the whole cell hit-testable. -->
                     <Border Margin="2" CornerRadius="4" Background="Transparent"
+                            MouseLeftButtonDown="Cell_MouseLeftButtonDown"
                             MouseLeftButtonUp="Cell_MouseLeftButtonUp"
                             ToolTip="{Binding Tooltip}">
                         <Border.Style>
@@ -113,7 +115,9 @@
                             </Style>
                         </Border.Style>
 
-                        <Grid MinHeight="44" MinWidth="44">
+                        <!-- #8532: 36 px holds the day number and the band label in their corners, and lets six
+                             week rows fit a 900 x 600 window with no day selected. -->
+                        <Grid MinHeight="36" MinWidth="44">
                             <!-- Band wash. Fill is the band brush; opacity conveys presence/severity. -->
                             <Rectangle RadiusX="3" RadiusY="3" Opacity="{Binding WashOpacity}">
                                 <Rectangle.Style>
@@ -159,6 +163,7 @@
                 </DataTemplate>
             </ItemsControl.ItemTemplate>
         </ItemsControl>
+        <TextBlock x:Name="CalendarLoadingText" Grid.Row="2" Text="Loading..." Visibility="Collapsed" Panel.ZIndex="5" IsHitTestVisible="False" Style="{DynamicResource EmptyHint}"/>
 
         <!--
           Row 3: the day-detail panel. Shown when a day is clicked (replacing the old one-row Daily Summary
@@ -204,4 +209,5 @@
             </StackPanel>
         </Border>
     </Grid>
+    </ScrollViewer>
 </UserControl>

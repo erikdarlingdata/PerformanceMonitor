@@ -934,7 +934,7 @@ END $$;";
     /* V258 (#7988): the Viewer-managed web access groups. The rung puts a trigger on config.server_tags and marks it ENABLE ALWAYS, which take
        strong locks on a table the Viewer edits, so it opens with the ladder's lock_timeout, V173's shape: a held lock fails the rung cleanly
        and the retry loop reports who holds it. */
-    private static readonly string V258Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + WebAccessGroupSchema.CreateSql;
+    private static readonly string V261Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + WebAccessGroupSchema.CreateSql;
 
     /// <summary>
     /// V174 (#5655) — <c>config.service_version</c>: one row per service host with the product version the service reported at
@@ -2878,6 +2878,41 @@ BEGIN
 END $$;";
 
     /// <summary>
+    /// V259 (#8549): the daily wait totals, <c>collect.wait_stats_daily</c>, created where the store can hold it at migration time so the
+    /// Daily Summary can read closed days from it. Per server, per UTC day, per stored wait type: the summed positive
+    /// <c>delta_wait_time_ms</c>, the Daily Summary's own <c>wait_per_spelling</c> grain. On a store without TimescaleDB it is the plain view
+    /// over <c>collect.wait_stats</c> (<c>date_trunc('day')</c> for <c>time_bucket</c>). On a TimescaleDB store whose <c>wait_stats</c> is
+    /// already a hypertable (every upgrading store) it is the continuous aggregate, <c>WITH NO DATA</c>, which is catalog-only and
+    /// transaction-safe; the ensure sweep that follows on the same start finds it, gives it the daily refresh policy and the 35-day
+    /// retention, and the start-up backfill fills the closed days from raw (not here: it reads every server's rows). On a fresh
+    /// TimescaleDB store the table is not yet a hypertable here (the conversion runs after the ladder), so this rung creates the plain
+    /// view, which the sweep drops for the aggregate once the table is a hypertable, as on a store that gained the extension.
+    /// Idempotent. An older build ignores the relation and reads raw <c>wait_stats</c> as before. <b>No Lite twin:</b> Lite has no rollup tier.
+    /// </summary>
+    /* Declared before the Scripts array on purpose: a static readonly is null until its initializer runs, and the array reads it. */
+    private static readonly string V259Sql = @"
+DO $$
+DECLARE
+    v_hypertable boolean := false;
+BEGIN
+    /* timescaledb_information only exists once the extension has been created; to_regclass probes it without raising, and
+       the hypertable read goes through EXECUTE so the reference is parsed only when it runs. */
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NOT NULL THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = ''collect'' AND hypertable_name = ''wait_stats'')'
+        INTO v_hypertable;
+    END IF;
+
+    /* The relation exists from this rung on, whatever shape the store is in, so the viewer's probe reads the rung. A store that
+       already holds the relation (a rerun) keeps it: the aggregate's own IF NOT EXISTS, and CREATE OR REPLACE VIEW only on a name
+       that is not already a relation of another kind. */
+    IF v_hypertable THEN
+        EXECUTE '" + TimescaleSupport.CreateWaitStatsDailySql.Replace("'", "''") + @"';
+    ELSIF to_regclass('collect.wait_stats_daily') IS NULL THEN
+        EXECUTE '" + TimescaleSupport.CreateWaitStatsDailyFallbackViewSql.Replace("'", "''") + @"';
+    END IF;
+END $$;";
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -3392,7 +3427,10 @@ $rung$;";
         new Migration(255, "wait-stats-cadence-baseline", V255Sql),
         new Migration(256, "schema-tracking", V256Sql),
         new Migration(257, "collection-log-status-time", V257Sql),
-        new Migration(WebAccessGroupSchema.Version, "viewer-managed-web-access-groups", V258Sql),
+        new Migration(258, "oversized-plan-backlog-dropped-index", V258Sql),
+        new Migration(259, "wait-stats-daily-rollup", V259Sql),
+        new Migration(260, "oversized-plan-backlog-median-indexes", V260Sql),
+        new Migration(WebAccessGroupSchema.Version, "viewer-managed-web-access-groups", V261Sql),
         new Migration(WebAccessAdvancedSchema.Version, "advanced-web-access-opt-in", WebAccessAdvancedSchema.CreateSql),
     };
 
@@ -3581,6 +3619,28 @@ CREATE TABLE IF NOT EXISTS collect.schema_capture_state (
        uses, inside the ladder's own transaction. Idempotent. */
     private const string V257Sql = @"
 CREATE INDEX IF NOT EXISTS idx_collection_log_status_time ON collect.collection_log (server_id, status, collection_time DESC);";
+
+    /* V260 (#8570): the two indexes the oversized-plan backlog read takes its median through, on collect.oversized_plan_backlog:
+       idx_oversized_plan_backlog_server_bytes (server_id, observed_bytes) for the per-server rollup, and idx_oversized_plan_backlog_collector_bytes
+       (collector_name, observed_bytes) for the fleet-wide collector census. The median used to sort every row of every group, wide rows
+       and all (3,000,000 rows: a 228 MB spill, 5.9 s); the read now counts the group and walks that many rows halfway through the index, which
+       holds the two narrow columns and nothing else. observed_bytes is not NULL and a re-sighting writes the value it already holds unless the
+       plan really changed size, so an update of a waiting row stays heap-only. Plain B-trees on a plain table, built from one read of it. Not
+       CONCURRENTLY: the rung runs inside the ladder's own transaction. Idempotent. */
+    private const string V260Sql = @"
+CREATE INDEX IF NOT EXISTS idx_oversized_plan_backlog_server_bytes ON collect.oversized_plan_backlog (server_id, observed_bytes);
+CREATE INDEX IF NOT EXISTS idx_oversized_plan_backlog_collector_bytes ON collect.oversized_plan_backlog (collector_name, observed_bytes);";
+
+    /* V258 (#8567): idx_oversized_plan_backlog_dropped, a partial B-tree on collect.oversized_plan_backlog (server_id, expired_at) over the
+       rows the sweep dropped unfetched: no content, no attempt, an expiry stamp. Those are the rows OversizedPlanBacklog.PurgeDroppedSql
+       deletes, for one server and before one cutoff, so the purge reads the rows it removes. Through the primary key it reads every row the
+       server has, the waiting ones included, on every pass. The predicate keeps a waiting row out of the index, so a new sighting writes no
+       entry to it, and the index names no column a re-sighting changes on a waiting row, so that update stays heap-only. The build reads the
+       table once. Not CONCURRENTLY: the rung runs inside the ladder's own transaction. Idempotent. */
+    private const string V258Sql = @"
+CREATE INDEX IF NOT EXISTS idx_oversized_plan_backlog_dropped ON collect.oversized_plan_backlog (server_id, expired_at)
+WHERE captured_at IS NULL AND last_attempt_at IS NULL AND expired_at IS NOT NULL;";
+
 
     /// <summary>
     /// V235 (#7083): the blocking alert pages on blocked wait time. The shipped bars move: <c>blocking_count_threshold</c> 1 to 3,

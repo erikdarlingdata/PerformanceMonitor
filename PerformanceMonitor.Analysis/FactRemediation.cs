@@ -31,14 +31,31 @@ public static class FactRemediation
     /// markup — renderers wrap it as needed (Slack mrkdwn code block, HTML
     /// &lt;pre&gt;, etc.).
     /// </summary>
-    public static string? GenerateForFinding(AnalysisFinding finding)
+    public static string? GenerateForFinding(AnalysisFinding finding) =>
+        GenerateForFinding(finding, states: null);
+
+    /// <summary>
+    /// <see cref="GenerateForFinding(AnalysisFinding)"/> with the read-time forcing and
+    /// automatic-plan-correction state of the finding's force-plan targets (#8542). A target that state
+    /// blocks (<see cref="BlockersFor"/>) is named in comments with its blockers and gets no runnable
+    /// statement. A target the read holds no row for keeps its statement under a line saying its state
+    /// is unknown (<see cref="StateUnknownLine"/>). A null <paramref name="states"/> withholds nothing;
+    /// when the read failed, pass why in <paramref name="stateUnavailableReason"/> and the force-plan text
+    /// opens by saying no target was checked (<see cref="StateNotReadPrefix"/>). With a null
+    /// <paramref name="states"/> and no reason the text carries no such line: the caller made no read,
+    /// and says nothing about the store.
+    /// </summary>
+    public static string? GenerateForFinding(
+        AnalysisFinding finding,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states,
+        string? stateUnavailableReason = null)
     {
         if (finding is null || string.IsNullOrEmpty(finding.RootFactKey))
             return null;
 
         return finding.RootFactKey switch
         {
-            "PLAN_REGRESSION" => GenerateForPlanRegression(finding),
+            "PLAN_REGRESSION" => GenerateForPlanRegression(finding, states, stateUnavailableReason),
             "DB_CONFIG" => GenerateForDbConfig(finding),
             "FILE_AUTOGROWTH_PERCENT" => GenerateForFileAutogrowth(finding),
             _ => null
@@ -573,7 +590,10 @@ public static class FactRemediation
     /// all. That is what keeps the byte-for-byte golden meaningful rather than merely re-baselined:
     /// the no-replica rendering is still the one it pins.</para>
     /// </summary>
-    private static string? GenerateForPlanRegression(AnalysisFinding finding)
+    private static string? GenerateForPlanRegression(
+        AnalysisFinding finding,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states,
+        string? stateUnavailableReason)
     {
         var targets = ExtractPlanRegressionTargets(finding);
         if (targets.Count == 0)
@@ -581,36 +601,170 @@ public static class FactRemediation
 
         var sb = new StringBuilder();
         var emitted = 0;
+        var eligible = 0;
 
         foreach (var target in targets)
         {
             if (emitted > 0)
                 sb.AppendLine();
 
-            sb.AppendLine($"-- Database: {target.Database}");
-            sb.AppendLine($"-- query_id = {target.QueryId}, forcing plan_id = {target.PlanId}");
+            /* #8542: a target the store's state blocks is described and named, never handed over as a statement. */
+            var blockers = BlockersFor(target, states);
+
+            sb.AppendLine($"-- Database: {OneLine(target.Database)}");
+            sb.AppendLine(blockers.Count == 0
+                ? $"-- query_id = {target.QueryId}, forcing plan_id = {target.PlanId}"
+                : $"-- query_id = {target.QueryId}, best plan_id = {target.PlanId} (not offered as a force)");
             if (!string.IsNullOrEmpty(target.LatestPlanHash))
-                sb.AppendLine($"--   latest plan hash: {target.LatestPlanHash} (cpu/exec {target.LatestCpuPerExecUs:F0} us)");
+                sb.AppendLine($"--   latest plan hash: {OneLine(target.LatestPlanHash)} (cpu/exec {target.LatestCpuPerExecUs:F0} us)");
             if (!string.IsNullOrEmpty(target.BestPlanHash))
-                sb.AppendLine($"--   best plan hash:   {target.BestPlanHash}   (cpu/exec {target.BestCpuPerExecUs:F0} us)");
+                sb.AppendLine($"--   best plan hash:   {OneLine(target.BestPlanHash)}   (cpu/exec {target.BestCpuPerExecUs:F0} us)");
             AppendBestPlanAge(sb, target);
             sb.AppendLine($"--   regression factor: {target.RegressionFactor:F1}x");
             if (!string.IsNullOrEmpty(target.ReplicaRole))
-                sb.AppendLine($"--   measured on replica: {target.ReplicaRole}");
+                sb.AppendLine($"--   measured on replica: {OneLine(target.ReplicaRole)}");
+            emitted++;
+
+            if (blockers.Count > 0)
+            {
+                AppendNotEligible(sb, target, blockers);
+                continue;
+            }
+
+            eligible++;
             AppendSecondaryReplicaDisclosure(sb, target);
             AppendParameterSensitivityCaution(sb, target);
+            if (StateUnknownLine(target, states) is { } stateUnknown)
+                sb.AppendLine(stateUnknown);
             sb.AppendLine($"USE {QuoteName(target.Database)};");
             sb.AppendLine($"EXEC sys.sp_query_store_force_plan @query_id = {target.QueryId}, @plan_id = {target.PlanId};");
             sb.AppendLine();
             sb.AppendLine($"-- To back out:");
             sb.AppendLine($"-- EXEC sys.sp_query_store_unforce_plan @query_id = {target.QueryId}, @plan_id = {target.PlanId};");
             AppendUnforceScopeNote(sb, target);
-
-            emitted++;
         }
 
-        return sb.ToString().TrimEnd();
+        var body = sb.ToString().TrimEnd();
+        if (eligible == 0)
+            body = NoEligibleForceTarget + Environment.NewLine + Environment.NewLine + body;
+
+        return WithStateNotRead(body, states, stateUnavailableReason);
     }
+
+    /// <summary>The line a force-plan remediation opens with when the store's state blocks every target
+    /// (#8542): the text then carries no force statement at all.</summary>
+    public const string NoEligibleForceTarget =
+        "-- No force statement is offered: the store's forcing state blocks every target below.";
+
+    /// <summary>How a force-plan remediation says the store's forcing state does not stand behind a
+    /// statement (#8542): one comment line that starts with this. It opens the text when the state could
+    /// not be read at all, and sits above one target's statement when the read holds no row for that
+    /// target, so neither statement is taken for one the store was asked about and cleared.</summary>
+    public const string StateNotReadPrefix = "-- NOT CHECKED:";
+
+    /// <summary>What a state read that holds no row for a target observed, in the words
+    /// <c>structured_remediation</c>'s <c>state_note</c> and the copy-paste text share.</summary>
+    private static string NoStateRowInLookback =>
+        $"no query_store_stats or plan_correction row for this target within the last {ForcePlanTargetState.Lookback.TotalHours:0} hours";
+
+    /// <summary>The instruction every unknown-state note and line ends with.</summary>
+    private const string CheckBeforeForcing = "Check get_plan_corrections and sys.query_store_plan before forcing.";
+
+    /// <summary>
+    /// The comment line a target's force statement sits under when the state read ran and holds no row
+    /// for the target (#8542): the dictionary has no key for it, or its state
+    /// <see cref="ForcePlanTargetState.IsEmpty"/>. The line starts with <see cref="StateNotReadPrefix"/>
+    /// and says what <c>structured_remediation</c>'s <c>state_note</c> says of the same target: its state
+    /// is unknown, check before forcing. The statement stays, because nothing observed is not a blocker.
+    /// Null for a target with a state row, and for a null <paramref name="states"/>, where the whole
+    /// read is spoken for once by <see cref="WithStateNotRead"/>.
+    /// </summary>
+    private static string? StateUnknownLine(
+        ForcePlanTarget target,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states)
+    {
+        if (states is null)
+            return null;
+
+        if (states.TryGetValue(ForcePlanTargetKey.Of(target), out var found) && found is not null && !found.IsEmpty)
+            return null;
+
+        return $"{StateNotReadPrefix} unknown: {NoStateRowInLookback}. {CheckBeforeForcing}";
+    }
+
+    /// <summary>The comment line that names a target the store's state blocks (#8542) starts with this.</summary>
+    public const string NotEligiblePrefix = "-- NOT ELIGIBLE:";
+
+    /// <summary>
+    /// Opens a force-plan text with the not-read line when the state read failed: no state, and a reason.
+    /// The reason is flattened to one line. With a state, or with no reason, the text is returned as is.
+    /// </summary>
+    private static string WithStateNotRead(
+        string text,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states,
+        string? stateUnavailableReason)
+    {
+        if (states is not null || string.IsNullOrWhiteSpace(stateUnavailableReason))
+            return text;
+
+        return $"{StateNotReadPrefix} the store's forcing and automatic-plan-correction state could not be read, so no target below was checked against it. {OneLine(stateUnavailableReason.Trim())}" +
+               Environment.NewLine + Environment.NewLine + text;
+    }
+
+    /// <summary>
+    /// The blockers that withhold one target's statement in the copy-paste renderers (#8542). The gate
+    /// (<see cref="ForcePlanBlockers(ForcePlanTarget, ForcePlanTargetState?)"/>) runs over the target's
+    /// read-time state, and its whole list comes back when it holds at least one blocker read from the
+    /// store's forcing or automatic-plan-correction state: <c>apc_owns_it</c>, <c>already_forced</c>,
+    /// <c>forcing_failed_on_this_plan</c>, <c>apc_withdrew_it</c>, <c>apc_resolved_differently</c>.
+    /// Empty otherwise. The two blockers a target carries from its own finding
+    /// (<c>parameter_sensitivity_cofired</c>, <c>secondary_replica_evidence</c>) withhold nothing on
+    /// their own: such a target renders its caution or disclosure WITH the statement (#1882, #2138),
+    /// the decision staying with the person who reads it.
+    /// </summary>
+    private static IReadOnlyList<ForcePlanBlocker> BlockersFor(
+        ForcePlanTarget target,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states)
+    {
+        ForcePlanTargetState? state = null;
+        if (states is not null &&
+            states.TryGetValue(ForcePlanTargetKey.Of(target), out var found) &&
+            found is not null && !found.IsEmpty)
+        {
+            state = found;
+        }
+
+        if (state is null)
+            return Array.Empty<ForcePlanBlocker>();
+
+        var all = ForcePlanBlockers(target, state);
+        foreach (var blocker in all)
+        {
+            if (!string.Equals(blocker.Name, ForcePlanBlockerNames.ParameterSensitivityCoFired, StringComparison.Ordinal) &&
+                !string.Equals(blocker.Name, ForcePlanBlockerNames.SecondaryReplicaEvidence, StringComparison.Ordinal))
+            {
+                return all;
+            }
+        }
+
+        return Array.Empty<ForcePlanBlocker>();
+    }
+
+    /// <summary>
+    /// Names a target the store's state blocks and each of its blockers as comment lines (#8542). The
+    /// evidence is flattened to one line so collected text in it stays inside the comment.
+    /// </summary>
+    private static void AppendNotEligible(StringBuilder sb, ForcePlanTarget target, IReadOnlyList<ForcePlanBlocker> blockers)
+    {
+        sb.AppendLine($"{NotEligiblePrefix} no force statement is given for {OneLine(QuoteName(target.Database))} query_id = {target.QueryId}, plan_id = {target.PlanId}.");
+        foreach (var blocker in blockers)
+            sb.AppendLine($"--   {blocker.Name}: {OneLine(blocker.Evidence)}");
+    }
+
+    private static string OneLine(string? text) =>
+        string.IsNullOrEmpty(text)
+            ? string.Empty
+            : text.Replace('\r', ' ').Replace('\n', ' ').Replace('\u2028', ' ').Replace('\u2029', ' ').Replace('\u0085', ' ');
 
     /// <summary>
     /// #4736: one comment line saying when the target's best plan last ran and how long before the analysis
@@ -689,7 +843,7 @@ public static class FactRemediation
             return;
 
         sb.AppendLine("--");
-        sb.AppendLine($"-- HEADS UP: this regression was measured on the {target.ReplicaRole} replica's workload,");
+        sb.AppendLine($"-- HEADS UP: this regression was measured on the {OneLine(target.ReplicaRole)} replica's workload,");
         sb.AppendLine("-- but the statement below forces on the PRIMARY. sp_query_store_force_plan is executed on");
         sb.AppendLine("-- the primary in every case, and its @replica_group_id argument defaults to the primary");
         sb.AppendLine("-- when omitted -- so running this as written changes the plan the primary's WRITE workload");
@@ -862,8 +1016,13 @@ public static class FactRemediation
         var apcState = state.ApcState ?? string.Empty;
         var apcReason = state.ApcStateReason;
 
-        /* apc_owns_it — three shapes, one blocker: the engine is doing this, on this plan or on this query. */
-        if (planForcedAuto)
+        /* apc_owns_it — three shapes, one blocker: the engine is doing this, on this plan or on this query.
+           #8628: the two AUTO-forced-row shapes rest on a query_store_stats observation, and the plan_correction
+           state beside it is its own, separate observation. When the plan_correction state is the NEWER one and says
+           the engine has backed out (Reverted or Expired) or that the plan it named is not forced, the older AUTO row
+           is stale and does not raise the blocker. When the forced-plan row is the newer (or the same age), it decides
+           as before. The same predicate serves every reader of this gate, so get_plan_force_precheck cannot differ. */
+        if (planForcedAuto && !ApcSupersedesForcedRow(state, state.PlanObservedAtUtc, target.PlanId))
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ApcOwnsIt,
@@ -876,7 +1035,8 @@ public static class FactRemediation
                 $"plan_correction: recommendation state {apcState}{Reason(apcReason)} with last_good_plan_id = {target.PlanId}" +
                 $"{ForcedClause(state.ApcLastGoodPlanIsForced, state.ApcLastGoodPlanForcingType)} at {Stamp(state.ApcObservedAtUtc)}, the engine is already forcing exactly this plan"));
         }
-        else if (state.OtherForcedPlanId is long otherAuto && IsAutoForcing(state.OtherForcedPlanForcingType))
+        else if (state.OtherForcedPlanId is long otherAuto && IsAutoForcing(state.OtherForcedPlanForcingType)
+            && !ApcSupersedesForcedRow(state, state.OtherForcedPlanObservedAtUtc, otherAuto))
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ApcOwnsIt,
@@ -953,6 +1113,31 @@ public static class FactRemediation
 
     private static bool IsAutoForcing(string? forcingType) =>
         string.Equals(forcingType, ForcePlanTargetState.ForcingTypeAuto, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// #8628: whether the automatic-plan-correction (<c>plan_correction</c>) observation is NEWER than the
+    /// forced-plan (<c>query_store_stats</c>) row and says that row no longer holds: the recommendation is
+    /// <c>Reverted</c> or <c>Expired</c> (the engine has backed out), or the plan it named
+    /// (<c>last_good_plan_id</c>, the forced plan in question) is not forced. Only a strictly newer
+    /// observation supersedes; the same age or an older one leaves the forced-plan row to decide, and a forced
+    /// row with no snapshot time is never superseded. One predicate for every reader of the gate, so the
+    /// analyze_server blocker, the guidance and <c>get_plan_force_precheck</c> read it the same way.
+    /// </summary>
+    internal static bool ApcSupersedesForcedRow(ForcePlanTargetState state, DateTime? forcedObservedAtUtc, long forcedPlanId)
+    {
+        if (state.ApcObservedAtUtc is not DateTime apcAt || forcedObservedAtUtc is not DateTime forcedAt || apcAt <= forcedAt)
+        {
+            return false;
+        }
+
+        return IsApcBackedOut(state.ApcState)
+            || (state.ApcLastGoodPlanIsForced == false && state.ApcLastGoodPlanId == forcedPlanId);
+    }
+
+    /// <summary>The engine's recommendation states in which it has stopped managing the plan: <c>Reverted</c> (no gain) and <c>Expired</c> (the situation changed). The others are <c>Active</c>, <c>Verifying</c> and <c>Success</c>.</summary>
+    internal static bool IsApcBackedOut(string? apcState) =>
+        string.Equals(apcState, "Reverted", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(apcState, "Expired", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// #4736: the engine's own OPEN (<c>Active</c>) recommendation names the proposed plan as the regressed,
@@ -1038,7 +1223,7 @@ public static class FactRemediation
             else if (!states.TryGetValue(ForcePlanTargetKey.Of(t), out state) || state is null || state.IsEmpty)
             {
                 state = null;
-                note = $"unknown: no query_store_stats or plan_correction row for this target within the last {ForcePlanTargetState.Lookback.TotalHours:0} hours; eligible reflects only the finding's own evidence. Check get_plan_corrections and sys.query_store_plan before forcing.";
+                note = $"unknown: {NoStateRowInLookback}; eligible reflects only the finding's own evidence. {CheckBeforeForcing}";
             }
             else
             {
@@ -1082,7 +1267,7 @@ public static class FactRemediation
                 ForcingState: state,
                 StateNote: note,
                 ApcMode: apcMode,
-                Guidance: BuildForcePlanGuidance(t, state)));
+                Guidance: BuildForcePlanGuidance(t, state, detailed)));
         }
 
         var guidance = anyApcOn
@@ -1095,12 +1280,14 @@ public static class FactRemediation
     /// <summary>
     /// The per-target verb (#3652): when FORCE_LAST_GOOD_PLAN is ON for the database the remediation is no
     /// longer "run this" but "the engine is doing X for this query; intervene only if it reverts or
-    /// expires" — stated with the engine's own state and reason. When the enablement is OFF or unknown,
+    /// expires" — stated with the engine's own state and reason. #8628: once the state IS Reverted or
+    /// Expired the engine has backed out, and the sentence says that (with the state, its reason and any
+    /// standing blocker's reason) instead of telling the reader to wait for what already happened. When the enablement is OFF or unknown,
     /// the only guidance is the non-blocking disagreement cases (an <c>Active</c> recommendation naming a
     /// different plan, or naming this plan as the regressed one — #4736). Null when there is nothing to add
     /// to the blockers.
     /// </summary>
-    private static string? BuildForcePlanGuidance(ForcePlanTarget t, ForcePlanTargetState? state)
+    private static string? BuildForcePlanGuidance(ForcePlanTarget t, ForcePlanTargetState? state, IReadOnlyList<ForcePlanBlocker> blockers)
     {
         if (state is null)
         {
@@ -1124,7 +1311,32 @@ public static class FactRemediation
                 var via = state.ApcLastGoodPlanId is long lg
                     ? (lg == t.PlanId ? $" via plan {lg} (the plan proposed here)" : $" via plan {lg} (not the plan proposed here, {t.PlanId})")
                     : string.Empty;
-                sb.Append($" and is currently {apcState}{reason} for query {t.QueryId}{via} as of {Stamp(state.ApcObservedAtUtc)}; intervene only if it reverts or expires.");
+                sb.Append($" and is currently {apcState}{reason} for query {t.QueryId}{via} as of {Stamp(state.ApcObservedAtUtc)}; ");
+                if (IsApcBackedOut(apcState))
+                {
+                    /* #8628: Reverted and Expired are the engine withdrawing, so "intervene only if it reverts or
+                       expires" would tell the reader to wait for what already happened. The engine has let go; a
+                       manual force is the reader's call, and a blocker that still stands is named beside it. */
+                    if (blockers.Count == 0)
+                    {
+                        sb.Append("the engine has backed out of it, so a manual force here is yours to decide.");
+                    }
+                    else
+                    {
+                        sb.Append("the engine has backed out of it, but this target is not eligible:");
+                        foreach (var blocker in blockers)
+                        {
+                            sb.Append($" {blocker.Name} ({OneLine(blocker.Evidence)});");
+                        }
+
+                        sb.Length--;
+                        sb.Append('.');
+                    }
+                }
+                else
+                {
+                    sb.Append("intervene only if it reverts or expires.");
+                }
             }
 
             if (namedAsRegressed)
@@ -1338,7 +1550,7 @@ public static class FactRemediation
                     sb.AppendLine();
                 }
                 currentDb = target.Database;
-                sb.AppendLine($"-- Database: {target.Database}");
+                sb.AppendLine($"-- Database: {OneLine(target.Database)}");
             }
 
             sb.AppendLine($"{StatementFor(target.Setting, target.Database)}   -- was {target.CurrentValue}");
@@ -1538,7 +1750,25 @@ public static class FactRemediation
     /// destructive shape (RCSI) prepends the two-sided <see cref="FactRiskDisclosure"/> text
     /// as a <c>/* ... */</c> comment header. Nothing here executes — it is advisory text the operator runs.
     /// </summary>
-    public static string? RenderCopyPasteCommand(RemediationAction? action)
+    public static string? RenderCopyPasteCommand(RemediationAction? action) =>
+        RenderCopyPasteCommand(action, states: null);
+
+    /// <summary>
+    /// <see cref="RenderCopyPasteCommand(RemediationAction?)"/> with the read-time forcing and
+    /// automatic-plan-correction state of the action's force-plan targets (#8542). A force-plan target
+    /// that state blocks (<see cref="BlockersFor"/>) is named in comments with its blockers and gets no
+    /// runnable statement; when it blocks every target the text says so and carries no force statement.
+    /// A target the read holds no row for keeps its statement under a line saying its state is unknown
+    /// (<see cref="StateUnknownLine"/>). A null <paramref name="states"/> withholds nothing; when the
+    /// read failed, pass why in <paramref name="stateUnavailableReason"/> and the force-plan text opens by
+    /// saying no target was checked (<see cref="StateNotReadPrefix"/>). With a null
+    /// <paramref name="states"/> and no reason the text carries no such line: the caller made no read,
+    /// and says nothing about the store. The other remediation shapes ignore both.
+    /// </summary>
+    public static string? RenderCopyPasteCommand(
+        RemediationAction? action,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states,
+        string? stateUnavailableReason = null)
     {
         if (action is null)
             return null;
@@ -1583,10 +1813,11 @@ public static class FactRemediation
         if (action.Targets is { Count: > 0 } forceTargets)
         {
             var blocks = new List<string>(forceTargets.Count);
+            var eligible = 0;
             foreach (var t in forceTargets)
             {
                 var disclosure = IsNonPrimaryReplicaRow(t.ReplicaRole)
-                    ? $"-- Measured on the {t.ReplicaRole} replica; this forces on the PRIMARY (@replica_group_id" + nl +
+                    ? $"-- Measured on the {OneLine(t.ReplicaRole)} replica; this forces on the PRIMARY (@replica_group_id" + nl +
                       "-- defaults there when omitted). Scope it with @replica_group_id to target that replica." + nl
                     : string.Empty;
 
@@ -1598,14 +1829,33 @@ public static class FactRemediation
                       "-- Forcing pins ONE shape for every value; consider stats updates first (see the preview)." + nl
                     : string.Empty;
 
+                /* #8542: a target the store's state blocks is named with its blockers, in comments only. */
+                var blockers = BlockersFor(t, states);
+                if (blockers.Count > 0)
+                {
+                    var blocked = new StringBuilder();
+                    AppendNotEligible(blocked, t, blockers);
+                    blocks.Add(blocked.ToString().TrimEnd());
+                    continue;
+                }
+
+                eligible++;
                 blocks.Add(
                     disclosure +
                     pspCaution +
+                    (StateUnknownLine(t, states) is { } stateUnknown ? stateUnknown + nl : string.Empty) +
                     $"USE {QuoteName(t.Database)};" + nl +
                     $"EXEC sys.sp_query_store_force_plan @query_id = {t.QueryId}, @plan_id = {t.PlanId};");
             }
 
-            return blocks.Count == 0 ? null : string.Join(nl + nl, blocks);
+            if (blocks.Count == 0)
+                return null;
+
+            var forceText = string.Join(nl + nl, blocks);
+            if (eligible == 0)
+                forceText = NoEligibleForceTarget + nl + nl + forceText;
+
+            return WithStateNotRead(forceText, states, stateUnavailableReason);
         }
 
         // RCSI reconstructed action (FactKey "RCSI") — DESTRUCTIVE. Carries a ReadCommittedSnapshotOn

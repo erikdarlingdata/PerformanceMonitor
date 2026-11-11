@@ -52,6 +52,9 @@ public sealed class AlertNotebookTemplateQueryPlansTests
         Assert.Equal("authored/forced-plan-failing", template!.Value.Id);
     }
 
+    private static readonly AlertNotebookEndpoint.AuthoredContext SqlServerContext =
+        AlertNotebookEndpoint.AuthoredContext.Empty with { EngineKind = PerformanceMonitor.Collectors.MonitoredEngineKind.SqlServer };
+
     /* ═══════════════════════════ Long-Running Query: exact cells ═══════════════════════════ */
 
     [Fact]
@@ -60,12 +63,9 @@ public sealed class AlertNotebookTemplateQueryPlansTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("Long-Running Query");
         Assert.NotNull(template);
 
-        var buildCells = template!.Value.BuildCells;
-        Assert.NotNull(buildCells);
-
-        var cells = buildCells(
+        var cells = template!.Value.Invoke(
             "Long-Running Query", "SRV1", AsOf, WindowStart, WindowEnd,
-            IncidentWithDatabase("SalesDb"), null, "Unknown");
+            IncidentWithDatabase("SalesDb"), null, "Unknown", SqlServerContext);
 
         Assert.Equal(6, cells.Count);
 
@@ -100,12 +100,9 @@ public sealed class AlertNotebookTemplateQueryPlansTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("Long-Running Query");
         Assert.NotNull(template);
 
-        var buildCells = template!.Value.BuildCells;
-        Assert.NotNull(buildCells);
-
-        var cells = buildCells(
+        var cells = template!.Value.Invoke(
             "Long-Running Query", "SRV1", AsOf, WindowStart, WindowEnd,
-            IncidentWithDatabase("SalesDb"), null, "Unknown");
+            IncidentWithDatabase("SalesDb"), null, "Unknown", SqlServerContext);
 
         var planXmlCells = cells.OfType<JsonObject>()
             .Where(c => (string?)c["type"] == "read" && (string?)c["read"] == "get_plan_xml")
@@ -120,15 +117,12 @@ public sealed class AlertNotebookTemplateQueryPlansTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("Long-Running Query");
         Assert.NotNull(template);
 
-        var buildCells = template!.Value.BuildCells;
-        Assert.NotNull(buildCells);
-
-        var withIncident = buildCells(
+        var withIncident = template!.Value.Invoke(
             "Long-Running Query", "SRV1", AsOf, WindowStart, WindowEnd,
-            IncidentWithDatabase("SalesDb"), null, "Unknown");
-        var withoutIncident = buildCells(
+            IncidentWithDatabase("SalesDb"), null, "Unknown", SqlServerContext);
+        var withoutIncident = template!.Value.Invoke(
             "Long-Running Query", "SRV1", AsOf, WindowStart, WindowEnd,
-            null, null, "Unknown");
+            null, null, "Unknown", SqlServerContext);
 
         Assert.Equal(withIncident.Count, withoutIncident.Count);
     }

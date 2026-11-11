@@ -34,7 +34,9 @@ public sealed class LongQueryMonitorStatementsLiveTests
     private const string Skip = "Set DARLING_TEST_PG to a Postgres connection string to run the live long-query monitor-statement test.";
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static async Task<DateTime> SeedAsync(string cs, string?[] apps, CancellationToken ct)
+    /// <param name="ranBefore">Records one recent run of the collector that found nothing (#8571): the collector has run, so an empty window is
+    /// "ran and found nothing" and not the never-ran state. A run long ago would make the server read as offline instead.</param>
+    private static async Task<DateTime> SeedAsync(string cs, string?[] apps, CancellationToken ct, bool ranBefore = false)
     {
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);
@@ -43,6 +45,13 @@ public sealed class LongQueryMonitorStatementsLiveTests
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
         var end = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+        if (ranBefore)
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, rows_collected) VALUES ($1, $2, $3, 'long_query_completions', $4, 'SUCCESS', 0)",
+                CollectionIdGenerator.Next(), ServerId, ServerName, DarlingMcpTestData.Naive(end.AddMinutes(-5)));
+        }
+
         for (var i = 0; i < apps.Length; i++)
         {
             var at = DarlingMcpTestData.Naive(end.AddMinutes(-10 - i));
@@ -58,7 +67,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM long_query_completions WHERE server_id = {ServerId}; DELETE FROM config.config_collector_schedules WHERE server_id = {ServerId}; DELETE FROM servers WHERE server_id = {ServerId};", connection);
+            $"DELETE FROM long_query_completions WHERE server_id = {ServerId}; DELETE FROM collection_log WHERE server_id = {ServerId}; DELETE FROM config.config_collector_schedules WHERE server_id = {ServerId}; DELETE FROM servers WHERE server_id = {ServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 
@@ -135,7 +144,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
        a chosen database is blamed on the opt-in switch only when the store holds no long-query row for the server in the window. With
        rows for other databases the collector is on, so the answer is about the chosen database and leaves the switch out. */
     [Fact]
-    public async Task AFilteredEmptyWindow_NamesTheOptInSwitchOnlyWhenTheStoreHoldsNoRow()
+    public async Task AFilteredEmptyWindow_NamesTheOptInSwitchOnlyWhenTheCollectorNeverRan()
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), Skip);
@@ -144,11 +153,21 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
         var bodySucceeded = false;
         try
         {
+            /* #8571: a store with no row and no logged run is the never-ran state, which names the switch as not_collected and echoes the database. */
             await SeedAsync(cs!, Array.Empty<string?>(), ct);
-            using (var noRows = JsonDocument.Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, ServerName, 24, 30, database_name: "OtherDb", cancellationToken: ct)))
+            using (var neverRan = JsonDocument.Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, ServerName, 24, 30, database_name: "OtherDb", cancellationToken: ct)))
             {
-                Assert.Equal("empty", noRows.RootElement.GetProperty("status").GetString());
-                Assert.Contains("opt-in (default OFF)", noRows.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+                Assert.Equal("not_collected", neverRan.RootElement.GetProperty("status").GetString());
+                Assert.Contains("enable_collector", neverRan.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+                Assert.Equal("OtherDb", neverRan.RootElement.GetProperty("database_name").GetString());
+            }
+
+            /* A collector that ran and found nothing is on: the answer is about the chosen database and leaves the switch out. */
+            await SeedAsync(cs!, Array.Empty<string?>(), ct, ranBefore: true);
+            using (var ranFoundNothing = JsonDocument.Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, ServerName, 24, 30, database_name: "OtherDb", cancellationToken: ct)))
+            {
+                Assert.Equal("empty", ranFoundNothing.RootElement.GetProperty("status").GetString());
+                Assert.DoesNotContain("opt-in", ranFoundNothing.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
             }
 
             await SeedAsync(cs!, new string?[] { null }, ct);
@@ -176,7 +195,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
         var bodySucceeded = false;
         try
         {
-            await SeedAsync(cs!, Array.Empty<string?>(), ct);
+            await SeedAsync(cs!, Array.Empty<string?>(), ct, ranBefore: true);
 
             foreach (var (enabled, expectSentence) in new[] { (true, false), (false, true) })
             {

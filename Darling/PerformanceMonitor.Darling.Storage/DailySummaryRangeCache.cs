@@ -225,6 +225,32 @@ public sealed class DailySummaryRangeCache<TRow>
             return joined;
         }
 
+        /* #8549: a miss on this exact range is not yet a cold read. The warmer builds the Overview's 31-day block and
+           an MCP call with only server_name asks for 30 days, a different key over the same days, so it read the whole
+           month again (11.4 s on a busy store, 3 h 45 min after the service started). When another live block of the
+           SAME store, server, statement, scope and end day begins on or before this call's start and has closed at
+           least as far, its closed days are this call's closed days (every row is grouped within its own day, see the
+           type's remarks), so this call starts from a copy of them cut to its own start and takes the usual short
+           path (the open days, and the sub-horizon days when they are due). */
+        if (!_blocks.ContainsKey(key))
+        {
+            var donor = _blocks
+                .Where(entry => entry.Key.StoreKey.Equals(storeKey) && entry.Key.ServerId == serverId && entry.Key.ToDate == toDate
+                    && entry.Key.FromDate <= fromDate && entry.Key.RoutedSql == routedSql && entry.Key.ScopeKey == (scopeKey ?? "")
+                    && nowUtc < entry.Value.ExpiresAtUtc && entry.Value.ClosedEndUtc <= closedEndUtc)
+                .OrderBy(entry => entry.Key.FromDate)
+                .Select(entry => (KeyValuePair<BlockKey, CachedBlock>?)entry)
+                .LastOrDefault();
+            if (donor is { } found && found.Value.ClosedEndUtc > fromDate)
+            {
+                var sliced = found.Value with { ClosedRows = found.Value.ClosedRows.Where(row => day(row) >= fromDate).ToList() };
+                if (_blocks.TryAdd(key, sliced))
+                {
+                    return await GetRangeAsync(storeKey, serverId, fromDate, toDate, routedSql, asOfNow, day, runRange, scopeKey ?? "", cancellationToken, trustFromUtc).ConfigureAwait(false);
+                }
+            }
+        }
+
         var full = await runRange(fromDate, toDate, cancellationToken).ConfigureAwait(false);
         var closedRows = full.Where(row => day(row) < closedEndUtc).ToList();
 

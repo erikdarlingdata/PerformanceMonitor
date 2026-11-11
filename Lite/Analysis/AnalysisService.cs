@@ -1295,14 +1295,26 @@ WHERE server_id = $1";
     /// the caller can put "state unavailable: why" on every target rather than fail the read or — worse —
     /// let the verdict read as eligible by silence. An abandonment is not swallowed (#2443).
     /// </summary>
-    public async Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> TryGetForcePlanTargetStatesAsync(
-        int serverId, IEnumerable<AnalysisFinding> findings, CancellationToken cancellationToken = default)
+    public Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> TryGetForcePlanTargetStatesAsync(
+        int serverId, IEnumerable<AnalysisFinding> findings, CancellationToken cancellationToken = default) =>
+        ReadForcePlanTargetStatesAsync(_duckDb, serverId, findings, cancellationToken);
+
+    /// <summary>
+    /// The same read for a caller that holds the store and no analysis service: the Recommendations
+    /// cards, through <see cref="FindingStore.TryGetForcePlanTargetStatesAsync"/> (#8542).
+    /// </summary>
+    internal static async Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> ReadForcePlanTargetStatesAsync(
+        DuckDbInitializer duckDb, int serverId, IEnumerable<AnalysisFinding> findings, CancellationToken cancellationToken = default)
     {
         var targets = new List<ForcePlanTarget>();
         foreach (var finding in findings)
         {
             if (finding.Remediation?.Targets is { Count: > 0 } ts)
                 targets.AddRange(ts);
+            else
+                /* #8542: a finding with no persisted action renders its statements from its drill-down, so
+                   its targets are read from there, through the extraction the renderer uses. */
+                targets.AddRange(FactRemediation.ExtractPlanRegressionTargets(finding));
         }
 
         if (targets.Count == 0)
@@ -1312,17 +1324,21 @@ WHERE server_id = $1";
         {
             /* #7256: a table whose archive holds nothing in the lookback is read as its hot table. */
             var nowUtc = DateTime.UtcNow;
-            var plan = await _duckDb.PlanArchiveReadAsync(cancellationToken,
+            var plan = await duckDb.PlanArchiveReadAsync(cancellationToken,
                 [.. ForcePlanTargetStateReader.ArchivedTables.Select(t => new ArchiveWindow(t, "collection_time", nowUtc - ForcePlanTargetState.Lookback))]);
-            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
-            using var connection = _duckDb.CreateConnection();
+            using var readLock = duckDb.AcquireReadLock(cancellationToken);
+            using var connection = duckDb.CreateConnection();
             await connection.OpenAsync(cancellationToken);
             using var command = connection.CreateCommand();
             return (await ForcePlanTargetStateReader.ReadAsync(command, serverId, targets, nowUtc, plan, cancellationToken), null);
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
         {
-            return (null, $"the forcing and automatic-plan-correction state read failed ({ex.GetType().Name}: {ex.Message}); eligible reflects only the finding's own evidence. Check get_plan_corrections and sys.query_store_plan before forcing.");
+            /* The fault's message goes to the log. The reason carries the exception's type only, as Darling's
+               reader does (#4316): it is written into the command text a card shows and a notification
+               sends, and a DuckDB message can name the store's path. */
+            AppLogger.Warn("AnalysisService", $"The forcing and automatic-plan-correction state read failed for server {serverId}: {ex.Message}");
+            return (null, $"the forcing and automatic-plan-correction state read failed ({ex.GetType().Name}). Check get_plan_corrections and sys.query_store_plan before forcing.");
         }
     }
 }

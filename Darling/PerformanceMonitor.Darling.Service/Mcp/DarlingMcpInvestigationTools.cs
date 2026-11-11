@@ -415,7 +415,7 @@ public sealed partial class DarlingMcpInvestigationTools
             else if (DarlingAgentActionGate.IsRefusedLegacyAgentId(namedAgentNames, agent_id))
             {
                 /* The legacy token's agent_id is free text. One that is a named agent's name would put the claim, and the plan changes after it,
-                   in that agent's journal, and one that is a reserved placeholder (invalid, unclaimed) would make the claim's rows read as a
+                   in that agent's journal, and one that is a reserved placeholder (invalid, unclaimed, legacy-token) would make the claim's rows read as a
                    refusal's, so it is refused and journaled under no agent's name. */
                 await store.RecordRefusalAsync(requestId, InvestigationRules.InvalidAgentId, "claim", AgentIdIsNamedToken, null, cancellationToken);
                 return InvestigationToolCore.Status(AgentIdIsNamedToken, AgentIdIsNamedTokenMessage(agent_id));

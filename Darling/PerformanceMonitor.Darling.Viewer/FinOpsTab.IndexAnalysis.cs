@@ -35,14 +35,21 @@ public partial class FinOpsTab
     /// the grids/banners.
     /// </summary>
     /// <summary>
-    /// The two Index Analysis grids are wider than the page, so a horizontal scroll bar is right only while they hold rows: on an empty
-    /// grid it would scroll a header row and nothing else.
+    /// The two Index Analysis grids and their section titles show only while a read has rows. Before a read, or after one that
+    /// finds nothing, they stay collapsed and the one message over them (Grid.RowSpan 4) is the whole empty state, instead of a
+    /// message under a bare rollup grid (#8621). The horizontal scroll bar follows the same rule: the grids are wider than the
+    /// page, so it is right only while they hold rows.
     /// </summary>
     private void IndexAnalysisGridsHoldRows(bool hasRows)
     {
-        var visibility = hasRows ? ScrollBarVisibility.Auto : ScrollBarVisibility.Hidden;
-        FinOpsIndexAnalysisRollupGrid.HorizontalScrollBarVisibility = visibility;
-        FinOpsIndexAnalysisDetailGrid.HorizontalScrollBarVisibility = visibility;
+        var scroll = hasRows ? ScrollBarVisibility.Auto : ScrollBarVisibility.Hidden;
+        var visibility = hasRows ? Visibility.Visible : Visibility.Collapsed;
+        FinOpsIndexAnalysisRollupGrid.HorizontalScrollBarVisibility = scroll;
+        FinOpsIndexAnalysisDetailGrid.HorizontalScrollBarVisibility = scroll;
+        FinOpsIndexAnalysisRollupGrid.Visibility = visibility;
+        FinOpsIndexAnalysisDetailGrid.Visibility = visibility;
+        FinOpsIndexAnalysisRollupTitle.Visibility = visibility;
+        FinOpsIndexAnalysisDetailTitle.Visibility = visibility;
     }
 
     private async Task LoadFinOpsIndexAnalysisAsync()

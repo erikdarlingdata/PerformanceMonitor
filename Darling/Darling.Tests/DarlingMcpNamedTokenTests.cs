@@ -505,6 +505,44 @@ public sealed class DarlingMcpNamedTokenTests
         Assert.Equal(1, unserved.CountAtLevel(LogLevel.Critical));
     }
 
+    /// <summary>#8611: a no-claim write through the legacy token is journaled as <c>agent:legacy-token</c>, so an <c>mcp.tokens</c> entry
+    /// with that name (in any case) would make its own rows read as the legacy token's. At start the entry is skipped with one Critical
+    /// line naming it, the other entries are still served, and the service does start (Resolve returns a set, it does not throw).</summary>
+    [Theory]
+    [InlineData("legacy-token")]
+    [InlineData("Legacy-Token")]
+    [InlineData("LEGACY-TOKEN")]
+    public void Resolve_SkipsAnEntryNamedLegacyToken_WithOneCriticalLine_AndStillServesTheOthers(string name)
+    {
+        var mcp = new McpConfig
+        {
+            Tokens = new List<McpTokenEntry> { Entry("ops-lead", OperatorToken, "operator"), Entry(name, AgentToken, "agent") },
+        };
+        var log = new CapturingTestLogger();
+
+        var set = DarlingMcpTokenSet.Resolve(mcp, "", DarlingMcpWritePolicy.Effective.Off, log);
+
+        Assert.Equal("ops-lead", Assert.Single(set.Named).Name);
+        Assert.Equal(1, log.CountAtLevel(LogLevel.Critical));
+        Assert.Equal(0, log.CountAtLevel(LogLevel.Warning));
+        var problems = DarlingMcpTokenSet.Check(mcp, "", DarlingMcpTokenSet.ResolveEntry, out _);
+        var problem = Assert.Single(problems);
+        Assert.Contains("mcp.tokens[1] is named " + name + ", which is reserved", problem, StringComparison.Ordinal);
+        Assert.DoesNotContain(AgentToken, problem, StringComparison.Ordinal);
+    }
+
+    /// <summary>#8611: the legacy token's free-text agent_id cannot be <c>legacy-token</c> in any case (a claim, or an agent_action's
+    /// agent id), so its rows are never mistaken for the no-claim writes journaled under that name.</summary>
+    [Theory]
+    [InlineData("legacy-token")]
+    [InlineData("Legacy-Token")]
+    [InlineData("LEGACY-TOKEN")]
+    public void ALegacyTokenAgentId_OfLegacyToken_IsRefused_InAnyCase(string agentId)
+    {
+        Assert.True(DarlingAgentActionGate.IsRefusedLegacyAgentId(null, agentId));
+        Assert.False(DarlingAgentActionGate.IsRefusedLegacyAgentId(null, "legacy-tokens"));
+    }
+
     [Fact]
     public void AnAgentTokenName_IsTheAgentIdTheToolsHoldTheCallerTo_AndAnOperatorTokenHasNone()
     {

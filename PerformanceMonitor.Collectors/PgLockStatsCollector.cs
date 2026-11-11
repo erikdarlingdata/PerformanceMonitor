@@ -99,8 +99,8 @@ SELECT
     l.relation::bigint                                    AS relation_oid,
     c.relname::text                                       AS relation_name,
     count(*)::bigint                                      AS backend_count,
-    /* Granted rows have no wait to report, and MAX over an empty filtered set is NULL rather than 0 -
-       which is the honest answer, since 0 would read as 'granted instantly'. */
+    " + /* Granted rows have no wait to report, and MAX over an empty filtered set is NULL rather than 0 -
+       which is the honest answer, since 0 would read as 'granted instantly'. */ @"
     max(CASE WHEN NOT l.granted
              THEN EXTRACT(EPOCH FROM (clock_timestamp() - a.state_change)) * 1000
         END)                                              AS oldest_wait_ms
@@ -112,18 +112,18 @@ LEFT JOIN pg_catalog.pg_class AS c
 LEFT JOIN pg_catalog.pg_stat_activity AS a
   ON a.pid = l.pid
 WHERE l.pid <> pg_catalog.pg_backend_pid()
-/* #7428: nor the service's OTHER connections. This collector's own pid is excluded above, but the service holds several
+" + /* #7428: nor the service's OTHER connections. This collector's own pid is excluded above, but the service holds several
    connections to the target and runs collectors on them side by side, so whichever of them is mid-query holds granted
    AccessShareLocks on the catalogs it reads. On an idle target those were the only rows, held by one backend in nearly
    every capture, and read as a standing lock on the user's server. Same exclusion by application_name, and the same
    pinned literals, as the wait sampler. The tradeoff: a lock the service's own connection really does hold on the
    target (a remediation action in flight) is not shown here either. The service takes no lock it keeps on the user's
    objects, so this costs nothing the monitored workload can feel. The coalesce keeps a lock whose pg_stat_activity row is
-   missing, which the LEFT JOIN yields as a NULL application_name. */
+   missing, which the LEFT JOIN yields as a NULL application_name. */ @"
 AND   coalesce(a.application_name, '') NOT IN ('" + PgWaitSamplingCollector.ServiceApplicationName + "', '" + PgWaitSamplingCollector.ServiceRemediationApplicationName + @"')
 GROUP BY d.datname, l.locktype, l.mode, l.granted, l.relation, c.relname
-/* Ungranted first, then the biggest queues: the row that matters is always a queue, and a grid that opened
-   with a hundred granted AccessShareLocks would bury it. */
+" + /* Ungranted first, then the biggest queues: the row that matters is always a queue, and a grid that opened
+   with a hundred granted AccessShareLocks would bury it. */ @"
 ORDER BY l.granted, count(*) DESC, l.mode";
 
     public override string Name => "pg_lock_stats";

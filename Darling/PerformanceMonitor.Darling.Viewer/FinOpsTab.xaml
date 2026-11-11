@@ -58,6 +58,8 @@
             <Setter Property="ui:DataGridSortBehavior.SortDescendingFirst" Value="True"/>
             <Setter Property="ui:DataGridFillColumn.Enabled" Value="True"/>
             <Setter Property="ui:DataGridHeaderFit.Enabled" Value="True"/>
+            <!-- #8634: a keyed style does not inherit the theme's implicit DataGrid style, so a text column with no element style cut a long value at the cell edge. -->
+            <Setter Property="ui:DataGridCellTrimming.Enabled" Value="True"/>
             <Setter Property="ui:ScrollPanBehavior.EnableMiddleClickPanning" Value="True"/>
             <Setter Property="AutoGenerateColumns" Value="False"/>
             <Setter Property="IsReadOnly" Value="True"/>
@@ -258,6 +260,7 @@
             <TextBlock Text="Server:" VerticalAlignment="Center" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,6,0"/>
             <ComboBox x:Name="ServerSelector" Width="260" VerticalAlignment="Center"
                       Style="{StaticResource DarkCombo}"
+                      ToolTip="{Binding SelectedItem.PickerLabel, RelativeSource={RelativeSource Self}}"
                       AutomationProperties.Name="Server"
                       SelectionChanged="ServerSelector_SelectionChanged">
                 <!-- A screen reader announces each item (and the selection) by the server's name, not the model's type name. -->
@@ -268,7 +271,7 @@
                 </ComboBox.ItemContainerStyle>
                 <ComboBox.ItemTemplate>
                     <DataTemplate>
-                        <TextBlock Text="{Binding PickerLabel}"/>
+                        <TextBlock Text="{Binding PickerLabel}" TextTrimming="CharacterEllipsis" ToolTip="{Binding PickerLabel}"/>
                     </DataTemplate>
                 </ComboBox.ItemTemplate>
             </ComboBox>
@@ -374,7 +377,7 @@
                                     <Grid Margin="0,0,0,8">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="120"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
                                         <TextBlock Grid.Column="0" Text="Stolen Mem %" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"
-                                                   ToolTip="(Total Server Memory - Buffer Pool) / Total Server Memory — memory used by plan cache, locks, grants, CLR, etc."/>
+                                                   ToolTip="(Total Server Memory - Buffer Pool) / Total Server Memory: memory used by plan cache, locks, grants, CLR, etc."/>
                                         <Grid Grid.Column="1" Margin="0,0,8,0">
                                             <Border Height="16" CornerRadius="3" Background="{DynamicResource BarTrackBrush}" BorderBrush="{DynamicResource ControlBorderBrush}" BorderThickness="1"/>
                                             <Grid>
@@ -387,7 +390,7 @@
                                     <Grid Margin="0,0,0,8">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="120"/><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
                                         <TextBlock Grid.Column="0" Text="Buffer Pool %" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"
-                                                   ToolTip="Buffer Pool / Physical Memory — how much of physical RAM is used by the buffer pool. On an Azure SQL Database it is the share of the database's memory limit."/>
+                                                   ToolTip="Buffer Pool / Physical Memory: how much of physical RAM is used by the buffer pool. On an Azure SQL Database it is the share of the database's memory limit."/>
                                         <Grid Grid.Column="1" Margin="0,0,8,0">
                                             <Border Height="16" CornerRadius="3" Background="{DynamicResource BarTrackBrush}" BorderBrush="{DynamicResource ControlBorderBrush}" BorderThickness="1"/>
                                             <Grid>
@@ -415,11 +418,11 @@
                         <TextBlock x:Name="FinOpsClassificationExplanation" Margin="12,8,10,4" VerticalAlignment="Top"
                                    TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
-                        <ui:ChartPanel x:Name="FinOpsProvisioningTrendCard" Title="7-Day Provisioning Trend" Subtitle="The badge above covers the last 24 hours; each row is one whole day, judged on its CPU, memory grants and stolen memory" Margin="10,8,10,0">
+                        <ui:ChartPanel x:Name="FinOpsProvisioningTrendCard" Title="7-Day Provisioning Trend" Subtitle="The badge above covers the last 24 hours; each row is one calendar day, judged on its CPU, memory grants and stolen memory: the six whole days before today, then today so far" Margin="10,8,10,0">
                             <DataGrid x:Name="FinOpsProvisioningTrendGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}"
                                       CanUserSortColumns="False">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="100" SortMemberPath="Day"/>
+                                    <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="130" SortMemberPath="Day"/>
                                     <!-- Status takes the width the numeric columns leave, so UNDER PROVISIONED is never cut while the card has room. -->
                                     <DataGridTextColumn Header="Status" Binding="{Binding StatusDisplay}" Width="*" MinWidth="160">
                                         <DataGridTextColumn.ElementStyle>
@@ -600,10 +603,15 @@
                                 <TextBlock x:Name="FinOpsNoStorageGrowthMessage" Style="{StaticResource EmptyHint}" Text="No storage growth data available yet"/>
                             </Grid>
 
-                            <Grid x:Name="FinOpsStorageObjectView" Visibility="Collapsed">
-                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="2*"/><RowDefinition Height="3*"/></Grid.RowDefinitions>
+                            <!-- The chart is as tall as its rows need (FinOpsHeatmapRenderer sets its MinHeight from the object count), so the
+                                 view scrolls as one page when the chart and the grid cannot both fit. The grid lists every object and
+                                 takes the room that is left, and the wheel over either moves the page. -->
+                            <ScrollViewer x:Name="FinOpsStorageObjectView" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                          PreviewMouseWheel="FinOpsPageScroll_PreviewMouseWheel">
+                            <Grid MinHeight="{Binding ViewportHeight, ElementName=FinOpsStorageObjectView}">
+                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                                 <TextBlock Grid.Row="0" TextWrapping="Wrap" Margin="0,0,0,4" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                           Text="Object / reserved footprint (daily). This is per-object reservation, not file allocation — it may not fully explain a database's file-level growth (log / free space)."/>
+                                           Text="Object / reserved footprint (daily). This is per-object reservation, not file allocation, so it may not fully explain a database's file-level growth (log / free space)."/>
                                 <ui:ChartPanel Title="Object Growth Heatmap" Grid.Row="1">
                                     <scottplot:WpfPlot x:Name="FinOpsObjectGrowthHeatmapChart" MouseMove="FinOpsObjectHeatmapChart_MouseMove" MouseLeave="FinOpsObjectHeatmapChart_MouseLeave"/>
                                 </ui:ChartPanel>
@@ -624,6 +632,7 @@
                                 <TextBlock Grid.Row="1" Grid.RowSpan="2" x:Name="FinOpsObjectGrowthNoDataMessage" Style="{StaticResource EmptyHint}"
                                            Text="No object size data for this database yet. Index/object stats are collected daily."/>
                             </Grid>
+                            </ScrollViewer>
 
                             <Grid x:Name="FinOpsStorageIndexView" Visibility="Collapsed">
                                 <DataGrid x:Name="FinOpsObjectIndexDetailGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" HorizontalScrollBarVisibility="Auto">
@@ -779,7 +788,7 @@
                         <Grid Height="{Binding ViewportHeight, ElementName=PvsScroll}" MinHeight="600">
                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
-                            <TextBlock Text="Accelerated Database Recovery — Persistent Version Store" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
+                            <TextBlock Text="Accelerated Database Recovery: Persistent Version Store" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="Bold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="FinOpsRefreshPvsStats_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                             <TextBlock x:Name="FinOpsPvsCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" Style="{DynamicResource PanelSubtitleText}"/>
                         </StackPanel>
@@ -1083,6 +1092,7 @@
                                         <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ProvisioningDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         <DataGridTextColumn.ElementStyle>
                                             <Style TargetType="TextBlock">
+                                                <Setter Property="ToolTip" Value="{Binding ProvisioningNote}"/>
                                                 <Style.Triggers>
                                                     <DataTrigger Binding="{Binding ProvisioningStatus}" Value="RIGHT_SIZED"><Setter Property="Foreground" Value="#27AE60"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger>
                                                     <DataTrigger Binding="{Binding ProvisioningStatus}" Value="OVER_PROVISIONED"><Setter Property="Foreground" Value="#F39C12"/><Setter Property="FontWeight" Value="SemiBold"/></DataTrigger>
@@ -1095,9 +1105,9 @@
                                     <DataGridTextColumn Binding="{Binding StorageTotalGb, StringFormat=N1}" Width="Auto" MinWidth="95" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StorageTotalGb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Storage GB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding IdleDbCount}" Width="70" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IdleDbCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Idle DBs" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding UptimeDisplay}" SortMemberPath="UptimeSeconds" Width="90"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="UptimeDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Uptime" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding SqlServerStartTime, StringFormat=\{0:yyyy-MM-dd HH:mm\}}" Width="150"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SqlServerStartTime" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Start Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding InventoryAsOfText}" SortMemberPath="InventoryAsOfUtc" Width="170"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="InventoryAsOf" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Inventory As Of" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding LastCollectedText}" SortMemberPath="LastCollectedUtc" Width="170"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastCollected" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding StartTimeText}" SortMemberPath="SqlServerStartTime" Width="215"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SqlServerStartTime" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Start Time" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding InventoryAsOfText}" SortMemberPath="InventoryAsOfUtc" Width="215"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="InventoryAsOf" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Inventory As Of" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding LastCollectedText}" SortMemberPath="LastCollectedUtc" Width="215"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastCollected" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Last Collected" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <!-- #2359: Server Inventory lists every REGISTERED server, so a decommissioned one keeps the
                                          Last Updated it had when monitoring stopped. Without this the date reads as a broken
                                          freshness column. No explicit Style here on purpose (#2181/#2331): DarkButton and friends
@@ -1105,7 +1115,7 @@
                                     <DataGridTextColumn Header="Monitoring" Binding="{Binding MonitoringStatus}" Width="120"/>
                                     <DataGridTextColumn Header="Monthly ($)" Binding="{Binding MonthlyCost, StringFormat=N0}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Annual ($)" Binding="{Binding AnnualCost, StringFormat=N0}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Health" Binding="{Binding HealthScore, TargetNullValue='-'}" Width="60">
+                                    <DataGridTextColumn Header="Health" Binding="{Binding HealthDisplay}" SortMemberPath="HealthScore" Width="Auto" MinWidth="60">
                                         <DataGridTextColumn.ElementStyle>
                                             <Style TargetType="TextBlock">
                                                 <Setter Property="HorizontalAlignment" Value="Center"/><Setter Property="FontWeight" Value="Bold"/>
@@ -1172,10 +1182,10 @@
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
 
-                            <TextBlock Grid.Row="0" Text="Reclaimable Space (overall + per database)" FontWeight="SemiBold" FontSize="12" Margin="0,0,0,4" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <TextBlock x:Name="FinOpsIndexAnalysisRollupTitle" Visibility="Collapsed" Grid.Row="0" Text="Reclaimable Space (overall + per database)" FontWeight="SemiBold" FontSize="12" Margin="0,0,0,4" Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
-                            <!-- Both grids hide their horizontal scroll bar while they hold no rows; a read with rows turns it back on (IndexAnalysisGridsHoldRows). -->
-                            <DataGrid x:Name="FinOpsIndexAnalysisRollupGrid" Grid.Row="1" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" MaxHeight="220" HorizontalScrollBarVisibility="Hidden" AutoGenerateColumns="False" IsReadOnly="True">
+                            <!-- Both grids and their two section titles stay collapsed until a read returns rows (IndexAnalysisGridsHoldRows), so the page shows one empty-state message and never a bare grid. A read with rows turns the horizontal scroll bar on. -->
+                            <DataGrid x:Name="FinOpsIndexAnalysisRollupGrid" Grid.Row="1" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" MaxHeight="220" HorizontalScrollBarVisibility="Hidden" Visibility="Collapsed" AutoGenerateColumns="False" IsReadOnly="True">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding Scope}" Width="180"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Scope" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <!-- #7701: next to the database name. When this database's newest snapshot was collected; blank on the overall row, which spans databases. -->
@@ -1184,17 +1194,17 @@
                                     <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="230"/>
                                     <DataGridTextColumn Header="Tables" Binding="{Binding TablesAnalyzed, StringFormat=N0}" Width="Auto" MinWidth="70" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Indexes" Binding="{Binding IndexCount, StringFormat=N0}" Width="Auto" MinWidth="75" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Size GB" Binding="{Binding TotalSizeGb, StringFormat=#\,##0.00####}" Width="Auto" MinWidth="80" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Size GB" Binding="{Binding TotalSizeGb, StringFormat=#\,##0.00}" Width="Auto" MinWidth="80" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Rows" Binding="{Binding TotalRows, StringFormat=N0}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="To Disable" Binding="{Binding IndexesToDisable, StringFormat=N0}" Width="Auto" MinWidth="80" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="To Merge" Binding="{Binding IndexesToMerge, StringFormat=N0}" Width="Auto" MinWidth="80" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Compressible" Binding="{Binding CompressableIndexes, StringFormat=N0}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Unused" Binding="{Binding UnusedIndexes, StringFormat=N0}" Width="Auto" MinWidth="70" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Disable GB" Binding="{Binding UnusedSizeGb, StringFormat=#\,##0.00####}" Width="Auto" MinWidth="90" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Compress Min GB" Binding="{Binding CompressionMinSavingsGb, StringFormat=#\,##0.00####}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Compress Max GB" Binding="{Binding CompressionMaxSavingsGb, StringFormat=#\,##0.00####}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Total Min GB" Binding="{Binding TotalMinSavingsGb, StringFormat=#\,##0.00####}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Total Max GB" Binding="{Binding TotalMaxSavingsGb, StringFormat=#\,##0.00####}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Disable GB" Binding="{Binding UnusedSizeGb, StringFormat=#\,##0.00}" Width="Auto" MinWidth="90" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Compress Min GB" Binding="{Binding CompressionMinSavingsGb, StringFormat=#\,##0.00}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Compress Max GB" Binding="{Binding CompressionMaxSavingsGb, StringFormat=#\,##0.00}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Total Min GB" Binding="{Binding TotalMinSavingsGb, StringFormat=#\,##0.00}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Total Max GB" Binding="{Binding TotalMaxSavingsGb, StringFormat=#\,##0.00}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
                                     <!-- Workload-impact columns (sp_IndexCleanup #index_reporting_stats parity): pre-formatted strings,
                                          'N/A' on the overall row; numeric SortMemberPath keys keep sorting correct. Reads shows the
                                          seeks/scans/lookups breakdown (left-aligned text, like Lite). -->
@@ -1209,11 +1219,11 @@
                                 </DataGrid.Columns>
                             </DataGrid>
 
-                            <TextBlock Grid.Row="2" Text="Recommendations" FontWeight="SemiBold" FontSize="12" Margin="0,8,0,4" Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <TextBlock x:Name="FinOpsIndexAnalysisDetailTitle" Visibility="Collapsed" Grid.Row="2" Text="Recommendations" FontWeight="SemiBold" FontSize="12" Margin="0,8,0,4" Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
                             <!-- MinHeight is the #2300 backstop: even if the rows above grow again, this grid keeps enough
                                  viewport to prove it has data — a grid that CAN show rows beats one that fits the window. -->
-                            <DataGrid x:Name="FinOpsIndexAnalysisDetailGrid" Grid.Row="3" MinHeight="120" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" HorizontalScrollBarVisibility="Hidden" AutoGenerateColumns="False" IsReadOnly="True">
+                            <DataGrid x:Name="FinOpsIndexAnalysisDetailGrid" Grid.Row="3" MinHeight="120" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" HorizontalScrollBarVisibility="Hidden" Visibility="Collapsed" AutoGenerateColumns="False" IsReadOnly="True">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding ActionDisplay}" Width="110"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ActionDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Action" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding ResultKindDisplay}" Width="110"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ResultKindDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Result Kind" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
@@ -1222,7 +1232,7 @@
                                     <DataGridTextColumn Binding="{Binding SchemaName}" Width="90"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SchemaName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Schema" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding TableName}" Width="170"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TableName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Table" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding IndexName}" Width="200"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IndexName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Index" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                    <DataGridTextColumn Header="Size GB" Binding="{Binding IndexSizeGb, StringFormat=#\,##0.00####}" Width="Auto" MinWidth="80" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Size GB" Binding="{Binding IndexSizeGb, StringFormat=#\,##0.00}" Width="Auto" MinWidth="80" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Rows" Binding="{Binding IndexRows, StringFormat=N0}" Width="Auto" MinWidth="100" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Reads" Binding="{Binding IndexReads, StringFormat=N0}" Width="Auto" MinWidth="90" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Writes" Binding="{Binding IndexWrites, StringFormat=N0}" Width="Auto" MinWidth="90" ElementStyle="{StaticResource NumericCell}"/>
@@ -1243,8 +1253,8 @@
                                 </DataGrid.Columns>
                             </DataGrid>
 
-                            <!-- One sentence for the whole analysis, in the lower grid; the rollup grid above keeps only its header. -->
-                            <TextBlock x:Name="FinOpsIndexAnalysisNoDataMessage" Grid.Row="3" Style="{StaticResource EmptyHint}" Text="No analyzable index statistics collected yet for this server."/>
+                            <!-- One sentence for the whole analysis. It spans all four rows: with both grids and both titles collapsed it is the whole page, so it starts visible (an EmptyHint is collapsed by default) and a read with rows hides it. -->
+                            <TextBlock x:Name="FinOpsIndexAnalysisNoDataMessage" Grid.Row="0" Grid.RowSpan="4" Style="{StaticResource EmptyHint}" Visibility="Visible" Text="No analyzable index statistics collected yet for this server."/>
                         </Grid>
                     </Grid>
                 </TabItem>
@@ -1329,7 +1339,7 @@
                                 </DataGrid.Columns>
                             </DataGrid>
 
-                            <TextBlock x:Name="FinOpsRecommendationsNoDataMessage" Style="{StaticResource EmptyHint}" Text="No recommendations — nothing needs attention, or not enough has been collected yet."/>
+                            <TextBlock x:Name="FinOpsRecommendationsNoDataMessage" Style="{StaticResource EmptyHint}" Text="No recommendations: nothing needs attention, or not enough has been collected yet."/>
                         </Grid>
                     </Grid>
                 </TabItem>

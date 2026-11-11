@@ -56,13 +56,15 @@ public sealed class DarlingMcpObjectStatsTools
     /// </summary>
     private const int ObjectLockingTop = 75;
 
-    [McpServerTool(Name = "get_table_index_sizes"), Description("Gets the 100 largest tables with per-table size, growth (7d/30d/daily rate), and row counts from the latest daily snapshot. Indexes are rolled up per table. Use to find storage hot-spots and fast-growing tables for capacity planning. Growth is measured only over history the store actually holds: each baseline is the snapshot nearest 7 or 30 days ago within a day, named in the history block (baseline_7d_snapshot / baseline_30d_snapshot, null when none lies that near) with the days of snapshots held and whether each is reachable; growth_7d_mb / growth_30d_mb / growth_pct_30d are null (with the reason in growth_note) when no snapshot lies within a day of the mark or its span to the latest snapshot is not 6 to 8 or 29 to 31 days, never re-labelled from another, and growth_over_available_history_* always spans exactly growth_window_days. A table absent from a baseline snapshot (created since) reports null growth for that window, not 0. tables_returned and truncated bound the page.")]
+    [McpServerTool(Name = "get_table_index_sizes"), Description("Gets the 100 largest tables with per-table size, growth (7d/30d/daily rate), and row counts from the latest daily snapshot. Indexes are rolled up per table. Use to find storage hot-spots and fast-growing tables for capacity planning. Growth is measured only over history the store actually holds: each baseline is the snapshot nearest 7 or 30 days ago within a day, named in the history block (baseline_7d_snapshot / baseline_30d_snapshot, null when none lies that near) with the days of snapshots held and whether each is reachable; growth_7d_mb / growth_30d_mb / growth_pct_30d are null (with the reason in growth_note) when no snapshot lies within a day of the mark or its span to the latest snapshot is not 6 to 8 or 29 to 31 days, never re-labelled from another, and growth_over_available_history_* always spans exactly growth_window_days. A table absent from a baseline snapshot (created since) reports null growth for that window, not 0. tables_returned and truncated bound the page: truncated is true when more tables follow it, and next_offset is then the offset that reads on. The page is also held to the 32,768-byte response budget, whole tables only: budget_truncated = true says tables were left off the end for the budget, and budget_note says how many of how many fit.")]
     public static Task<string> GetTableIndexSizes(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
+        /* database_name stays the last parameter on both products (#5244), so offset sits before it. */
+        [Description("Tables to skip, largest first (a page start). Default 0; use next_offset when truncated is true.")] int offset = 0,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         CancellationToken cancellationToken = default) =>
-        GetTableIndexSizes(postgres, server_name, DatabaseFilter.One(database_name), cancellationToken);
+        GetTableIndexSizes(postgres, server_name, DatabaseFilter.One(database_name), offset, McpResponseBudget.DefaultBytes, cancellationToken);
 
     /// <summary>
     /// #5244: get_table_index_sizes over a SET of databases (<see cref="DatabaseFilter.All"/> = every database). The page is
@@ -73,19 +75,39 @@ public sealed class DarlingMcpObjectStatsTools
     /// <c>empty</c> ("for the database 'X'" or "for the chosen databases", with the server's other rows counted) and never
     /// <c>unavailable</c>, which stays "this server has no index stats at all". The read has no truncation sentence. Every answer
     /// shape carries the <c>database_name</c> echo (the name, "the chosen databases", or null for every database).</para>
+    /// <para>This form names no offset and no response budget: the web route's page, the first
+    /// <see cref="TableSizesTop"/> tables whole.</para>
+    /// </summary>
+    internal static Task<string> GetTableIndexSizes(
+        NpgsqlDataSource postgres, string? server_name, DatabaseFilter databases, CancellationToken cancellationToken = default) =>
+        GetTableIndexSizes(postgres, server_name, databases, offset: 0, responseByteBudget: null, cancellationToken);
+
+    /// <summary>
+    /// #8655: get_table_index_sizes' page. It starts <paramref name="offset"/> tables into the largest-first list, and under
+    /// a <paramref name="responseByteBudget"/> it ends at the last whole table that fits it. <c>truncated</c> is true when
+    /// more tables follow the page, for the <see cref="TableSizesTop"/> cap or the budget, and <c>next_offset</c> then reads
+    /// on from the first one left out. The MCP tool passes <see cref="McpResponseBudget.DefaultBytes"/>; a caller that names
+    /// no budget keeps the page exactly.
     /// </summary>
     internal static async Task<string> GetTableIndexSizes(
-        NpgsqlDataSource postgres, string? server_name, DatabaseFilter databases, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, string? server_name, DatabaseFilter databases, int offset, int? responseByteBudget,
+        CancellationToken cancellationToken = default)
     {
+        if (offset < 0 || offset > DarlingMcpPgServerStateTools.MaxPageOffset)
+        {
+            return McpHelpers.Refusal("offset", $"Invalid offset value '{offset}'. Must be 0-{DarlingMcpPgServerStateTools.MaxPageOffset}.");
+        }
+
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
             var now = DateTime.UtcNow;
-            /* Over-fetch by one so truncation is observed, not inferred from a full page (#3541 A3's rule). */
+            /* Over-fetch by one so truncation is observed, not inferred from a full page (#3541 A3's rule). The read is
+               largest first with a full tie-break, so the tables before the offset are the ones earlier pages listed. */
             var rows = await DarlingObjectStatsReader.GetObjectSizeGrowthAsync(
-                postgres, resolved.ServerId, now.AddDays(-7), now.AddDays(-30), TableSizesTop + 1, databases, cancellationToken);
+                postgres, resolved.ServerId, now.AddDays(-7), now.AddDays(-30), offset + TableSizesTop + 1, databases, cancellationToken);
             if (rows.Count == 0)
             {
                 /* #5244: a filter that matches no table is a different answer from a server that collects no index stats.
@@ -113,6 +135,15 @@ public sealed class DarlingMcpObjectStatsTools
                     ?? McpHelpers.StatusForDatabase("unavailable", "No object size data available. Index/object stats are collected daily.", databases.Describe());
             }
 
+            if (offset >= rows.Count)
+            {
+                return McpHelpers.StatusForDatabase(
+                    "empty", $"offset {offset} is past the {CountText.Plural(rows.Count, "table")} this read lists.", databases.Describe());
+            }
+
+            /* The tables from the offset on: the page starts at the first of them. */
+            rows = rows.Skip(offset).ToList();
+
             var truncated = rows.Count > TableSizesTop;
             var page = rows.Take(TableSizesTop).ToList();
 
@@ -126,26 +157,30 @@ public sealed class DarlingMcpObjectStatsTools
                 database_name = r.DatabaseName,
                 schema_name = r.SchemaName,
                 table_name = r.TableName,
-                reserved_mb = r.CurrentReservedMb,
-                used_mb = r.CurrentUsedMb,
+                /* #8572: every size and growth figure is rounded here, where the reply is built, to the two places growth_7d_mb has always
+                   carried. A difference of two stored doubles is 48.06999999999999 otherwise. */
+                reserved_mb = McpHelpers.RoundTo(r.CurrentReservedMb, 2),
+                used_mb = McpHelpers.RoundTo(r.CurrentUsedMb, 2),
                 total_rows = r.TotalRows,
                 index_count = r.IndexCount,
                 /* Each nominal-window figure comes from exactly the baseline it names, or is null (#3541
                    A12). The SQL this replaced folded a missing 30-day baseline onto the 7-day one and a
                    missing 7-day one onto the oldest, and labelled the result with the window asked for. */
-                growth_7d_mb = r.Growth7dMb,
-                growth_30d_mb = r.Growth30dMb,
-                growth_pct_30d = r.GrowthPct30d,
+                growth_7d_mb = McpHelpers.RoundTo(r.Growth7dMb, 2),
+                growth_30d_mb = McpHelpers.RoundTo(r.Growth30dMb, 2),
+                growth_pct_30d = McpHelpers.RoundTo(r.GrowthPct30d, 2),
                 /* The figure that is always honest: growth from the store's earliest snapshot of this table
                    to its latest, over exactly growth_window_days. Null only when there is no span at all. */
-                growth_over_available_history_mb = r.GrowthOverAvailableHistoryMb,
-                growth_over_available_history_pct = r.GrowthOverAvailableHistoryPct,
+                growth_over_available_history_mb = McpHelpers.RoundTo(r.GrowthOverAvailableHistoryMb, 2),
+                growth_over_available_history_pct = McpHelpers.RoundTo(r.GrowthOverAvailableHistoryPct, 2),
                 growth_window_days = r.DaysOfData,
-                daily_growth_rate_mb = r.DailyGrowthRateMb,
+                daily_growth_rate_mb = McpHelpers.RoundTo(r.DailyGrowthRateMb, 2),
                 growth_note = GrowthNote(r),
-            });
+            }).ToList();
 
-            return JsonSerializer.Serialize(new
+            /* #8655: the first `kept` tables of the page. Under a response budget that is as many whole tables as fit it,
+               so the count, both flags and next_offset are worked out from the tables the answer really lists. */
+            string Reply(int kept) => JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 database_name = databases.Describe(),
@@ -163,10 +198,19 @@ public sealed class DarlingMcpObjectStatsTools
                     covers_30d = covers30d,
                     note = HistoryNote(span),
                 },
-                tables_returned = page.Count,
-                truncated,
-                tables = result
+                offset,
+                tables_returned = kept,
+                truncated = truncated || kept < page.Count,
+                budget_truncated = kept < page.Count,
+                budget_note = kept < page.Count
+                    ? McpResponseBudget.PageCutNote(page.Count, kept, "largest first", "tables",
+                        $"Call again with offset {offset + kept} for the next page, or narrow the tables with database_name.")
+                    : null,
+                next_offset = truncated || kept < page.Count ? offset + kept : (int?)null,
+                tables = result.Take(kept)
             }, McpHelpers.JsonOptions);
+
+            return responseByteBudget is int budget ? McpResponseBudget.FitPrefix(page.Count, Reply, budget).Json : Reply(page.Count);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -742,8 +786,10 @@ public sealed class DarlingMcpObjectStatsTools
                     /* A file with no allocated size (the Hyperscale log file, in the log service) adds nothing,
                        so a Hyperscale database's total is its data file alone, and used sums over the same files.
                        Used is null when none of those files has a used size: that is unknown, not 0 MB. */
-                    ["total_size_mb"] = g.Sum(r => r.TotalSizeMb ?? 0),
-                    ["used_size_mb"] = UsedSizeTotalMb(g)
+                    /* #8572: summed doubles carry float noise (985829.2999999999), so the totals are rounded to the two places a megabyte
+                       figure carries elsewhere. */
+                    ["total_size_mb"] = Math.Round(g.Sum(r => r.TotalSizeMb ?? 0), 2),
+                    ["used_size_mb"] = McpHelpers.RoundTo(UsedSizeTotalMb(g), 2)
                 };
                 if (g.Any(r => r.IsAzureSiblingRow))
                     database[AzureSiblingDatabaseSize.RowNoteKey] = AzureSiblingDatabaseSize.LogNote;
@@ -797,8 +843,8 @@ public sealed class DarlingMcpObjectStatsTools
         {
             ["file_name"] = r.FileName,
             ["file_type"] = r.FileTypeDesc,
-            ["total_size_mb"] = r.TotalSizeMb,
-            ["used_size_mb"] = r.UsedSizeMb
+            ["total_size_mb"] = McpHelpers.RoundTo(r.TotalSizeMb, 2),
+            ["used_size_mb"] = McpHelpers.RoundTo(r.UsedSizeMb, 2)
         };
         if (r.IsAzureSiblingRow)
             file[AzureSiblingDatabaseSize.RowNoteKey] = AzureSiblingDatabaseSize.LogNote;

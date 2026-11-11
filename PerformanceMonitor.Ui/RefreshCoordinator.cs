@@ -20,6 +20,13 @@ internal enum RefreshScope
 
     /// <summary>The visible tab's read plus the chrome around it: server clock, alert badge, status line.</summary>
     Full = 2,
+
+    /// <summary>
+    /// #8647: a <see cref="Full"/> pass without its visible-tab read: the chrome around the tab (server clock, range picker, alert
+    /// badge, status line). Only the coordinator asks for it, as the second half of a <see cref="Full"/> replay it split so the
+    /// tab the user just picked is read first. Callers never request it.
+    /// </summary>
+    Surround = 3,
 }
 
 /// <summary>
@@ -35,6 +42,14 @@ internal enum RefreshScope
 /// stage boundary instead of painting a result nobody wants, and the remembered request runs once the pass returns.
 /// A pass reads the UI's selection and window at its own start, so the replay always loads whatever is selected
 /// when it begins, not what was selected when the request was made.</para>
+///
+/// <para><b>The picked tab goes first (#8647).</b> A tab or sub-tab switch that arrives while a pass runs used to replay the
+/// widest scope (<see cref="RefreshScope.Full"/>): clock, range picker, the tab, badges. On a newly opened tab, whose first pass
+/// is still reading, the tab the user had just picked was read only after all of that restarted, and stayed empty meanwhile. A
+/// replay that holds a switch is now run as two passes in the same loop: the <see cref="RefreshScope.VisibleTab"/> read first,
+/// then <see cref="RefreshScope.Surround"/> (the rest of the Full scope). The cancel and latest-wins rules are the same: a
+/// request that arrives during either half cancels it, and the chrome the first half owed is not lost, it is merged into the
+/// next replay. Nothing runs beside anything: still one pass at a time.</para>
 ///
 /// <para><b>A poll does not queue.</b> <see cref="PollAsync"/> is the timer tick: when a pass is already running or
 /// remembered the data is being refreshed now, so the tick starts nothing and leaves nothing behind. (A user gesture
@@ -54,6 +69,8 @@ internal sealed class RefreshCoordinator
 
     private bool _running;
     private RefreshScope? _pending;
+    private bool _pendingHasSwitch;
+    private bool _currentOwesSurround;
     private CancellationTokenSource? _current;
     private RefreshScope _currentScope;
     private TaskCompletionSource? _drained;
@@ -87,7 +104,11 @@ internal sealed class RefreshCoordinator
             return RunAsync(scope);
         }
 
-        _pending = Widest(Widest(_pending, scope), _currentScope);
+        /* The pass being cancelled still owes its scope: a chrome half owes the chrome, and a tab half that was split off a
+           Full replay owes the chrome that was to follow it, so both are carried as Full. */
+        var owed = _currentScope == RefreshScope.Surround || _currentOwesSurround ? RefreshScope.Full : _currentScope;
+        _pending = Widest(Widest(_pending, scope), owed);
+        _pendingHasSwitch |= scope == RefreshScope.VisibleTab;
         _current?.Cancel();
         return _drained!.Task;
     }
@@ -105,6 +126,7 @@ internal sealed class RefreshCoordinator
         _running = true;
         _drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var scope = first;
+        var owesSurround = false;
         try
         {
             while (true)
@@ -112,7 +134,9 @@ internal sealed class RefreshCoordinator
                 using var cts = new CancellationTokenSource();
                 _current = cts;
                 _currentScope = scope;
+                _currentOwesSurround = owesSurround;
                 _pending = null;
+                _pendingHasSwitch = false;
 
                 try
                 {
@@ -135,18 +159,34 @@ internal sealed class RefreshCoordinator
                 }
 
                 _current = null;
-                if (_pending is not { } next)
+                if (_pending is { } next)
+                {
+                    scope = next;
+                    owesSurround = false;
+                    if (next == RefreshScope.Full && _pendingHasSwitch)
+                    {
+                        /* #8647: a switch is waiting inside this replay: read the picked tab first, the rest of the Full scope after. */
+                        scope = RefreshScope.VisibleTab;
+                        owesSurround = true;
+                    }
+                }
+                else if (owesSurround)
+                {
+                    scope = RefreshScope.Surround;
+                    owesSurround = false;
+                }
+                else
                 {
                     break;
                 }
-
-                scope = next;
             }
         }
         finally
         {
             _current = null;
             _pending = null;
+            _pendingHasSwitch = false;
+            _currentOwesSurround = false;
             _running = false;
             _drained.TrySetResult();
         }

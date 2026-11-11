@@ -53,6 +53,9 @@ public static class EmptyState
     /// </summary>
     public static void Show(FrameworkElement surface, bool isEmpty, string? text = null, bool clearOfBaseline = false)
     {
+        /* #8647: a read came back, so the sentence that held the place until it did is done, whichever answer the read gave. */
+        ShowLoading(surface, false);
+
         var anchor = Anchor(surface);
         if (anchor.Parent is not Grid parent)
         {
@@ -97,6 +100,102 @@ public static class EmptyState
 
         existing.Text = text ?? GetText(surface) ?? DefaultGridText;
         existing.Visibility = isEmpty ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>What a surface says between the moment its tab is picked and the moment its first read returns (#8647).</summary>
+    public const string LoadingText = "Loading...";
+
+    /// <summary>The name given to the loading element this class makes, so it is found again and never doubled.</summary>
+    public const string LoadingElementName = "LoadingText";
+
+    /// <summary>
+    /// #8647: shows <see cref="LoadingText"/> over <paramref name="surface"/> when <paramref name="loading"/>, hides it otherwise.
+    /// The text sits where <see cref="Show"/>'s sentence sits and wears the same muted look, so the empty-state sentence replaces it
+    /// in place once a read returns no rows. Nothing happens when the surface has no Grid cell to put it in.
+    /// </summary>
+    public static void ShowLoading(FrameworkElement surface, bool loading)
+    {
+        var anchor = Anchor(surface);
+        if (anchor.Parent is not Grid parent)
+        {
+            return;
+        }
+
+        var name = LoadingElementName + "_" + SurfaceKey(surface);
+        var existing = parent.Children.OfType<TextBlock>().FirstOrDefault(t => t.Name == name);
+
+        if (existing is null)
+        {
+            if (!loading)
+            {
+                return;
+            }
+
+            existing = new TextBlock
+            {
+                Name = name,
+                Text = LoadingText,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = TextAlignment.Center,
+                TextWrapping = TextWrapping.Wrap,
+                IsHitTestVisible = false,
+            };
+            existing.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundMutedBrush");
+            Grid.SetRow(existing, Grid.GetRow(anchor));
+            Grid.SetColumn(existing, Grid.GetColumn(anchor));
+            Grid.SetRowSpan(existing, Grid.GetRowSpan(anchor));
+            Grid.SetColumnSpan(existing, Grid.GetColumnSpan(anchor));
+            Panel.SetZIndex(existing, 5);
+            parent.Children.Add(existing);
+        }
+
+        existing.Visibility = loading ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>True when <see cref="ShowLoading"/> has ever put its text on <paramref name="surface"/>, shown or since hidden.</summary>
+    public static bool HasLoadingText(FrameworkElement surface)
+        => Anchor(surface).Parent is Grid parent
+            && parent.Children.OfType<TextBlock>().Any(t => t.Name == LoadingElementName + "_" + SurfaceKey(surface));
+
+    /// <summary>True while <see cref="LoadingText"/> is on screen over <paramref name="surface"/>.</summary>
+    public static bool IsShowingLoading(FrameworkElement surface)
+        => Anchor(surface).Parent is Grid parent
+            && parent.Children.OfType<TextBlock>().Any(t => t.Name == LoadingElementName + "_" + SurfaceKey(surface) && t.Visibility == Visibility.Visible);
+
+    /// <summary>
+    /// #8647: puts <see cref="LoadingText"/> over a grid nobody has given rows to yet (its <see cref="ItemsControl.ItemsSource"/> is
+    /// null) and takes it away the moment a read assigns one, rows or none: the empty-state sentence or the rows then take its place.
+    /// Done once per grid: a grid that already carries the text, shown or hidden, is left alone, so a tab picked again never
+    /// says "Loading..." over rows it already holds. Returns true when it put the text up.
+    /// </summary>
+    public static bool ShowLoadingUntilRead(DataGrid grid)
+    {
+        if (grid.ItemsSource is not null || HasLoadingText(grid))
+        {
+            return false;
+        }
+
+        ShowLoading(grid, true);
+        if (!HasLoadingText(grid))
+        {
+            return false;
+        }
+
+        var descriptor = System.ComponentModel.DependencyPropertyDescriptor.FromProperty(ItemsControl.ItemsSourceProperty, typeof(DataGrid));
+        EventHandler? handler = null;
+        handler = (_, _) =>
+        {
+            if (grid.ItemsSource is null)
+            {
+                return;
+            }
+
+            descriptor.RemoveValueChanged(grid, handler!);
+            ShowLoading(grid, false);
+        };
+        descriptor.AddValueChanged(grid, handler);
+        return true;
     }
 
     /// <summary>The name given to the filtered-out element, so it is found again and never doubled.</summary>

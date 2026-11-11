@@ -440,7 +440,7 @@ public sealed class McpZeroIsAMeasurementTests
         foreach (var file in new[] { DarlingMcp + "/DarlingMcpObjectStatsTools.cs", LiteMcp + "/McpObjectStatsTools.cs" })
         {
             var body = Strip(ToolBody(ReadRepoFile(file.Split('/')), "get_table_index_sizes"));
-            foreach (var key in new[] { "history_days_available", "covers_7d", "covers_30d", "growth_over_available_history_mb", "growth_over_available_history_pct", "growth_window_days", "growth_note = GrowthNote(r)", "tables_returned = page.Count", "truncated," })
+            foreach (var key in new[] { "history_days_available", "covers_7d", "covers_30d", "growth_over_available_history_mb", "growth_over_available_history_pct", "growth_window_days", "growth_note = GrowthNote(r)", "tables_returned = kept", "truncated = truncated || kept < page.Count," })
             {
                 Assert.Contains(key, body, StringComparison.Ordinal);
             }
