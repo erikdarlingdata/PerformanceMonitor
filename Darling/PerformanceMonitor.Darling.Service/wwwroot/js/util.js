@@ -1691,7 +1691,9 @@ function grantGateSlot(heavy) {
 
 /* Resolves true when a slot is this request's, in the order asked, or false if `signal` aborted while it waited. */
 function takeGateSlot(signal, heavy) {
-  if (gateWaiting.length === 0 && canTakeGateSlot(heavy)) {
+  /* A read that can take a slot now goes at once unless a waiter ahead of it could take one too: waiters held back only by the heavy cap
+     (#8681: four heavy reads asked first leave two waiting) do not hold back a read with a free slot and room under its own cap. */
+  if (canTakeGateSlot(heavy) && !gateWaiting.some((w) => canTakeGateSlot(w.heavy))) {
     grantGateSlot(heavy);
     return Promise.resolve(true);
   }
