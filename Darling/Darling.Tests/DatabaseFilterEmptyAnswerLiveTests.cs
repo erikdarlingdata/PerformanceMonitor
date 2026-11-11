@@ -68,6 +68,11 @@ public sealed class DatabaseFilterEmptyAnswerLiveTests
     public Task LongQueryEmpty_UnderAFilter_KeepsTheOptInSentence_WhenTheStoreHoldsNoLongQueryRows() =>
         DurationTrendDatabaseFilterLiveTests.WithSharedStoreAsync("a5244r2-lq-off", async (connection, postgres, serverId, serverName, now, ct) =>
         {
+            /* #8571: a collector that never ran is not_collected, so this store records one old run (outside the window) that found nothing. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, rows_collected) VALUES ($1, $2, $3, 'long_query_completions', $4, 'SUCCESS', 0)",
+                CollectionIdGenerator.Next(), serverId, serverName, DarlingMcpTestData.Naive(now.AddDays(-3)));
+
             var filtered = await DarlingMcpLongQueryTools.GetLongQueryCompletions(
                 postgres, serverName, 24, 10, null, DatabaseFilter.Of(new[] { "DbA", "DbB" }), null, ct);
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(filtered));

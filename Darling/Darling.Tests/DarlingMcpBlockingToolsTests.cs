@@ -787,7 +787,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
     private static async Task DeleteEventServerAsync(NpgsqlConnection connection, string name, System.Threading.CancellationToken ct)
     {
         var serverId = ServerIdHelper.GetDeterministicHashCode(name);
-        foreach (var table in new[] { "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks", "long_query_completions", "servers" })
+        foreach (var table in new[] { "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks", "long_query_completions", "collection_log", "servers" })
         {
             await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM {table} WHERE server_id = $1", serverId);
         }
@@ -901,6 +901,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
         {
             var added = end.AddDays(-2);
             await SeedEventServerAsync(connection, tool, name, added, null, ct);
+            if (tool.Name == "get_long_query_completions")
+            {
+                /* #8571: a long-query collector that never ran is not_collected; this server's collector ran once and stored nothing. */
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, rows_collected) VALUES ($1, $2, $3, 'long_query_completions', $4, 'SUCCESS', 0)",
+                    PerformanceMonitor.Collectors.CollectionIdGenerator.Next(), ServerIdHelper.GetDeterministicHashCode(name), name, DarlingMcpTestData.Naive(end.AddDays(-30)));
+            }
 
             var root = ParseEvent(await CallEventAsync(postgres, tool, name, 1, end.AddDays(-5)));
 

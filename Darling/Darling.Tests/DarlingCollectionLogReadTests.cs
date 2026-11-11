@@ -176,6 +176,63 @@ public sealed class DarlingCollectionLogReadTests
     }
 
     /// <summary>
+    /// #8571 item 1: a page cut by the row limit named its own size in runs_total ("truncated: true" beside "runs_total: 58" when 58 was
+    /// the limit), so a caller could not tell 58 matching runs from 58,000. runs_total is now the count of the runs that matched the
+    /// filters in the window, beside runs_returned, and equals it when nothing was cut.
+    /// </summary>
+    [Fact]
+    public async Task RunsTotal_IsTheMatchedCount_NotThePageSize_WhenTheLimitCutsThePage_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live collection-log read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            for (var i = 1; i <= 3; i++)
+            {
+                await SeedAsync(connection, ct, "query_store", DateTime.UtcNow.AddMinutes(-10 * i));
+            }
+
+            for (var i = 1; i <= 2; i++)
+            {
+                await SeedAsync(connection, ct, "deadlocks", DateTime.UtcNow.AddMinutes(-5 * i));
+            }
+
+            var cut = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionLog(dataSource, ServerName, 24, 2)).RootElement;
+            Assert.True(cut.GetProperty("truncated").GetBoolean());
+            Assert.Equal(2, cut.GetProperty("runs_returned").GetInt32());
+            Assert.Equal(5, cut.GetProperty("runs_total").GetInt32());
+
+            var filtered = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionLog(dataSource, ServerName, 24, 1, collector_name: "query_store")).RootElement;
+            Assert.True(filtered.GetProperty("truncated").GetBoolean());
+            Assert.Equal(1, filtered.GetProperty("runs_returned").GetInt32());
+            Assert.Equal(3, filtered.GetProperty("runs_total").GetInt32());
+
+            var whole = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionLog(dataSource, ServerName, 24, 200)).RootElement;
+            Assert.False(whole.GetProperty("truncated").GetBoolean());
+            Assert.Equal(5, whole.GetProperty("runs_returned").GetInt32());
+            Assert.Equal(5, whole.GetProperty("runs_total").GetInt32());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
     /// #3287's four additions, against a live store because every one of them is a property of the SQL: two
     /// filters applied BEFORE the cap, the ordering the duration filter implies, and the span the read
     /// actually reached.
