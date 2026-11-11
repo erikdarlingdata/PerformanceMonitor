@@ -130,7 +130,8 @@ public sealed class McpAlertSettingsKeyTests
         var poison = Settings().GetProperty("poison_wait");
         Assert.Contains("threshold_ms", KeysOf(poison));
         Assert.Equal(McpAlertTools.PoisonWaitThresholdMsNote, poison.GetProperty("threshold_ms_note").GetString());
-        Assert.StartsWith("retired by #3593", McpAlertTools.PoisonWaitThresholdMsNote, StringComparison.Ordinal);
+        /* #8572: the reply names no tracker number. */
+        Assert.DoesNotMatch(@"#\d", McpAlertTools.PoisonWaitThresholdMsNote);
 
         var darlingTools = File.ReadAllText(FindRepoFile(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs")));

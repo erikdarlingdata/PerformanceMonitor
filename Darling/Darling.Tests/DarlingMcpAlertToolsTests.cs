@@ -513,7 +513,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         var poison = payload["poison_wait"]!;
         Assert.Equal(1000, poison["threshold_ms"]!.GetValue<int>());
         Assert.Equal(DarlingMcpAlertTools.PoisonWaitThresholdMsNote, poison["threshold_ms_note"]!.GetValue<string>());
-        Assert.StartsWith("retired by #3593", DarlingMcpAlertTools.PoisonWaitThresholdMsNote, StringComparison.Ordinal);
+        /* #8572: the reply names no tracker number. */
+        Assert.DoesNotMatch(@"#\d", DarlingMcpAlertTools.PoisonWaitThresholdMsNote);
 
         /* Setting the value: stored under its old bounds, named in the targets, and warned about. */
         var (targets, error, warnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(

@@ -452,6 +452,21 @@ public class DarlingPgSessionStatesReaderTests
     }
 
     /// <summary>
+    /// #8572: the brief-holder sentence says "1 transaction's row versions" for an age of one and "5 transactions' row versions" for
+    /// any other, not "1 transactions'".
+    /// </summary>
+    [Theory]
+    [InlineData(1, "at most 1 transaction's row versions")]
+    [InlineData(5, "at most 5 transactions' row versions")]
+    public void ABriefHolder_SaysItsAgeInTheRightNumber(long age, string expected)
+    {
+        var finding = DarlingMcpPgSessionStatesTools.HorizonFinding(
+            Row(sampleCount: 10, horizonHolderSamples: 9, idleInTransactionSamples: 10, peakHorizonAge: age));
+
+        Assert.Contains(expected, finding, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// One sighting in ten is NOT a finding. Every write transaction is briefly the oldest holder — that is
     /// what a transaction is — so a tool that reported every one of them as pinning the horizon would raise
     /// an alarm on ordinary traffic and be ignored within a day.

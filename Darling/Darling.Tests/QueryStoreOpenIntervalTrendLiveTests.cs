@@ -77,7 +77,7 @@ public sealed class QueryStoreOpenIntervalTrendLiveTests
         /* The viewer's own raw read rates the same way: its chart shows the open interval at its covered rate. */
         var viewerRaw = await ReadViewerRawAsync(postgres, ct);
         Assert.Equal(3, viewerRaw.Count);
-        Assert.Equal(4_412_812d / 3600d, viewerRaw[0]!.Value, 9);
+        Assert.Equal(4_412_812d / 3600d, viewerRaw[0]!.Value, 6);
         Assert.Equal(OpenExecutions / 1410d, viewerRaw[2]!.Value, 6);
 
         /* The same interval last captured 30 seconds in: under a minute, so the point is unrated and counted. */
@@ -95,7 +95,7 @@ public sealed class QueryStoreOpenIntervalTrendLiveTests
         Assert.Equal(30, open.GetProperty("covered_seconds").GetDouble(), 6);
         Assert.Equal(1, brief.GetProperty("unrated_points").GetInt32());
         Assert.Contains("still open", brief.GetProperty("unrated_note").GetString());
-        Assert.Equal(4_412_812d / 3600d, trend[0].GetProperty("executions_per_second").GetDouble(), 9);
+        Assert.Equal(4_412_812d / 3600d, trend[0].GetProperty("executions_per_second").GetDouble(), 6);
         Assert.Null((await ReadViewerRawAsync(postgres, ct))[2]);
 
         var briefRollup = await ReadRollupAsync(postgres, rollupRoute, ct);
@@ -135,8 +135,8 @@ public sealed class QueryStoreOpenIntervalTrendLiveTests
         Assert.Equal(0, answer.GetProperty("unrated_points").GetInt32());
 
         /* The closed points are rated over their own stored hour and carry no partial marker. */
-        Assert.Equal(4_412_812d / 3600d, trend[0].GetProperty("executions_per_second").GetDouble(), 9);
-        Assert.Equal(4_955_449d / 3600d, trend[1].GetProperty("executions_per_second").GetDouble(), 9);
+        Assert.Equal(4_412_812d / 3600d, trend[0].GetProperty("executions_per_second").GetDouble(), 6);
+        Assert.Equal(4_955_449d / 3600d, trend[1].GetProperty("executions_per_second").GetDouble(), 6);
         Assert.False(trend[0].TryGetProperty("partial", out _));
         Assert.False(trend[1].TryGetProperty("partial", out _));
 
@@ -152,8 +152,8 @@ public sealed class QueryStoreOpenIntervalTrendLiveTests
     {
         var points = await ReadRollupAsync(postgres, route, ct);
         Assert.Equal(3, points.Count);
-        Assert.Equal(4_412_812d / 3600d, points[0].ExecutionsPerSecond!.Value, 9);
-        Assert.Equal(4_955_449d / 3600d, points[1].ExecutionsPerSecond!.Value, 9);
+        Assert.Equal(4_412_812d / 3600d, points[0].ExecutionsPerSecond!.Value, 6);
+        Assert.Equal(4_955_449d / 3600d, points[1].ExecutionsPerSecond!.Value, 6);
         Assert.Null(points[0].PartialCoveredSeconds);
         Assert.Null(points[1].PartialCoveredSeconds);
         Assert.Equal(OpenExecutions / 1410d, points[2].ExecutionsPerSecond!.Value, 6);

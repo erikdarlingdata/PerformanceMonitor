@@ -1076,8 +1076,8 @@ public sealed class DarlingMcpDataTools
                 execution_count = r.TotalExecutions,
                 total_cpu_ms = r.TotalCpuUs / 1000.0,
                 total_elapsed_ms = r.TotalElapsedUs / 1000.0,
-                avg_cpu_ms = r.TotalExecutions > 0 ? r.TotalCpuUs / 1000.0 / r.TotalExecutions : 0,
-                avg_elapsed_ms = r.TotalExecutions > 0 ? r.TotalElapsedUs / 1000.0 / r.TotalExecutions : 0,
+                avg_cpu_ms = r.TotalExecutions > 0 ? Math.Round(r.TotalCpuUs / 1000.0 / r.TotalExecutions, 2) : 0, // #8572: two places, as get_query_trend writes it
+                avg_elapsed_ms = r.TotalExecutions > 0 ? Math.Round(r.TotalElapsedUs / 1000.0 / r.TotalExecutions, 2) : 0,
                 min_cpu_ms = hourly ? (double?)null : r.MinCpuUs / 1000.0,
                 max_cpu_ms = hourly ? (double?)null : r.MaxCpuUs / 1000.0,
                 min_elapsed_ms = hourly ? (double?)null : r.MinElapsedUs / 1000.0,
@@ -1094,7 +1094,7 @@ public sealed class DarlingMcpDataTools
                 total_physical_reads = hourly && !routed.IoRoute ? (long?)null : r.TotalPhysicalReads,
                 total_rows = hourly ? (long?)null : r.TotalRows,
                 total_spills = hourly ? (long?)null : r.TotalSpills,
-                avg_reads = hourly && !routed.IoRoute ? (double?)null : r.TotalExecutions > 0 ? (double)r.TotalLogicalReads / r.TotalExecutions : 0,
+                avg_reads = hourly && !routed.IoRoute ? (double?)null : r.TotalExecutions > 0 ? Math.Round((double)r.TotalLogicalReads / r.TotalExecutions, 2) : 0,
                 // #2012 stage 2: the statement's host object joins the GROUPING key, so proc-hosted
                 // INSERT...EXEC callers sharing a hash now land in separate, correctly-labeled rows;
                 // null = ad-hoc/prepared text (literal-collapse behavior unchanged). History rows
@@ -1464,8 +1464,8 @@ public sealed class DarlingMcpDataTools
                 execution_count = r.TotalExecutions,
                 total_cpu_ms = r.TotalCpuUs / 1000.0,
                 total_elapsed_ms = r.TotalElapsedUs / 1000.0,
-                avg_cpu_ms = r.TotalExecutions > 0 ? r.TotalCpuUs / 1000.0 / r.TotalExecutions : 0,
-                avg_elapsed_ms = r.TotalExecutions > 0 ? r.TotalElapsedUs / 1000.0 / r.TotalExecutions : 0,
+                avg_cpu_ms = r.TotalExecutions > 0 ? Math.Round(r.TotalCpuUs / 1000.0 / r.TotalExecutions, 2) : 0, // #8572: two places, as get_query_trend writes it
+                avg_elapsed_ms = r.TotalExecutions > 0 ? Math.Round(r.TotalElapsedUs / 1000.0 / r.TotalExecutions, 2) : 0,
                 min_cpu_ms = hourly ? (double?)null : r.MinCpuUs / 1000.0,
                 max_cpu_ms = hourly ? (double?)null : r.MaxCpuUs / 1000.0,
                 min_elapsed_ms = hourly ? (double?)null : r.MinElapsedUs / 1000.0,
@@ -1473,7 +1473,7 @@ public sealed class DarlingMcpDataTools
                 /* #2235: same lifetime-extremes flag as the queries tool. */
                 extremes_note = hourly ? null : QueryStatExtremes.LifetimeExtremeNote(
                     r.TotalCpuUs, r.MaxCpuUs, r.TotalElapsedUs, r.MaxElapsedUs),
-                avg_reads = hourly && !routed.IoRoute ? (double?)null : r.TotalExecutions > 0 ? (double)r.TotalLogicalReads / r.TotalExecutions : 0,
+                avg_reads = hourly && !routed.IoRoute ? (double?)null : r.TotalExecutions > 0 ? Math.Round((double)r.TotalLogicalReads / r.TotalExecutions, 2) : 0,
                 total_logical_reads = hourly && !routed.IoRoute ? (long?)null : r.TotalLogicalReads,
                 total_logical_writes = hourly && !routed.IoRoute ? (long?)null : r.TotalLogicalWrites,
                 total_physical_reads = hourly && !routed.IoRoute ? (long?)null : r.TotalPhysicalReads,
