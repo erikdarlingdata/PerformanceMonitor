@@ -303,7 +303,7 @@ public static class FindingRouting
         => $"recurring: this weekday and hour for {weeks.ToString(CultureInfo.InvariantCulture)} weeks, the story keeps a weekly schedule, so it goes to the digest with its severity and label unchanged.";
 
     private static string OneFactReason(double severity, double notifySeverity)
-        => $"one fact at the bar: severity {severity.ToString("F2", CultureInfo.InvariantCulture)} is under {(notifySeverity + OneFactPageMargin).ToString("F2", CultureInfo.InvariantCulture)} (notify bar {notifySeverity.ToString("F2", CultureInfo.InvariantCulture)} + {OneFactPageMargin.ToString("F2", CultureInfo.InvariantCulture)}) and no second fact corroborates it. A a co-fire check matched, but that alone does not page this close to the bar.";
+        => $"one fact at the bar: severity {severity.ToString("F2", CultureInfo.InvariantCulture)} is under {(notifySeverity + OneFactPageMargin).ToString("F2", CultureInfo.InvariantCulture)} (notify bar {notifySeverity.ToString("F2", CultureInfo.InvariantCulture)} + {OneFactPageMargin.ToString("F2", CultureInfo.InvariantCulture)}) and no second fact corroborates it. A co-fire check matched, but that alone does not page this close to the bar.";
 
     /// <summary>A rule that holds a finding off the page: the digest, unless the operator's knob restores paging.</summary>
     private static FindingRouteDecision HeldBy(FindingRoute uncorroboratedRoute, string reason)
