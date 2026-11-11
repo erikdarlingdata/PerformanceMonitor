@@ -700,16 +700,19 @@ internal static class TrendPayloads
     /// <see cref="PerfmonLatestRow"/> publish is rounded here, so Lite and Darling publish the same number for the same
     /// count over the same span.
     /// </summary>
-    internal static double RoundRate(double rate)
+    internal static double RoundRate(double rate, int minDecimals = 4)
     {
         if (rate == 0 || !double.IsFinite(rate))
         {
             return rate;
         }
 
-        var decimals = Math.Clamp(1 - (int)Math.Floor(Math.Log10(Math.Abs(rate))), 4, 15);
+        var decimals = Math.Clamp(1 - (int)Math.Floor(Math.Log10(Math.Abs(rate))), minDecimals, 15);
         return Math.Round(rate, decimals);
     }
+
+    /// <summary><see cref="RoundRate(double, int)"/> for a rate that may be absent: null stays null (#8572).</summary>
+    internal static double? RoundRate(double? rate, int minDecimals = 4) => rate is { } r ? RoundRate(r, minDecimals) : null;
 
     /// <summary>A cumulative counter's delta and the seconds it accrued over, one class at a time: the rated
     /// collections' where any exist; else the unknowable ones' with an interval of 0, the marker a caller must not

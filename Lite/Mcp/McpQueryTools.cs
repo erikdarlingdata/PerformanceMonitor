@@ -190,8 +190,8 @@ public sealed class McpQueryTools
                 execution_count = r.TotalExecutions,
                 total_cpu_ms = r.TotalCpuMs,
                 total_elapsed_ms = r.TotalElapsedMs,
-                avg_cpu_ms = r.AvgCpuMs,
-                avg_elapsed_ms = r.AvgElapsedMs,
+                avg_cpu_ms = Math.Round(r.AvgCpuMs, 2), // #8572
+                avg_elapsed_ms = Math.Round(r.AvgElapsedMs, 2),
                 min_cpu_ms = r.MinCpuMs,
                 max_cpu_ms = r.MaxCpuMs,
                 min_elapsed_ms = r.MinElapsedMs,
@@ -208,7 +208,7 @@ public sealed class McpQueryTools
                 total_physical_reads = r.TotalPhysicalReads,
                 total_rows = r.TotalRows,
                 total_spills = r.TotalSpills,
-                avg_reads = r.AvgReads,
+                avg_reads = Math.Round(r.AvgReads, 2),
                 // #2012 stage 2: same annotations as Darling's twin — the host object joins the
                 // grouping key, so proc-hosted INSERT...EXEC callers sharing a hash land in
                 // separate, correctly-labeled rows; null = ad-hoc/prepared text (or pre-upgrade
@@ -393,8 +393,8 @@ public sealed class McpQueryTools
                 execution_count = r.TotalExecutions,
                 total_cpu_ms = r.TotalCpuMs,
                 total_elapsed_ms = r.TotalElapsedMs,
-                avg_cpu_ms = r.AvgCpuMs,
-                avg_elapsed_ms = r.AvgElapsedMs,
+                avg_cpu_ms = Math.Round(r.AvgCpuMs, 2), // #8572
+                avg_elapsed_ms = Math.Round(r.AvgElapsedMs, 2),
                 min_cpu_ms = r.MinCpuMs,
                 max_cpu_ms = r.MaxCpuMs,
                 min_elapsed_ms = r.MinElapsedMs,
@@ -402,7 +402,7 @@ public sealed class McpQueryTools
                 /* #2235: same lifetime-extremes flag as the queries tool. Mirrors Darling. */
                 extremes_note = QueryStatExtremes.LifetimeExtremeNote(
                     r.TotalCpuMs, r.MaxCpuMs, r.TotalElapsedMs, r.MaxElapsedMs),
-                avg_reads = r.AvgReads,
+                avg_reads = Math.Round(r.AvgReads, 2),
                 total_logical_reads = r.TotalLogicalReads,
                 total_logical_writes = r.TotalLogicalWrites,
                 total_physical_reads = r.TotalPhysicalReads,
@@ -2165,12 +2165,13 @@ public sealed class McpQueryTools
             var point = new
             {
                 time = p.CollectionTime.ToString("o"),
-                value = p.Value,
-                elapsed_ms_per_second = p.Value,
+                /* #8572: the rates go through the one rate rounding rule the perfmon trends use (13 decimals of float noise otherwise). */
+                value = TrendPayloads.RoundRate(p.Value, 6),
+                elapsed_ms_per_second = TrendPayloads.RoundRate(p.Value, 6),
                 execution_count = p.ExecutionCount,
-                executions_per_second = p.ExecutionsPerSecond,
+                executions_per_second = TrendPayloads.RoundRate(p.ExecutionsPerSecond, 6),
                 /* #3897: the bucket's worst single collection; null where a point is not a bucket of collections. */
-                peak_elapsed_ms_per_second = p.PeakElapsedMsPerSecond,
+                peak_elapsed_ms_per_second = TrendPayloads.RoundRate(p.PeakElapsedMsPerSecond, 6),
             };
             return p.PartialCoveredSeconds is double covered ? MarkPartial(point, covered) : (object)point;
         });

@@ -158,7 +158,7 @@ public sealed class McpHealthTools
                    when the window was too short to normalise). The window is the row's own clamp against
                    its ReferenceUtc, so an anchored read rates against its as_of, not the process clock. */
                 collection_runs = row.CollectionRuns,
-                blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window),
+                blocking_rate_per_hour = McpHelpers.RoundTo(ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window), 2), // #8572: 0.32255504310332606 otherwise
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -282,7 +282,7 @@ public sealed class McpHealthTools
                     max_block_duration_ms = row.MaxBlockDurationMs,
                     /* #3539 A2/A3, additive — see get_daily_summary's members of the same names. */
                     collection_runs = row.CollectionRuns,
-                    blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window),
+                    blocking_rate_per_hour = McpHelpers.RoundTo(ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window), 2), // #8572: 0.32255504310332606 otherwise
                 }),
             }, McpHelpers.JsonOptions);
         }

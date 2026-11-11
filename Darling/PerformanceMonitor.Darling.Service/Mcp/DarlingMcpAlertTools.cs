@@ -482,7 +482,7 @@ public sealed partial class DarlingMcpAlertTools
     /// test reads this declaration to hold the two equal.
     /// </summary>
     internal const string PoisonWaitThresholdMsNote =
-        "retired by #3593: the alert grades accumulated wait over a ten-minute window; this value is stored and reported but not consulted";
+        "no longer used: the alert grades accumulated wait over a ten-minute window, and this value is stored and reported but not consulted";
 
     /// <summary>The #3712 route knob resolved for the read surface: the row's store half (raw, off
     /// <see cref="DarlingAlertReader.AlertSettingsReadRow.AnalysisUncorroboratedRoute"/>) beside the file half

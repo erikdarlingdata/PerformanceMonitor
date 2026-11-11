@@ -220,7 +220,7 @@ public sealed class DarlingMcpHealthTools
                    when the window was too short to normalise). The window is the row's own clamp against
                    its ReferenceUtc, so an anchored read rates against its as_of, not the process clock. */
                 collection_runs = row.CollectionRuns,
-                blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window),
+                blocking_rate_per_hour = McpHelpers.RoundTo(ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window), 2), // #8572: 0.32255504310332606 otherwise
                 /* #3653 A6, additive and trailing: the ONE key name the range tool spells the same way. A
                    unique_queries of null above means the rollup tier never carried this day for this server
                    (DarlingHealthReader.DailySummaryReadRow says what that is); this names the day so a caller
@@ -360,7 +360,7 @@ public sealed class DarlingMcpHealthTools
                     peak_snapshot_wait_ms = row.PeakSnapshotWaitMs,
                     /* #3539 A2/A3, additive — see get_daily_summary's members of the same names. */
                     collection_runs = row.CollectionRuns,
-                    blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window),
+                    blocking_rate_per_hour = McpHelpers.RoundTo(ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window), 2), // #8572: 0.32255504310332606 otherwise
                 }),
                 /* #3653 A6, additive and TRAILING: the days whose unique_queries above is null — the rollup
                    tier that answered this window never carried them for this server while its source still

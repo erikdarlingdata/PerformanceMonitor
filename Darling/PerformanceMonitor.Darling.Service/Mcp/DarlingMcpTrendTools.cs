@@ -1211,13 +1211,14 @@ public sealed class DarlingMcpTrendTools
             var point = new
             {
                 time = p.CollectionTime.ToString("o"),
-                value = p.Value,
-                elapsed_ms_per_second = p.Value,
+                /* #8572: the rates go through the one rate rounding rule the perfmon trends use (13 decimals of float noise otherwise). */
+                value = TrendPayloads.RoundRate(p.Value, 6),
+                elapsed_ms_per_second = TrendPayloads.RoundRate(p.Value, 6),
                 execution_count = p.ExecutionCount,
-                executions_per_second = p.ExecutionsPerSecond,
+                executions_per_second = TrendPayloads.RoundRate(p.ExecutionsPerSecond, 6),
                 /* #3897: the bucket's worst single collection (its busiest hour on the hourly tier), so a spike
                survives the bucket; null on a Query Store point, which is not a bucket. */
-                peak_elapsed_ms_per_second = p.PeakElapsedMsPerSecond,
+                peak_elapsed_ms_per_second = TrendPayloads.RoundRate(p.PeakElapsedMsPerSecond, 6),
             };
             return p.PartialCoveredSeconds is double covered ? MarkPartial(point, covered) : (object)point;
         });

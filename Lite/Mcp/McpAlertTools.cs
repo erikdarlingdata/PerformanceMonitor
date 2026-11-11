@@ -29,7 +29,7 @@ public sealed class McpAlertTools
     /// <c>DarlingMcpAlertTools.PoisonWaitThresholdMsNote</c>, byte for byte; <c>McpAlertSettingsKeyTests</c>
     /// reads that declaration to hold the two equal, the way it holds the cpu.mode vocabulary.</summary>
     internal const string PoisonWaitThresholdMsNote =
-        "retired by #3593: the alert grades accumulated wait over a ten-minute window; this value is stored and reported but not consulted";
+        "no longer used: the alert grades accumulated wait over a ten-minute window, and this value is stored and reported but not consulted";
 
     /// <summary>The <c>analysis.uncorroborated_route_note</c> text (#3712). Darling's twin states the precedence
     /// between the knob's TWO homes there (the settings-row column since V137, over darling.json) and publishes
