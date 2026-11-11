@@ -5,6 +5,9 @@
 .DESCRIPTION
   For each line of C:\GitHub\worktrees\.rig-registry.tsv:
     - owner is a path that no longer exists      -> stop, delete the rig, drop the line;
+    - the registered PID is gone, the owner still exists, and <data>\postmaster.pid names a live postgres.exe
+      started on this data directory (the owner restarted the cluster with pg_ctl, so it runs under a new PID)
+                                                 -> keep, and rewrite the line's PID;
     - the registered postmaster PID is gone      -> stale: stop whatever is left, delete the rig, drop the line;
     - otherwise                                  -> keep.
   A line whose data directory is outside the allowed roots is refused and kept. Then every running postgres.exe
@@ -13,13 +16,17 @@
 .EXAMPLE
   pwsh -NoProfile -File C:\GitHub\PerformanceMonitor\.claude\skills\lane-orders\rig-sweep.ps1
 #>
-param()
+param(
+    # The registry file. Defaults to the one every lane shares; a test passes a scratch file so it never touches it.
+    [string]$RegistryPath = ''
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'rig-common.ps1')
+if ($RegistryPath) { $script:RigRegistryPath = $RegistryPath }
 
-$stopped = 0; $deleted = 0; $kept = 0; $refused = 0; $gone = 0
+$stopped = 0; $deleted = 0; $kept = 0; $repinned = 0; $refused = 0; $gone = 0
 
 foreach ($snapshot in Read-RigRegistry) {
     $data = ConvertTo-RigPath $snapshot.DataDir
@@ -40,6 +47,17 @@ foreach ($snapshot in Read-RigRegistry) {
         $ownerGone = $ownerIsPath -and -not (Test-Path -LiteralPath $row.Owner)
         $pidGone = -not ($pmPid -gt 0 -and (Test-RigPostmaster -ProcessId $pmPid -DataDir $data))
 
+        # The owner restarted the cluster (pg_ctl restart, to empty the buffers for a cold probe): a live postmaster under
+        # a new PID, which the line does not know. The owner still exists, so keep the rig and fix the line.
+        if ($pidGone -and -not $ownerGone) {
+            $livePid = Find-RigPostmaster -DataDir $data
+            if ($livePid -gt 0) {
+                Update-RigRegistryPid -DataDir $data -ProcessId $livePid
+                Write-Host "keep     $data (PID $livePid, rewritten from $pmPid after a restart, port $($row.Port), owner $($row.Owner), started $($row.StartedUtc))"
+                return 'repinned'
+            }
+        }
+
         if (-not $ownerGone -and -not $pidGone) {
             Write-Host "keep     $data (PID $pmPid, port $($row.Port), owner $($row.Owner), started $($row.StartedUtc))"
             return 'kept'
@@ -57,6 +75,7 @@ foreach ($snapshot in Read-RigRegistry) {
     switch -Wildcard ($outcome) {
         'gone'     { $gone++ }
         'kept'     { $kept++ }
+        'repinned' { $kept++; $repinned++ }
         'refused'  { $refused++ }
         'swept*'   { if ($outcome -match 'stopped') { $stopped++ }; if ($outcome -match 'deleted') { $deleted++ } }
     }
@@ -70,4 +89,4 @@ foreach ($u in $unregistered) {
     Write-Host "UNREGISTERED  PID $($u.ProcessId)  data $dataText  ($($u.Children) child processes). Not stopped."
 }
 
-Write-Host "Summary: stopped $stopped, deleted $deleted, kept $kept, unregistered $($unregistered.Count), refused $refused, already gone $gone."
+Write-Host "Summary: stopped $stopped, deleted $deleted, kept $kept (PID rewritten after a restart: $repinned), unregistered $($unregistered.Count), refused $refused, already gone $gone."
