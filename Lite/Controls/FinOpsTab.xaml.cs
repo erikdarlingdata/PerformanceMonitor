@@ -1048,7 +1048,8 @@ public partial class FinOpsTab : UserControl
     }
 
     /// <summary>One store read (the fleet overlay), laid onto the cached rows. Each row raises a change for the cells that moved,
-    /// so the grid keeps its rows, its selection and its scroll position. A failed read is logged by
+    /// so the grid keeps its rows, its selection and its scroll position. A good read shows each row what a load over the same
+    /// overlay shows it, so a value missing from the store leaves its cell. A failed read is logged by
     /// <see cref="FinOpsServerInventory.TryReadCollectedMetricsAsync"/> and keeps the values the rows have; a cell with none
     /// then reads "Could not read". Rows a whole load replaced while the read ran are left to that load.</summary>
     private async System.Threading.Tasks.Task ReReadServerInventoryOverlayAsync()

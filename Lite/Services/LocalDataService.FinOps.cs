@@ -495,6 +495,11 @@ public class ServerPropertyRow : System.ComponentModel.INotifyPropertyChanged
         set { if (_storageTotalGb != value) { _storageTotalGb = value; Raise(nameof(StorageTotalGb)); } }
     }
 
+    /// <summary>The storage total this row's own read brought, before any collected overlay: the live read's figure, and none for a
+    /// row built from the store. <see cref="StorageTotalGb"/> reads it again when a re-read of the overlay holds no total for the
+    /// server (<see cref="FinOpsServerInventory.ReapplyCollectedMetrics"/>).</summary>
+    internal decimal? OwnStorageTotalGb { get; set; }
+
     public int? IdleDbCount
     {
         get => _idleDbCount;

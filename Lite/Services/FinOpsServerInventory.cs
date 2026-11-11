@@ -115,7 +115,10 @@ internal static class FinOpsServerInventory
             if (readClock != null) await StampClockAsync(item, server, readClock);
 
             /* Step 2: lay this server's collected metrics from the fleet-wide read on top. Guarded on its
-               own (see ApplyCollectedMetrics), so it cannot cost the row above its place. */
+               own (see ApplyCollectedMetrics), so it cannot cost the row above its place. The row keeps the storage
+               total its own read brought beside the overlay's, for a re-read whose overlay has none (see
+               ReapplyCollectedMetrics). */
+            item.OwnStorageTotalGb = item.StorageTotalGb;
             item.OverlayReadFailed = overlayReadFailed;
             ApplyCollectedMetrics(item, server, fleetMetrics);
 
@@ -237,10 +240,18 @@ internal static class FinOpsServerInventory
     }
 
     /// <summary>
-    /// Lays a newer fleet overlay onto rows already built, each found by its <see cref="ServerPropertyRow.StorageServerId"/>. A row
-    /// with no entry, or a value the overlay does not have, keeps what it shows. It reads nothing itself: the caller passes the
-    /// one store read, so the rows' live properties are not read again. Every row is marked with <paramref name="readFailed"/>,
-    /// so after a failed read a cell with no value reads "Could not read", and after a good one "Not collected" again.
+    /// Lays a newer fleet overlay onto rows already built, each found by its <see cref="ServerPropertyRow.StorageServerId"/>. It
+    /// reads nothing itself: the caller passes the one store read, so the rows' live properties are not read again. Every row is
+    /// marked with <paramref name="readFailed"/>.
+    ///
+    /// <para><b>After a good read each row shows what a load over the same overlay shows it.</b> The entry's average CPU, idle
+    /// database count, verdict and score replace the row's, a missing one included, so a server whose last CPU sample has left
+    /// the 24-hour window reads "Not collected" in Status and Health. The storage total is the entry's, or the one the row's own
+    /// read brought (<see cref="ServerPropertyRow.OwnStorageTotalGb"/>) when the entry has none. A server with no entry is laid
+    /// as one whose entry holds nothing.</para>
+    ///
+    /// <para><b>After a failed read every row keeps the values it has.</b> The overlay passed with it is empty and says nothing
+    /// about any server, so no value is taken off a row, and a cell with no value reads "Could not read".</para>
     /// </summary>
     internal static void ReapplyCollectedMetrics(
         IEnumerable<ServerPropertyRow> rows,
@@ -250,13 +261,16 @@ internal static class FinOpsServerInventory
         foreach (var item in rows)
         {
             item.OverlayReadFailed = readFailed;
-            if (!fleetMetrics.TryGetValue(item.StorageServerId, out var row)) continue;
+            if (readFailed) continue;
 
-            if (row.AvgCpuPct.HasValue) item.AvgCpuPct = row.AvgCpuPct;
-            if (row.StorageTotalGb.HasValue) item.StorageTotalGb = row.StorageTotalGb;
-            if (row.IdleDbCount.HasValue) item.IdleDbCount = row.IdleDbCount;
-            if (row.ProvisioningStatus != null) item.ProvisioningStatus = row.ProvisioningStatus;
-            if (row.HealthScore.HasValue) item.HealthScore = row.HealthScore;
+            /* A server with no entry gets the empty one: every value null. */
+            fleetMetrics.TryGetValue(item.StorageServerId, out var row);
+
+            item.AvgCpuPct = row.AvgCpuPct;
+            item.StorageTotalGb = row.StorageTotalGb ?? item.OwnStorageTotalGb;
+            item.IdleDbCount = row.IdleDbCount;
+            item.ProvisioningStatus = row.ProvisioningStatus;
+            item.HealthScore = row.HealthScore;
         }
     }
 
