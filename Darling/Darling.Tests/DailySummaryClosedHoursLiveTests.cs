@@ -24,9 +24,10 @@ namespace Darling.Tests;
 /// rollup holds, plus the open day's last hours. The result must stay the raw statement's: EXCEPT both ways over a window whose
 /// yesterday is missing from the daily rollup and partly missing from the hourly one, on the legacy daily, on the stitched daily, on
 /// windows that start and end inside an hour (microseconds kept) and on a daily that holds nothing, and the hourly tier's statement is
-/// unchanged. The raw rows the plan reads (<see cref="ExplainBuffers.RowsRead"/>) stay at the hours no rollup holds. A hash seen only in a
-/// restart row (<c>sample_interval_seconds = 0</c>, which the interval-honest hourly skips) is still counted, as the raw tail counted it, and
-/// the stitched daily's legacy-hourly branch, for hours before the boundary day, runs in a case of its own.
+/// unchanged. The raw rows the plan reads (<see cref="ExplainBuffers.RowsRead"/>) stay at the hours no rollup holds. A hash whose only row in a
+/// held hour of an interval-honest hourly is a restart row (<c>sample_interval_seconds = 0</c>) is left out of the count, which is the queries
+/// with credited executions in the window (#8651), while the legacy hourly keeps it. The stitched daily's legacy-hourly branch, for hours before
+/// the boundary day, runs in a case of its own.
 ///
 /// <para><b>Own store</b> (<c>#1776 own-store</c>): the test mints its own scratch database through <see cref="ScratchPostgres"/> and
 /// drops it whole.</para>
@@ -132,7 +133,7 @@ public sealed class DailySummaryClosedHoursLiveTests
     }
 
     [Fact]
-    public async Task TheQueriesPart_CountsAHashSeenOnlyInARestartRow_AsTheRawTailDid_OnEveryShapeOfDaily()
+    public async Task TheQueriesPart_LeavesOutAHashWhoseOnlyRowInAHeldHourIsARestartRow_AndCountsAHashWithAnyCreditedRowOnce()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
@@ -148,15 +149,14 @@ public sealed class DailySummaryClosedHoursLiveTests
         var hourEnd = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(-1);
         await SeedAsync(connection, today, now, ct);
 
-        /* Restart rows: no counter was knowable, so every delta is 0 and the interval is 0. The two window edges are yesterday 14:30 and 19:30
-           (a microsecond is ten ticks). Hours 9 and 21 to 23 of yesterday are missing from the hourly below, so RST_RAW sits in a raw hour and
-           the others in held hours. */
+        /* Restart rows: no counter was knowable, so every delta is 0 and the interval is 0. Hours 9 and 21 to 23 of yesterday are missing from
+           the hourly below, so every restart row sits in a held hour. The two window edges are yesterday 14:30 and 19:30 (a microsecond is ten
+           ticks). A restart row in an hour read from raw is #8651's, not this member's, so none is planted there. */
         var windowStart = yesterday.AddHours(14).AddMinutes(30);
         var windowEnd = yesterday.AddHours(19).AddMinutes(30);
         await PlantAsync(connection, 854998000L, new (DateTime At, string? Hash, int Interval)[]
         {
             (yesterday.AddHours(11).AddMinutes(25), "RST_HELD", 0),
-            (yesterday.AddHours(22).AddMinutes(25), "RST_RAW", 0),
             (yesterday.AddHours(15).AddMinutes(25), "RST_AND_NORMAL", 0),
             (yesterday.AddHours(16).AddMinutes(25), "RST_AND_NORMAL", 120),
             (yesterday.AddHours(17).AddMinutes(25), null, 0),
@@ -168,7 +168,7 @@ public sealed class DailySummaryClosedHoursLiveTests
             (windowEnd, "RST_END_OUT", 0),
         }, ct);
 
-        /* Legacy shape. Its hourly has no filter and keeps restart rows, so this is the control. */
+        /* Legacy shape. Its hourly has no filter and keeps restart rows, so a restart-only hash counts and the reply equals raw. */
         await RefreshAsync(connection, TimescaleSupport.QueryStatsHourlyView, today.AddDays(-6), hourEnd, ct);
         await RefreshAsync(connection, TimescaleSupport.QueryStatsDailyView, today.AddDays(-6), yesterday, ct);
         var legacyHourly = await ResolveAsync(connection, TimescaleSupport.QueryStatsHourlyView, ct);
@@ -178,8 +178,15 @@ public sealed class DailySummaryClosedHoursLiveTests
         await AssertSameRowsAsync(connection, RetentionTier.Daily, NoCoverage, start, end, ct);
         await AssertSameRowsAsync(connection, RetentionTier.Daily, NoCoverage, windowStart, windowEnd, ct);
 
-        /* Stitched shape: the interval-honest successor holds the last three days. A hash seen only in a restart row of a held hour (RST_HELD,
-           RST_AND_NORMAL) or of a raw hour (RST_RAW) of yesterday is counted, and the rows outside a window are not. */
+        /* The rule the interval hourlies were built on (#8651): unique queries counts the queries with credited executions in the window. */
+        var credited = await CreditedHashesAsync(connection, yesterday, today, ct);
+        var restartOnly = await ScalarAsync<long>(connection,
+            $"SELECT count(*) FROM (SELECT query_hash FROM collect.query_stats WHERE server_id = {ServerId} AND collection_time >= '{Ts(yesterday)}' AND collection_time < '{Ts(today)}' "
+            + "AND query_hash IS NOT NULL GROUP BY query_hash HAVING bool_and(sample_interval_seconds = 0)) AS x", ct);
+        Assert.True(restartOnly >= 7, $"the seed plants restart-only hashes in held hours, got {restartOnly}");
+
+        /* Stitched shape: the interval-honest successor holds the last three days. A hash whose only row in a held hour of yesterday is a restart row
+           (RST_HELD, RST_BEFORE, RST_AFTER and the edge hashes) is left out, and RST_AND_NORMAL, which has a credited row too, counts once. */
         await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, today.AddDays(-3), hourEnd, ct);
         await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalDailyView, today.AddDays(-3), yesterday, ct);
         var intervalHourly = await ResolveAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, ct);
@@ -188,9 +195,9 @@ public sealed class DailySummaryClosedHoursLiveTests
 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var stitched = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, await TimescaleSupport.DetectRollupsAsync(dataSource, ct), ct);
-        Assert.Contains("queries_ceiling_successor", DailySummarySql.RangeSqlFor(RetentionTier.Daily, stitched, start), StringComparison.Ordinal);
-        await AssertSameRowsAsync(connection, RetentionTier.Daily, stitched, start, end, ct);
-        await AssertSameRowsAsync(connection, RetentionTier.Daily, stitched, windowStart, windowEnd, ct);
+        var stitchedSql = DailySummarySql.RangeSqlFor(RetentionTier.Daily, stitched, start);
+        Assert.Contains("queries_ceiling_successor", stitchedSql, StringComparison.Ordinal);
+        Assert.Equal(credited, await UniqueQueriesAsync(connection, stitchedSql, yesterday, today, ct));
 
         /* The interval-honest daily alone: the successor reaches the window start, so the legacy daily drops out of the statement. */
         await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, today.AddDays(-6), today.AddDays(-3), ct);
@@ -199,18 +206,16 @@ public sealed class DailySummaryClosedHoursLiveTests
         var aloneSql = DailySummarySql.RangeSqlFor(RetentionTier.Daily, alone, start);
         Assert.DoesNotContain("queries_ceiling_successor", aloneSql, StringComparison.Ordinal);
         Assert.Contains(TimescaleSupport.QueryStatsIntervalDailyView, aloneSql, StringComparison.Ordinal);
-        await AssertSameRowsAsync(connection, RetentionTier.Daily, alone, start, end, ct);
-        await AssertSameRowsAsync(connection, RetentionTier.Daily, alone, windowStart, windowEnd, ct);
+        Assert.Equal(credited, await UniqueQueriesAsync(connection, aloneSql, yesterday, today, ct));
 
-        /* The disagreement that was already there: a day the interval daily HOLDS leaves a restart-only hash out and raw counts it. The routed
-           statement keeps the daily's count for that day, one fewer than the raw statement's. */
+        /* A day the interval daily HOLDS leaves a restart-only hash out too, so the routed count is the credited one. */
         var heldDay = today.AddDays(-2);
         await PlantAsync(connection, 854997000L, new (DateTime At, string? Hash, int Interval)[] { (heldDay.AddHours(12).AddMinutes(25), "RST_IN_A_HELD_DAY", 0) }, ct);
         await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, today.AddDays(-6), yesterday, ct);
         await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalDailyView, today.AddDays(-6), yesterday, ct);
-        var rawCount = await UniqueQueriesAsync(connection, DailySummarySql.RangeSql, heldDay, yesterday, ct);
-        var routedCount = await UniqueQueriesAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Daily, alone, heldDay), heldDay, yesterday, ct);
-        Assert.Equal(rawCount - 1, routedCount);
+        Assert.Equal(
+            await CreditedHashesAsync(connection, heldDay, yesterday, ct),
+            await UniqueQueriesAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Daily, alone, heldDay), heldDay, yesterday, ct));
     }
 
     /// <summary>
@@ -320,6 +325,12 @@ public sealed class DailySummaryClosedHoursLiveTests
         await ExecuteAsync(connection, $"CREATE TEMP TABLE qs_sum AS EXECUTE qs_sum_q({ServerId}, '{Ts(start)}', '{Ts(end)}', '{Ts(EventWindowFloor.For(start))}')", ct);
         return await ScalarAsync<long>(connection, "SELECT COALESCE(sum(unique_queries), 0)::bigint FROM qs_sum", ct);
     }
+
+    /// <summary>The distinct hashes with a credited row (<c>sample_interval_seconds</c> not 0) in [start, end), the count the interval-honest rollups hold (#8651).</summary>
+    private static Task<long> CreditedHashesAsync(NpgsqlConnection connection, DateTime start, DateTime end, CancellationToken ct)
+        => ScalarAsync<long>(connection,
+            $"SELECT count(DISTINCT query_hash) FROM collect.query_stats WHERE server_id = {ServerId} AND collection_time >= '{Ts(start)}' AND collection_time < '{Ts(end)}' "
+            + "AND sample_interval_seconds IS DISTINCT FROM 0", ct);
 
     /// <summary>EXCEPT both ways between the raw statement and the routed statement over [start, end), whole rows; returns the row count.</summary>
     private static async Task<long> AssertSameRowsAsync(
