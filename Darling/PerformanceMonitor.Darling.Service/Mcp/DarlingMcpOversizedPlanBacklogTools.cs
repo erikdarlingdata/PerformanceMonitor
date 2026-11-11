@@ -106,7 +106,7 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
                     $"No oversized-plan backlog rows for {scope}, so nothing here says any cached plan was "
                     + "declined for size. That is the EXPECTED answer on most deployments: a row is only "
                     + "written when ONE query_stats or procedure_stats row's plan XML exceeds "
-                    + $"{QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes} bytes as measured on the monitored "
+                    + $"{QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} bytes as measured on the monitored "
                     + "server, which on the measured population is a handful of long-lived plan-cache "
                     + "residents per server rather than a stream. It is also permanently empty on a store "
                     + "with an older schema, and on any store whose service build predates the sweep. Before "

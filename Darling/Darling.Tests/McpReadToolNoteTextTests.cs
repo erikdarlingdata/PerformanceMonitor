@@ -100,7 +100,7 @@ public sealed class McpReadToolNoteTextTests
     }
 
     /// <summary>
-    /// The alert-read note's list of fleet-scoped reads names the two #3826 self-alerts and then says which two they are. Without a
+    /// The alert-read note's list of fleet-scoped reads names the two informational store self-alerts and then says which two they are. Without a
     /// dash, that appositive has to sit in parentheses: a comma would make the two reads look like further list members.
     /// </summary>
     [Fact]
@@ -108,7 +108,7 @@ public sealed class McpReadToolNoteTextTests
     {
         Assert.DoesNotContain('\u2014', AlertReadFailureCounter.FleetScopedReads);
         Assert.Contains(
-            "the two informational store self-alerts #3826 added (the plan dimension's TOAST slack read and the "
+            "the two informational store self-alerts (the plan dimension's TOAST slack read and the "
             + "store checkpointer pressure read behind the WAL levers), and the store settings self-alert's",
             AlertReadFailureCounter.FleetScopedReads,
             StringComparison.Ordinal);

@@ -37,7 +37,7 @@ public sealed class McpAlertTools
     /// note says where it is edited and there is no source key to publish (<c>McpAlertSettingsKeyTests</c> holds
     /// that omission as a decision).</summary>
     internal const string UncorroboratedRouteNote =
-        "#3712: 'digest' (default) keeps a lone uncorroborated finding off email, the webhooks and the tray, it is still "
+        "'digest' (default) keeps a lone uncorroborated finding off email, the webhooks and the tray, it is still "
         + "recorded (Alerts tab status Digest) and shown in Recommendations with a not-paged marker; 'page' restores delivery of "
         + "every finding at or above notify_severity. A corroborated finding is delivered under either value. Edited in "
         + "Settings → Alerts ('Only notify on corroborated findings') or as analysis_uncorroborated_route in the settings file.";

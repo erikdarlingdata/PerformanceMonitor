@@ -368,7 +368,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         Assert.Equal("page", payload["analysis"]!["uncorroborated_route"]!.GetValue<string>());
         Assert.Equal(DarlingAlertSettings.RouteSourceStore, payload["analysis"]!["uncorroborated_route_source"]!.GetValue<string>());
         Assert.Equal(DarlingMcpAlertTools.UncorroboratedRouteNote, payload["analysis"]!["uncorroborated_route_note"]!.GetValue<string>());
-        Assert.StartsWith("#3712: the EFFECTIVE route, resolved store-over-file", DarlingMcpAlertTools.UncorroboratedRouteNote, StringComparison.Ordinal);
+        Assert.StartsWith("The effective route, resolved store-over-file", DarlingMcpAlertTools.UncorroboratedRouteNote, StringComparison.Ordinal);
         Assert.DoesNotContain("FILE-LEVEL", DarlingMcpAlertTools.UncorroboratedRouteNote, StringComparison.Ordinal);
 
         /* A NULL store half with nothing published: neither home holds a route, so the shipped digest applies and

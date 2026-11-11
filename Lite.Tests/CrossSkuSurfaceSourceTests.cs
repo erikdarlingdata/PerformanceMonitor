@@ -275,8 +275,7 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Contains("collection-history audit", inventory, StringComparison.Ordinal);
         Assert.Contains("external-alert delivery", inventory, StringComparison.Ordinal);
         Assert.Contains("threshold-override reload", inventory, StringComparison.Ordinal);
-        Assert.Contains("daily report (#7041)", inventory, StringComparison.Ordinal);
-        Assert.Contains("store autovacuum (#7368)", inventory, StringComparison.Ordinal);
+        Assert.Contains("reload, daily report, store autovacuum, and the stale", inventory, StringComparison.Ordinal);
         Assert.Contains("stale daily rollup", inventory, StringComparison.Ordinal);
 
         /* And the phantom stays gone. Disk pressure's feed reads are exempt — a local filesystem read and a
