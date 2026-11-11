@@ -1030,17 +1030,19 @@ public sealed class DarlingMcpHostService : BackgroundService
             {
                 logger.LogCritical(
                     "{Setting} is on but no usable bearer token is available: the MCP write tools stay off. Set mcp.network.encryptedToken " +
-                    "(via --encrypt-password) or mcp.network.token, at least {MinimumLength} characters; every MCP request, loopback " +
-                    "included, must then present it.",
+                    "(via --encrypt-password) or mcp.network.token, at least {MinimumLength} characters with at least {MinimumDistinct} different ones; " +
+                    "every MCP request, loopback included, must then present it.",
                     DarlingMcpWritePolicy.WritesSetting,
-                    DarlingHostBinding.MinimumTokenLength);
+                    DarlingHostBinding.MinimumTokenLength,
+                    DarlingHostBinding.MinimumDistinctTokenCharacters);
             }
             else
             {
                 logger.LogWarning(
-                    "MCP write tools are ON ({Setting}; add_servers/edit_server/remove_server {ServerAdmin}): every MCP request, " +
+                    "MCP write tools are ON ({Setting}; {ServerAdminTools} {ServerAdmin}): every MCP request, " +
                     "loopback included, must present the bearer token.",
                     DarlingMcpWritePolicy.WritesSetting,
+                    DarlingMcpWritePolicy.ServerAdminToolList,
                     writes.ServerAdmin ? "on via " + DarlingMcpWritePolicy.ServerAdminSetting : "off");
 
                 if (writes.ServerAdmin && mcp.AllowWindowsAuthOverUnverifiedTls)
@@ -1059,8 +1061,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             logger.LogInformation(
                 "MCP write tools are off (the default): tools that change monitoring configuration are not served. " +
                 "To serve them set {Setting}=true in darling.json plus a bearer token (mcp.network.encryptedToken or " +
-                "mcp.network.token); add_servers/edit_server/remove_server also need {ServerAdminSetting}=true.",
+                "mcp.network.token); {ServerAdminTools} also need {ServerAdminSetting}=true.",
                 DarlingMcpWritePolicy.WritesSetting,
+                DarlingMcpWritePolicy.ServerAdminToolList,
                 DarlingMcpWritePolicy.ServerAdminSetting);
         }
     }
@@ -1085,10 +1088,11 @@ public sealed class DarlingMcpHostService : BackgroundService
             {
                 logger.LogCritical(
                     "{Setting} is on but no usable bearer token is available{Problem}: the investigation tools stay off. Set " +
-                    "mcp.network.encryptedToken (via --encrypt-password) or mcp.network.token, at least {MinimumLength} characters.",
+                    "mcp.network.encryptedToken (via --encrypt-password) or mcp.network.token, at least {MinimumLength} characters with at least {MinimumDistinct} different ones.",
                     DarlingMcpWritePolicy.InvestigationsSetting,
                     tokenProblem is null ? "" : " (the token " + tokenProblem + ")",
-                    DarlingHostBinding.MinimumTokenLength);
+                    DarlingHostBinding.MinimumTokenLength,
+                    DarlingHostBinding.MinimumDistinctTokenCharacters);
             }
             else
             {

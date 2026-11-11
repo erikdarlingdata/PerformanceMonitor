@@ -65,6 +65,11 @@ internal static class DarlingMcpInstructions
         DarlingMcpWritePolicy.Effective policy, bool agentMuteRules = true)
         => Compose(peers, ToolCensus(catalog, served, policy, agentMuteRules), served.Contains(MuteTool), policy);
 
+    /// <summary>What a claim-free mute may do, from the limits the path enforces (<see cref="DarlingMcpAgentMuteDirect"/>), so a change to one moves the text (#8610).</summary>
+    internal static readonly string DirectMuteLimits =
+        $"a mute on one server and a metric that is not a service alert, expiring within {DarlingMcpAgentMuteDirect.MaxExpiryDays} days " +
+        $"({DarlingMcpAgentMuteDirect.MaxWritesPerHour} writes an hour, no repeat within {DarlingMcpAgentMuteDirect.RepeatLookbackDays} days)";
+
     private static string Compose(
         DarlingPeerDirectory.Snapshot peers, string census, bool muteServed = true, DarlingMcpWritePolicy.Effective? named = null)
     {
@@ -139,7 +144,7 @@ internal static class DarlingMcpInstructions
             if (role.Investigations)
                 off.Add(agentMuteRules
                     ? "this token has the agent role: the write tools beyond the actions an agent may take with an `agent_action`, and beyond " +
-                      "the four mute rule tools it may call without one for a rule that expires within 7 days, are served only to an operator token"
+                      $"the four mute rule tools it may call without one for {DirectMuteLimits}, are served only to an operator token"
                     : "this token has the agent role: the write tools beyond the actions an agent may take with an `agent_action` are served only to an operator token");
             else if (!role.Writes)
                 off.Add("this token has the reader role: the write tools, the server registry tools and the investigation tools are never " +
@@ -156,7 +161,7 @@ internal static class DarlingMcpInstructions
             off.Add($"the write tools are off, so the {writeCount + adminCount - agentActionServed} that change monitoring configuration are not served " +
                     $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount - agentActionServed}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
                     $"{adminCount} more)" + (agentActionServed > 0
-                        ? $"; the {agentActionServed} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch)" + (agentMuteRules ? ", except the four mute rule tools, which an agent token may also call without one for a rule that expires within 7 days (reason and expires_at required)" : string.Empty)
+                        ? $"; the {agentActionServed} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch)" + (agentMuteRules ? $", except the four mute rule tools, which an agent token (a named agent token, or the unnamed token under `mcp.allowInvestigations`) may also call without one for {DirectMuteLimits} (reason and expires_at required)" : string.Empty)
                         : string.Empty));
         else if (!adminServed)
             off.Add($"`{DarlingMcpWritePolicy.ServerAdminSetting}` is off, so the {adminCount} tools that add, edit and remove " +

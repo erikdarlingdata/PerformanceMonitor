@@ -482,7 +482,7 @@ internal static class DarlingMcpWritePolicy
     /// (<c>DarlingMcpInstructionsBudgetTests</c>).</summary>
     internal static readonly string InstructionsLine =
         "Its write tools (alerting, mutes, custom alert rules, Custom Views, collector schedules, service flags, collection state, the server registry) change only the " +
-        "MONITORING store and are served when darling.json sets mcp.allowWrites (add_servers/edit_server/remove_server " +
+        "MONITORING store and are served when darling.json sets mcp.allowWrites (" + ServerAdminToolList + " " +
         "also need mcp.allowServerAdmin; both default off). An unserved write fails as unknown: ask the operator, do not " +
         "retry. Investigation tools (" + InvestigationToolList + ") write only investigation " +
         "state and are served when darling.json sets mcp.allowInvestigations with a token and mcp.allowWrites is off. " +
