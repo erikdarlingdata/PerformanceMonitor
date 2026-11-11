@@ -1097,6 +1097,8 @@ public partial class MainWindow : Window
         if (MainTabs.SelectedItem is TabItem { Content: ViewerServerTab activated })
         {
             activated.ApplyServerClockToHelper();
+            /* #8549: the tab's first-open clock starts here, so a wait behind another tab's refresh counts in a slow first open's line. */
+            activated.BeginFirstOpen();
         }
 
         await RefreshVisibleAsync();
