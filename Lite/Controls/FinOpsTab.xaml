@@ -3069,7 +3069,7 @@
                               RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Binding="{Binding ServerName}" Width="220" ElementStyle="{StaticResource TrimmedCell}">
+                            <DataGridTextColumn Binding="{Binding ServerName}" Width="120" ElementStyle="{StaticResource TrimmedCell}">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
                                         <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ServerName" Click="FilterButton_Click" Margin="0,0,4,0"/>
