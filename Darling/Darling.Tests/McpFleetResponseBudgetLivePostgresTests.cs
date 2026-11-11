@@ -251,6 +251,35 @@ public sealed class McpFleetResponseBudgetLivePostgresTests
             Assert.True(summaryBytes <= McpResponseBudget.DefaultBytes,
                 $"detail=summary was {summaryBytes:N0} bytes, over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
 
+            /* #8568: the cards answer is held to the same budget. It keeps whole cards, worst first, counts what it
+               selected and what it holds, and names every server whose card it left out. */
+            Assert.True(cardsBytes <= McpResponseBudget.DefaultBytes,
+                $"detail=cards was {cardsBytes:N0} bytes, over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
+            using (var cardsDoc = JsonDocument.Parse(cardsJson))
+            {
+                var root = cardsDoc.RootElement;
+                var cards = root.GetProperty("cards").EnumerateArray().ToList();
+                var total = root.GetProperty("cards_total").GetInt32();
+                Assert.True(total >= ByteFleetIds.Length, $"the fleet holds the {ByteFleetIds.Length} seeded servers, and cards_total was {total}.");
+                Assert.InRange(cards.Count, 1, total - 1);
+                Assert.Equal(cards.Count, root.GetProperty("cards_returned").GetInt32());
+                Assert.True(root.GetProperty("budget_truncated").GetBoolean());
+                Assert.Contains("32,768-byte response budget", root.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
+                Assert.Contains($"only {cards.Count} fit", root.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
+                Assert.Equal(total - cards.Count, root.GetProperty("cards_left_out_count").GetInt32());
+                Assert.Equal(cards.Count, root.GetProperty("next_card_offset").GetInt32());
+
+                var leftOut = root.GetProperty("cards_left_out").EnumerateArray().Select(n => n.GetString()).ToList();
+                var shown = cards.Select(c => c.GetProperty("server_name").GetString()).ToList();
+                Assert.Equal(Math.Min(total - cards.Count, 100), leftOut.Count);
+                Assert.Empty(shown.Intersect(leftOut));
+
+                /* Worst first: the needs-attention ranking leads the page, in the ranking's own order. */
+                var worst = root.GetProperty("worst_servers").EnumerateArray().Select(w => w.GetProperty("server_id").GetInt32()).ToList();
+                var lead = cards.Take(Math.Min(worst.Count, cards.Count)).Select(c => c.GetProperty("server_id").GetInt32()).ToList();
+                Assert.Equal(worst.Take(lead.Count), lead);
+            }
+
             bodySucceeded = true;
         }
         finally
