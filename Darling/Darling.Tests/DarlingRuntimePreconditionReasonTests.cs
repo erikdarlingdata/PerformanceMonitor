@@ -60,7 +60,9 @@ public sealed class DarlingRuntimePreconditionReasonTests
     {
         var r = JsonDocument.Parse(DarlingMcpPgPlanTools.PlanCaptureNotReadyStatus(new[] { "capture_threshold = -1", "extension_available = false" })).RootElement;
         Assert.Equal("precondition", r.GetProperty("status").GetString());
-        Assert.Contains("capture_threshold = -1 | extension_available = false", r.GetProperty("message").GetString()!, System.StringComparison.Ordinal);
+        /* #8572: counted, and in the causal order get_pg_plan_capture_readiness uses, not alphabetical. */
+        Assert.Contains("2 unsatisfied preconditions", r.GetProperty("message").GetString()!, System.StringComparison.Ordinal);
+        Assert.Contains("extension_available = false | capture_threshold = -1", r.GetProperty("message").GetString()!, System.StringComparison.Ordinal);
         var hints = r.GetProperty("hints");
         Assert.Equal("plan_capture_not_ready", hints.GetProperty("reason").GetString());
         Assert.Equal(2, hints.GetProperty("unsatisfied_count").GetInt32());
