@@ -3387,6 +3387,7 @@ $rung$;";
         new Migration(255, "wait-stats-cadence-baseline", V255Sql),
         new Migration(256, "schema-tracking", V256Sql),
         new Migration(257, "collection-log-status-time", V257Sql),
+        new Migration(258, "oversized-plan-backlog-dropped-index", V258Sql),
     };
 
     /* V256 (#7643): schema tracking. Versioned table and view definitions, kept by the schema_objects collector (Darling only).
@@ -3574,6 +3575,16 @@ CREATE TABLE IF NOT EXISTS collect.schema_capture_state (
        uses, inside the ladder's own transaction. Idempotent. */
     private const string V257Sql = @"
 CREATE INDEX IF NOT EXISTS idx_collection_log_status_time ON collect.collection_log (server_id, status, collection_time DESC);";
+
+    /* V258 (#8567): idx_oversized_plan_backlog_dropped, a partial B-tree on collect.oversized_plan_backlog (server_id, expired_at) over the
+       rows the sweep dropped unfetched: no content, no attempt, an expiry stamp. Those are the rows OversizedPlanBacklog.PurgeDroppedSql
+       deletes, for one server and before one cutoff, so the purge reads the rows it removes. Through the primary key it reads every row the
+       server has, the waiting ones included, on every pass. The predicate keeps a waiting row out of the index, so a new sighting writes no
+       entry to it, and the index names no column a re-sighting changes on a waiting row, so that update stays heap-only. The build reads the
+       table once. Not CONCURRENTLY: the rung runs inside the ladder's own transaction. Idempotent. */
+    private const string V258Sql = @"
+CREATE INDEX IF NOT EXISTS idx_oversized_plan_backlog_dropped ON collect.oversized_plan_backlog (server_id, expired_at)
+WHERE captured_at IS NULL AND last_attempt_at IS NULL AND expired_at IS NOT NULL;";
 
     /// <summary>
     /// V235 (#7083): the blocking alert pages on blocked wait time. The shipped bars move: <c>blocking_count_threshold</c> 1 to 3,

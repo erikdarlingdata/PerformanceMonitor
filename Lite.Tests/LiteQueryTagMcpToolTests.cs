@@ -227,16 +227,17 @@ public sealed class LiteQueryTagMcpToolTests : IDisposable
     }
 
     [Fact]
-    public async Task LongQueryCompletions_WithATagAndNoRows_StillSaysTheCollectorIsOptIn_AndNamesTheTag()
+    public async Task LongQueryCompletions_WithATagAndNoRows_NeverRanAndOff_SaysTheCollectorIsOptIn_AndNamesTheTag()
     {
         await CpuTagAsync("Dec", _idA, "0x00000000000000AA");
 
         var root = Parse(await McpLongQueryTools.GetLongQueryCompletions(_service, _serverManager, ServerA, 24, 10, tag: "Dec"));
 
-        Assert.Equal("empty", root.GetProperty("status").GetString());
+        /* #8571: the collector never ran for the server and no schedule says it is on, so the answer is not_collected with the enable step. */
+        Assert.Equal("not_collected", root.GetProperty("status").GetString());
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains("for query tag 'Dec'", message, StringComparison.Ordinal);
-        Assert.Contains("collector is opt-in (default OFF)", message, StringComparison.Ordinal);
+        Assert.Contains("It is off by default", message, StringComparison.Ordinal);
         Assert.DoesNotContain("carry query tag", message, StringComparison.Ordinal);
     }
 

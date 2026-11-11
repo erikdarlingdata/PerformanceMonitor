@@ -760,6 +760,9 @@ DROP TABLE IF EXISTS collect.schema_capture_passes;"),
         // V257 (#8464): the status-leading collection_log index. The probe's sentinel is the index itself, so the rewind drops it and a re-run
         // of V257 makes it again. Safe on a store that never had it.
         new(257, "hasCollectionLogStatusTimeIndex", "DROP INDEX IF EXISTS collect.idx_collection_log_status_time;"),
+        // V258 (#8567): the oversized-plan backlog's dropped-row index. The probe's sentinel is the index itself, so the rewind drops it and a
+        // re-run of V258 makes it again. Safe on a store that never had it.
+        new(258, "hasOversizedPlanBacklogDroppedIndex", "DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_dropped;"),
     ];
 
     /// <summary>
