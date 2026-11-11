@@ -613,7 +613,9 @@ public sealed class DurationTrendDatabaseFilterHourlyLiveTests
                 var wideB = await Wide(DatabaseFilter.One(B));
                 Assert.Equal(3_000 * twoHours, wideA, 6);
                 Assert.Equal(6_000 * twoHours, wideB, 6);
-                Assert.Equal(wideA + wideB, await Wide(Of(A, B)), 6);
+                /* #8572: each figure is rounded to six places, so a sum of two rounded figures and the rounded sum may differ
+                   by a millionth or two. A list that dropped a database would be off by hundreds of times that. */
+                Assert.Equal(wideA + wideB, await Wide(Of(A, B)), 2e-6);
                 Assert.Equal(18_000 * twoHours, await Wide(DatabaseFilter.All), 6);
 
                 /* [M4] A list that matches nothing in the rollup is "empty", and the message names the chosen databases. */

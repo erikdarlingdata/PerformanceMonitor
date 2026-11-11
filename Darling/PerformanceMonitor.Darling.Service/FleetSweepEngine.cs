@@ -938,7 +938,7 @@ public static class FleetSweepEngine
             collection_runs = reading.Signals.CollectionRuns,
             high_cpu_events = reading.Signals.HighCpuEvents,
             blocking_events = reading.Signals.BlockingEvents,
-            blocking_rate_per_hour = McpHelpers.RoundTo(ServerHealthClassifier.BlockingRatePerHour(
+            blocking_rate_per_hour = TrendPayloads.RoundRate(ServerHealthClassifier.BlockingRatePerHour(
                 reading.Signals.BlockingEvents, reading.Signals.Window), 2), // #8572
             memory_pressure_events = reading.Signals.MemoryPressureEvents,
             memory_critical_events = reading.Signals.MemoryCriticalEvents,
