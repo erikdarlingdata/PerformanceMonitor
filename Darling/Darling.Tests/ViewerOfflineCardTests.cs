@@ -13,7 +13,9 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Shapes;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
@@ -118,16 +120,37 @@ public sealed class ViewerOfflineCardTests
     [Fact]
     public void TheDatedLastCollectValue_FitsInsideTheCard()
     {
-        var (text, clipped, rightEdge, cardWidth, slot, width) = Shown(OfflineCard(), card =>
+        /* Server Time on a named clock: the stamp then carries its date and the clock's offset, the longest text the row shows. */
+        var savedMode = ViewerTimeHelper.CurrentDisplayMode;
+        var savedClock = ViewerTimeHelper.ActiveServerClock;
+        ViewerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(-300);
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        string text;
+        System.Collections.Generic.List<string> clipped;
+        double rightEdge, cardWidth, slot, width;
+        try
         {
-            var value = Row(card, "Last Collect:").Value;
-            var right = value.TransformToAncestor(card).TransformBounds(new Rect(value.RenderSize)).Right;
-            /* Layout clips a block whose rendered size is wider than the cell it was given; the person sees the cut, not the card edge. */
-            var layoutClip = LayoutInformation.GetLayoutClip(value);
-            return (value.Text, ClippedTextProbe.Clipped(card, card), right, card.ActualWidth, layoutClip is null ? value.ActualWidth : layoutClip.Bounds.Width, value.ActualWidth);
-        });
+            (text, clipped, rightEdge, cardWidth, slot, width) = Shown(OfflineCard(), card =>
+            {
+                /* The shell the template is read from seeds the mode from the app settings; the card is drawn in the one named here. */
+                ViewerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(-300);
+                ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+                var value = Row(card, "Last Collect:").Value;
+                value.GetBindingExpression(TextBlock.TextProperty)?.UpdateTarget();
+                card.UpdateLayout();
+                var right = value.TransformToAncestor(card).TransformBounds(new Rect(value.RenderSize)).Right;
+                /* Layout clips a block whose rendered size is wider than the cell it was given; the person sees the cut, not the card edge. */
+                var layoutClip = LayoutInformation.GetLayoutClip(value);
+                return (value.Text, ClippedTextProbe.Clipped(card, card), right, card.ActualWidth, layoutClip is null ? value.ActualWidth : layoutClip.Bounds.Width, value.ActualWidth);
+            });
+        }
+        finally
+        {
+            ViewerTimeHelper.CurrentDisplayMode = savedMode;
+            ViewerTimeHelper.ActiveServerClock = savedClock;
+        }
 
-        Assert.Matches(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$", text);
+        Assert.Matches(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \(UTC-05:00\)$", text);
         Assert.True(clipped.Count == 0, "cut off: " + string.Join("; ", clipped));
         Assert.True(slot + 0.5 >= width, $"\"{text}\" renders {width:F0} wide in a {slot:F0} wide cell, so its end is cut");
         Assert.True(rightEdge <= cardWidth - 2 + 0.5, $"the Last Collect value ends at {rightEdge:F0}, past the {cardWidth:F0} wide card's border");
