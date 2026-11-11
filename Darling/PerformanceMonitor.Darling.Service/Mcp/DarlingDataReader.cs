@@ -1227,19 +1227,19 @@ internal static class DarlingDataReader
                    IN semi-join, so a hash shared by two winners is read once, not once a winner) and cannot match a NULL
                    hash, so the second arm reads the NULL-hash rows, and only when a winner has a NULL hash. The join below stays
                    the exact NULL-safe match, so the groups and every figure are unchanged. */
-                SELECT q0.* FROM query_stats AS q0
-                WHERE q0.server_id = $1
-                AND   q0.collection_time >= $2
-                AND   q0.collection_time <= $3
-                AND   ($5::text[] IS NULL OR q0.database_name = ANY($5))
-                AND   q0.query_hash IN (SELECT win_query_hash FROM winners)
+                SELECT * FROM query_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                AND   query_hash IN (SELECT win_query_hash FROM winners)
                 UNION ALL
-                SELECT q0.* FROM query_stats AS q0
-                WHERE q0.server_id = $1
-                AND   q0.collection_time >= $2
-                AND   q0.collection_time <= $3
-                AND   ($5::text[] IS NULL OR q0.database_name = ANY($5))
-                AND   q0.query_hash IS NULL
+                SELECT * FROM query_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   ($5::text[] IS NULL OR database_name = ANY($5))
+                AND   query_hash IS NULL
                 AND   EXISTS (SELECT 1 FROM winners WHERE win_query_hash IS NULL)
             ) AS q
             JOIN winners AS w
