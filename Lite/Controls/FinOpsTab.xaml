@@ -112,11 +112,18 @@
         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,6,10,0">
             <TextBlock Text="Server:" VerticalAlignment="Center" Margin="0,0,6,0"
                        FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}"/>
-            <ComboBox x:Name="ServerSelector" Width="260" DisplayMemberPath="DisplayNameWithIntent"
+            <ComboBox x:Name="ServerSelector" Width="260"
+                      ToolTip="{Binding SelectedItem.DisplayNameWithIntent, RelativeSource={RelativeSource Self}}"
                       AutomationProperties.Name="Server"
                       ItemContainerStyle="{DynamicResource ServerSelectorItemStyle}"
                       SelectionChanged="ServerSelector_SelectionChanged">
                 <!-- A screen reader announces each item (and the selection) by the server's name, not the model's type name. -->
+                <!-- #8564: a long hostname trims with an ellipsis instead of running under the drop-down arrow, and the whole name is the tooltip. -->
+                <ComboBox.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding DisplayNameWithIntent}" TextTrimming="CharacterEllipsis" ToolTip="{Binding DisplayNameWithIntent}"/>
+                    </DataTemplate>
+                </ComboBox.ItemTemplate>
             </ComboBox>
         </StackPanel>
 
@@ -149,7 +156,7 @@
                                Margin="10,0,10,4" FontSize="11"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                     <TextBlock Style="{DynamicResource EmptyHint}" x:Name="RecommendationsNoDataMessage"
-                               Text="No recommendations — all checks passed or insufficient data for analysis."
+                               Text="No recommendations: all checks passed or insufficient data for analysis."
                                Margin="10,0" Visibility="Collapsed"/>
                 </StackPanel>
 
@@ -393,7 +400,7 @@
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Grid.Column="0" Text="Stolen Mem %" FontWeight="SemiBold"
                                            Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"
-                                           ToolTip="(Total Server Memory - Buffer Pool) / Total Server Memory — memory used by plan cache, locks, grants, CLR, etc."/>
+                                           ToolTip="(Total Server Memory - Buffer Pool) / Total Server Memory: memory used by plan cache, locks, grants, CLR, etc."/>
                                 <Grid Grid.Column="1" Margin="0,0,8,0">
                                     <Border Height="16" CornerRadius="3" Background="{DynamicResource BarTrackBrush}" BorderBrush="{DynamicResource ControlBorderBrush}" BorderThickness="1"/>
                                     <Grid>
@@ -418,7 +425,7 @@
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Grid.Column="0" Text="Buffer Pool %" FontWeight="SemiBold"
                                            Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center"
-                                           ToolTip="Buffer Pool / Physical Memory — how much of physical RAM is used by the buffer pool. On an Azure SQL Database it is the share of the database's memory limit."/>
+                                           ToolTip="Buffer Pool / Physical Memory: how much of physical RAM is used by the buffer pool. On an Azure SQL Database it is the share of the database's memory limit."/>
                                 <Grid Grid.Column="1" Margin="0,0,8,0">
                                     <Border Height="16" CornerRadius="3" Background="{DynamicResource BarTrackBrush}" BorderBrush="{DynamicResource ControlBorderBrush}" BorderThickness="1"/>
                                     <Grid>
@@ -494,7 +501,7 @@
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
                 <!-- Provisioning Trend (7-day) -->
-                <ui:ChartPanel x:Name="ProvisioningTrendCard" Title="7-Day Provisioning Trend" Subtitle="The badge above covers the last 24 hours; each row is one whole day, judged on its CPU, memory grants and stolen memory" Margin="10,8,10,0">
+                <ui:ChartPanel x:Name="ProvisioningTrendCard" Title="7-Day Provisioning Trend" Subtitle="The badge above covers the last 24 hours; each row is one calendar day, judged on its CPU, memory grants and stolen memory: the six whole days before today, then today so far" Margin="10,8,10,0">
                     <DataGrid x:Name="ProvisioningTrendGrid" MaxHeight="{x:Static ui:PageScroll.GridMaxHeight}"
                               AutoGenerateColumns="False" IsReadOnly="True"
                               CanUserSortColumns="False" HeadersVisibility="Column"
@@ -502,7 +509,7 @@
                               RowStyle="{StaticResource DefaultRowStyle}"
                               LoadingRow="MarkedGrid_LoadingRow">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="100" SortMemberPath="Day"/>
+                            <DataGridTextColumn Header="Day" Binding="{Binding DayDisplay}" Width="130" SortMemberPath="Day"/>
                             <!-- Status takes the width the numeric columns leave, so UNDER PROVISIONED is never cut while the card has room. -->
                             <DataGridTextColumn Header="Status" Binding="{Binding StatusDisplay}" Width="*" MinWidth="160">
                                 <DataGridTextColumn.ElementStyle>
@@ -1079,16 +1086,21 @@
 
                   <!-- View 1 (object drill): the selected database's object-growth heatmap (rows = top-N
                        objects by reserved-MB growth, X = daily buckets, color = absolute reserved MB) over a
-                       companion grid. Double-click an object to drill to its indexes. (#1138 §3A/§3C) -->
-                  <Grid x:Name="StorageObjectView" Visibility="Collapsed">
+                       companion grid. Double-click an object to drill to its indexes. (#1138 §3A/§3C)
+                       The chart is as tall as its rows need (FinOpsHeatmapRenderer sets its MinHeight from the object count), so
+                       the view scrolls as one page when the chart and the grid cannot both fit. The grid lists every object
+                       and takes the room that is left, and the wheel over either moves the page. -->
+                  <ScrollViewer x:Name="StorageObjectView" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                PreviewMouseWheel="PageScroll_PreviewMouseWheel">
+                  <Grid MinHeight="{Binding ViewportHeight, ElementName=StorageObjectView}">
                       <Grid.RowDefinitions>
                           <RowDefinition Height="Auto"/>
-                          <RowDefinition Height="2*"/>
-                          <RowDefinition Height="3*"/>
+                          <RowDefinition Height="Auto"/>
+                          <RowDefinition Height="*"/>
                       </Grid.RowDefinitions>
                       <TextBlock Grid.Row="0" x:Name="ObjectSubstrateCaveat" TextWrapping="Wrap" Margin="0,0,0,4"
                                  FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                 Text="Object / reserved footprint (daily). This is per-object reservation, not file allocation — it may not fully explain a database's file-level growth (log / free space)."/>
+                                 Text="Object / reserved footprint (daily). This is per-object reservation, not file allocation, so it may not fully explain a database's file-level growth (log / free space)."/>
                       <ui:ChartPanel Title="Object Growth Heatmap" Grid.Row="1">
                           <ScottPlot:WpfPlot x:Name="ObjectGrowthHeatmapChart"
                                              MouseMove="ObjectHeatmapChart_MouseMove"
@@ -1121,6 +1133,7 @@
                                  FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
                                  HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
                   </Grid>
+                  </ScrollViewer>
 
                   <!-- View 2 (index drill): per-index size + usage for the selected object (folds the old
                        Index Usage tab, #1138 §3C). -->
@@ -1516,7 +1529,7 @@
 
                 <!-- Header Controls -->
                 <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="10,8" Height="36">
-                    <TextBlock Text="Accelerated Database Recovery — Persistent Version Store" VerticalAlignment="Center" Margin="0,0,10,0"
+                    <TextBlock Text="Accelerated Database Recovery: Persistent Version Store" VerticalAlignment="Center" Margin="0,0,10,0"
                                FontWeight="Bold" FontSize="14"
                                Foreground="{DynamicResource ForegroundBrush}"/>
                     <Button Content="Refresh" Click="RefreshPvsStats_Click"
@@ -3177,6 +3190,7 @@
                                 </DataGridTextColumn.Header>
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
+                                        <Setter Property="ToolTip" Value="{Binding ProvisioningNote}"/>
                                         <Style.Triggers>
                                             <DataTrigger Binding="{Binding ProvisioningStatus}" Value="RIGHT_SIZED">
                                                 <Setter Property="Foreground" Value="#27AE60"/>
@@ -3238,11 +3252,12 @@
                                 </DataGridTextColumn.Header>
                             </DataGridTextColumn>
                             <!-- The time a live row was read, or "last known, <collection time>" for a row built from the store because
-                                 the server could not be reached. Sorted on the DateTime behind the text. -->
-                            <DataGridTextColumn Binding="{Binding LastUpdatedDisplay}" SortMemberPath="LastUpdated" Width="200">
+                                 the server could not be reached, on the selected time display (the row's own server's clock in Server
+                                 Time). Sorted on the instant behind the text, and filtered on that instant on the same clock. -->
+                            <DataGridTextColumn Binding="{Binding LastUpdatedDisplay}" SortMemberPath="LastUpdated" Width="Auto" MinWidth="200">
                                 <DataGridTextColumn.Header>
                                     <StackPanel Orientation="Horizontal">
-                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastUpdated" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                        <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastUpdatedLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>
                                         <TextBlock Text="Last Updated" FontWeight="Bold" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </DataGridTextColumn.Header>
@@ -3253,7 +3268,7 @@
                             <DataGridTextColumn Header="Annual ($)" Binding="{Binding AnnualCost, StringFormat='{}{0:N0}'}" Width="Auto" MinWidth="100">
                                 <DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style></DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Health" Binding="{Binding HealthScore, TargetNullValue='-'}" Width="75">
+                            <DataGridTextColumn Header="Health" Binding="{Binding HealthDisplay}" SortMemberPath="HealthScore" Width="Auto" MinWidth="75">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="ToolTip" Value="{Binding HealthScoreNote}"/>

@@ -199,6 +199,10 @@ public partial class ServerTab : UserControl
        Queries tab shows an explicit "trace is OFF" empty-state banner when it is disabled — read fresh
        each refresh so toggling it in the schedule editor updates the banner without reopening the tab. */
     private readonly Func<bool> _isLongQueryTraceEnabled;
+    /* #8541: the query_store_health collector's schedule on this server (null when the schedules do not hold it), read fresh
+       each time the Query Store panel's window comes back empty, so the panel says whether a newer health capture is coming and
+       at what cadence. */
+    private readonly Func<CollectorSchedule?> _queryStoreHealthSchedule;
 
     /// <summary>
     /// Raised after each data refresh with alert counts for tab badge display.
@@ -208,7 +212,7 @@ public partial class ServerTab : UserControl
     public event Func<Task>? ManualRefreshRequested;
     public event Action<ServerConnection>? PersistServerRequested; /* #1319: persist ViewFilterDatabases via ServerManager */
 
-    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null, AwsRdsKind awsRdsKind = AwsRdsKind.None)
+    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null, AwsRdsKind awsRdsKind = AwsRdsKind.None, Func<CollectorSchedule?>? queryStoreHealthSchedule = null)
     {
         InitializeComponent();
         PerformanceMonitor.Ui.ChartPairLayout.Attach(CurrentWaitsScroll, CurrentWaitsGrid, CurrentWaitsFirstCard, CurrentWaitsSecondCard, CurrentWaitsGrid.RowDefinitions[2]); // #8219: side by side when the tab is too short for both stacked
@@ -234,6 +238,9 @@ public partial class ServerTab : UserControl
         /* Default to "enabled" when no probe is supplied so the empty-state banner never falsely claims
            the trace is off; MainWindow always wires the live schedule probe. */
         _isLongQueryTraceEnabled = isLongQueryTraceEnabled ?? (() => true);
+        /* No schedule when no probe is supplied, which the panel reads as the shipped one (enabled, hourly); MainWindow wires
+           the live schedule probe. */
+        _queryStoreHealthSchedule = queryStoreHealthSchedule ?? (() => null);
         foreach (var db in _server.ViewFilterDatabases)
             _selectedDatabases.Add(db);
         _dataService = new LocalDataService(duckDb);
@@ -774,6 +781,7 @@ public partial class ServerTab : UserControl
     public void DisposeChartHelpers()
     {
         ThemeManager.ThemeChanged -= OnThemeChanged;
+        _barCellMaxesWatch?.Release();
         /* Closing the server tab with plan tabs still open would leak each PlanViewerControl via the
            static ThemeChanged event — clean them up here too (ClosePlanTab_Click only handles the
            per-tab close-button path). */

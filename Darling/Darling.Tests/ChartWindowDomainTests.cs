@@ -100,10 +100,10 @@ public sealed class ChartWindowDomainTests
     {
         var util = UtilJs;
 
-        Assert.Contains("export function windowFromHours(hours) {", util, StringComparison.Ordinal);
+        Assert.Contains("export function windowFromHours(hours, asOf = null) {", util, StringComparison.Ordinal);
         /* END = now (a UTC epoch, directly comparable to the parseUtc'd data times), START = now - hours. The
            last data point is NEVER read here — that is the whole point of the fix. */
-        Assert.Contains("const windowEnd = Date.now();", util, StringComparison.Ordinal);
+        Assert.Contains("const windowEnd = pinned != null ? pinned : Date.now();", util, StringComparison.Ordinal);
         Assert.Contains("return { windowStart: windowEnd - h * 3600000, windowEnd };", util, StringComparison.Ordinal);
         /* A missing/degenerate hours ⇒ null ⇒ the chart falls back to its data-extent domain (byte-for-byte). */
         Assert.Contains("if (!isFinite(h) || h < 1) return null;", util, StringComparison.Ordinal);
@@ -122,7 +122,7 @@ public sealed class ChartWindowDomainTests
     {
         var panels = PanelsJs;
         /* vizLine: width from the descriptor's own hours (windowHours when a fanout injected it, else params.hours). */
-        Assert.Contains("const win = windowFromHours(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours);", panels, StringComparison.Ordinal);
+        Assert.Contains("const win = windowFromHours(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours, desc.params && desc.params.as_of);", panels, StringComparison.Ordinal);
         Assert.Contains("windowStart: win ? win.windowStart : null,", panels, StringComparison.Ordinal);
         Assert.Contains("windowEnd: win ? win.windowEnd : null,", panels, StringComparison.Ordinal);
         /* The loader hands a narrowed read's kept hours to the renderer as windowHours. */

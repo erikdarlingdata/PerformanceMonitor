@@ -33,7 +33,7 @@ public sealed class PgPlanCaptureReadinessSettingsLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static string Sql(string logFormat, string linePrefix)
+    private static string Sql(string? logFormat, string linePrefix, string preload = "pg_stat_statements,auto_explain")
     {
         var context = new CollectorContext
         {
@@ -47,9 +47,9 @@ public sealed class PgPlanCaptureReadinessSettingsLiveTests
         var text = PgPlanCaptureReadinessCollector.Instance.BuildQuery(context).Text;
         var swaps = new (string From, string To)[]
         {
-            ("current_setting('shared_preload_libraries', true)", "'pg_stat_statements,auto_explain'::text"),
+            ("current_setting('shared_preload_libraries', true)", "'" + preload + "'::text"),
             ("current_setting('auto_explain.log_min_duration', true)", "'10'::text"),
-            ("current_setting('auto_explain.log_format', true)", "'" + logFormat + "'::text"),
+            ("current_setting('auto_explain.log_format', true)", logFormat is null ? "NULL::text" : "'" + logFormat + "'::text"),
             ("current_setting('log_line_prefix', true)", "'" + linePrefix + "'::text"),
             ("current_setting('log_destination', true)", "'stderr'::text"),
         };
@@ -63,7 +63,7 @@ public sealed class PgPlanCaptureReadinessSettingsLiveTests
         return text;
     }
 
-    private static async Task<Dictionary<string, (bool Satisfied, string Detail)>> RunAsync(string logFormat, string linePrefix)
+    private static async Task<Dictionary<string, (bool Satisfied, string Detail)>> RunAsync(string? logFormat, string linePrefix, string preload = "pg_stat_statements,auto_explain")
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a throwaway PostgreSQL to run the live readiness test.");
@@ -71,7 +71,7 @@ public sealed class PgPlanCaptureReadinessSettingsLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);
-        await using var command = new NpgsqlCommand(Sql(logFormat, linePrefix), connection);
+        await using var command = new NpgsqlCommand(Sql(logFormat, linePrefix, preload), connection);
         await using var reader = await command.ExecuteReaderAsync(ct);
 
         var facets = new Dictionary<string, (bool, string)>();
@@ -81,6 +81,19 @@ public sealed class PgPlanCaptureReadinessSettingsLiveTests
         }
 
         return facets;
+    }
+
+    /// <summary>#8572: the library is not loaded, so auto_explain.log_format does not exist. The detail said "with auto_explain's default
+    /// text format the library loads and logs plans" beside an observed value that says the library is not loaded.</summary>
+    [Fact]
+    public async Task WhenTheLibraryIsNotLoaded_PlanTextSettingSaysTheSettingDoesNotExist_NotThatTheLibraryLogsPlans()
+    {
+        var facets = await RunAsync(null, "%m [%p] %Q ", preload: "pg_stat_statements");
+
+        Assert.False(facets["plan_text_setting"].Satisfied);
+        Assert.Contains("auto_explain is not loaded", facets["plan_text_setting"].Detail, StringComparison.Ordinal);
+        Assert.Contains("Fix library_loaded first", facets["plan_text_setting"].Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("the library loads and logs plans", facets["plan_text_setting"].Detail, StringComparison.Ordinal);
     }
 
     [Theory]

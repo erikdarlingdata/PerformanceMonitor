@@ -256,8 +256,8 @@ function firstRunHero(canEdit, servers) {
     el("div", {
       class: "hero-pitch",
       text:
-        "Build a DASHBOARD — pick a metric, aggregate it, group and filter it, and chart it as a line, bar, pie, " +
-        "stacked area, or stat — or a NOTEBOOK that mixes markdown notes with those same charts into a guided " +
+        "Build a DASHBOARD: pick a metric, aggregate it, group and filter it, and chart it as a line, bar, pie, " +
+        "stacked area, or stat. Or build a NOTEBOOK that mixes markdown notes with those same charts into a guided " +
         "investigation. Both save for every seat and re-scope live by server and time range. No SQL to write.",
     }),
     el("div", { class: "hero-ctas" }, [
@@ -844,6 +844,13 @@ export async function renderNotebookDoc(main, opts) {
   const catalog = isAlert ? (opts.catalog || { reads: [], compose: {} }) : opts.catalog;
   const readSet = new Set((catalog.reads || []).map((r) => r.name));
   const sourceSet = new Set(((catalog.compose || {}).measures || []).map((m) => m.source));
+
+  /* #8555: a row that declares no notebook (the report rows) shows only the notes its caller drew: no "Alert notebook" header,
+     no Save as notebook or Open live buttons, no "no cells yet" line, none of which has anything to act on. */
+  if (isAlert && opts.noNotebook) {
+    mount(main, []);
+    return;
+  }
 
   const status = el("div", { class: "view-status" });
   const head = isAlert

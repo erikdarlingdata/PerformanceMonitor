@@ -691,7 +691,7 @@ public partial class ViewerServerTab
                   + "nothing about whether anything blocked. Check the Overview tab for the pg_blocking "
                   + "collector's status."
                 : $"{counts.CapturesWithBlocking:N0} of {counts.CapturesTotal:N0} captures in this window "
-                  + $"saw blocking{(chains.Count == 0 && cycles.Count == 0 ? " — and none of them produced a chain or a cycle in view" : "")}.";
+                  + $"saw blocking{(chains.Count == 0 && cycles.Count == 0 ? ", and none of them produced a chain or a cycle in view" : "")}.";
 
         PgTopQueriesGrid.ItemsSource = statementsTask.Result.Select(PgDisplay.Statement).ToList();
         PgStatementsNote.Text = PanelNote("pg_statement_stats", statementsTask.Result.Count,
@@ -1138,7 +1138,7 @@ public partial class ViewerServerTab
         PgXminHorizonGrid.ItemsSource = xminCurrent.Select(r => PgDisplay.Xmin(r, xminCapturesInWindow)).ToList();
         ShowNote(PgXminNote, PanelNoteParts("pg_xmin_horizon", xminCurrent.Count,
             "Nothing held the xmin horizon back in this window.",
-            "Nothing held the xmin horizon back in this window — no long-running transaction, replication "
+            "Nothing held the xmin horizon back in this window: no long-running transaction, replication "
             + "slot, standby feedback or prepared transaction pinned an old xmin. Zero rows is the healthy "
             + "answer here, not a missing read.",
             ClearedRows.Xmin(xminRows.Count - xminCurrent.Count)));
@@ -1442,7 +1442,7 @@ public partial class ViewerServerTab
               + "server is cascading to a downstream of its own. On a primary it means nothing is "
               + "replicating from it, which is either correct or the finding."
             : $"{CountText.Plural(rows.Count, "standby connection")}. The worst {(rows.Count == 1 ? "it" : "any of them")} fell behind in this window was "
-              + string.Create(CultureInfo.InvariantCulture, $"{worst:N0} bytes of unapplied WAL — that column, not the current one, is what catches a ")
+              + $"{PgDisplay.Bytes(worst)} of unapplied WAL - that column, not the current one, is what catches a "
               + "replica that drifts far behind and recovers before anybody looks. Rank on BYTES rather than "
               + "the lag columns: measured against a stalled standby, the time lag read 2.8 seconds for a "
               + "33.7 MB backlog, because it times the round trip of the last replayed record rather than "
@@ -1645,7 +1645,7 @@ public partial class ViewerServerTab
               + "covered, and when this does record it records EVERY btree at any size, which is why its "
               + "index count exceeds the usage panel's. " + coverage.Message
             : $"ESTIMATED from catalog statistics - no index page is read. About "
-              + string.Create(CultureInfo.InvariantCulture, $"{page.ReclaimableBytesShown:N0} bytes look reclaimable across {CountText.Plural(rows.Count, "index", "indexes")}, ")
+              + $"{PgDisplay.Bytes(page.ReclaimableBytesShown)} looks reclaimable across {CountText.Plural(rows.Count, "index", "indexes")}, "
               + "and the answered rows are ranked by that figure: a percentage ranks the wrong thing, "
               + "since a tiny index at 20% is worth kilobytes next to a large one at 70%. Measured against "
               + "pgstatindex ground truth, median absolute error is 2.79 percentage points and p90 is 6.63 "

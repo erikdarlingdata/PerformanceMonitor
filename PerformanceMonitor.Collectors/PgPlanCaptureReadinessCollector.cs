@@ -356,6 +356,11 @@ SELECT
         WHEN NOT p.loaded AND p.log_format IS NOT NULL
             THEN 'This value is a PLACEHOLDER - auto_explain is not loaded, so nothing is writing plans in '
                  || 'this or any format. Fix library_loaded first.'
+        /* #8572: with the library not loaded the setting does not exist, so the library-loads-and-logs-plans sentence below
+           would describe a loaded library on a row whose own observed value says it is not loaded. Same wording as capture_threshold. */
+        WHEN NOT p.loaded
+            THEN 'This setting does not exist because auto_explain is not loaded. Fix library_loaded first - '
+                 || 'plans cannot be written in any format until the library is loaded.'
         WHEN p.log_format_json
             THEN 'auto_explain writes plans as JSON, the format the plan capture reads.'
         ELSE 'auto_explain.log_format is not json. The plan capture reads only JSON and skips every other '

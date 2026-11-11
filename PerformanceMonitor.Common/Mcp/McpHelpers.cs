@@ -20,6 +20,15 @@ namespace PerformanceMonitor.Common;
 internal static class McpHelpers
 {
     /// <summary>
+    /// A reply figure rounded to <paramref name="digits"/> places where the reply is built (#8572), so a difference or a sum of stored floats
+    /// does not reach the reader as 48.06999999999999. Null stays null. Only the written figure is rounded: nothing stored or compared goes through here.
+    /// </summary>
+    public static double? RoundTo(double? value, int digits) => value is { } v ? Math.Round(v, digits) : null;
+
+    /// <summary>The <see cref="RoundTo(double?, int)"/> form for a decimal figure.</summary>
+    public static decimal? RoundTo(decimal? value, int digits) => value is { } v ? Math.Round(v, digits) : null;
+
+    /// <summary>
     /// Maximum hours of history allowed (7 days).
     /// </summary>
     public const int MaxHoursBack = 168;

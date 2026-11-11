@@ -242,7 +242,13 @@ public sealed partial class ViewerDataService
         (await GetJobHistoryServersAsync(cancellationToken)).Choices;
 
     /// <summary>The Job History tab's registered servers: the Server drop-down's choices, and which of them are Azure SQL Databases (no SQL Agent).</summary>
-    public sealed record JobHistoryServers(List<JobHistoryFilterChoices.ServerChoice> Choices, IReadOnlySet<int> AzureSqlDatabaseIds);
+    /// <param name="Choices">The offered servers.</param>
+    /// <param name="AzureSqlDatabaseIds">Which of them are Azure SQL Databases.</param>
+    /// <param name="EngineGapNotes">The servers whose engine never runs the job history collector (a PostgreSQL target), by id, each with the engine's own sentence
+    /// (#8564). Null reads as none.</param>
+    public sealed record JobHistoryServers(
+        List<JobHistoryFilterChoices.ServerChoice> Choices, IReadOnlySet<int> AzureSqlDatabaseIds,
+        IReadOnlyDictionary<int, string>? EngineGapNotes = null);
 
     /// <summary>Reads the registered servers the Job History tab offers (<see cref="OffersJobHistory"/>), with the Azure SQL Databases among them marked.</summary>
     public async Task<JobHistoryServers> GetJobHistoryServersAsync(CancellationToken cancellationToken = default)
@@ -259,7 +265,21 @@ public sealed partial class ViewerDataService
     /// </summary>
     internal static bool OffersJobHistory(DarlingServer server) =>
         JobHistoryCollector.CollectsOn(server.IsEnabled, server.EngineKind, server.EngineEdition)
-        || IsEnabledAzureSqlDatabase(server);
+        || IsEnabledAzureSqlDatabase(server)
+        || EngineGapNoteOf(server) is not null;
+
+    /// <summary>
+    /// #8564: the engine's own sentence for an enabled server whose engine never runs the job history collector (a PostgreSQL target), the same
+    /// <see cref="CollectorEngineCapability.NotCollectedMessage"/> the Agent Alerts, Database Protection and Identity Capacity tabs show. It is
+    /// offered in the Server drop-down so the tab can say why it has no runs, instead of the usual note that reads as a true negative. Null for a
+    /// server that runs SQL Agent, an Azure SQL Database (it has its own sentence) or a disabled server.
+    /// </summary>
+    internal static string? EngineGapNoteOf(DarlingServer server) =>
+        server.IsEnabled && !JobHistoryCollector.CollectsOn(true, server.EngineKind, CollectorEngineCapability.UnknownEngineEdition)
+            ? CollectorEngineCapability.NotCollectedMessage(
+                string.IsNullOrEmpty(server.DisplayName) ? server.ServerName : server.DisplayName,
+                server.EngineEdition, server.EngineKind, "job_history", server.AwsRdsKind)
+            : null;
 
     private static bool IsEnabledAzureSqlDatabase(DarlingServer server) =>
         server.EngineEdition == CollectorEngineCapability.AzureSqlDatabaseEngineEdition
@@ -273,7 +293,11 @@ public sealed partial class ViewerDataService
             offered
                 .Select(s => new JobHistoryFilterChoices.ServerChoice(s.ServerId, string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName))
                 .ToList(),
-            offered.Where(IsEnabledAzureSqlDatabase).Select(s => s.ServerId).ToHashSet());
+            offered.Where(IsEnabledAzureSqlDatabase).Select(s => s.ServerId).ToHashSet(),
+            offered
+                .Select(s => (s.ServerId, Note: EngineGapNoteOf(s)))
+                .Where(x => x.Note is not null)
+                .ToDictionary(x => x.ServerId, x => x.Note!));
     }
 
     /// <summary>Maps the managed servers to Server choices (see <see cref="ServersOf"/>).</summary>

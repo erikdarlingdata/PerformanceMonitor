@@ -125,6 +125,26 @@ BEGIN
     RETURN;
 END;
 
+IF EXISTS
+(
+    SELECT
+        1
+    FROM sys.database_query_store_options AS PerformanceMonitorLite
+    WHERE actual_state IN (1, 2, 4)
+    AND   readonly_reason & 8 <> 0
+)
+BEGIN
+    SELECT /* PerformanceMonitorLite */
+        query_hint_id = CONVERT(bigint, NULL),
+        query_id = CONVERT(bigint, NULL),
+        query_hint_text = CONVERT(nvarchar(max), NULL),
+        last_query_hint_failure_reason = CONVERT(nvarchar(128), NULL),
+        query_hint_failure_count = CONVERT(bigint, NULL),
+        source = CONVERT(nvarchar(60), N'{ReadableSecondarySentinel}');
+
+    RETURN;
+END;
+
 IF NOT EXISTS
 (
     SELECT
@@ -204,7 +224,14 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
         var scrub = context.BeginStatementScrub();
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(ReadRow(reader, item, scrub));
+            var row = ReadRow(reader, item, scrub);
+            if (IsReadableSecondarySentinel(row))
+            {
+                context.QueryStoreSecondaryDatabases++;
+                continue;
+            }
+
+            rows.Add(row);
         }
     }
 
@@ -219,11 +246,28 @@ EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(ReadRow(reader, databaseName, scrub));
+            var row = ReadRow(reader, databaseName, scrub);
+            if (IsReadableSecondarySentinel(row))
+            {
+                context.QueryStoreSecondaryDatabases++;
+                continue;
+            }
+
+            rows.Add(row);
         }
 
         return rows;
     }
+
+    /// <summary>
+    /// #8541: the <c>source</c> of the one row the payload returns for a database whose Query Store is a readable secondary's
+    /// (<c>readonly_reason</c> bit 8). The readers count it on the context and store nothing for it, so the table holds no row for
+    /// such a database, and the run can say that every database it read was one.
+    /// </summary>
+    internal const string ReadableSecondarySentinel = "PerformanceMonitor:readable_secondary";
+
+    private static bool IsReadableSecondarySentinel(Row row) =>
+        row.QueryHintId is null && string.Equals(row.Source, ReadableSecondarySentinel, StringComparison.Ordinal);
 
     /// <summary>Ordinals follow the SELECT list of <see cref="BuildPayloadBody"/>.</summary>
     private static Row ReadRow(DbDataReader reader, string databaseName, SensitiveStatements.Session scrub) =>

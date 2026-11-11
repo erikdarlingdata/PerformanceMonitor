@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -48,7 +49,8 @@ public sealed record ProvisioningTrendDto(
     decimal MemoryRatio,
     string Status,
     decimal? StolenMemoryPct = null,
-    string? StatusReason = null);
+    string? StatusReason = null,
+    bool IsPartial = false);
 
 /// <summary>One day of pool-level memory-grant vs used efficiency. <paramref name="Day"/> is the day the read bucketed by (<see cref="DayBucket"/>): a UTC date unless the caller gave the display's days.</summary>
 public sealed record MemoryGrantEfficiencyDto(
@@ -348,20 +350,23 @@ ORDER BY d.day";
 
     /// <summary>
     /// The 7-day daily provisioning classification trend, oldest day first, each row a UTC calendar day: the day a caller with no
-    /// display, such as the MCP tools, names.
+    /// display, such as the MCP tools, names. The days are the seven of <see cref="ProvisioningTrendWindow"/>: the six whole UTC
+    /// days before today and today so far.
     /// </summary>
     public static Task<List<ProvisioningTrendDto>> GetProvisioningTrendAsync(
         NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, CancellationToken cancellationToken = default)
     {
         var nowUtc = DateTime.UtcNow;
-        var cutoff = nowUtc.AddDays(-7);
+        var cutoff = ProvisioningTrendWindow.FirstDay(nowUtc);
         return GetProvisioningTrendAsync(dataSource, serverId, cutoff, UtcDays(cutoff, nowUtc), commandTimeoutSeconds, cancellationToken);
     }
 
     /// <summary>
     /// The daily provisioning classification trend of the samples at or after <paramref name="fromUtc"/>, oldest day first, each row
     /// one of <paramref name="days"/>: the samples inside its bounds, labelled with its Day. The Viewer passes the selected time
-    /// display's days, so a row reads in the same clock as every other time on its page.
+    /// display's days, so a row reads in the same clock as every other time on its page. The read keeps the newest
+    /// <see cref="ProvisioningTrendWindow.Days"/> of the days, so it never returns more rows than that, and marks a row partial
+    /// when its day has not ended on the wall clock: that day is judged on the hours so far.
     /// </summary>
     public static async Task<List<ProvisioningTrendDto>> GetProvisioningTrendAsync(
         NpgsqlDataSource dataSource, int serverId, DateTime fromUtc, IReadOnlyList<DayBucket> days, int commandTimeoutSeconds,
@@ -375,6 +380,12 @@ ORDER BY d.day";
             return [];
         }
         days = DaysThrough(days, newest);
+        if (days.Count > ProvisioningTrendWindow.Days)
+        {
+            days = days.Skip(days.Count - ProvisioningTrendWindow.Days).ToList();
+        }
+        var asOfUtc = DateTime.UtcNow;
+        var dayEnds = days.ToDictionary(d => d.Day.Date, d => d.EndUtc);
 
         await using var command = dataSource.CreateCommand(ProvisioningTrendSql);
         command.CommandTimeout = commandTimeoutSeconds;
@@ -416,8 +427,9 @@ ORDER BY d.day";
                     : (decimal)((Convert.ToDouble(reader.GetValue(14)) - Convert.ToDouble(reader.GetValue(15))) / Convert.ToDouble(reader.GetValue(14)) * 100.0),
                 isAgSecondary: ProvisioningVerdict.IsSecondaryReplicaRole(reader.IsDBNull(16) ? null : reader.GetString(16)));
 
+            var day = reader.GetDateTime(0);
             items.Add(new ProvisioningTrendDto(
-                reader.GetDateTime(0),
+                day,
                 avgCpu,
                 maxCpu,
                 p95Cpu,
@@ -427,7 +439,8 @@ ORDER BY d.day";
                 /* The reason comes from the same place as the verdict, as the Viewer's badge does. */
                 status == ProvisioningVerdict.UnderProvisioned
                     ? ProvisioningVerdict.UnderProvisionedReason(p95Cpu, maxGrantWaiters, grantTimeouts, forcedGrants, maxWorkers, currentWorkers, stolenMemoryPercent, engineEdition)
-                    : null));
+                    : null,
+                IsPartial: dayEnds.TryGetValue(day.Date, out var dayEnd) && dayEnd > asOfUtc));
         }
         return items;
     }

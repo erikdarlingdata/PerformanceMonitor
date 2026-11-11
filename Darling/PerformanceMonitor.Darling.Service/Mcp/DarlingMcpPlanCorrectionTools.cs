@@ -145,6 +145,11 @@ public sealed class DarlingMcpPlanCorrectionTools
                         notice.AsHints()), cancellationToken, windowStart);
             }
 
+            /* The plan_correction collector's effective schedule on the server, for the automatic-tuning snapshot's staleness note. */
+            var tuningSchedule = tuning.Count > 0
+                ? await DarlingGatedCollectorRows.CollectorScheduleAsync(postgres, resolved.ServerId, "plan_correction", cancellationToken)
+                : default;
+
             var recommendations = page.Select(r => new
             {
                 collection_time = r.CollectionTime.ToString("o"),
@@ -198,7 +203,11 @@ public sealed class DarlingMcpPlanCorrectionTools
                    end (as_of when given), so a read of a past instant is not graded against the present. */
                 automatic_tuning_note = QueryStoreSnapshotStaleness.Join(
                     tuning.Count > 0 ? await DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken) : null,
-                    tuning.Count > 0 ? QueryStoreSnapshotStaleness.Note(DateTime.SpecifyKind(tuning.Max(t => t.CollectionTime), DateTimeKind.Utc), now, "plan_correction") : null),
+                    tuning.Count > 0
+                        ? QueryStoreSnapshotStaleness.Note(
+                            DateTime.SpecifyKind(tuning.Max(t => t.CollectionTime), DateTimeKind.Utc), now, "plan_correction",
+                            tuningSchedule.Enabled, tuningSchedule.IntervalMinutes)
+                        : null),
                 /* #3541 A3: the page described as a page. Newest-capture-first makes it a contiguous slice of
                    the window's tail, so the oldest stamp IS the reach; null when the window held no
                    recommendation rows and only the tuning snapshot answered. */
