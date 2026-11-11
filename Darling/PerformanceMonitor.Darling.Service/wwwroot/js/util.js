@@ -1658,7 +1658,11 @@ const HEAVY_READ_CAP = 2;
    GATED_READ_CAP, which stays below the six a browser opens so that some connections are always free for the reads nothing gates.
    The heavy reads keep their own cap inside it (HEAVY_READ_CAP), and a read that is next in line but not allowed yet does not hold
    back one behind it that is. */
-const LONG_TAB_READS = new Set(["get_query_duration_trend", "get_procedure_duration_trend", "get_query_store_duration_trend"]);
+/* #8681: the tab's other two data reads, the active-query snapshots (get_active_queries) and get_query_store_top, took 1.2 to 3.9 s on a
+   first visit and were not gated, so they held the two connections the gate leaves free, and ping, store host and the alert badge
+   still queued 1.1 to 3.3 s behind them. Every data read the tab makes now goes through the gate, so two of the browser's six
+   connections always stay free for the page's own reads. */
+const LONG_TAB_READS = new Set(["get_query_duration_trend", "get_procedure_duration_trend", "get_query_store_duration_trend", "get_active_queries", "get_query_store_top"]);
 const LONG_TOP_READS = new Set(["get_top_queries_by_cpu", "get_top_procedures_by_cpu"]);
 const GATED_READ_CAP = 4;
 let heavyInFlight = 0;
@@ -1671,8 +1675,9 @@ export function isHeavyPageRead(tool) {
   return HEAVY_PAGE_READS.has(tool);
 }
 
-/** True for one of the Queries tab's five other long reads (#8632), which go through the gate beside the heavy ones: the three duration
- *  trends, and the two top lists when asked at detail=full (the CPU tab's plain top list is small and goes at once). */
+/** True for one of the Queries tab's other data reads (#8632, #8681), which go through the gate beside the heavy ones: the three duration
+ *  trends, the active-query snapshots, the Query Store top list, and the two top lists when asked at detail=full (the CPU tab's plain
+ *  top list is small and goes at once). */
 export function isLongTabRead(tool, params) {
   return LONG_TAB_READS.has(tool) || (LONG_TOP_READS.has(tool) && !!params && params.detail === "full");
 }
