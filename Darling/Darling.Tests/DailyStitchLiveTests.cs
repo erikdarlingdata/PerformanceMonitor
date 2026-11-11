@@ -228,9 +228,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10)", connection);
             Assert.Equal(0.3 * scale, totalsByDay[d5], 3);
 
             /* ── Daily summary: RangeSqlFor(Daily, coverage, windowStart), the not-carried probe ──
-               unique_queries: legacy's 3 (QH1, QH2, RESTARTQ) below F_d, and 3 at/after F_d too: the successor's own
-               rows carry QH1 and QH2 (RESTARTQ filtered out), and the daily half adds the restart-only hash back from raw
-               on a day the successor daily holds (#8549), as raw counts it. One row per day, no gap, no overlap; D4 reads NULL (not carried —
+               unique_queries: legacy's 3 (QH1, QH2, RESTARTQ) below F_d, successor's 2 (QH1, QH2 — RESTARTQ
+               filtered out) at/after F_d, one row per day, no gap, no overlap; D4 reads NULL (not carried —
                the successor-side probe's source is the successor HOURLY, which IS refreshed for D4). */
             var dailySummarySql = DailySummarySql.RangeSqlFor(RetentionTier.Daily, coverage, D0);
             var dailySummaryRows = await ReadDailySummaryAsync(connection, dailySummarySql, ServerId, D0, d6, ct);
@@ -241,9 +240,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10)", connection);
             Assert.Equal(3L, byDay[D0]);
             Assert.Equal(3L, byDay[D0.AddDays(1)]);
             Assert.Equal(3L, byDay[D0.AddDays(2)]);
-            Assert.Equal(3L, byDay[d3]);
+            Assert.Equal(2L, byDay[d3]);
             Assert.Null(byDay[d4]);
-            Assert.Equal(3L, byDay[d5]);
+            Assert.Equal(2L, byDay[d5]);
 
             /* ── Red first (#3653 A6): re-probe the SAME store with RollupAvailability.WithoutIntervalDailies —
                the product's own probe, forced back to the pre-A6-daily shape. With no successor daily
