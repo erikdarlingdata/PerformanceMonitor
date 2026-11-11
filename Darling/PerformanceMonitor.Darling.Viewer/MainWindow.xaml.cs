@@ -65,8 +65,8 @@ public partial class MainWindow : Window
     /// <summary>Single-flight guard for the tick's retry of the server-list read.</summary>
     private bool _storeRetryInFlight;
     private DispatcherTimer? _overviewTimer;
-    private bool _refreshInFlight;
-    private bool _refreshRequested;
+    /// <summary>#8549: the overlap guard for "refresh the tab on screen", one lane for the fleet tabs and one for the server tabs.</summary>
+    private readonly ViewerRefreshLanes _refreshLanes = new();
 
     /// <summary>Suppresses the Recommendations server combo's SelectionChanged during initial population.</summary>
     private bool _populatingRecoServers;
@@ -1303,8 +1303,8 @@ public partial class MainWindow : Window
     /// Refreshes whichever top-level tab is visible, with the overlap guard: a per-server tab delegates
     /// to its own inner-tab refresh; the aggregate tabs reload for the sidebar-selected server. If the
     /// user switches tab or server while a load is in flight, the triggering event bounces off the guard
-    /// and sets <see cref="_refreshRequested"/>, so the running loop reloads once more when it finishes —
-    /// no user action is silently swallowed.
+    /// and asks the running loop of its own lane (<see cref="ViewerRefreshLanes"/>) to reload once more when it finishes —
+    /// no user action is silently swallowed. A fleet tab's load and a server tab's load do not wait on each other (#8549).
     /// </summary>
     private async Task RefreshVisibleAsync()
     {
@@ -1313,26 +1313,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_refreshInFlight)
-        {
-            _refreshRequested = true;
-            return;
-        }
-
-        _refreshInFlight = true;
-        try
-        {
-            do
-            {
-                _refreshRequested = false;
-                await LoadVisibleTabAsync();
-            }
-            while (_refreshRequested);
-        }
-        finally
-        {
-            _refreshInFlight = false;
-        }
+        await _refreshLanes.RunAsync(() => MainTabs.SelectedItem is TabItem { Content: ViewerServerTab }, LoadVisibleTabAsync);
     }
 
     private async Task LoadVisibleTabAsync()
