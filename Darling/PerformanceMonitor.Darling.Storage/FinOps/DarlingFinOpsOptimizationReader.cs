@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -98,8 +99,9 @@ ORDER BY ds.total_size_mb DESC";
     /// </summary>
     private static string IdleActivityForCagg(string relationSql, DateTime ceilingHourUtc, DateTime watermarkUtc)
     {
-        var ceiling = $"TIMESTAMP '{ceilingHourUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
-        var watermark = $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var ceiling = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{ceilingHourUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
+        var watermark = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
 
         return $@"db_activity AS (
     SELECT
@@ -224,7 +226,8 @@ SELECT (SELECT collection_time FROM v_query_stats WHERE server_id = $1 ORDER BY 
     {
         ArgumentNullException.ThrowIfNull(coverage);
 
-        var watermark = $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
+        var watermark = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
         var relationSql = coverage.StitchedRelationSql(
             TimescaleSupport.QueryStatsDbHourlyView, "f", coverageStartUtc, RollupCoverage.StitchTier.Hourly);
 
