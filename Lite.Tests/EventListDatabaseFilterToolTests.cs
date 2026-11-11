@@ -484,6 +484,34 @@ VALUES ($1, $2, $3, 'long_query_completions', $4, 'SUCCESS', 0)",
     }
 
     /// <summary>
+    /// #8571, Darling's twin: a collector that never ran, with its schedule ON (just enabled, before its first pass), is not_collected and is told
+    /// to read again, not to enable what is already enabled. The same server with the schedule OFF gets the enable step.
+    /// </summary>
+    [Fact]
+    public async Task LongQueries_ACollectorThatNeverRan_WithTheScheduleOn_IsNotCollected_WithoutTheEnableStep()
+    {
+        var server = _serverManager.GetAllServers().Single();
+        var schedules = new ScheduleManager(_configDir);
+        var runTimes = new McpCollectorRunTimes(schedules, _serverManager);
+
+        foreach (var (enabled, expectEnableStep) in new[] { (true, false), (false, true) })
+        {
+            schedules.SetScheduleForServer(server.Id, new System.Collections.Generic.List<CollectorSchedule>
+            {
+                new() { Name = "long_query_completions", Enabled = enabled, FrequencyMinutes = 1, RetentionDays = 30 },
+            });
+
+            var root = Parse(await McpLongQueryTools.GetLongQueryCompletions(_service, _serverManager, ServerName, 24, 30, database_name: "DbA", runTimes: runTimes));
+
+            Assert.Equal("not_collected", root.GetProperty("status").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.Equal(expectEnableStep, message.Contains("turn it on in the collector schedule", StringComparison.Ordinal));
+            Assert.Equal(!expectEnableStep, message.Contains("has not run its first pass yet; read again after it does", StringComparison.Ordinal));
+            Assert.Equal("DbA", root.GetProperty("database_name").GetString());
+        }
+    }
+
+    /// <summary>
     /// [#5414 round 2, L2] The <c>precondition</c> answer (the collector's last run recorded a permission denial, Lite's one
     /// reachable rung before the empty one) echoes <c>database_name</c>: the name for a chosen database, null for blank.
     /// </summary>

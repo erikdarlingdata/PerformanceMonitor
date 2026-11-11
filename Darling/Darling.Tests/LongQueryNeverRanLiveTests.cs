@@ -26,7 +26,7 @@ namespace PerformanceMonitor.Darling.Tests;
 public sealed class LongQueryNeverRanLiveTests
 {
     private const string Cleanup =
-        "DELETE FROM long_query_completions WHERE server_id = {0}; DELETE FROM collection_log WHERE server_id = {0}";
+        "DELETE FROM long_query_completions WHERE server_id = {0}; DELETE FROM collection_log WHERE server_id = {0}; DELETE FROM config.config_collector_schedules WHERE server_id = {0}";
 
     [Fact]
     public Task ACollectorThatNeverRan_IsNotCollected_WithTheEnableStep() =>
@@ -51,5 +51,29 @@ public sealed class LongQueryNeverRanLiveTests
             var json = await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, serverName, 24, 10, cancellationToken: ct);
 
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(json));
+        }, Cleanup);
+
+    /// <summary>
+    /// The never-ran state with the schedule ON: the collector was just enabled and has had no first pass. It is told to read again, and it
+    /// is not told to enable a collector that is already enabled. The same server with the schedule OFF gets the enable step.
+    /// </summary>
+    [Fact]
+    public Task ACollectorThatNeverRan_WithTheScheduleOn_IsNotCollected_WithoutTheEnableStep() =>
+        DurationTrendDatabaseFilterLiveTests.WithSharedStoreAsync("i8571-lq-never-on", async (connection, postgres, serverId, serverName, now, ct) =>
+        {
+            foreach (var (enabled, expectEnableStep) in new[] { (true, false), (false, true) })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM config.config_collector_schedules WHERE server_id = {serverId}");
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO config.config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) VALUES ($1,'long_query_completions',1,30,$2)",
+                    serverId, enabled);
+
+                var json = await DarlingMcpLongQueryTools.GetLongQueryCompletions(postgres, serverName, 24, 10, cancellationToken: ct);
+
+                Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(json));
+                var message = JsonDocument.Parse(json).RootElement.GetProperty("message").GetString()!;
+                Assert.Equal(expectEnableStep, message.Contains("enable_collector", StringComparison.Ordinal));
+                Assert.Equal(!expectEnableStep, message.Contains("has not run its first pass yet; read again after it does", StringComparison.Ordinal));
+            }
         }, Cleanup);
 }

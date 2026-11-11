@@ -24,6 +24,11 @@ public sealed class McpLongQueryTools
         "Long query completions have not been collected for this server: the long_query_completions collector has never run for it. It is off by default; " +
         "turn it on in the collector schedule and read again after its first pass.";
 
+    /* #8571, Darling's twin: the never-ran state with the schedule ON (just enabled, before its first pass) is not told to enable itself. */
+    private const string NotRunYetMessage =
+        "Long query completions have not been collected for this server yet: the long_query_completions collector is enabled but has not run its first pass yet; " +
+        "read again after it does.";
+
     [McpServerTool(Name = "get_long_query_completions"), Description("Gets the SLOWEST long-running query completions in the window: rpc/batch completions over the trace's duration threshold, plus attentions (cancels/timeouts), ranked duration DESC, attentions (no duration) last. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: truncated means the window held more, none slower than the page; oldest/newest_returned_event_time bound the slowest runs' ages, NOT how far the read reached. Collector is opt-in, OFF by default: empty can mean none in the window, or the collector was off, enable 'long_query_completions' in the schedule. <<GUIDE>> Gets the SLOWEST long-running query completions in the window, captured by the opt-in long-query trace: rpc/batch completions whose duration exceeded the trace threshold, plus attentions (client cancels / query timeouts), ranked by duration DESC with attentions (no duration) last. Shows duration, CPU, reads/writes, row count, result (OK/Error/Abort, Abort means the long query was cancelled), the statement text, and the calling session/app/login. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: completions_returned is how many rows you got and truncated says the window held more than limit. Because the page is duration-RANKED, oldest_returned_event_time / newest_returned_event_time tell you how old the slowest runs are and say NOTHING about how far back the read reached: every row in the window was a candidate, so a truncated page still holds the window's slowest. query_identity is the key to group rows by: it is the engine's query_hash when the engine gave one (batch-level events carry none, so query_hash is null there), otherwise text: plus a fingerprint of the statement text that does not merge statements differing only in a literal. An attention row (client cancel or timeout) carries no statement text, so its query_identity is null and it cannot be grouped by it; a null query_identity is never a group key, so do not pool those rows under one. Both SKUs keep the same population. The collector is OFF by default; if it returns empty, enable the 'long_query_completions' collector in the schedule. The monitor's own statements (program name starting PerformanceMonitor) are left out unless include_monitor is true, so an idle server answers empty." + McpHelpers.UtcStampsDescription)]
     public static async Task<string> GetLongQueryCompletions(
         LocalDataService dataService,
@@ -87,11 +92,15 @@ public sealed class McpLongQueryTools
                 var emptyNotice = await McpQueryTools.EventWindowNoticeAsync(
                     () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.LongQueryCompletions, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
                     null, windowEnd.AddHours(-hours_back), windowEnd, "long_query_completions", emptyAnswer: true);
-                /* #8571, Darling's twin: a collector that never ran for this server is not_collected, not empty. */
+                /* #8571, Darling's twin: a collector that never ran for this server is not_collected, not empty. The enable step rides only when the
+                   schedule has it off (or cannot be read: null). A schedule that has it on says it has not had its first pass. The chosen tag rides on it. */
+                var collectorEnabled = runTimes?.IsCollectorEnabled(resolved.ServerId, "long_query_completions");
                 if (emptyNotice.EffectiveStart is null
                     && !await dataService.HasCollectorEverRunAsync(resolved.ServerId, "long_query_completions"))
                 {
-                    return McpHelpers.StatusForDatabase("not_collected", NeverRanMessage, database);
+                    return McpHelpers.StatusForDatabase("not_collected",
+                        (collectorEnabled == true ? NotRunYetMessage : NeverRanMessage) + (tagScope.Active ? $" The read was for query tag '{tagScope.Requested}'." : ""),
+                        database);
                 }
 
                 /* #5244 round 2 (L3): the twin of Darling's. The floor probe is not database-filtered, so a null floor (no effective_start)
@@ -99,7 +108,7 @@ public sealed class McpLongQueryTools
                    the opt-in switch; with rows for other databases the collector is on. */
                 /* #7684 item 1: and only when the schedule says it is off; a collector that is on, with nothing captured in the window,
                    is not told to switch itself on. Null (no schedules, or the collector is not in them) leaves the rule above alone. */
-                var collectorMayBeOff = runTimes?.IsCollectorEnabled(resolved.ServerId, "long_query_completions") != true
+                var collectorMayBeOff = collectorEnabled != true
                     && ((database == null && !tagScope.Active) || emptyNotice.EffectiveStart is null);
                 /* #8146: the long-query session's ring-buffer loss over the window rides the empty answer's hints. */
                 return RingBufferLossAnswer.AttachToHints(await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.StatusForDatabase("empty",
