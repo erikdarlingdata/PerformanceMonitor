@@ -265,7 +265,9 @@ internal static class ComposeStoreAvailability
         RollupAvailability rollups, RollupCoverage coverage)
     {
         var cagg = ComposeCaggCatalog.For(sourceTable);
-        if (rollups == RollupAvailability.None || cagg is null)
+        /* #8549: wait_stats_daily is a plain view on a store without TimescaleDB, and the probe finds it there, so that flag alone
+           does not make a rollup tier: a plain store has no tier to fall back from and gets no retention notice. */
+        if ((rollups with { WaitStatsDaily = false }) == RollupAvailability.None || cagg is null)
         {
             return null;
         }
