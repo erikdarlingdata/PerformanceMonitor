@@ -22,6 +22,16 @@ internal static partial class AlertNotebookEndpoint
     /// the server's engine (#8323).</summary>
     internal const int CpuTemplateVersion = 2;
 
+    private const string CpuFiringMetric = "High CPU";
+
+    /// <summary>#8555: does a <c>High CPU</c> section answer on this engine? The CPU Resolved notebook is mechanical (it shares
+    /// the firing's section list), so it keeps only the reads of the target's own engine, the way the High CPU template does since
+    /// #8323: <c>get_pg_cpu_utilization</c> (Performance Insights) is PostgreSQL's, the others are SQL Server's.</summary>
+    private static bool CpuSectionAppliesTo(DarlingTriageEndpoint.TriageSection section, CollectorTargetEngine engine) =>
+        string.Equals(section.Read, "get_pg_cpu_utilization", StringComparison.Ordinal)
+            ? engine == CollectorTargetEngine.PostgreSql
+            : engine == CollectorTargetEngine.SqlServer;
+
     /// <summary>High CPU (spec §3): header, status, then the resolved server's own engine's cells (#8323,
     /// <see cref="AuthoredContext.EngineKind"/>). The metric fires on both engines (#2719). SQL Server: the SQL Server CPU
     /// timeline, the top-queries and top-procedures-by-CPU drill-downs, then scheduler pressure. PostgreSQL (Aurora
