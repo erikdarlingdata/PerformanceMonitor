@@ -135,7 +135,7 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// The <c>module</c> CTE of <see cref="TopQueriesSql"/> (#1568 module attribution): one <c>procedure_stats</c> identity per ranked
     /// <c>sql_handle</c>. Its own constant so a live test can run it against a stand-in <c>ranked</c> CTE (#8549).
-    /// $1 server_id; reads <c>ranked.sql_handle</c>.
+    /// $1 server_id, $2 the window start (the read's own lower bound); reads <c>ranked.sql_handle</c>.
     /// </summary>
     public static readonly string TopQueriesModuleCte = """
         module AS MATERIALIZED (
@@ -144,40 +144,79 @@ public sealed partial class ViewerDataService
                procedure/function/trigger inherits its db.schema.object and the query_stats row never
                fans out. Both stores persist the SAME normalized CONVERT(varchar(130), ..., 1) handle
                text, so the join key lines up; unmatched -> ad hoc. MATERIALIZED so the page joins to one run of it, not one per ranked row.
-               #6804: only the handles of the ranked groups, and no collection_time bound. A handle whose newest row is older
-               than the window still names its module, which a bound would turn into 'ad hoc'.
-               #8549: the newest row of each handle is found without sorting. This was a ROW_NUMBER over every row of the ranked
-               handles, which sorts them (126,732 rows to keep 55 on a four-day rig, an external merge with temp files, 476 ms of a
-               959 ms statement). Now a hash aggregate takes the newest collection_time per ranked handle, and a join back on
-               idx_procedure_stats_time (server_id, collection_time) fetches each winner's row. The pass over the server's rows
-               stays, because this table has no (server_id, sql_handle) index (#4247 dropped it for its WAL cost) and a handle
-               with no row at all (an ad hoc statement) can only be proved absent by reading every row, but nothing is sorted
-               and the join back touches only the winners' rows. Both columns of the sort key are NOT NULL, so no NULL ordering applies.
-               The tie-break (DISTINCT ON over the few rows of a tied time) is the row collected last (the higher collection_id), the rule Lite's module lookup uses;
-               the ROW_NUMBER left a tie unspecified. A module whose newest row has NULL names answers NULL, as before.
+               #6804: only the handles of the ranked groups, and no upper bound on the newest row. A handle whose newest row is older
+               than the window still names its module, which a bound would turn into 'ad hoc' (#7256: the newest row over all history).
+               #8549: this was a ROW_NUMBER over every row of the ranked handles (a sort), then a hash aggregate joined back to the
+               whole table, which a planner with 10x-high group estimates ran as a hash join over every row of the server: on a
+               field store, 4.2 million rows read twice, 14.0 s of a 17.1 s statement. Now the newest row of each handle is found
+               in the RECENT rows first (collection_time >= the window start, no upper bound): a handle with any row since the window
+               start has its newest row there, so the answer is the same, and the recent rows are a few chunks, not the server.
+               Only the handles with no recent row take the read over the older history (collection_time < the window start), and
+               that read is limited to them and gated by an EXISTS, so with none of them it reads nothing. A handle with no row at all
+               (an ad hoc statement) can only be proved absent by reading the history, because this table has no (server_id,
+               sql_handle) index (#4247 dropped it for its WAL cost); that read is one filtered aggregate pass, with no join back
+               to the server. Each winner's row is then fetched by a LATERAL probe of idx_procedure_stats_time (server_id,
+               collection_time) with ORDER BY collection_id DESC LIMIT 1, a nested loop the planner cannot turn into a hash join
+               over the table. The tie-break is the row collected last (the higher collection_id), the rule Lite's module lookup
+               uses; the ROW_NUMBER left a tie unspecified. A module whose newest row has NULL names answers NULL, as before. Both
+               columns of the time key are NOT NULL, so no NULL ordering applies.
                idx_procedure_stats_time is part of the schema, not the tuning pass, so every store has it. */
-            SELECT DISTINCT ON (w.sql_handle)
+            WITH handles AS MATERIALIZED (
+                SELECT DISTINCT sql_handle
+                FROM ranked
+                WHERE sql_handle IS NOT NULL
+                AND   sql_handle <> ''
+            ),
+            recent AS MATERIALIZED (
+                SELECT
+                    sql_handle,
+                    MAX(collection_time) AS newest
+                FROM procedure_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   sql_handle IN (SELECT sql_handle FROM handles)
+                GROUP BY sql_handle
+            ),
+            missing AS MATERIALIZED (
+                SELECT h.sql_handle
+                FROM handles AS h
+                WHERE NOT EXISTS (SELECT 1 FROM recent AS r WHERE r.sql_handle = h.sql_handle)
+            ),
+            older AS MATERIALIZED (
+                SELECT
+                    sql_handle,
+                    MAX(collection_time) AS newest
+                FROM procedure_stats
+                WHERE server_id = $1
+                AND   collection_time < $2
+                AND   sql_handle IN (SELECT sql_handle FROM missing)
+                AND   EXISTS (SELECT 1 FROM missing)
+                GROUP BY sql_handle
+            )
+            SELECT
                 w.sql_handle,
                 p.object_name,
                 p.schema_name,
                 p.database_name
             FROM
             (
-                SELECT
-                    sql_handle,
-                    MAX(collection_time) AS newest
-                FROM procedure_stats
-                WHERE server_id = $1
-                AND   sql_handle IS NOT NULL
-                AND   sql_handle <> ''
-                AND   sql_handle IN (SELECT sql_handle FROM ranked)
-                GROUP BY sql_handle
+                SELECT sql_handle, newest FROM recent
+                UNION ALL
+                SELECT sql_handle, newest FROM older
             ) AS w
-            JOIN procedure_stats AS p
-                ON  p.server_id = $1
-                AND p.collection_time = w.newest
-                AND p.sql_handle = w.sql_handle
-            ORDER BY w.sql_handle, p.collection_id DESC
+            CROSS JOIN LATERAL
+            (
+                SELECT
+                    ps.object_name,
+                    ps.schema_name,
+                    ps.database_name
+                FROM procedure_stats AS ps
+                WHERE ps.server_id = $1
+                AND   ps.collection_time = w.newest
+                AND   ps.sql_handle = w.sql_handle
+                ORDER BY ps.collection_id DESC
+                LIMIT 1
+            ) AS p
         )
         """;
 
