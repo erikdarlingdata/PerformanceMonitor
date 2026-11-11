@@ -133,6 +133,7 @@ public sealed partial class ViewerDataService
             {
                 "WG409" => "This group changed in another window or in the service. Refresh and retry.",
                 "WG404" => "This group was deleted. Refresh the group list.",
+                "WG429" => "A store holds at most 256 web access groups.",
                 "23505" => "A group with this name already exists.",
                 "WG400" => "Check the group name and selected tags. A selected tag may have been deleted.",
                 "42501" => "This connection is not permitted to manage web access groups.",

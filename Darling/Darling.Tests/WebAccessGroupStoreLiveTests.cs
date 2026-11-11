@@ -213,6 +213,39 @@ public sealed class WebAccessGroupStoreLiveTests
 
 
     [Fact]
+    public async Task AStoreRefusesTheTwoHundredFiftySeventhGroupAndADeleteFreesASlot()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to test the web access group cap.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var owner = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString);
+        var store = new WebAccessGroupStore(owner);
+        using var key = PasswordPrivateKey.Generate();
+        Task<long> Create(Guid id, string name)
+        {
+            var generation = Guid.NewGuid();
+            var sealedToken = PasswordSeal.Seal("synthetic-web-group-token-only-for-tests", key.PublicKey, PasswordBinding.ForWebAccessToken(id, generation));
+            return store.CreateAsync(id, name, WebAccessGroupScope.AllServers, Array.Empty<int>(), generation, sealedToken, true, "test-admin", ct);
+        }
+        var ids = new Guid[256];
+        for (var i = 0; i < ids.Length; i++)
+        {
+            ids[i] = Guid.NewGuid();
+            Assert.Equal(1, await Create(ids[i], "group-" + i));
+        }
+        var refused = await Assert.ThrowsAsync<PostgresException>(() => Create(Guid.NewGuid(), "one-too-many"));
+        Assert.Equal("WG429", refused.SqlState);
+        Assert.Equal("A store holds at most 256 web access groups.", refused.MessageText);
+        Assert.Equal(256, (await store.ListAsync(ct)).Count);
+
+        Assert.Equal(2, await store.DeleteAsync(ids[0], 1, "test-admin", ct));
+        Assert.Equal(1, await Create(Guid.NewGuid(), "one-more"));
+        var again = await Assert.ThrowsAsync<PostgresException>(() => Create(Guid.NewGuid(), "one-too-many"));
+        Assert.Equal("WG429", again.SqlState);
+    }
+
+    [Fact]
     public async Task MigrationCarvesCustomDefaultGrantsOnlyOnTheNewProtectedObjects()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");

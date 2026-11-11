@@ -138,6 +138,10 @@ BEGIN
             OR EXISTS (SELECT 1 FROM config.web_access_group_events WHERE group_id=p_id) THEN
             RAISE EXCEPTION USING ERRCODE='WG409', MESSAGE='Web access group identity or name already exists.';
         END IF;
+        -- A store holds at most 256 groups. The administration lock above makes the count exact.
+        IF (SELECT count(*) FROM config.web_access_groups) >= 256 THEN
+            RAISE EXCEPTION USING ERRCODE='WG429', MESSAGE='A store holds at most 256 web access groups.';
+        END IF;
         INSERT INTO config.web_access_groups(group_id,name,scope_kind,enabled,token_generation,sealed_token)
             VALUES(p_id,p_name,p_scope,p_enabled,p_generation,p_sealed) RETURNING revision INTO new_revision;
     ELSIF p_action='update' THEN
