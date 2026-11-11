@@ -48,12 +48,16 @@ namespace PerformanceMonitor.Darling.Storage;
 /// (<see cref="DropOverCapSql"/>). A dropped row keeps its place for a day so the read can count it, and then
 /// leaves (<see cref="PurgeDroppedSql"/>).</para>
 ///
-/// <para><b>One index, deliberately: the primary key.</b> Its leading column is <c>server_id</c>, which is
-/// the leading predicate of every access path — the sweep's trim and claim, the read-surface fallback and the
-/// sighting upsert — so each one is served or is a scan of one server's rows, which the trim holds to the
-/// pending cap plus what the sweep itself stamped inside the horizon. A second index chosen for an ORDER BY
-/// nobody has measured would be a guess; the ORDER BYs below name the index to add if it ever stops being
-/// one.</para>
+/// <para><b>Two indexes: the primary key, and one for the purge.</b> The key's leading column is
+/// <c>server_id</c>, which is the leading predicate of every access path — the sweep's trim and claim, the
+/// read-surface fallback and the sighting upsert — so each one is served or is a scan of one server's rows, which
+/// the trim holds to the pending cap plus what the sweep itself stamped inside the horizon.
+/// <c>idx_oversized_plan_backlog_dropped</c> (V258) is on <c>(server_id, expired_at)</c> and partial to the rows
+/// dropped unfetched, so <see cref="PurgeDroppedSql"/> reads the rows it deletes and not the server's every row.
+/// It names no column a re-sighting changes on a waiting row, so the upsert stays a heap-only update. An index on
+/// <c>last_seen_at</c> would end that for every re-sighting, which is why retention's daily DELETE has none. An
+/// index chosen for an ORDER BY nobody has measured would be a guess; the ORDER BYs below name the index to add if
+/// it ever stops being one.</para>
 ///
 /// <para><b>Not a collector table.</b> It is absent from <see cref="CollectorCatalog"/>, so
 /// <see cref="TimescaleSupport"/>'s catalog-driven hypertable conversion and
@@ -432,7 +436,9 @@ FROM
     /// #8567: removes one server's ($1) rows that were dropped unfetched before $2. A dropped row has no content
     /// and no attempt to keep, so it is held only for the day the read counts it in
     /// (<c>OversizedPlanBacklogSweep.DroppedRowHold</c>), which is what lets the table level off. A row a fetch
-    /// expired carries <c>last_attempt_at</c> and is not matched: it leaves on the retention horizon.
+    /// expired carries <c>last_attempt_at</c> and is not matched: it leaves on the retention horizon. These
+    /// conditions imply the predicate of <c>idx_oversized_plan_backlog_dropped</c> (V258), which is what lets the
+    /// statement read that index.
     /// </summary>
     public const string PurgeDroppedSql = @"
 DELETE FROM collect.oversized_plan_backlog
