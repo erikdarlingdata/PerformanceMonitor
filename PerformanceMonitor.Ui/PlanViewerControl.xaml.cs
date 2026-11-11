@@ -68,6 +68,7 @@ public partial class PlanViewerControl : UserControl
     // The width the last fit gave the Statements column. A column that is not that wide was moved by its splitter.
     private double _statementsFittedWidth = PlanPanelLayout.DefaultStatementsWidth;
     private bool _fittingSidePanels;
+    private readonly LoadedValueWatch _propertiesWidthWatch;
     // Whether the Statements panel was opened after the Properties panel, and the panel a fit closed because the viewer
     // could not hold both. That panel comes back when there is room for it again; a panel the person closed does not.
     private bool _statementsOpenedLast;
@@ -221,10 +222,10 @@ public partial class PlanViewerControl : UserControl
         InsightsGrid.LayoutUpdated += (_, _) => BoundInsightsGridToStrip();
 
         // The splitter writes the dragged size straight onto the column, so that is where the
-        // remembered width (#4574) comes from - no drag tracking of our own.
-        var widthDescriptor = System.ComponentModel.DependencyPropertyDescriptor.FromProperty(
-            System.Windows.Controls.ColumnDefinition.WidthProperty, typeof(ColumnDefinition));
-        widthDescriptor?.AddValueChanged(PropertiesColumn, (_, _) =>
+        // remembered width (#4574) comes from - no drag tracking of our own. The column is watched only while the viewer is
+        // loaded (#8566): a splitter moves only in a viewer that is on screen, and a plan tab that is selected again loads again.
+        _propertiesWidthWatch = LoadedValueWatch.Attach(
+            this, PropertiesColumn, System.Windows.Controls.ColumnDefinition.WidthProperty, typeof(ColumnDefinition), () =>
         {
             // A width FitSidePanels gives the panel in a narrow viewer is not one the person dragged, so it is not remembered.
             if (_fittingSidePanels) return;
@@ -380,10 +381,14 @@ public partial class PlanViewerControl : UserControl
             InsightsGrid.Width = width;
     }
 
-    /// <summary>Unsubscribes from theme changes. Hosts must call this when the plan tab/window is closed.</summary>
+    /// <summary>
+    /// Unsubscribes from theme changes and stops watching the Properties column. Hosts must call this when the plan tab/window is
+    /// closed.
+    /// </summary>
     public void Cleanup()
     {
         ThemeManager.ThemeChanged -= OnThemeChanged;
+        _propertiesWidthWatch.Release();
     }
 
     private void OnThemeChanged(string _)

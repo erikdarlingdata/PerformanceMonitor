@@ -115,6 +115,7 @@ public partial class ViewerServerTab
     /// <see cref="Dispose"/> so the whole tab tears down through one path.</summary>
     private void DisposeQueriesTabHelpers()
     {
+        _barCellMaxesWatch?.Release();
         DisposeQueryTrendHelpers();
     }
 
