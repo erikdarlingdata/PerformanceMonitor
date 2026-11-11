@@ -150,8 +150,8 @@ public sealed class DailySummaryClosedHoursLiveTests
         await SeedAsync(connection, today, now, ct);
 
         /* Restart rows: no counter was knowable, so every delta is 0 and the interval is 0. Hours 9 and 21 to 23 of yesterday are missing from
-           the hourly below, so every restart row sits in a held hour. The two window edges are yesterday 14:30 and 19:30 (a microsecond is ten
-           ticks). A restart row in an hour read from raw is #8651's, not this member's, so none is planted there. */
+           the hourly below, so every restart row but RST_RAW_HOUR's sits in a held hour. The two window edges are yesterday 14:30 and 19:30 (a microsecond is ten
+           ticks). */
         var windowStart = yesterday.AddHours(14).AddMinutes(30);
         var windowEnd = yesterday.AddHours(19).AddMinutes(30);
         await PlantAsync(connection, 854998000L, new (DateTime At, string? Hash, int Interval)[]
@@ -162,20 +162,22 @@ public sealed class DailySummaryClosedHoursLiveTests
             (yesterday.AddHours(17).AddMinutes(25), null, 0),
             (yesterday.AddHours(13).AddMinutes(20), "RST_BEFORE", 0),
             (yesterday.AddHours(20).AddMinutes(20), "RST_AFTER", 0),
+            (yesterday.AddHours(9).AddMinutes(35), "RST_RAW_HOUR", 0),
             (windowStart.AddTicks(-10), "RST_EDGE_OUT", 0),
             (windowStart, "RST_EDGE_IN", 0),
             (windowEnd.AddTicks(-10), "RST_END_IN", 0),
             (windowEnd, "RST_END_OUT", 0),
         }, ct);
 
-        /* Legacy shape. Its hourly has no filter and keeps restart rows, so a restart-only hash counts and the reply equals raw. */
+        /* Legacy shape. Its hourly has no filter and no per-hash column that tells a restart row apart, so it still counts a restart-only hash in
+           a held hour, which raw (the rule, #8651) leaves out. The reply is raw's row for row but for that count, and the windows below that cut
+           the held hours out keep equalling raw. */
         await RefreshAsync(connection, TimescaleSupport.QueryStatsHourlyView, today.AddDays(-6), hourEnd, ct);
         await RefreshAsync(connection, TimescaleSupport.QueryStatsDailyView, today.AddDays(-6), yesterday, ct);
         var legacyHourly = await ResolveAsync(connection, TimescaleSupport.QueryStatsHourlyView, ct);
         await ExecuteAsync(connection, $"DELETE FROM {legacyHourly} WHERE bucket = '{Ts(yesterday.AddHours(9))}' OR (bucket >= '{Ts(yesterday.AddHours(21))}' AND bucket < '{Ts(today)}')", ct);
         var start = today.AddDays(-5);
         var end = today.AddDays(1);
-        await AssertSameRowsAsync(connection, RetentionTier.Daily, NoCoverage, start, end, ct);
         await AssertSameRowsAsync(connection, RetentionTier.Daily, NoCoverage, windowStart, windowEnd, ct);
 
         /* The rule the interval hourlies were built on (#8651): unique queries counts the queries with credited executions in the window. */
@@ -183,7 +185,10 @@ public sealed class DailySummaryClosedHoursLiveTests
         var restartOnly = await ScalarAsync<long>(connection,
             $"SELECT count(*) FROM (SELECT query_hash FROM collect.query_stats WHERE server_id = {ServerId} AND collection_time >= '{Ts(yesterday)}' AND collection_time < '{Ts(today)}' "
             + "AND query_hash IS NOT NULL GROUP BY query_hash HAVING bool_and(sample_interval_seconds = 0)) AS x", ct);
-        Assert.True(restartOnly >= 7, $"the seed plants restart-only hashes in held hours, got {restartOnly}");
+        Assert.True(restartOnly >= 8, $"the seed plants restart-only hashes in held hours and one in an hour read from raw, got {restartOnly}");
+        Assert.Equal(credited, await UniqueQueriesAsync(connection, DailySummarySql.RangeSql, yesterday, today, ct));
+        const int restartOnlyInRawHour = 1;
+        Assert.Equal(credited + restartOnly - restartOnlyInRawHour, await UniqueQueriesAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Daily, NoCoverage, start), yesterday, today, ct));
 
         /* Stitched shape: the interval-honest successor holds the last three days. A hash whose only row in a held hour of yesterday is a restart row
            (RST_HELD, RST_BEFORE, RST_AFTER and the edge hashes) is left out, and RST_AND_NORMAL, which has a credited row too, counts once. */

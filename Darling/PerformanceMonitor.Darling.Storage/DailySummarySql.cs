@@ -76,9 +76,13 @@ public static class DailySummarySql
             FROM (
                 SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
                 /* #7147: collect.query_stats, not the v_query_stats view: the view's payload joins keep the planner off an
-                   index-only scan even though this read needs only server_id, collection_time and query_hash. */
+                   index-only scan even though this read needs only server_id, collection_time and query_hash.
+                   #8651: unique queries counts queries with credited executions in the window, so a restart row
+                   (sample_interval_seconds = 0: a first sighting, an uncredited reset or a gap) does not count its hash. A NULL
+                   interval (a row from before the column) passes, the rule the interval rollups' own WHERE states. */
                 FROM collect.query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+                  AND sample_interval_seconds IS DISTINCT FROM 0
             ) AS x
             GROUP BY x.d
         ),
@@ -415,9 +419,13 @@ public static class DailySummarySql
             FROM (
                 SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
                 /* #7147: collect.query_stats, not the v_query_stats view: the view's payload joins keep the planner off an
-                   index-only scan even though this read needs only server_id, collection_time and query_hash. */
+                   index-only scan even though this read needs only server_id, collection_time and query_hash.
+                   #8651: unique queries counts queries with credited executions in the window, so a restart row
+                   (sample_interval_seconds = 0: a first sighting, an uncredited reset or a gap) does not count its hash. A NULL
+                   interval (a row from before the column) passes, the rule the interval rollups' own WHERE states. */
                 FROM collect.query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+                  AND sample_interval_seconds IS DISTINCT FROM 0
             ) AS x
             GROUP BY x.d
         ),
@@ -426,10 +434,11 @@ public static class DailySummarySql
     /// <summary>
     /// The same CTE against a rollup. <c>COUNT(DISTINCT query_hash)</c> is exact over a CAGG because query_hash is
     /// one of its GROUP BY columns — the rollup preserves every distinct hash per bucket, so counting them per day
-    /// gives the count of distinct hashes the rollup's source rows produced. That is raw's answer except for the
-    /// rows the rollup's own <c>WHERE</c> leaves out: the interval-honest successor skips restart rows
-    /// (<c>sample_interval_seconds IS DISTINCT FROM 0</c>), so a closed day can read a few hashes lower from the
-    /// rollup than from raw (369 against 362 on one store, #7505). The time column becomes <c>bucket</c>; parameter positions are
+    /// gives the count of distinct hashes the rollup's source rows produced. Raw skips restart rows
+    /// (<c>sample_interval_seconds IS DISTINCT FROM 0</c>) in this count, as the interval-honest successor's own
+    /// <c>WHERE</c> does (#8651), so raw and the successor agree. The legacy rollups cannot skip them: they carry no
+    /// per-hash column that tells a restart row apart after aggregation, so a legacy rollup still counts a hash whose only
+    /// rows that day are restart rows (369 against 362 on one store, #7505). The time column becomes <c>bucket</c>; parameter positions are
     /// unchanged, so the caller binds the same three values either way.
     ///
     /// <para><b>The days the rollup has not reached yet come from raw (#3653 A6, the <c>unique_queries = 0</c>
@@ -564,14 +573,6 @@ public static class DailySummarySql
                 (hourlySource, string.Empty));
         var rawTailGate = hourlySource is null ? string.Empty : "\n                  AND (SELECT raw_from FROM queries_ceiling) IS NULL";
 
-        /* #7505: the partial ceiling day's raw rows are counted with the rollup's own source filter, so that day
-           is not read higher than the rollup would have read it once it catches up (a restart row's hash counts in
-           raw and not in the interval-honest successor). Days past the ceiling keep reading raw unfiltered, as they
-           always did. The filter is a no-op for a rollup with none. */
-        var partialDayFilter = filter.Length == 0
-            ? string.Empty
-            : $"\n                  AND (collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2) OR ({filter}))";
-
         return $"""
         /* #7505: last_day is the newest day the rollup holds a bucket for. raw_from is the first day the rollup
            does NOT hold whole: the day in which the newest bucket ENDS. For a daily rollup, or an hourly one whose
@@ -604,7 +605,9 @@ public static class DailySummarySql
                 SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
                 FROM v_query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-                  AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling), $2){partialDayFilter}{rawTailGate}{closedHours}
+                  AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling), $2)
+                  /* #8651: raw counts only queries with credited executions, as the interval rollups do. See QueriesCteRaw. */
+                  AND sample_interval_seconds IS DISTINCT FROM 0{rawTailGate}{closedHours}
             ) AS x
             GROUP BY x.d
             UNION ALL
@@ -697,6 +700,7 @@ public static class DailySummarySql
                     WHERE c.server_id = $1
                       AND c.collection_time >= GREATEST(q.h, $2)
                       AND c.collection_time < LEAST(q.h + INTERVAL '1 hour', $3)
+                      AND c.sample_interval_seconds IS DISTINCT FROM 0
                 ) AS r
                 WHERE NOT q.held
             """;
@@ -755,9 +759,6 @@ public static class DailySummarySql
         var boundaryDay = successorFloor == successorFloor.Date ? successorFloor : successorFloor.Date.AddDays(1);
         /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
         var boundary = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{boundaryDay:yyyy-MM-dd HH:mm:ss.ffffff}'");
-        /* #7505: the partial ceiling day's raw rows carry the owning side's source filter. See QueriesCteForCagg. */
-        var partialDaySuccessor = successorFilter.Length == 0 ? "TRUE" : $"({successorFilter})";
-        var partialDayLegacy = legacyFilter.Length == 0 ? "TRUE" : $"({legacyFilter})";
         var legacyWidth = (long)legacyTarget.BucketWidth.TotalSeconds;
         var successorWidth = (long)successorTarget.BucketWidth.TotalSeconds;
 
@@ -817,9 +818,8 @@ public static class DailySummarySql
                 FROM v_query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
                   AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling_successor), (SELECT raw_from FROM queries_ceiling_legacy), $2)
-                  AND (collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_successor), (SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_legacy), $2)
-                       OR ((SELECT last_day FROM queries_ceiling_successor) IS NOT NULL AND {partialDaySuccessor})
-                       OR ((SELECT last_day FROM queries_ceiling_successor) IS NULL AND {partialDayLegacy})){rawTailGate}{closedHours}
+                  /* #8651: raw counts only queries with credited executions, as the interval rollups do. See QueriesCteRaw. */
+                  AND sample_interval_seconds IS DISTINCT FROM 0{rawTailGate}{closedHours}
             ) AS x
             GROUP BY x.d
             UNION ALL
@@ -878,7 +878,7 @@ public static class DailySummarySql
     /// <paramref name="hourlyRelation"/> is <c>query_stats_hourly</c> or its interval-honest successor
     /// <c>query_stats_interval_hourly</c>, by <see cref="RollupCoverage.HourlyRelationFor"/> over the window's
     /// start. The successor carries the same <c>query_hash</c> and <c>bucket</c> the queries CTE reads, and
-    /// leaves out the restart row the legacy counted as a query seen that day. This overload's OWN daily tier is
+    /// leaves out the restart row the legacy counted as a query seen that day, as raw's count now does (#8651). This overload's OWN daily tier is
     /// not parameterised — it always reads the legacy <c>query_stats_daily</c> unstitched, whatever
     /// <paramref name="hourlyRelation"/> carries; the daily's own stitch lives in the three-argument overload
     /// below, which does not call this one for that case at all — it builds its own queries CTE directly off

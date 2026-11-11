@@ -88,7 +88,9 @@ public sealed class DailySummaryHeapStoreLiveTests
         var directPlan = await PlanAsync(connection, current, start, end, ct);
         var viewPlan = await PlanAsync(connection, viaView, start, end, ct);
         const string QueryStatsIndex = "Index Only Scan using idx_query_stats_server_hash_time";
-        Assert.True(directPlan.Contains(QueryStatsIndex, StringComparison.Ordinal), directPlan);
+        /* #8651: the direct query_stats read now also filters on sample_interval_seconds (restart rows do not count a hash), a column the
+           composer index does not carry, so on a plain heap store it reads the heap and no longer plans the index-only scan. The view read
+           still cannot take it either. */
         Assert.DoesNotContain(QueryStatsIndex, viewPlan, StringComparison.Ordinal);
         Assert.Contains("Index Only Scan using " + PgTableTuning.WaitStatsDailyCoverIndexName, directPlan, StringComparison.Ordinal);
     }
