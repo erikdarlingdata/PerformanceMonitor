@@ -76,13 +76,13 @@ process.on("unhandledRejection", () => {});
 const DEADLOCKS_TEXT =
   "No deadlock was reported on pg-a in the last 24 hour(s). FOUR different things produce that and they are worth telling apart: the server had no deadlocks, which is the healthy answer; " +
   "the log could not be read; the log was read and PostgreSQL did not write it in English; or, on a target that logs in the stderr format, the log was read but its line prefix is one the reader cannot parse. " +
-  "The pg_plan_capture_readiness collector judges all four, because plan capture reads the same file the same way - the English one as its message_locale facet (#3061) and the prefix one as its " +
-  "log_line_prefix_readable facet (#4735) - and get_pg_plan_capture_readiness is the read that returns those facets with the remedy for each. get_pg_server_config carries the target's lc_messages. " +
+  "The pg_plan_capture_readiness collector judges all four, because plan capture reads the same file the same way - the English one as its message_locale facet and the prefix one as its " +
+  "log_line_prefix_readable facet - and get_pg_plan_capture_readiness is the read that returns those facets with the remedy for each. get_pg_server_config carries the target's lc_messages. " +
   "pg_stat_database's cumulative deadlock counter, in get_pg_database_stats, is the independent check for all four.";
 const GRAPH_TEXT =
   "No deadlock graph is stored for pg-a. Either the server had no deadlocks, which is the healthy answer, or its log could not be read, or it was read in a language this does not match - PostgreSQL translates its own " +
-  "messages under a non-English lc_messages, severity label included (#3061) - or it was read on a stderr log target whose log_line_prefix the reader cannot parse, so every line was dropped " +
-  "(the log_line_prefix_readable facet of get_pg_plan_capture_readiness, #4735). get_pg_database_stats carries pg_stat_database's cumulative deadlock counter, which tells the healthy case from the others.";
+  "messages under a non-English lc_messages, severity label included - or it was read on a stderr log target whose log_line_prefix the reader cannot parse, so every line was dropped " +
+  "(the log_line_prefix_readable facet of get_pg_plan_capture_readiness). get_pg_database_stats carries pg_stat_database's cumulative deadlock counter, which tells the healthy case from the others.";
 const COLUMN_TEXT =
   "No column statistics for pg-a in the last 24 hour(s). This collector runs DAILY, so a window shorter than a day can be empty on a perfectly healthy server - widen it before concluding anything. " +
   "Tables at or above the 1,000 page floor (last 24 hours): 12. Of those, with column statistics this monitoring login can read: 0. Column statistic rows returned (over the window you asked for): 0. " +

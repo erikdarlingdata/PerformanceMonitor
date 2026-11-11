@@ -191,6 +191,25 @@ VALUES ($1, $2, $3, $4, 'appdb', '0xAVG', '0xPLAN', 'SELECT Averages FROM Number
         Assert.True(replies.Count(r => r.Reply.StartsWith('{')) >= 40, "Fewer than 40 reads answered a default call: the scan is no longer reaching the catalog.");
     }
 
+    /// <summary>#8572 rows 2, 3 and 11: no default reply says an em dash, a tracker reference or a count of four or more digits without its
+    /// thousands separators in its own prose. The reads are the same ones the float scan drives.</summary>
+    [Fact]
+    public async Task EveryReadsDefaultReply_CarriesNoEmDashTrackerNumberOrUngroupedCount()
+    {
+        var replies = await DriveEveryReadAsync();
+        var hits = replies.SelectMany(r => ReplyTextScan.Hits(r.Reply).Select(h => $"{r.Read}: {h}")).ToList();
+        Assert.True(hits.Count == 0, "Replies break the reply-text rules (no U+2014, no tracker number, grouped counts):\n" + string.Join("\n", hits.Take(200)));
+    }
+
+    [Fact]
+    public void TheTextScan_FlagsEachRule_AndPassesDataThatIsNotACount()
+    {
+        Assert.Equal(3, ReplyTextScan.Hits("{\"a\":\"one \u2014 two\",\"b\":\"retired by #3593\",\"c\":\"saw 1438 captures\"}").Count);
+        /* Grouped counts, ids in a token, dates, times, decimals, hashes and the text of a captured statement are not defects. */
+        Assert.Empty(ReplyTextScan.Hits("{\"a\":\"saw 1,438 captures, 12.5 ms, 2026-11-11T06:03:49Z, 0x1234ABCD, port:1433, v3.12.0\",\"query_text\":\"SELECT 12345 -- #12 \u2014\"}"));
+        Assert.Single(ReplyTextScan.Hits("plain text reply with 443230195 block accesses"));
+    }
+
     private async Task ExecAsync(string sql, params object?[] values)
     {
         using var readLock = _duckDb.AcquireReadLock();

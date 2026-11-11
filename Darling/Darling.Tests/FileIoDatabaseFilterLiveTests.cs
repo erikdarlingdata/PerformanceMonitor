@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -240,8 +241,8 @@ public sealed class FileIoDatabaseFilterLiveTests
             var sized = JsonDocument.Parse(await DarlingMcpTrendTools.GetFileIoTrend(
                 postgres, ServerName, 1, asOf, null, DatabaseFilter.One(DbMany), asked, ct)).RootElement;
             var sizedNote = sized.GetProperty("aggregate_note").GetString()!;
-            Assert.Contains($"near {aimed} points", sizedNote, StringComparison.Ordinal);
-            Assert.DoesNotContain($"near {asked.AutoPoints} points", sizedNote, StringComparison.Ordinal);
+            Assert.Contains($"near {aimed.ToString("N0", CultureInfo.InvariantCulture)} points", sizedNote, StringComparison.Ordinal);
+            Assert.DoesNotContain($"near {asked.AutoPoints.ToString("N0", CultureInfo.InvariantCulture)} points", sizedNote, StringComparison.Ordinal);
 
             /* Seven chosen databases of a store that holds twelve: per-database lines, the cap applies to the set. A, B, C and
                the many-file database are outside it and appear nowhere. */
