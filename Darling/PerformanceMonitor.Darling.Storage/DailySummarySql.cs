@@ -841,7 +841,7 @@ public static class DailySummarySql
     /// registry <see cref="RollupCoverage.StitchedRelationSql"/> reads, rather than a second lookup that could
     /// drift from it.
     /// </summary>
-    public static string RangeSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc)
+    private static string RangeSqlForQueries(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc)
     {
         ArgumentNullException.ThrowIfNull(coverage);
 
@@ -894,6 +894,92 @@ public static class DailySummarySql
         }
 
         return routed;
+    }
+
+    /// <summary>
+    /// The <c>wait_per_spelling</c> part exactly as it appears in <see cref="RangeSql"/>: the per-day, per-stored-name wait totals, summed
+    /// from raw <c>wait_stats</c>. The part a 30-day window pays for most (#8549): it reads and groups a month of raw rows, 2.2 s of a
+    /// 2.7 s statement on a test store of 11.76 M rows.
+    /// </summary>
+    private const string WaitPerSpellingRaw = """
+        WITH wait_per_spelling AS (
+            SELECT date_trunc('day', collection_time) AS d, wait_type, SUM(delta_wait_time_ms) AS ms
+            FROM v_wait_stats
+            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 AND delta_wait_time_ms > 0
+            GROUP BY 1, 2
+        ),
+        """;
+
+    /// <summary>
+    /// <see cref="WaitPerSpellingRaw"/> over the daily wait totals (#8549). The rollup answers a day when it holds that day for the server
+    /// and the day lies WHOLLY inside <c>[$2, $3)</c>; every other day reads raw, one lateral probe each: the open day, the day or two the
+    /// refresh has not reached, a hole in the middle, and the first or last day of a window that does not start or end at midnight (a
+    /// partial day must sum only the rows inside the window, which the rollup cannot split).
+    ///
+    /// <para><b>The day boundary.</b> Daily Summary days are <c>date_trunc('day', collection_time)</c> over the naive-UTC column, so they are
+    /// UTC days, and <c>time_bucket('1 day')</c> on that column buckets to the same midnight. A day the window covers whole therefore
+    /// has the same rows in both places. A window of any other shape reads those days from raw, so the result does not depend on the
+    /// rollup's day boundary matching the window's.</para>
+    ///
+    /// <para>The day list is <c>generate_series</c> over the window, <c>OFFSET 0</c> so the planner keeps it as one list, and the
+    /// last instant of the window is <c>$3</c> less a microsecond, the finest step a <c>timestamp</c> holds, so a window ending a hair
+    /// past midnight still reads that day. The raw lateral term groups by the stored spelling as the raw statement does, so the
+    /// <c>rtrim</c> merge in <c>wait_per_type</c> is unchanged and the rows of both branches have the same shape.</para>
+    /// </summary>
+    private const string WaitPerSpellingFromRollup = """
+        WITH wait_covered AS (
+            SELECT bucket AS d
+            FROM collect.wait_stats_daily
+            WHERE server_id = $1 AND bucket >= $2 AND bucket + INTERVAL '1 day' <= $3
+            GROUP BY bucket
+        ),
+        wait_per_spelling AS (
+            SELECT bucket AS d, wait_type, delta_wait_time_ms AS ms
+            FROM collect.wait_stats_daily
+            WHERE server_id = $1 AND bucket >= $2 AND bucket + INTERVAL '1 day' <= $3
+            UNION ALL
+            SELECT x.d, r.wait_type, r.ms
+            FROM (
+                SELECT g.d
+                FROM generate_series(date_trunc('day', $2::timestamp), $3::timestamp - INTERVAL '1 microsecond', INTERVAL '1 day') AS g(d)
+                WHERE NOT EXISTS (SELECT 1 FROM wait_covered AS c WHERE c.d = g.d)
+                OFFSET 0
+            ) AS x
+            CROSS JOIN LATERAL (
+                SELECT w.wait_type, SUM(w.delta_wait_time_ms) AS ms
+                FROM v_wait_stats AS w
+                WHERE w.server_id = $1
+                AND   w.collection_time >= GREATEST(x.d, $2)
+                AND   w.collection_time < LEAST(x.d + INTERVAL '1 day', $3)
+                AND   w.delta_wait_time_ms > 0
+                GROUP BY w.wait_type
+            ) AS r
+        ),
+        """;
+
+    /// <summary>
+    /// <see cref="RangeSqlFor(RetentionTier, string)"/>'s coverage-aware form (#3653), with the wait totals read from
+    /// <c>collect.wait_stats_daily</c> for the closed days it holds when the store has it (#8549,
+    /// <see cref="RollupCoverage.HasWaitStatsDaily"/>), on the hourly and daily tiers. The raw tier is a window of a few days and keeps the
+    /// raw part. A store without the relation (an older build's store, or one whose sweep has not made it yet) gets exactly the text it
+    /// got before: the existence probe decides, so the read can never name a relation that is not there.
+    /// </summary>
+    public static string RangeSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc)
+    {
+        var routed = RangeSqlForQueries(tier, coverage, windowStartUtc);
+        if (tier == RetentionTier.Raw || !coverage.HasWaitStatsDaily)
+        {
+            return routed;
+        }
+
+        var withRollup = routed.Replace(WaitPerSpellingRaw, WaitPerSpellingFromRollup, StringComparison.Ordinal);
+        if (string.Equals(withRollup, routed, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Daily-summary wait rollup routing found no wait_per_spelling CTE to replace: WaitPerSpellingRaw has drifted from RangeSql (#8549).");
+        }
+
+        return withRollup;
     }
 
 }

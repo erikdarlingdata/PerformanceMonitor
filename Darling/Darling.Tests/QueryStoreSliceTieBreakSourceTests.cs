@@ -82,8 +82,10 @@ public sealed class QueryStoreSliceTieBreakSourceTests
            blend two collections into one row. So the pattern matches the ordering wherever it appears
            rather than only inside a PARTITION BY, and the site count below still holds each file to a
            declared number so a dedup cannot be deleted or moved without saying so. */
+        /* #8549 added a THIRD shape: the Query Store slicer keeps the newest row per interval with SELECT DISTINCT ON over the
+           interval key, whose ORDER BY lists the key columns first and the time term last. Same contract, same guard. */
         var dedupOrderBy = new Regex(
-            @"(?:PARTITION BY[^()]*?runtime_stats_interval_id[^()]*?|array_agg\([^()]*?)ORDER BY\s+(?<time>collection_time|\{timeColumn\})\s+DESC(?<tie>,\s*execution_count DESC)?",
+            @"(?:(?:PARTITION BY[^()]*?runtime_stats_interval_id[^()]*?|array_agg\([^()]*?)ORDER BY\s+|DISTINCT ON \([^()]*?runtime_stats_interval_id[^()]*?\).*?ORDER BY\s+(?:\w+,\s*)+)(?<time>collection_time|\{timeColumn\})\s+DESC(?<tie>,\s*execution_count DESC)?",
             RegexOptions.Singleline);
 
         var untied = new List<string>();

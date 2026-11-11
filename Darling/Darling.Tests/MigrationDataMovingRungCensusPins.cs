@@ -751,11 +751,13 @@ public sealed class MigrationDataMovingRungCensusPins
     /// through <c>EXECUTE</c> because <c>timescaledb_information</c> parses only where the extension exists. Both shapes are catalog-only: no
     /// row is read or rewritten, so there is no data-moving cost to declare, only the scan blind spot to name.</para>
     /// </summary>
-    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204, 246, 255];
+    /* V259 (#8549) is V255's shape for the daily wait totals: a DO block that reads the catalog for the hypertable and creates the empty
+       aggregate or the plain view through EXECUTE. Catalog-only, no row of wait_stats is read or written. */
+    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204, 246, 255, 259];
 
     /// <summary>
     /// The scan is textual, so dynamic SQL would hide a data-moving statement from it completely. The
-    /// ladder has four exempted rungs today (V152, V204, V246 and V255, named in <see cref="s_dynamicSqlExemptedRungs"/> because
+    /// ladder has five exempted rungs today (V152, V204, V246, V255 and V259, named in <see cref="s_dynamicSqlExemptedRungs"/> because
     /// each <c>DO $$ ... EXECUTE</c> drops a catalog index or constraint, or creates an empty aggregate or a view, rather than moving data) and
     /// otherwise none — the only other <c>EXECUTE</c> is <c>EXECUTE FUNCTION</c> in V17's trigger
     /// definitions. Pinned so the blind spot stays theoretical for every other rung: one that builds DDL
