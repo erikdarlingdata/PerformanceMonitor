@@ -123,14 +123,18 @@ public partial class DuckDbInitializer
     }
 
     /// <summary>The trim timer's one line for a tick that did something (#8535): the memory text, then what the tick did. Nothing when the tags could not be read.</summary>
-    private void LogTrimTick(IReadOnlyList<MemoryTag>? tags, string outcome)
+    private void LogTrimTick(IReadOnlyList<MemoryTag>? tags, string outcome, string? closedServerName = null)
     {
         if (tags is null)
             return;
 
-        _logger?.LogInformation("Memory trim tick: {Line} {Outcome}",
+        _logger?.LogInformation("{Trigger}: {Line} {Outcome}", TrimTriggerLabel(closedServerName),
             DescribeMemory(tags, ReadPrivateBytes(), GC.GetTotalMemory(forceFullCollection: false)), outcome);
     }
+
+    /// <summary>What starts a trim line (#8535): "Memory trim tick" for the timer, "Memory trim after server tab closed (name)" for a close.</summary>
+    internal static string TrimTriggerLabel(string? closedServerName) =>
+        closedServerName is null ? "Memory trim tick" : "Memory trim after server tab closed (" + closedServerName + ")";
 
     /// <summary>
     /// Reads Lite's own instance and returns the line's text, or null when it cannot be read without waiting: the database is
@@ -254,5 +258,28 @@ public partial class DuckDbInitializer
 
         _logger?.LogInformation("{Event}: {Line}", eventName, line);
         return line;
+    }
+
+    /// <summary>
+    /// What a server tab's close does (#8535), off the calling thread so the window never waits for it: the close's memory line
+    /// first, so it still shows what the close itself gave back (nothing), then a request for a trim. The request is the
+    /// trim timer's own cycle with a non-waiting lock, so a tab load or a collector holding the store at that moment means the
+    /// trim is skipped and the next tick takes it. Fire and forget: it never throws and never blocks the caller.
+    /// </summary>
+    internal void OnServerTabClosedInBackground(string serverName) =>
+        _ = System.Threading.Tasks.Task.Run(() => OnServerTabClosedAsync(serverName, TabLineBusyBound, TabLineBusyDelay));
+
+    /// <summary><see cref="OnServerTabClosedInBackground"/>'s work, with the line's busy bound and delay passed in so a test can use short ones.</summary>
+    internal async System.Threading.Tasks.Task OnServerTabClosedAsync(string serverName, TimeSpan bound, TimeSpan delay)
+    {
+        try
+        {
+            await LogServerTabMemoryAsync(ServerTabEventName(serverName, opened: false), bound, delay).ConfigureAwait(false);
+            RunMemoryTrimCycle(serverName);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Trim after server tab close failed");
+        }
     }
 }

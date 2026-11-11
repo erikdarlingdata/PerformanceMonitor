@@ -2053,8 +2053,9 @@ public partial class MainWindow : Window
             _openServerTabs.Remove(serverId);
             _serverStatusSuffix.Remove(serverId);
 
-            /* #8535: the line a close leaves, to read against the open's. */
-            _databaseInitializer.LogServerTabMemoryInBackground(_serverManager.GetServerById(serverId)?.DisplayName ?? serverId, opened: false);
+            /* #8535: the line a close leaves, to read against the open's, then a request for a trim: the buffer pool holds what the
+               tab read after the tab is gone. Off the UI thread, and the trim never waits on a busy store (the next tick takes it). */
+            _databaseInitializer.OnServerTabClosedInBackground(_serverManager.GetServerById(serverId)?.DisplayName ?? serverId);
 
             /* Clean up alert state for this server */
             _alertStateService.RemoveServerState(serverId);
