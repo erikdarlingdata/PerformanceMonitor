@@ -139,7 +139,10 @@ public class ServerCollectionFreshnessTests
         Assert.False(card.CollectionIsNotFresh);
         Assert.Equal(UnknownGrey, Hex(card.LastCollectionBrush));
         Assert.Null(card.CollectionFreshnessTooltip);
-        Assert.DoesNotContain("(", card.LastCollectionDisplay, StringComparison.Ordinal);
+        /* The stamp and nothing after it: no band word. In Server Time the stamp itself ends with its clock's offset in brackets. */
+        Assert.Equal(
+            ServerSummaryItem.FormatLastCollect(card.LastCollectionTime!.Value, ServerTimeHelper.CurrentDisplayMode, card.Clock, DateTime.UtcNow),
+            card.LastCollectionDisplay);
     }
 
     // ── The defect, and the conflation the fix must not create ────────────────────────────────────────

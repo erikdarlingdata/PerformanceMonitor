@@ -57,8 +57,9 @@ public sealed class ConfigChangeTraceAnchorTests
         /* The span is (previous capture, this capture]: exclusive below, inclusive above. */
         Assert.Contains("> $2", sql, StringComparison.Ordinal);
         Assert.Contains("<= $3", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain(">= $2", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("< $3", sql, StringComparison.Ordinal);
+        /* #8570: the one ">= $2" is the redundant collection_time bound that lets the read use the index; the span's own
+           bounds on event_time stay exclusive below. */
+        Assert.DoesNotContain(">= $2", sql.Replace("dte.collection_time >= $2 - interval '1 day'", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);        Assert.DoesNotContain("< $3", sql, StringComparison.Ordinal);
         /* Oldest first by the server-local time, and ServerLocalTimes.TraceLinesInWindow re-sorts (stably) by the
            converted UTC time, so a caller reading the list in order reads the change history in order. */
         Assert.EndsWith("ORDER BY event_time_local", sql.TrimEnd(), StringComparison.Ordinal);

@@ -706,13 +706,17 @@ public class ServerSummaryItem
     /// The Last Collect time as the card words it: <paramref name="lastCollectionUtc"/> (naive UTC) in the selected
     /// "Show timestamps in" mode on <paramref name="clock"/> (the same zone choice as the Alert History and Job History
     /// rows), as "HH:mm:ss" when that wall time falls on today's date in the same zone, and with its date
-    /// ("yyyy-MM-dd HH:mm:ss") otherwise, so a collection from nine days ago does not read as one from this morning.
+    /// ("yyyy-MM-dd HH:mm:ss") otherwise, so a collection from nine days ago does not read as one from this morning. In Server
+    /// Time each card is on its own server's clock, so the text ends with that clock's offset, "12:30:15 (UTC-08:00)"
+    /// (<see cref="ServerTimeHelper.WithServerZoneLabel"/>).
     /// </summary>
     internal static string FormatLastCollect(DateTime lastCollectionUtc, TimeDisplayMode mode, ServerClock? clock, DateTime nowUtc)
     {
-        var zone = ServerTimeHelper.DisplayZoneFor(mode, clock ?? ServerTimeHelper.ActiveServerClock);
+        var onClock = clock ?? ServerTimeHelper.ActiveServerClock;
+        var zone = ServerTimeHelper.DisplayZoneFor(mode, onClock);
         var isToday = DisplayZone.ToDisplay(lastCollectionUtc, zone).Date == DisplayZone.ToDisplay(nowUtc, zone).Date;
-        return ServerTimeHelper.FormatInstant(lastCollectionUtc, zone, isToday ? "HH:mm:ss" : "yyyy-MM-dd HH:mm:ss");
+        var text = ServerTimeHelper.FormatInstant(lastCollectionUtc, zone, isToday ? "HH:mm:ss" : "yyyy-MM-dd HH:mm:ss");
+        return ServerTimeHelper.WithServerZoneLabel(text, mode, onClock, lastCollectionUtc);
     }
 
     /// <summary>

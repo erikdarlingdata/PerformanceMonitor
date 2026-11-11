@@ -6,8 +6,10 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Linq;
 using System.Text.Json;
 using PerformanceMonitor.Common;
 using Xunit;
@@ -79,6 +81,17 @@ public sealed class FinOpsVerdictWordingBehaviourTests
         Assert.Contains("outside the buffer pool", stolen);
 
         Assert.DoesNotContain("outside the buffer pool", run.GetProperty("plain").GetString()!);
+    }
+
+    /// <summary>#8548: the trend's Day cell ends ", so far" on the row the payload marks <c>part_day</c>, the day still running, and on
+    /// no other row.</summary>
+    [Fact]
+    public void TheUtilizationTrendSaysSoFarOnThePartDayRow_AndOnNoOther()
+    {
+        var days = Run().GetProperty("trendDayCells").EnumerateArray().Select(d => d.GetString()!).ToArray();
+        Assert.Equal(7, days.Length);
+        Assert.EndsWith(ProvisioningTrendWindow.PartialDaySuffix, days[^1], StringComparison.Ordinal);
+        Assert.All(days[..^1], d => Assert.DoesNotContain("so far", d, StringComparison.Ordinal));
     }
 
     [Fact]

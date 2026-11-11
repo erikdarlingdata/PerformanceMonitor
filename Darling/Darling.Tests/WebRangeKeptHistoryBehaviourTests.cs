@@ -366,4 +366,53 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         }
         Assert.Equal(3, found.GetProperty("get_memory_pressure_events").GetInt32());
     }
+
+    /// <summary>#8577: a read cell that carries <c>as_of</c> (an alert notebook's read cells name the time of the alert) draws the
+    /// <c>hours</c> ending there. It used to draw "the last N hours ending now", so a chart opened a day after its alert had its line outside the
+    /// axis. The cell says which window it is with the composed cell's "Pinned: start to end". A cell with no <c>as_of</c>, or one whose
+    /// <c>as_of</c> is not yet in the past (a link opened within minutes of the alert), keeps the window that ends now and shows no pin.</summary>
+    [Fact]
+    public void AReadCellWithAnAsOf_DrawsTheHoursEndingThere_AndSaysItIsPinned()
+    {
+        const long fourHours = 4L * 3600000;
+
+        if (!TryRun("pinnedReadLine:pinned", out var pinned)) return;
+        var asOf = pinned.GetProperty("found").GetProperty("asOfMs").GetInt64();
+        var window = pinned.GetProperty("chartWindows")[0];
+        Assert.Equal(asOf, window[1].GetInt64());
+        Assert.Equal(asOf - fourHours, window[0].GetInt64());
+        var times = pinned.GetProperty("chartPointTimes")[0].EnumerateArray().Select(t => t.GetInt64()).ToArray();
+        Assert.Equal(2, times.Length);
+        Assert.All(times, t => Assert.InRange(t, asOf - fourHours, asOf));
+        var pin = Assert.Single(Strings(pinned, "pins"));
+        Assert.StartsWith("Pinned: ", pin, StringComparison.Ordinal);
+        Assert.Contains("\u2192", pin, StringComparison.Ordinal);
+
+        foreach (var live in new[] { "live", "future" })
+        {
+            if (!TryRun("pinnedReadLine:" + live, out var r)) return;
+            var found = r.GetProperty("found");
+            var now = found.GetProperty("now").GetInt64();
+            var w = r.GetProperty("chartWindows")[0];
+            Assert.InRange(w[1].GetInt64(), now, now + 10000);
+            Assert.Equal(fourHours, w[1].GetInt64() - w[0].GetInt64());
+            Assert.Empty(Strings(r, "pins"));
+        }
+    }
+
+    /// <summary>#8577: a read's own empty sentence says "in the last 4 hour(s)", which is false for a pinned window. The page names the
+    /// window's end instead, and leaves the sentence of a read that ends now as it was.</summary>
+    [Fact]
+    public void AnEmptyReadWithAnAsOf_NamesTheWindowItEndsAt_NotTheLastHours()
+    {
+        if (!TryRun("pinnedReadEmpty:pinned", out var pinned)) return;
+        var sentence = Assert.Single(Strings(pinned, "empties"));
+        Assert.Contains("in the 4 hours ending ", sentence, StringComparison.Ordinal);
+        Assert.DoesNotContain("in the last", sentence, StringComparison.Ordinal);
+        Assert.Single(Strings(pinned, "pins"));
+
+        if (!TryRun("pinnedReadEmpty:live", out var live)) return;
+        Assert.Contains("in the last 4 hours matched", Assert.Single(Strings(live, "empties")), StringComparison.Ordinal);
+        Assert.Empty(Strings(live, "pins"));
+    }
 }

@@ -40,8 +40,9 @@ public sealed class FinOpsServerInventoryLastKnownTests : IDisposable
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
 
-    /* The collected row's collection time, the naive UTC instant the store holds. The grid shows it on the machine's clock, as it
-       shows the time a live row was read. */
+    /* The collected row's collection time, the naive UTC instant the store holds. The row keeps that instant, and the grid shows
+       it on the selected time display. This store's row carries no UTC offset and no tab is open, so the server's clock is the
+       machine's. */
     private static readonly DateTime CollectedAtUtc = new(2026, 11, 7, 9, 30, 0, DateTimeKind.Utc);
 
     private readonly string _tempDir = Path.Combine(Path.GetTempPath(), "LiteFinOpsLastKnown_" + Guid.NewGuid().ToString("N")[..8]);
@@ -75,7 +76,10 @@ public sealed class FinOpsServerInventoryLastKnownTests : IDisposable
     {
         var collected = Unreachable("inv-offline-collected", 1);
         var neverCollected = Unreachable("inv-offline-never-collected", 2);
-        var expectedTime = CollectedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+        var mode = ServerTimeHelper.CurrentDisplayMode;
+        var clock = ServerTimeHelper.ClockForServer(null, null);
+        var expectedTime = ServerTimeHelper.FormatInstant(CollectedAtUtc, ServerTimeHelper.DisplayZoneFor(mode, clock), "yyyy-MM-dd HH:mm")
+            + (mode == PerformanceMonitor.Ui.TimeDisplayMode.ServerTime ? " (" + ServerTimeHelper.GetTimezoneLabel(mode, clock, CollectedAtUtc) + ")" : "");
 
         var initializer = await StoreAsync(collected);
         var problems = OnTheInventory(new LocalDataService(initializer), new[] { collected, neverCollected }, (grid, message, count) =>
@@ -101,7 +105,7 @@ public sealed class FinOpsServerInventoryLastKnownTests : IDisposable
             {
                 found.Add($"the row reads {row.Edition} / {row.CpuCount} CPUs / {row.PhysicalMemoryMb} MB / {row.SocketCount} sockets / {row.CoresPerSocket} cores per socket, not the collected row");
             }
-            if (row.LastUpdated != CollectedAtUtc.ToLocalTime())
+            if (row.LastUpdated != CollectedAtUtc)
             {
                 found.Add($"Last Updated is {row.LastUpdated:O}, not the collected row's collection time");
             }

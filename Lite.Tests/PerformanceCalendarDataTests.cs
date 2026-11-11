@@ -236,7 +236,7 @@ public class PerformanceCalendarDataTests : IClassFixture<SharedDuckDbFixture>, 
 
         Assert.Equal(DailyHealthBand.Warning, byDate[Day(9)].HealthBand);
         Assert.Equal(15_000, byDate[Day(9)].MaxBlockDurationMs);
-        Assert.Contains("1 blocking event (0.0 reports/hr, peak block 15.0 s)", byDate[Day(9)].SignalsTooltip, StringComparison.Ordinal);
+        Assert.Contains("1 blocking event (<0.1 reports/hr, peak block 15.0 s)", byDate[Day(9)].SignalsTooltip, StringComparison.Ordinal);
 
         Assert.Equal(DailyHealthBand.Warning, byDate[Day(10)].HealthBand);
         Assert.Equal(1, byDate[Day(10)].AlertCount);       // dismissed + resolution excluded

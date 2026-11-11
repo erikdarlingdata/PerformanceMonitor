@@ -229,6 +229,10 @@ try {
   const windowChips = { hour: await windowTiles(1), day: await windowTiles(24) };
   fleetReply = { cards: [{ server_name: "n", display_name: "n", is_online: true, blocking_count: 0, deadlock_count: 0, deadlock_rate_per_hour: null }] };
   windowChips.noWindow = detailsOf(fleet.metricBands((await util.apiGetFleet()).data.cards[0], null));
+  /* #8532: the Deadlocks tile's rate beside its count, for a rate one decimal place cannot show, the first it can, none, and a busy one. */
+  const deadlockRateOf = (count, rate) =>
+    detailsOf(fleet.metricBands({ server_name: "r", display_name: "r", is_online: true, blocking_count: 0, deadlock_count: count, deadlock_rate_per_hour: rate }, null)).Deadlocks;
+  const deadlockRates = { one: deadlockRateOf(1, 1 / 24), two: deadlockRateOf(2, 2 / 24), none: deadlockRateOf(0, 0), busy: deadlockRateOf(50, 50) };
   const sweepTiles = tiles(panels.VIZ.stat({ sweep_pressure: { verdict: "ok" }, skipped_cycles: { status: "unavailable" } }, { stats: [...shared.SWEEP_STATS, ...shared.SKIPPED_CYCLES_STATS] }));
 
   /* #7660: the Skipped Cycles panel drawn the way the page draws it (the Collection Health tab of both products, through the real fanout): the last
@@ -328,6 +332,7 @@ try {
 
   console.log(JSON.stringify({
     alertSetup, quietChips, engineChips, blockingTile, windowChips, sweepTiles, skippedCycles, recommendations, pools, semaphoreWords, windowCellClasses, windowHeaderClasses, windowHeaderClassesAfterSort, sortedState, fileIoHeaders, runnable, platform, unrateable,
+    deadlockRates,
     protectionChip: chipText("Protection"),
     identityChip: chipText("Identity capacity"),
     bigIdentityChip: bigChip ? bigChip.textContent : null,
