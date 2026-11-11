@@ -55,6 +55,19 @@ public sealed class DarlingRuntimePreconditionReasonTests
         Assert.False(Reason("x", null).TryGetProperty("hints", out _));
     }
 
+    /// <summary>#8555: one unmet facet is "precondition", several are "preconditions", never "precondition(s)".</summary>
+    [Theory]
+    [InlineData(1, "1 unsatisfied precondition, from pg_plan_capture_readiness, in the order they have to be fixed in: ")]
+    [InlineData(2, "2 unsatisfied preconditions, from pg_plan_capture_readiness, in the order they have to be fixed in: ")]
+    public void PlanCaptureThatIsNotReady_CountsItsPreconditions(int unmet, string expected)
+    {
+        var facets = Enumerable.Range(1, unmet).Select(i => "facet_" + i).ToArray();
+        var message = JsonDocument.Parse(DarlingMcpPgPlanTools.PlanCaptureNotReadyStatus(facets)).RootElement.GetProperty("message").GetString()!;
+
+        Assert.Contains(expected, message, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("(s)", message, System.StringComparison.Ordinal);
+    }
+
     [Fact]
     public void PlanCaptureThatIsNotReady_CarriesTheReasonAndTheCountOnTheWire()
     {

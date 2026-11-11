@@ -236,7 +236,7 @@ public partial class JobHistoryTab : UserControl
             var choicesApplied = ApplyKnownChoicesAsync(choicesTask, choicesKey, gen, all);
 
             var displayCount = JobHistoryDataGrid.Items.Count;
-            NoJobsMessage.Text = EmptyNote(IsAzureSqlDatabaseSelected());
+            NoJobsMessage.Text = EmptyNote(GetSelectedServerId(), _servers);
             NoJobsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
             RunTimeHeaderText.Text = TimeColumnTitle.For("Run Time", ViewerTimeHelper.CurrentDisplayMode, all.Any(r => r.MixedServers)); // D5: the column names its clock
             DataGridHeaderFit.Apply(JobHistoryDataGrid); // #6136: the longer title ("Run Time (server)") widens its column
@@ -396,7 +396,7 @@ public partial class JobHistoryTab : UserControl
         if (servers is not null)
         {
             _knownServers = servers.Choices;
-            _azureServerIds = servers.AzureSqlDatabaseIds;
+            _servers = servers;
         }
 
         StartCategoriesOverWhenServerChanged();
@@ -409,23 +409,44 @@ public partial class JobHistoryTab : UserControl
         PopulateCategoryFilter(rows);
 
         /* #6391: the empty-grid sentence follows the picked server, and the engine list may have arrived after the grid bound. */
-        NoJobsMessage.Text = EmptyNote(IsAzureSqlDatabaseSelected());
+        NoJobsMessage.Text = EmptyNote(GetSelectedServerId(), _servers);
     }
 
     /// <summary>The Azure SQL Database servers among the Server choices, as the last read found them (they have no SQL Agent, so they never have rows).</summary>
-    private IReadOnlySet<int> _azureServerIds = new HashSet<int>();
+    private ViewerDataService.JobHistoryServers? _servers;
 
     /// <summary>The server the Category drop-down was last built for (null is All Servers), so a different pick starts the list over.</summary>
     private int? _categoryListServerId;
 
-    /// <summary>What the empty grid says (#6391): the plain no-SQL-Agent sentence the web's Job History uses for an Azure SQL Database, else the usual note.</summary>
-    internal static string EmptyNote(bool azureSqlDatabase) =>
-        azureSqlDatabase ? AzureNoAgentLine : "No job runs recorded in the selected time range";
+    /// <summary>
+    /// What the empty grid says (#6391): the plain no-SQL-Agent sentence the web's Job History uses for an Azure SQL Database, and the engine's own
+    /// sentence for a PostgreSQL target (#8564: the collector is written for SQL Server and never runs against another engine), else the usual note.
+    /// At All Servers the usual note gives way to the engine's sentence only when every registered server is such a target, so a fleet with no
+    /// SQL Server in it does not read as a true negative.
+    /// </summary>
+    internal static string EmptyNote(int? pickedServerId, ViewerDataService.JobHistoryServers? servers)
+    {
+        if (servers is null)
+        {
+            return UsualEmptyNote;
+        }
+
+        if (pickedServerId is int id)
+        {
+            return servers.AzureSqlDatabaseIds.Contains(id) ? AzureNoAgentLine
+                : servers.EngineGapNotes is { } picked && picked.TryGetValue(id, out var note) ? note
+                : UsualEmptyNote;
+        }
+
+        return servers.EngineGapNotes is { Count: > 0 } all && all.Count == servers.Choices.Count
+            ? all[servers.Choices[0].ServerId]
+            : UsualEmptyNote;
+    }
+
+    private const string UsualEmptyNote = "No job runs recorded in the selected time range";
 
     /// <summary>The web Job History's sentence for an Azure SQL Database (job-history.js AZURE_NO_AGENT_LINE).</summary>
     internal const string AzureNoAgentLine = "Azure SQL Database has no SQL Agent, so it has no job history.";
-
-    private bool IsAzureSqlDatabaseSelected() => GetSelectedServerId() is int id && _azureServerIds.Contains(id);
 
     private void PopulateServerFilter(List<ViewerJobHistoryRow> rows)
     {
@@ -679,7 +700,7 @@ public partial class JobHistoryTab : UserControl
             CategoryFilterComboBox.SelectionChanged += Filter_SelectionChanged;
         }
 
-        NoJobsMessage.Text = EmptyNote(IsAzureSqlDatabaseSelected());
+        NoJobsMessage.Text = EmptyNote(GetSelectedServerId(), _servers);
 
         if (IsLoaded)
         {

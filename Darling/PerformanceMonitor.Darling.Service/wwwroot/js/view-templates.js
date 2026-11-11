@@ -185,7 +185,7 @@ export const DASHBOARD_TEMPLATES = [
             viz: "line",
             rowsKey: "trend",
             xKey: "time",
-            emptyText: "No blocked process reports in this window — an empty trend here means none were captured, not that nothing was collected.",
+            emptyText: "No blocked process reports in this window: an empty trend here means none were captured, not that nothing was collected.",
             series: [{ key: "count", label: "Reports or snapshot rows" }],
             format: "int",
             unit: "reports or snapshot rows",
@@ -278,7 +278,7 @@ export const DASHBOARD_TEMPLATES = [
             params: { server },
             viz: "table",
             rowsKey: "clerks",
-            emptyText: "No memory clerks in the latest snapshot — the clerk collector may not have run yet.",
+            emptyText: "No memory clerks in the latest snapshot: the clerk collector may not have run yet.",
             columns: [
               { key: "clerk_type", label: "Clerk" },
               { key: "memory_mb", label: "Memory", format: "mbfit" },

@@ -4886,7 +4886,7 @@
                                     <DataGridTextColumn Header="Caveats" Binding="{Binding Caveats}" Width="200"/>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <Expander Grid.Row="2" x:Name="PgBlockingCyclesExpander" Header="Lock cycles (no root — every participant is blocked, so these appear on no chain)"
+                            <Expander Grid.Row="2" x:Name="PgBlockingCyclesExpander" Header="Lock cycles (no root: every participant is blocked, so these appear on no chain)"
                                       IsExpanded="False" Margin="0,8,0,0" Foreground="{DynamicResource ForegroundBrush}">
                                 <DataGrid x:Name="PgBlockingCyclesGrid" Style="{StaticResource DarkGrid}" MaxHeight="220"
                                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
@@ -5072,7 +5072,7 @@
                                     </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <TextBlock Grid.Row="2" Text="Per-database counters — where the spills, the deadlocks and the rollbacks are" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                            <TextBlock Grid.Row="2" Text="Per-database counters: where the spills, the deadlocks and the rollbacks are" FontWeight="SemiBold" Margin="0,10,0,2"/>
                             <StackPanel Grid.Row="3">
                                 <TextBlock x:Name="PgDatabasesNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
@@ -5236,7 +5236,7 @@
                 <TextBlock Grid.Row="0" x:Name="PgVacuumNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
 
-                <TextBlock Grid.Row="1" Text="1. Which session is holding a transaction open — and whether it pins anything at all" FontWeight="SemiBold" Margin="0,0,0,2"/>
+                <TextBlock Grid.Row="1" Text="1. Which session is holding a transaction open, and whether it pins anything at all" FontWeight="SemiBold" Margin="0,0,0,2"/>
                 <StackPanel Grid.Row="2">
                     <TextBlock x:Name="PgSessionStatesNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
@@ -5316,7 +5316,7 @@
                     </DataGrid.Columns>
                 </DataGrid>
 
-                <TextBlock Grid.Row="4" Text="2. What holds the xmin horizon — vacuum cannot reclaim anything newer than this" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBlock Grid.Row="4" Text="2. What holds the xmin horizon: vacuum cannot reclaim anything newer than this" FontWeight="SemiBold" Margin="0,10,0,2"/>
                 <StackPanel Grid.Row="5">
                     <TextBlock x:Name="PgXminNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
@@ -5346,7 +5346,7 @@
                     </DataGrid.Columns>
                 </DataGrid>
 
-                <TextBlock Grid.Row="7" Text="3. Autovacuum backlog — ranked by how far past each table's OWN threshold it is, not by raw dead tuples" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBlock Grid.Row="7" Text="3. Autovacuum backlog: ranked by how far past each table's OWN threshold it is, not by raw dead tuples" FontWeight="SemiBold" Margin="0,10,0,2"/>
                 <StackPanel Grid.Row="8">
                     <TextBlock x:Name="PgAutovacuumNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
@@ -5392,7 +5392,7 @@
                     </DataGrid.Columns>
                 </DataGrid>
 
-                <TextBlock Grid.Row="10" Text="4. Freeze headroom — how much transaction-ID space is left before the emergency vacuum, and before a shutdown" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBlock Grid.Row="10" Text="4. Freeze headroom: how much transaction-ID space is left before the emergency vacuum, and before a shutdown" FontWeight="SemiBold" Margin="0,10,0,2"/>
                 <TextBlock Grid.Row="11" x:Name="PgWraparoundNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 <DataGrid Grid.Row="12" x:Name="PgWraparoundGrid" Style="{StaticResource DarkGrid}"
@@ -5417,7 +5417,7 @@
                     </DataGrid.Columns>
                 </DataGrid>
             
-                <TextBlock Grid.Row="13" Text="5. Can this server capture execution plans at all — and if not, which step is missing" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBlock Grid.Row="13" Text="5. Can this server capture execution plans at all, and if not, which step is missing" FontWeight="SemiBold" Margin="0,10,0,2"/>
                 <TextBlock Grid.Row="14" x:Name="PgPlanCaptureNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 <DataGrid Grid.Row="15" x:Name="PgPlanCaptureGrid" Style="{StaticResource DarkGrid}"
@@ -5855,12 +5855,12 @@
                         <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="120"/>
                         <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="180"/>
                         <DataGridTextColumn Header="Column" Binding="{Binding ColumnName}" Width="160"/>
-                        <DataGridTextColumn Header="Top Value Share" Binding="{Binding TopValueFrequency}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
-                        <DataGridTextColumn Header="Correlation" Binding="{Binding Correlation}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
+                        <DataGridTextColumn Header="Top Value Share" Binding="{Binding TopValueFrequency, StringFormat=N3}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Correlation" Binding="{Binding Correlation, StringFormat=N3}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                         <!-- NEGATIVE IS A RATIO of row count, not a count: -1 means distinct is about every
                              row. The header says so because the number alone reads as nonsense. -->
-                        <DataGridTextColumn Header="Distinct (neg = ratio)" Binding="{Binding NDistinct}" ElementStyle="{StaticResource NumericCell}" Width="160"/>
-                        <DataGridTextColumn Header="Null Frac" Binding="{Binding NullFrac}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        <DataGridTextColumn Header="Distinct (neg = ratio)" Binding="{Binding NDistinct, StringFormat='{}{0:#,##0.###}'}" ElementStyle="{StaticResource NumericCell}" Width="160"/>
+                        <DataGridTextColumn Header="Null Frac" Binding="{Binding NullFrac, StringFormat=N3}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                         <DataGridTextColumn Header="Avg Width" Binding="{Binding AvgWidth}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                         <DataGridTextColumn Header="Common Values" Binding="{Binding CommonValueCount}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                         <DataGridTextColumn Header="Captured" Binding="{Binding CaptureTime}" Width="*" SortMemberPath="CaptureTimeUtc"/>

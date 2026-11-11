@@ -164,7 +164,7 @@ export const READ_FIELDS = {
       rowsKey: "trend",
       xKey: "time",
       format: "int",
-      emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
+      emptyText: "No deadlocks in this window: an empty trend here means none happened, not that nothing was collected.",
       series: [{ key: "count", label: "Deadlocks" }],
     },
   },
@@ -194,6 +194,24 @@ export const READ_FIELDS = {
         { key: "occurred_at", label: "When", format: "time" },
         { key: "victim_pid", label: "Victim PID", format: "id" },
         { key: "graph", label: "Graph", wrap: true },
+      ],
+    },
+  },
+  /* #8584: the PostgreSQL blocking notebook cell. One row per sampled chain, worst first by victim count. */
+  get_pg_blocking: {
+    table: {
+      rowsKey: "chains",
+      emptyText: "No blocking was sampled in this window. Captures are periodic, so a shorter episode leaves no trace.",
+      columns: [
+        { key: "captured_at", label: "Captured", format: "time" },
+        { key: "root_pid", label: "Root PID", format: "int" },
+        { key: "root_application", label: "Application" },
+        { key: "root_state", label: "Root State" },
+        { key: "total_victims", label: "Victims", format: "int" },
+        { key: "worst_victim_wait_ms", label: "Worst Wait", format: "ms" },
+        { key: "root_xact_duration_ms", label: "Root Xact", format: "ms" },
+        { key: "root_query", label: "Root Query", wrap: true },
+        { key: "recommended_action", label: "Action", wrap: true },
       ],
     },
   },

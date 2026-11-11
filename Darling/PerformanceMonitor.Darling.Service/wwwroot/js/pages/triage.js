@@ -177,6 +177,8 @@ async function renderAlertNotebook(main, box, server, metric, at, dedup) {
       server,
       provenance,
       isLive,
+      /* #8555: a report row declares no notebook (template none/reports); the note above says so and nothing else is drawn. */
+      noNotebook: !!(t.template && t.template.id === "none/reports"),
       onOpenLive: () => { def = stripAsOf(def); paint(); },
     });
   }
