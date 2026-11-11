@@ -88,7 +88,7 @@ SELECT
     current_setting('autovacuum_multixact_freeze_max_age')::bigint   AS autovacuum_multixact_freeze_max_age,
     d.datallowconn                                                   AS allows_connections
 FROM pg_database AS d
-/* EVERY database, templates included. The cluster-wide stop limit derives from the oldest datfrozenxid in
+" + /* EVERY database, templates included. The cluster-wide stop limit derives from the oldest datfrozenxid in
    pg_database, so excluding template0/template1 could understate cluster risk by exactly the amount that
    matters — and template0 aging without ever being vacuumed is a real, documented way to get there, typically
    after a major upgrade.
@@ -97,7 +97,7 @@ FROM pg_database AS d
    CONNECTION per database and template0 refuses them (datallowconn = false). This read needs no connection at
    all — pg_database is a SHARED catalog, verified on live Aurora 17.7 where template0's datfrozenxid reads
    fine despite datallowconn = false. allows_connections is already stored, so a consumer can still tell a
-   template row apart. */
+   template row apart. */ @"
 ORDER BY age(d.datfrozenxid) DESC";
 
     public override string Name => "pg_wraparound_stats";

@@ -128,7 +128,7 @@ WITH activity AS
         a.query,
         (extract(epoch FROM (clock_timestamp() - a.xact_start)) * 1000)::bigint  AS xact_duration_ms,
         (extract(epoch FROM (clock_timestamp() - a.query_start)) * 1000)::bigint AS query_duration_ms,
-        /* The expensive call, bounded to backends already waiting on a lock. */
+        " + /* The expensive call, bounded to backends already waiting on a lock. */ @"
         CASE
             WHEN coalesce(a.wait_event_type, '') = 'Lock' THEN pg_blocking_pids(a.pid)
         END                                                     AS blocker_pids
@@ -155,9 +155,9 @@ fan_out AS
 SELECT
     e.blocked_backend_id,
     e.blocked_pid,
-    /* A blocker that has since gone (or that pg_stat_activity does not show) still leaves a real edge, so
+    " + /* A blocker that has since gone (or that pg_stat_activity does not show) still leaves a real edge, so
        the join is LEFT and the blocker's own columns come back NULL rather than dropping the row. Losing the
-       edge would understate the chain, which is the opposite of useful. */
+       edge would understate the chain, which is the opposite of useful. */ @"
     coalesce(blocker.backend_id, 0)                             AS blocking_backend_id,
     e.blocking_pid,
     coalesce(blocked.datname, blocker.datname)                  AS database_name,
@@ -179,13 +179,13 @@ SELECT
     " + SensitiveTextCase("blocker.query") + @"                           AS blocking_query,
     coalesce(blocker.xact_duration_ms, -1)                      AS blocking_xact_duration_ms,
     coalesce(blocker.query_duration_ms, -1)                     AS blocking_query_duration_ms,
-    /* No coalesce: fan_out is grouped from the same edges CTE and joined INNER, so every blocking_pid
-       here necessarily has a row and the fallback was unreachable. */
+    " + /* No coalesce: fan_out is grouped from the same edges CTE and joined INNER, so every blocking_pid
+       here necessarily has a row and the fallback was unreachable. */ @"
     f.blocked_pid_count                                         AS blocked_pid_count,
-    /* Stamped here rather than derived on read: the remedy for this root differs from every other root, and
-       a reader filtering rows must not be able to lose the distinction. */
+    " + /* Stamped here rather than derived on read: the remedy for this root differs from every other root, and
+       a reader filtering rows must not be able to lose the distinction. */ @"
     coalesce(blocker.state, '') = 'idle in transaction'          AS blocking_is_idle_in_transaction,
-    /* Whether EITHER text may be clipped by track_activity_query_size.
+    " + /* Whether EITHER text may be clipped by track_activity_query_size.
 
        pg_size_bytes(), NOT ::int. current_setting() renders a memory GUC WITH ITS UNIT — this one comes
        back as '8kB' on Aurora 17.7 and '4kB' on 16.11 (pg_settings.unit is 'B', and current_setting
@@ -199,7 +199,7 @@ SELECT
        query text at a BYTE boundary while length() counts CHARACTERS in the session encoding, so on
        multi-byte text the comparison undercounts and the flag comes back false for a query that really was
        clipped. Measured on live Aurora: repeat('あ',100) is length 100, octet_length 300 — a 3x undercount
-       against an 8192-byte limit. */
+       against an 8192-byte limit. */ @"
     (
         octet_length(coalesce(blocked.query, ''))
             >= pg_size_bytes(current_setting('track_activity_query_size'))

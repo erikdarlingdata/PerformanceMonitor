@@ -110,9 +110,9 @@ present AS (
     SELECT
         a.name                       AS name,
         a.default_version            AS default_version,
-        /* PER-DATABASE. pg_extension describes the CONNECTED database only, while pg_available_extensions
+        " + /* PER-DATABASE. pg_extension describes the CONNECTED database only, while pg_available_extensions
            above it is cluster-wide - the two are joined here precisely so the difference is visible rather
-           than assumed away. */
+           than assumed away. */ @"
         e.extversion                 AS installed_version
     FROM pg_catalog.pg_available_extensions AS a
     FULL OUTER JOIN pg_catalog.pg_extension AS e

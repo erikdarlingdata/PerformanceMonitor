@@ -118,9 +118,9 @@ SELECT
     EXTRACT(EPOCH FROM r.replay_lag) * 1000                        AS replay_lag_ms,
     (r.backend_start AT TIME ZONE 'UTC')                           AS backend_start
 FROM pg_catalog.pg_stat_replication AS r
-/* Worst first: the standby furthest from the primary's current position is the one to look at, and replay
+" + /* Worst first: the standby furthest from the primary's current position is the one to look at, and replay
    distance is the end of the chain - a standby that has received everything and applied nothing is still
-   useless for reads and still cannot be failed over to without waiting. */
+   useless for reads and still cannot be failed over to without waiting. */ @"
 ORDER BY replay_bytes_behind DESC NULLS LAST, r.application_name";
 
     public override string Name => "pg_replication_stats";
