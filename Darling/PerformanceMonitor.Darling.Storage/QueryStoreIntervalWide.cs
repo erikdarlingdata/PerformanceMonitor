@@ -625,6 +625,14 @@ SELECT EXISTS
     public static readonly TimeSpan TopMinWindow = TimeSpan.FromHours(24);
 
     /// <summary>
+    /// The window the Viewer's Query Store slicer must span before it reads the interval table (#8549). Seven days, the window at
+    /// which the earlier measurement (ruling issuecomment-5840737421) had raw and the table tied; below it raw stays. At 7, 15 and
+    /// 30 days on a store of 1.8 million interval rows (3.6 million raw rows, compressed) the table read ran in 40 to 45 percent of
+    /// raw's time, so the line is conservative. A read's own constant, as <see cref="GridWideMinWindow"/> and <see cref="TopMinWindow"/> are.
+    /// </summary>
+    public static readonly TimeSpan SlicerWideMinWindow = TimeSpan.FromDays(7);
+
+    /// <summary>
     /// How long one Query Store runtime-stats interval can span (V143's clause 3 restated: "B is the window minus
     /// a day, and an interval spans at most a day"), so an interval that STARTED up to a day before the window can
     /// still have executions inside it. Clause 3 of <see cref="UseTable"/> no longer uses it alone (#5541): it is
