@@ -219,7 +219,9 @@ public sealed class DailySummaryStitchedRangeTests
         /* #7028: counted inside the queries CTE only (it ends where deadlocks begins): the blocking waits chain that
            follows (BlockingWaits.HourlyChosenWaitsSql) holds its own NOT EXISTS and UNION ALL. */
         var queriesCte = sql[sql.IndexOf("queries AS (", StringComparison.Ordinal)..sql.IndexOf("deadlocks AS (", StringComparison.Ordinal)];
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(queriesCte, "NOT EXISTS").Count);
+        /* #8549: the successor side's restart-hash member holds an anti-join of its own (aliased h), so the probes are counted by their alias r, one per relation. */
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(queriesCte, $@"NOT EXISTS \(\s*SELECT 1 FROM collect\.{DailyLegacy} AS r"));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(queriesCte, $@"NOT EXISTS \(\s*SELECT 1 FROM collect\.{DailySuccessor} AS r"));
         Assert.Contains("queries_ceiling_legacy", sql, StringComparison.Ordinal);
         Assert.Contains("queries_ceiling_successor", sql, StringComparison.Ordinal);
 
