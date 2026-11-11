@@ -16,8 +16,8 @@ using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
-/// <summary>One finding the reply left out, by the two things a reader needs to recognize it: its category and its headline.</summary>
-public sealed record FindingLabel(string Category, string Headline);
+/// <summary>One finding the reply left out, by what a reader needs to recognize it: its category and headline, and (#8628) the story path and its hash, the same two keys the returned findings carry. Two findings can share a category and a headline (two expensive queries read the same), and the story path, which names the root fact's object, is what tells them apart.</summary>
+public sealed record FindingLabel(string Category, string Headline, string? StoryPath = null, string? StoryPathHash = null);
 
 /// <summary>
 /// What a packed reply carries: the findings it holds (in severity order, trimmed ones flagged on the finding itself),
@@ -61,7 +61,18 @@ public sealed class PackedFindings
             var entries = new JsonArray();
             foreach (var label in LeftOut)
             {
-                entries.Add(new JsonObject { ["category"] = label.Category, ["headline"] = label.Headline });
+                var entry = new JsonObject { ["category"] = label.Category, ["headline"] = label.Headline };
+                if (!string.IsNullOrEmpty(label.StoryPath))
+                {
+                    entry["story_path"] = label.StoryPath;
+                }
+
+                if (!string.IsNullOrEmpty(label.StoryPathHash))
+                {
+                    entry["story_path_hash"] = label.StoryPathHash;
+                }
+
+                entries.Add(entry);
             }
 
             reply["findings_left_out"] = entries;
@@ -97,6 +108,15 @@ public static class AnalysisFindingsBudget
     [
         "suggested_remediation_sql", "remediation_command", "structured_remediation", "destructive_risk_disclosure",
     ];
+
+    /// <summary>The label a finding carries if the reply leaves it out (#8628): category, headline and the story path and hash the
+    /// returned findings carry. One place for both products, so the two <c>analyze_server</c> tools cannot label differently.</summary>
+    public static FindingLabel LabelFor(AnalysisFinding finding)
+    {
+        ArgumentNullException.ThrowIfNull(finding);
+        return new FindingLabel(
+            finding.Category, FactAdvice.GetForFinding(finding)?.Headline ?? finding.RootFactKey, finding.StoryPath, finding.StoryPathHash);
+    }
 
     /// <summary>
     /// Packs <paramref name="findings"/> (serialized, severity-first, one label each) into the largest reply that fits

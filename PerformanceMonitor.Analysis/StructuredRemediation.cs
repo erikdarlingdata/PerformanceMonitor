@@ -23,7 +23,8 @@ namespace PerformanceMonitor.Analysis;
 /// their own shapes when an agent consumer needs them.</para>
 /// <para>#3652: <see cref="Guidance"/> is the remediation-level sentence for the case where the verb has
 /// changed — automatic plan correction is ON for at least one target's database, so the remediation is no
-/// longer "here is SQL to run" but "the engine is doing this; intervene only if it reverts or expires".
+/// longer "here is SQL to run" but "the engine is doing this; intervene only if it reverts or expires" (#8628: a target
+/// whose recommendation is already Reverted or Expired is told the engine has backed out instead).
 /// Null when no target is under APC. Per-target detail lives on each target's own
 /// <see cref="StructuredForcePlanTarget.Guidance"/>.</para>
 /// </summary>
