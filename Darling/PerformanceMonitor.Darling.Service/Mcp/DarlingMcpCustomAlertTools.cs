@@ -296,7 +296,7 @@ public sealed class DarlingMcpCustomAlertTools
         [Description("The rule definition JSON (metric + predicate, plus optional hysteresis/scope/cadence). Validate it with validate_custom_alert_rule first.")] string definition,
         [Description("Optional human-readable description.")] string? description = null,
         [Description("Whether the rule is active. Default true (it evaluates on the next sweep); false stages it paused.")] bool enabled = true,
-        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when the write tools are served.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null,
         [Description("Optional expiry: an ISO-8601 UTC instant in the future (for example 2026-08-01T00:00:00Z). After it the rule stops evaluating. Omit for a rule that does not expire.")] string? expires_at_utc = null)
@@ -379,7 +379,7 @@ public sealed class DarlingMcpCustomAlertTools
         [Description("New rule definition JSON. Validate it with validate_custom_alert_rule first. Omit to keep the current definition.")] string? definition = null,
         [Description("New human-readable description. Omit to keep the current description; send an empty string \"\" to clear it.")] string? description = null,
         [Description("Whether the rule is active. Omit to keep the current enabled state; false pauses it, true resumes it.")] bool? enabled = null,
-        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when the write tools are served.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null,
         [Description("Expiry: an ISO-8601 UTC instant in the future moves it, \"\" clears it (never expires), omit keeps it. Moving or clearing it turns an expired rule back on.")] string? expires_at_utc = null)
@@ -469,7 +469,7 @@ public sealed class DarlingMcpCustomAlertTools
     public static async Task<string> DeleteCustomAlertRule(
         NpgsqlDataSource postgres,
         [Description("The id of the rule to delete (from list_custom_alert_rules).")] long rule_id,
-        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when the write tools are served.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null)
     {

@@ -133,7 +133,7 @@ The key is a hash of the sign-in that Darling works out when you sign in. It is 
 To pause all collection:
 
 1. In the Viewer, open **Settings**. Under **Data Collection**, click **Pause Collection**. Wait for the status line to change.
-2. Or call `pause_collection` through MCP. It needs `mcp.allowWrites`. Then call `get_command_result` and `get_collection_state` to see that it took effect.
+2. Or call `pause_collection` through MCP. It needs `mcp.allowWrites` or an `operator` token in `mcp.tokens`. Then call `get_command_result` and `get_collection_state` to see that it took effect.
 
 To resume, click **Resume Collection** in the same place, or call `resume_collection`.
 

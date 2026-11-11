@@ -50,7 +50,7 @@ public sealed class DarlingMcpSignatureMergeTools
         [Description("The deadlock signature to merge away (dl1-..., from the deadlock_digest event).")] string signature,
         [Description("The deadlock signature it is counted as from now on.")] string merged_into,
         [Description("Why the two are the same pattern (writes arm; 1 to 2000 characters). On the agent arm the agent_action reason is used.")] string? reason = null,
-        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when the write tools are served.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>

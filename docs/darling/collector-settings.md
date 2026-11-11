@@ -105,7 +105,7 @@ The write needs the run-time table, which the service adds when it starts. If th
 
 ## Stop, start or reschedule a collector from MCP (#6227)
 
-With `mcp.allowWrites` on (and a token), seven MCP tools change collector schedules, and one read shows the result. Each write takes a `collector_name` and an optional `server_name`. Without a server it changes the fleet-wide row, which every server inherits unless it has a row of its own.
+With `mcp.allowWrites` on (and a token), or for an `operator` token in `mcp.tokens`, seven MCP tools change collector schedules, and one read shows the result. Each write takes a `collector_name` and an optional `server_name`. Without a server it changes the fleet-wide row, which every server inherits unless it has a row of its own.
 
 | Tool | What it does |
 |---|---|
@@ -125,7 +125,7 @@ The `mcp` database role gets `INSERT, UPDATE, DELETE` on `config.config_collecto
 
 ## Set the service flags from MCP (#6393)
 
-With `mcp.allowWrites` on (and a token), `update_service_flags` sets the collection flags the Viewer's Settings window saves under Data Collection. Send only the ones to change; an omitted argument keeps the stored value.
+`update_service_flags` sets the collection flags the Viewer's Settings window saves under Data Collection. It needs `mcp.allowWrites` on (and a token), or an `operator` token in `mcp.tokens`. Send only the ones to change; an omitted argument keeps the stored value.
 
 | Argument | Meaning | Range |
 |---|---|---|
