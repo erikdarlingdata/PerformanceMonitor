@@ -80,12 +80,12 @@
             <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
                 <TextBlock Text="Port:" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="110"/>
                 <TextBox x:Name="PortBox" Width="100" TextAlignment="Right"
-                         ToolTip="Leave blank for the default (5432). Set it only for a PostgreSQL instance on a non-default port — the port is part of the server's identity, so two instances on one host stay distinct."/>
+                         ToolTip="Leave blank for the default (5432). Set it only for a PostgreSQL instance on a non-default port: the port is part of the server's identity, so two instances on one host stay distinct."/>
                 <TextBlock Text="blank = 5432, the default" Foreground="{DynamicResource ForegroundMutedBrush}"
                            FontSize="11" VerticalAlignment="Center" Margin="8,0,0,0"/>
             </StackPanel>
             <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"
-                       Text="PostgreSQL targets connect with username/password authentication. The Database box below is optional — blank connects to the maintenance database ('postgres'), which the cluster-wide collectors read from. Encryption maps to sslmode: Optional → prefer; Mandatory/Strict → verify-full, or require when 'Trust server certificate' is checked (typically needed for Aurora)."/>
+                       Text="PostgreSQL targets connect with username/password authentication. The Database box below is optional: blank connects to the maintenance database ('postgres'), which the cluster-wide collectors read from. Encryption maps to sslmode: Optional → prefer; Mandatory/Strict → verify-full, or require when 'Trust server certificate' is checked (typically needed for Aurora)."/>
 
             <!-- #5452: the per-server AWS role, for an Amazon RDS or Aurora target the service reaches by assuming a
                  role. Blank = the service's own credentials. Clearing the box on an edit clears the stored role. -->
@@ -136,10 +136,10 @@
                 <RadioButton x:Name="EntraMfaAuthRadio" Content="Microsoft _Entra MFA" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed"
                              ToolTip="Interactive authentication with MFA for Azure SQL Database."/>
-                <RadioButton x:Name="ServicePrincipalAuthRadio" Content="Azure — Service _Principal" Foreground="{DynamicResource ForegroundBrush}"
+                <RadioButton x:Name="ServicePrincipalAuthRadio" Content="Azure: Service _Principal" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,4,0,0"
                              ToolTip="Non-interactive Azure SQL auth using an Entra app registration (client id + secret)."/>
-                <RadioButton x:Name="ManagedIdentityAuthRadio" Content="Azure — _Managed Identity" Foreground="{DynamicResource ForegroundBrush}"
+                <RadioButton x:Name="ManagedIdentityAuthRadio" Content="Azure: _Managed Identity" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,4,0,0"
                              ToolTip="Non-interactive Azure SQL auth using the managed identity of the Azure resource running the Darling service."/>
             </StackPanel>
@@ -217,8 +217,8 @@
                 <ComboBox x:Name="AlertDeliveryOverrideBox" Width="240" SelectedIndex="0"
                           ToolTip="How deadlock/blocking alerts for THIS server are delivered. 'Use global setting' follows the app-wide Alerts setting; override to force Summary or Per-event for just this server.">
                     <ComboBoxItem Content="Use global setting"/>
-                    <ComboBoxItem Content="Summary — one card per cycle"/>
-                    <ComboBoxItem Content="Per-event — one notification per incident"/>
+                    <ComboBoxItem Content="Summary: one card per cycle"/>
+                    <ComboBoxItem Content="Per-event: one notification per incident"/>
                 </ComboBox>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,6,0,0">

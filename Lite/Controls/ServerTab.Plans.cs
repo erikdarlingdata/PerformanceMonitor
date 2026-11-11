@@ -688,7 +688,7 @@ public partial class ServerTab : UserControl
         {
             InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
                 $"The {sideLabel.ToLowerInvariant()} process report has no resolvable sql_handle. " +
-                "This usually means the query ran as dynamic SQL or a system context — " +
+                "This usually means the query ran as dynamic SQL or a system context. " +
                 "SQL Server records a zero handle in that case and the plan can't be recovered.");
             return;
         }
@@ -715,7 +715,7 @@ public partial class ServerTab : UserControl
         {
             InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
                 $"The plan for the {sideLabel.ToLowerInvariant()} query is no longer in the plan cache on {_server.ServerName}. " +
-                "Blocked process reports only give us a sql_handle — if that plan has been evicted, we can't recover it.");
+                "Blocked process reports only give us a sql_handle. If that plan has been evicted, we can't recover it.");
         }
     }
 
@@ -787,7 +787,7 @@ public partial class ServerTab : UserControl
         {
             InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
                 $"The process has no resolvable sql_handle in the deadlock graph. " +
-                "This usually means the query ran as dynamic SQL or a system context — " +
+                "This usually means the query ran as dynamic SQL or a system context. " +
                 "SQL Server records a zero handle in that case and the plan can't be recovered.");
             return;
         }
@@ -814,7 +814,7 @@ public partial class ServerTab : UserControl
         {
             InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
                 $"The plan for this {sideLabel.ToLowerInvariant()} process is no longer in the plan cache on {_server.ServerName}. " +
-                "Deadlock graphs only give us a sql_handle — if that plan has been evicted, we can't recover it.");
+                "Deadlock graphs only give us a sql_handle. If that plan has been evicted, we can't recover it.");
         }
     }
 

@@ -455,7 +455,7 @@ public sealed class RecommendationsViewModel
 
     /// <summary>The default insufficient-data prose when the engine supplied no message (mirrors Lite's).</summary>
     public const string DefaultInsufficientDataMessage =
-        "Still collecting — the engine needs about 24 hours of history before recommendations are " +
+        "Still collecting: the engine needs about 24 hours of history before recommendations are " +
         "meaningful. Keep the collector running and check back later.";
 
     /// <summary>Builds the loading-state view-model (no data yet, read in flight).</summary>
@@ -476,7 +476,7 @@ public sealed class RecommendationsViewModel
 
     /// <summary>The default window-empty prose when the marker carried no message (mirrors Lite's).</summary>
     public const string DefaultWindowEmptyMessage =
-        "Nothing was collected in this analysis window, so nothing was measured — this is not an all-clear.";
+        "Nothing was collected in this analysis window, so nothing was measured. This is not an all-clear.";
 
     /// <summary>
     /// Appended to every window-empty message so the operator lands on the surface that diagnoses a

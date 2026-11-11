@@ -798,7 +798,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         chart.Plot.Clear();
     }
 
-    /* A lane whose read failed is drawn as the empty lane is (its ruler and grid) and says only that the read failed, so it cannot
+    /* A lane whose read failed is drawn as the empty lane is (no axes, no grid) and says only that the read failed, so it cannot
        pass for a quiet healthy lane. The lane is cleared first, as the data paths clear it: the series the last refresh drew would
        otherwise stay under the note, the crosshair would still read their values, and a lane that fails again would carry two notes. */
     private void ShowFailed(ScottPlot.WPF.WpfPlot chart, string title)
@@ -826,40 +826,12 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         chart.Refresh();
     }
 
-    /* Render an empty lane as a live, gridded chart instead of a dead black box. This is most often
-       the Blocking/Deadlocking lane on a healthy server (no events = good news), so make it match the
-       populated lanes: keep the grid and show a 0-1 Y axis. X limits and the vertical gridlines are
-       set afterward by SyncXAxes so the time axis aligns with the other lanes; the left axis keeps its
-       default numeric ticks, so 0/1 labels and horizontal gridlines render. #8307: the lane also says it
-       is empty, in the one muted sentence the other charts use, anchored to the plot's center in pixels so
-       the X limits SyncXAxes sets afterwards do not carry it off the screen. The title arg is retained
+    /* An empty lane looks as every empty chart does (#8644): the one muted sentence the other charts use and nothing else, with no
+       default axes and no gridlines. The sentence is pinned to the lane's center in pixels, not to a data point, so the X limits
+       SyncXAxes sets afterwards (all five lanes share one time ruler) do not carry it off the screen. The title arg is retained
        for call-site readability. */
-    private void ShowEmpty(ScottPlot.WPF.WpfPlot chart, string title)
-    {
-        chart.Plot.Axes.DateTimeTicksBottomUtc(_displayZone);
-        // Only the bottom (File I/O) lane shows time labels; the upper lanes hide them (matches UpdateLane).
-        if (chart != FileIoChart)
-            chart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
-
-        ReapplyAxisColors(chart);
-
-        chart.Plot.Title("");
-        chart.Plot.YLabel("");
-        chart.Plot.Legend.IsVisible = false;
-        chart.Plot.Axes.Margins(bottom: 0);
-        if (chart == BlockingChart) ChartStyle.UseCountAxis(chart); // #8224: an empty count lane still labels whole numbers
-        chart.Plot.Axes.SetLimitsY(0, 1);
-
-        var note = chart.Plot.Add.Annotation(EmptySentence(chart), ScottPlot.Alignment.MiddleCenter);
-        note.LabelFontSize = 14;
-        note.LabelFontColor = EmptyTextColor();
-        note.LabelBackgroundColor = ScottPlot.Colors.Transparent;
-        note.LabelBorderColor = ScottPlot.Colors.Transparent;
-        note.LabelBorderWidth = 0;
-        note.LabelShadowColor = ScottPlot.Colors.Transparent;
-
-        chart.Refresh();
-    }
+    private void ShowEmpty(ScottPlot.WPF.WpfPlot chart, string title) =>
+        new ChartRenderHelper().RefreshEmptyChart(chart, LaneName(chart), "", pinToPlotCenter: true);
 
     /// <summary>The sentence a lane shows until its first read comes back.</summary>
     internal static string LoadingSentence(string laneName) => $"Loading {laneName} data...";
@@ -874,12 +846,6 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         : chart == BlockingChart ? "Blocking"
         : chart == MemoryChart ? "Buffer Pool"
         : "I/O Latency";
-
-    /// <summary>The theme's muted text color (the one the XAML empty hints use), or the palette's placeholder grey when no theme is loaded.</summary>
-    private static ScottPlot.Color EmptyTextColor() =>
-        System.Windows.Application.Current?.TryFindResource("ForegroundMutedBrush") is System.Windows.Media.SolidColorBrush brush
-            ? new ScottPlot.Color(brush.Color.R, brush.Color.G, brush.Color.B, brush.Color.A)
-            : ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
 
     /// <summary>
     /// Reapplies theme to all lane charts (call on theme change).

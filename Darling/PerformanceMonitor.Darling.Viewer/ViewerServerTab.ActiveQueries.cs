@@ -83,7 +83,7 @@ public partial class ViewerServerTab
             var (pendingTotalCount, pendingSnapshots) = pendingReadTask.Result;
             _querySnapshotsFilterMgr!.UpdateData(pendingSnapshots);
             LatestSnapshotIndicator.Text = pendingSnapshots.Count < pendingTotalCount
-                ? $"{pending.Indicator} — Showing the newest 1,000 of {pendingTotalCount:N0}"
+                ? $"{pending.Indicator}: Showing the newest 1,000 of {pendingTotalCount:N0}"
                 : pending.Indicator;
             UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(pendingDataStartTask, "Active Queries"), pending.FromUtc);
             await LoadActiveQueriesSlicerAsync(pending.FromUtc.AddHours(-1), pending.ToUtc.AddHours(1), timer);
@@ -191,11 +191,11 @@ public partial class ViewerServerTab
                     var result = await _dataService.RequestSnapshotNowAsync(_server.ServerId);
                     if (result is null)
                     {
-                        StatusChanged?.Invoke("snapshot: still running — showing the latest stored capture");
+                        StatusChanged?.Invoke("snapshot: still running, showing the latest stored capture");
                     }
                     else if (result.Status != ViewerDataService.StatusSucceeded)
                     {
-                        StatusChanged?.Invoke($"snapshot: the service reported {result.ResultStatus} — showing the latest stored capture");
+                        StatusChanged?.Invoke($"snapshot: the service reported {result.ResultStatus}, showing the latest stored capture");
                     }
                 }
                 catch (ViewerReadOnlyException)
@@ -384,7 +384,7 @@ public partial class ViewerServerTab
         var (totalCount, snapshots) = dataReadTask.Result;
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
         LatestSnapshotIndicator.Text = snapshots.Count < totalCount
-            ? $"{indicator} — Showing the newest 1,000 of {totalCount:N0}"
+            ? $"{indicator}: Showing the newest 1,000 of {totalCount:N0}"
             : indicator;
         UpdateTruncationBanner(QuerySnapshotsTruncationBanner, await DataStartOrNullAsync(dataStartTask, "Active Queries"), fromUtc);
 

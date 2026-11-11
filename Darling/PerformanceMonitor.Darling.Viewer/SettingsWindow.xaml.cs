@@ -445,8 +445,8 @@ public partial class SettingsWindow : Window
         }
 
         CollectionStatusText.Text = _paused
-            ? "Status: Paused — the Darling service is not collecting"
-            : "Status: Collecting — managed by the Darling service";
+            ? "Status: Paused (the Darling service is not collecting)"
+            : "Status: Collecting (managed by the Darling service)";
         /* The "_" keeps Alt+L alive across the state swap — see the XAML for why the key is on
            "Collection" (the word both states share) rather than on the verb. */
         PauseResumeButton.Content = _paused ? "Resume Co_llection" : "Pause Co_llection";
@@ -475,7 +475,7 @@ public partial class SettingsWindow : Window
 
             if (result is null)
             {
-                CollectionStatusText.Text = "Status: the service is running the command — check again later";
+                CollectionStatusText.Text = "Status: the service is running the command. Check again later";
             }
             else if (result.Status == ViewerDataService.StatusSucceeded)
             {

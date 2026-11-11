@@ -66,7 +66,8 @@ internal sealed class SystemHealthChartRenderer
         double max = 0;
         if (data.Count == 0)
         {
-            AddNoDataText(chart, xMin, xMax);
+            _chartHelper.RefreshEmptyChart(chart, label, label); // #8644: the one empty look, not a sentence over default axes
+            return;
         }
         else
         {
@@ -117,7 +118,8 @@ internal sealed class SystemHealthChartRenderer
             .ToList();
         if (sick.Count == 0)
         {
-            AddNoDataText(chart, xMin, xMax);
+            _chartHelper.RefreshEmptyChart(chart, "Sick Spinlocks", "Spinlock Backoffs"); // #8644: the one empty look, not a sentence over default axes
+            return;
         }
         else
         {
@@ -199,7 +201,8 @@ internal sealed class SystemHealthChartRenderer
 
         if (data.Count == 0)
         {
-            AddNoDataText(chart, xMin, xMax);
+            _chartHelper.RefreshEmptyChart(chart, "CPU Comparison", "CPU %"); // #8644: the one empty look, not a sentence over default axes
+            return;
         }
         else
         {
@@ -237,14 +240,4 @@ internal sealed class SystemHealthChartRenderer
     /// <summary>A CPU reading per snapshot as plot values: a missing reading is NaN (a gap), never 0 (#7416 item 1).</summary>
     internal static double[] CpuSeriesValues(IEnumerable<long?> readings) =>
         readings.Select(v => v.HasValue ? (double)v.Value : double.NaN).ToArray();
-
-    /// <summary>Centered "No data for selected time range" annotation for an empty counter chart.</summary>
-    private static void AddNoDataText(ScottPlot.WPF.WpfPlot chart, double xMin, double xMax)
-    {
-        double xCenter = xMin + (xMax - xMin) / 2;
-        var text = chart.Plot.Add.Text("No data for selected time range", xCenter, 0.5);
-        text.LabelFontSize = 14;
-        text.LabelFontColor = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
-        text.LabelAlignment = ScottPlot.Alignment.MiddleCenter;
-    }
 }

@@ -58,7 +58,7 @@ public partial class ViewerServerTab
         {
             MessageBox.Show(
                 "This row does not name a schema, table and column, so there is no candidate to test. That " +
-                "happens when the predicate could not be attributed to a single column — an expression, or a " +
+                "happens when the predicate could not be attributed to a single column: an expression, or a " +
                 "join condition.",
                 "Test an index", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
@@ -71,7 +71,7 @@ public partial class ViewerServerTab
             ? "\n\nNote: this predicate's worst estimate error is "
               + row.WorstEstimateErrorRatio.ToString("N1", CultureInfo.CurrentCulture)
               + "x, which means the planner is working from a wrong row count. An index does not fix a plan "
-              + "built on a bad estimate — statistics or correlated columns are the likelier story, and the "
+              + "built on a bad estimate; statistics or correlated columns are the likelier story, and the "
               + "answer below may be a confident 'no' for that reason."
             : string.Empty;
 
@@ -136,7 +136,7 @@ public partial class ViewerServerTab
         {
             MessageBox.Show(
                 "The service has started the experiment and has not answered within 90 seconds. It plans a statement twice, "
-                + "which is normally instant — a wait this long usually means the service cannot reach that server. "
+                + "which is normally instant; a wait this long usually means the service cannot reach that server. "
                 + "Nothing is left behind on it: the session is reset even when the call is abandoned. Try again later.",
                 "Test an index", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;

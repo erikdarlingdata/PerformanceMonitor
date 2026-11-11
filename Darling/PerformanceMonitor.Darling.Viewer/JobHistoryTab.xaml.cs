@@ -50,7 +50,7 @@ public partial class JobHistoryTab : UserControl
         InitializeComponent();
         /* #5562: the shared picker; the old combo defaulted to the last 24 hours and offered 7, 30 and 90 days, which are
            one click away in the picker's presets (1w, 1mo) and a typed "90d". */
-        TimeRangePickerControl.ZoneProvider = ViewerTimeHelper.CurrentDisplayZone;
+        TimeRangePickerControl.ZoneProvider = PickerZone;
         TimeRangePickerControl.Value = TimeRangePresets.Find("1d")!;
         /* R8: the old "Last Year" (365 days). The parser has no year unit, so "1y" cannot be typed; this choice is the way to a year. */
         TimeRangePickerControl.SetLongestChoice(ViewerTimeRangeWindow.JobHistoryLongestChoice, "Last Year");
@@ -178,7 +178,7 @@ public partial class JobHistoryTab : UserControl
         try
         {
             var (windowStartUtc, windowEndUtc, windowIsLive) = ViewerTimeRangeWindow.Window(
-                TimeRangePickerControl.Value, DateTime.UtcNow, ViewerTimeHelper.CurrentDisplayZone());
+                TimeRangePickerControl.Value, DateTime.UtcNow, PickerZone());
             int? serverId = GetSelectedServerId();
             /* #4966: the window's start is worked out once, and the read and the data-start probe both take it. The probe starts
                beside the read; its answer is awaited only after the rows are on screen, so a probe that fails costs the note and
@@ -190,7 +190,7 @@ public partial class JobHistoryTab : UserControl
             /* The choices are keyed on what identifies the window and the server (JobHistoryChoicesKey), not on its span: a live window
                with a fixed start (Today, Month to Date, "since X") grows its span on every refresh, which would read them every time. */
             var choicesKey = JobHistoryChoicesKey.For(
-                ViewerTimeRangeWindow.StartSlides(TimeRangePickerControl.Value, DateTime.UtcNow, ViewerTimeHelper.CurrentDisplayZone()),
+                ViewerTimeRangeWindow.StartSlides(TimeRangePickerControl.Value, DateTime.UtcNow, PickerZone()),
                 windowStartUtc, windowEndUtc, windowIsLive, serverId);
             var refreshChoices = _choicesFreshness.NeedsRead(choicesKey, DateTime.UtcNow);
             using var readFanOut = ViewerReadFanOut.Of(4);
@@ -218,6 +218,10 @@ public partial class JobHistoryTab : UserControl
             await ViewerServerTab.AwaitReadWatchingProbeAsync(readTask, dataStartTask, "Job History");
             var all = await readTask;
             readFanOut.Release();
+            foreach (var read in all)
+            {
+                if (read.Clock is { } readClock) _rowClocks[read.ServerId] = readClock;
+            }
 
             /* The last supersede check and the bind sit in one synchronous run (JobHistoryLoadSteps.BindWhenCurrentAsync): a load that
                was current at the check cannot be superseded before it binds, so an older load never binds over a newer one. The
@@ -253,7 +257,7 @@ public partial class JobHistoryTab : UserControl
 
             /* The rows are on screen, so the tab is refreshed. The agent-status, data-start and choices reads below are best effort
                and report their own failures; a failure line one of them raises after this stamp stands. */
-            StatusChanged?.Invoke($"job history — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+            StatusChanged?.Invoke($"job history: refreshed {ViewerTimeHelper.RefreshedStamp()}");
 
             await UpdateAgentStatusAsync(serverId);
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
@@ -583,6 +587,14 @@ public partial class JobHistoryTab : UserControl
         CategoryFilterComboBox.SelectionChanged += Filter_SelectionChanged;
     }
 
+
+    /// <summary>The clock each server's runs carried in the reads so far (#8645), so the picker words a range in the zone the rows beside it use.</summary>
+    private readonly Dictionary<int, PerformanceMonitor.Analysis.Baselines.ServerClock> _rowClocks = new();
+
+    /// <summary>The zone the range picker reads typed times in, and the window is worked out in (#8645): the picked server's clock, else, for
+    /// All Servers, the one clock a view of several servers reads on. Never the active server tab's (<see cref="ViewerTimeHelper.ListZoneFor"/>).</summary>
+    private TimeZoneInfo PickerZone() =>
+        ViewerTimeHelper.ListZoneFor(ViewerTimeHelper.CurrentDisplayMode, GetSelectedServerId(), _rowClocks, TimeZoneInfo.Local);
 
     private int? GetSelectedServerId()
     {

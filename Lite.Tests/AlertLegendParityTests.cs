@@ -30,7 +30,7 @@ public sealed class AlertLegendParityTests
     private const string ClientTimeoutsMetric = "Client Timeouts";
 
     private static readonly Regex LegendLine = new(
-        @"<Run Foreground=""(?<hex>#[0-9A-Fa-f]{6})""[^>]*Text=""[^""]*""\s*/>\s*—\s*(?<text>[^\r\n<]*)",
+        @"<Run Foreground=""(?<hex>#[0-9A-Fa-f]{6})""[^>]*Text=""[^""]*""\s*/>\s*:\s*(?<text>[^\r\n<]*)",
         RegexOptions.Compiled);
 
     public static IEnumerable<object[]> SkuData() => new[]

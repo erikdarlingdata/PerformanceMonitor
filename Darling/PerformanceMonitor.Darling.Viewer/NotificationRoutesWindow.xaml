@@ -67,7 +67,7 @@
                 </DataGrid.Columns>
             </DataGrid>
             <TextBlock x:Name="NoRoutesMessage"
-                       Text="No routes yet — every alert goes to every channel configured in Notifications. Add a route to send a family somewhere else."
+                       Text="No routes yet: every alert goes to every channel configured in Notifications. Add a route to send a family somewhere else."
                        Foreground="{DynamicResource ForegroundMutedBrush}"
                        HorizontalAlignment="Center" VerticalAlignment="Center"
                        TextWrapping="Wrap" TextAlignment="Center" MaxWidth="460"

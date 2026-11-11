@@ -117,7 +117,7 @@ public partial class ManageTagsWindow : Window
            content tree), so it cannot drift as buttons are added. */
         if (dataService.IsReadOnly)
         {
-            Title += " — read-only seat (tag editing needs the admin connection)";
+            Title += ", read-only seat (tag editing needs the admin connection)";
             if (Content is FrameworkElement root)
             {
                 root.IsEnabled = false;

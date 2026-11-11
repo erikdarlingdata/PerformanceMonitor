@@ -32,7 +32,14 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task LoadDailySummaryAsync(ViewerLoadTimer? timer = null)
     {
-        await LoadCalendarMonthAsync(DailyCalendar.DisplayMonth, timer);
+        try
+        {
+            await LoadCalendarMonthAsync(DailyCalendar.DisplayMonth, timer);
+        }
+        finally
+        {
+            DailyCalendar.IsLoading = false; // #8647: the read returned, with rows or without
+        }
     }
 
     /// <summary>

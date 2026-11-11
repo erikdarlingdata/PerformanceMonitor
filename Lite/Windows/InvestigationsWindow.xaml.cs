@@ -71,6 +71,7 @@ public partial class InvestigationsWindow : Window
             }
 
             RequestsGrid.ItemsSource = requests;
+            NoRequestsMessage.Visibility = requests.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             StatusText.Text = requests.Count == 0
                 ? "No investigation requests."
                 : requests.Count + " requests shown" + (truncated ? "; older ones are not listed. Narrow the state or family." : "");
@@ -140,6 +141,7 @@ public partial class InvestigationsWindow : Window
         BriefBox.Text = detail.Brief ?? "";
         JournalGrid.ItemsSource = detail.Journal;
         JournalNote.Visibility = detail.JournalTruncated ? Visibility.Visible : Visibility.Collapsed;
+        NoJournalMessage.Visibility = detail.Journal.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void ClearDetail(string head)
@@ -150,6 +152,7 @@ public partial class InvestigationsWindow : Window
         BriefHead.Visibility = BriefBox.Visibility = Visibility.Collapsed;
         JournalGrid.ItemsSource = Array.Empty<InvestigationPanelJournalRow>();
         JournalNote.Visibility = Visibility.Collapsed;
+        NoJournalMessage.Visibility = Visibility.Collapsed;
     }
 
     private async void Filter_SelectionChanged(object sender, SelectionChangedEventArgs e)

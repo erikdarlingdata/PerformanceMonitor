@@ -56,9 +56,13 @@ public partial class ServerTab : UserControl
     }
 
     private bool _isUpdatingWaitTypeSelection;
+    private bool _waitTypeListLoaded;
+    private bool _memoryClerkListLoaded;
+    private bool _perfmonCounterListLoaded;
 
     private void PopulateWaitTypePicker(List<string> waitTypes)
     {
+        _waitTypeListLoaded = true; // #8647: from here on, nothing ticked means nothing picked, not "not read yet"
         var previouslySelected = new HashSet<string>(_waitTypeItems.Where(i => i.IsSelected).Select(i => i.DisplayName));
         var topWaits = previouslySelected.Count == 0 ? GetDefaultWaitTypes(waitTypes) : null;
         _waitTypeItems = waitTypes.Select(w => new SelectableItem
@@ -169,13 +173,14 @@ public partial class ServerTab : UserControl
             ApplyTheme(WaitStatsChart);
             _waitStatsHover?.Clear();
 
-            if (selected.Count == 0) { RefreshEmptyChart(WaitStatsChart, "Wait Stats", ""); return; }
+            if (selected.Count == 0) { _chartHelper.RefreshNothingToPlotChart(WaitStatsChart, _waitTypeListLoaded, _waitTypeItems.Count, "Wait Stats", "wait types", ""); return; } // #8647
 
             bool useAvgPerWait = WaitStatsMetricCombo?.SelectedIndex == 1;
             if (_waitStatsHover != null) _waitStatsHover.Unit = useAvgPerWait ? "ms/wait" : "ms/sec";
 
             var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
             double globalMax = 0;
+            var drawn = 0;
 
             // Batched fetch: one query for all selected wait types (was an N+1 query-per-type loop).
             var trendsByType = await Task.Run(() => _dataService.GetWaitStatsTrendsByTypesAsync(_serverId, selected.Select(s => s.DisplayName).ToList(), hoursBack, fromDate, toDate));
@@ -195,9 +200,13 @@ public partial class ServerTab : UserControl
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);
                 _waitStatsHover?.Add(plot, selected[i].DisplayName);
+                drawn++;
 
                 if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
             }
+
+            /* #8644: types are ticked but none has a row in the window: the empty look, not the default axes with no legend. */
+            if (drawn == 0) { RefreshEmptyChart(WaitStatsChart, "Wait Stats", ""); return; }
 
             WaitStatsChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             DateTime rangeStart, rangeEnd;
@@ -230,6 +239,7 @@ public partial class ServerTab : UserControl
 
     private void PopulateMemoryClerkPicker(List<string> clerkTypes)
     {
+        _memoryClerkListLoaded = true; // #8647
         var previouslySelected = new HashSet<string>(_memoryClerkItems.Where(i => i.IsSelected).Select(i => i.DisplayName));
         var topClerks = previouslySelected.Count == 0 ? new HashSet<string>(clerkTypes.Take(5)) : null;
         _memoryClerkItems = clerkTypes.Select(c => new SelectableItem
@@ -337,14 +347,12 @@ public partial class ServerTab : UserControl
             {
                 MemoryClerksTotalText.Text = "--";
                 MemoryClerksTopText.Text = "--";
-                MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-                MemoryClerksChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryClerksChart.Plot, xMin, xMax), xMax);
-                ReapplyAxisColors(MemoryClerksChart);
-                MemoryClerksChart.Refresh();
+                _chartHelper.RefreshNothingToPlotChart(MemoryClerksChart, _memoryClerkListLoaded, _memoryClerkItems.Count, "Memory Clerks", "clerks", "MB"); // #8644, #8647
                 return;
             }
 
             double globalMax = 0;
+            var drawn = 0;
             double nonBpTotal = 0;
             string topNonBpClerk = "";
             double topNonBpMb = 0;
@@ -365,6 +373,7 @@ public partial class ServerTab : UserControl
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);
                 _memoryClerksHover?.Add(plot, selected[i].DisplayName);
+                drawn++;
 
                 if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
 
@@ -379,6 +388,15 @@ public partial class ServerTab : UserControl
                         topNonBpClerk = selected[i].DisplayName;
                     }
                 }
+            }
+
+            /* #8644: clerks are ticked but none has a row in the window: the empty look, and the summary says nothing was read. */
+            if (drawn == 0)
+            {
+                MemoryClerksTotalText.Text = "--";
+                MemoryClerksTopText.Text = "--";
+                RefreshEmptyChart(MemoryClerksChart, "Memory Clerks", "MB");
+                return;
             }
 
             MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
@@ -425,6 +443,7 @@ public partial class ServerTab : UserControl
             PerfmonPackCombo.SelectedItem = "General Throughput";
         }
 
+        _perfmonCounterListLoaded = true; // #8647
         var previouslySelected = new HashSet<string>(_perfmonCounterItems.Where(i => i.IsSelected).Select(i => i.DisplayName));
         _perfmonCounterItems = counters.Select(c => new SelectableItem
         {
@@ -583,7 +602,7 @@ public partial class ServerTab : UserControl
             _perfmonHover?.Clear();
             ApplyTheme(PerfmonChart);
 
-            if (selected.Count == 0) { PerfmonChart.Refresh(); return; }
+            if (selected.Count == 0) { _chartHelper.RefreshNothingToPlotChart(PerfmonChart, _perfmonCounterListLoaded, _perfmonCounterItems.Count, "Perfmon", "counters", ""); return; } // #8644, #8647
 
             var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
             double globalMax = 0;
@@ -618,6 +637,10 @@ public partial class ServerTab : UserControl
 
                 globalMax = Math.Max(globalMax, DeltaSeriesShaping.MaxFinite(values, 0));
             }
+
+            /* #8644: counters are ticked but none has a row in the window, so nothing was drawn: the empty look, not the default
+               -10 to 10 axes with no legend and no message. */
+            if (plottedBases.Count == 0) { RefreshEmptyChart(PerfmonChart, "Perfmon", ""); return; }
 
             PerfmonChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
             DateTime rangeStart, rangeEnd;

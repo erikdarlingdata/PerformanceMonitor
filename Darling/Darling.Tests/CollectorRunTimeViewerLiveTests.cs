@@ -264,7 +264,7 @@ public sealed class CollectorRunTimeViewerLiveTests
 
             /* A reset of run times alone says so (#4938): it is not reported as schedule overrides. */
             Assert.Equal(
-                "Reset 2 per-server run times — every server now follows the fleet default.",
+                "Reset 2 per-server run times: every server now follows the fleet default.",
                 CollectorScheduleOverlay.FormatResetStatus(removed));
 
             bodySucceeded = true;

@@ -105,7 +105,7 @@ public partial class AgentAlertsTab : UserControl
 
             ViewerServerTab.ClientStep(timer, "alerts grid bind", () => Show(read));
             LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.RefreshedStamp();
-            StatusChanged?.Invoke($"agent alerts — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+            StatusChanged?.Invoke($"agent alerts: refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {

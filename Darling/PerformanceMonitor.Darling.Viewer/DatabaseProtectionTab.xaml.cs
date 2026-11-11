@@ -92,7 +92,7 @@ public partial class DatabaseProtectionTab : UserControl
 
             Show(read);
             LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.RefreshedStamp();
-            StatusChanged?.Invoke($"database protection — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+            StatusChanged?.Invoke($"database protection: refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {

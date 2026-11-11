@@ -48,6 +48,37 @@ public sealed class ViewerFleetWideTimesTests : IDisposable
         Assert.Equal(TimeZoneInfo.Utc, ViewerTimeHelper.FleetWideZone());
     }
 
+    /// <summary>#8645: Alert History and Job History cover every server unless one is picked, so their range picker and window must not take
+    /// the clock of whichever server tab was opened last. With Times on Server Time they read that tab's offset while the rows read this
+    /// machine's.</summary>
+    [Fact]
+    public void AllServersList_InServerMode_ReadsTheMachinesZone_NotTheActiveServersClock()
+    {
+        ViewerTimeHelper.ActiveServerClock = Mountain;
+        var machine = TimeZoneInfo.CreateCustomTimeZone("machine", TimeSpan.FromHours(-5), "machine", "machine");
+        var noClocks = new System.Collections.Generic.Dictionary<int, ServerClock>();
+
+        var all = ViewerTimeHelper.ListZoneFor(TimeDisplayMode.ServerTime, null, noClocks, machine);
+        var unknownPick = ViewerTimeHelper.ListZoneFor(TimeDisplayMode.ServerTime, 9, noClocks, machine);
+
+        Assert.Equal(machine.BaseUtcOffset, all.BaseUtcOffset);
+        Assert.Equal(machine.BaseUtcOffset, unknownPick.BaseUtcOffset);
+        Assert.NotEqual(ViewerTimeHelper.CurrentDisplayZone().BaseUtcOffset, all.BaseUtcOffset);
+        Assert.Equal(TimeZoneInfo.Utc, ViewerTimeHelper.ListZoneFor(TimeDisplayMode.UTC, null, noClocks, machine));
+    }
+
+    [Fact]
+    public void PickedServer_InServerMode_ReadsThatServersOwnClock()
+    {
+        ViewerTimeHelper.ActiveServerClock = Mountain;
+        var machine = TimeZoneInfo.CreateCustomTimeZone("machine", TimeSpan.FromHours(-5), "machine", "machine");
+        var clocks = new System.Collections.Generic.Dictionary<int, ServerClock> { [7] = Eastern };
+
+        var zone = ViewerTimeHelper.ListZoneFor(TimeDisplayMode.ServerTime, 7, clocks, machine);
+
+        Assert.Equal(TimeSpan.FromHours(-4), zone.BaseUtcOffset);
+    }
+
     [Fact]
     public void FleetSweepTimes_InLocalMode_ReadThisMachinesZone()
     {

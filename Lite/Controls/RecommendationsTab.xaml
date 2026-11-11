@@ -178,7 +178,7 @@
 
             <!-- Empty: all-clear. -->
             <TextBlock x:Name="EmptyMessage" Style="{StaticResource LiteEmptyStateMessage}"
-                       Text="All clear — no current recommendations."/>
+                       Text="All clear. No current recommendations."/>
 
             <!-- Insufficient data: engine has not collected its minimum window yet. -->
             <TextBlock x:Name="InsufficientDataMessage" Style="{StaticResource LiteEmptyStateMessage}"

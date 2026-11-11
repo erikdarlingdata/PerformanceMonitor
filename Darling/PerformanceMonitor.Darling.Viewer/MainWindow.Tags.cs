@@ -158,7 +158,7 @@ public partial class MainWindow
     /// <summary>Tooltip shown on disabled tag editors, so the read-only seat is TOLD why (#2008's
     /// complaint was the silence, and greying-out without a reason is only half an answer).</summary>
     private const string ReadOnlyTagToolTip =
-        "This seat is connected with the read-only viewer role — tag editing needs the admin connection.";
+        "This seat is connected with the read-only viewer role: tag editing needs the admin connection.";
 
     /// <summary>Tooltip on the server-row menu's write items (Remove, Silence, Unsilence) on a read-only seat (#8547).</summary>
     internal const string ReadOnlyServerWriteToolTip =
@@ -182,7 +182,7 @@ public partial class MainWindow
             silenceItem.ToolTip = readOnly
                 ? ReadOnlyServerWriteToolTip
                 : silenced
-                    ? "Already silenced — use Unsilence to restore alert delivery"
+                    ? "Already silenced: use Unsilence to restore alert delivery"
                     : "Mute every alert for this server until you Unsilence it";
             ToolTipService.SetShowOnDisabled(silenceItem, true);
 
@@ -191,7 +191,7 @@ public partial class MainWindow
                 ? ReadOnlyServerWriteToolTip
                 : silenced
                     ? "Remove this server's whole-server alert silence"
-                    : "Not silenced — there is nothing to remove";
+                    : "Not silenced: there is nothing to remove";
             ToolTipService.SetShowOnDisabled(unsilenceItem, true);
         }
 

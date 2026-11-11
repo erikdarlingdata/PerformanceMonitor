@@ -150,7 +150,7 @@ public sealed class SettingsRowParityTests
         {
             var xaml = RepoFile.ReadRepoFile(path);
             var label = Attr(xaml, "AlertClientTimeoutsCheckBox", "Content")!;
-            Assert.Equal("Client timeouts and cancels per minute — Warning at", label);
+            Assert.Equal("Client timeouts and cancels per minute: Warning at", label);
             Assert.DoesNotContain("attention", label, StringComparison.OrdinalIgnoreCase);
 
             /* The row ends at the Critical box: no trailing "per minute" TextBlock repeats the unit. */

@@ -33,7 +33,7 @@
 
         <TextBlock Grid.Row="1" TextWrapping="Wrap" Margin="0,0,0,10"
                    Foreground="{DynamicResource ForegroundBrush}"
-                   Text="Open this page in a browser — on this machine or on your phone — and enter the code below. It does not have to be this machine, and it does not use the Windows sign-in prompt."/>
+                   Text="Open this page in a browser (on this machine or on your phone) and enter the code below. It does not have to be this machine, and it does not use the Windows sign-in prompt."/>
 
         <!-- Read-only TextBoxes rather than TextBlocks: both values have to be selectable, because a
              user whose clipboard is locked down by policy still needs to be able to read and retype

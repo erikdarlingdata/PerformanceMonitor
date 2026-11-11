@@ -99,7 +99,7 @@ public static class ViewerConfigDiagnostics
            reporting a managed flag or a set of fields nothing was parsed from would be an invention. */
         if (string.IsNullOrWhiteSpace(connectionString))
         {
-            return new[] { Line("connection", "(darling.json was not loaded — nothing was parsed)") };
+            return new[] { Line("connection", "(darling.json was not loaded: nothing was parsed)") };
         }
 
         var lines = new List<string>
@@ -122,7 +122,7 @@ public static class ViewerConfigDiagnostics
                and that fragment can be the credential half of the string. */
             lines.Add(Line(
                 "connection",
-                $"COULD NOT BE PARSED ({ex.GetType().Name}) — check postgres.connectionString in darling.json"));
+                $"COULD NOT BE PARSED ({ex.GetType().Name}): check postgres.connectionString in darling.json"));
             return lines;
         }
 
@@ -131,7 +131,7 @@ public static class ViewerConfigDiagnostics
            the ':' can be the tail of a password. A string with no Host is the formatter's sentence too. */
         if (DarlingStoreConnection.TryDescribeParseFailure(connectionString) is { } unusable)
         {
-            lines.Add(Line("connection", $"COULD NOT BE USED — {unusable}"));
+            lines.Add(Line("connection", $"COULD NOT BE USED: {unusable}"));
             return lines;
         }
 

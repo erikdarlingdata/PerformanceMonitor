@@ -96,6 +96,21 @@ public sealed class FinOpsIndexAnalysisDatabaseBoxTests : IDisposable
         Assert.Null(listed.Note);
     }
 
+    /// <summary>#8645: the note names the snapshot's time on the zone it is given (the picked server's), not on the machine's or the
+    /// last-opened server tab's.</summary>
+    [Fact]
+    public void TheNote_NamesTheSnapshotTimeInTheZoneItIsGiven()
+    {
+        var tokyo = TimeZoneInfo.FindSystemTimeZoneById("Tokyo Standard Time");
+        var asOf = new DateTime(2026, 11, 10, 20, 30, 0, DateTimeKind.Utc);
+
+        var note = FinOpsTab.IndexAnalysisListNote(asOf, tokyo);
+
+        Assert.NotNull(note);
+        Assert.StartsWith("Databases as of 2026-11-11 05:30,", note, StringComparison.Ordinal);
+        Assert.Null(FinOpsTab.IndexAnalysisListNote(null, tokyo));
+    }
+
     private async Task<DuckDbInitializer> StoreAsync()
     {
         _store = new DuckDbInitializer(Path.Combine(_tempDir, "box.duckdb"));

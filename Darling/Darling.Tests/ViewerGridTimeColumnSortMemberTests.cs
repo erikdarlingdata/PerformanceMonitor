@@ -62,6 +62,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
     {
         { "FinOpsTab.xaml", "FinOpsApplicationConnectionsDataGrid", "FirstSeenText", Name(typeof(ApplicationConnectionRow)), "FirstSeenUtc" },
         { "FinOpsTab.xaml", "FinOpsApplicationConnectionsDataGrid", "LastSeenText", Name(typeof(ApplicationConnectionRow)), "LastSeenUtc" },
+        { "FinOpsTab.xaml", "FinOpsServerInventoryDataGrid", "StartTimeText", Name(typeof(ServerPropertyRow)), "SqlServerStartTime" },
         { "FinOpsTab.xaml", "FinOpsServerInventoryDataGrid", "InventoryAsOfText", Name(typeof(ServerPropertyRow)), "InventoryAsOfUtc" },
         { "FinOpsTab.xaml", "FinOpsServerInventoryDataGrid", "LastCollectedText", Name(typeof(ServerPropertyRow)), "LastCollectedUtc" },
         { "ViewerServerTab.xaml", "QueryStoreClutterGrid", "OptionsCapturedText", Name(typeof(ViewerDataService.QueryStoreClutterRow)), "OptionsCapturedUtc" },
