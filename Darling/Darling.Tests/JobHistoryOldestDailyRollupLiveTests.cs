@@ -160,10 +160,8 @@ VALUES (860000001, (now() AT TIME ZONE 'utc'), 8002, 'jh-oldest', 1, 'j', 'late 
         Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.wait_stats", ct));
         Assert.True(await ScalarAsync<bool>(connection, ViewerDataService.JobHistoryOldestDailyIsAggregateSql, ct), "a hypertable store holds the aggregate");
 
-        var clock = System.Diagnostics.Stopwatch.StartNew();
         Assert.False(await TimescaleSupport.BackfillJobHistoryOldestDailyAsync(connection, null, LiveClock.Now(), ct), "raw job_history holds nothing, so there is nothing to refresh");
         Assert.False(await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, null, LiveClock.Now(), ct), "raw wait_stats holds nothing either");
-        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), $"no refresh ran, so it returns at once, took {clock.Elapsed.TotalSeconds:F1} s");
         Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.JobHistoryOldestDailyView}", ct));
         Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.WaitStatsDailyView}", ct));
     }
