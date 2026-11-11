@@ -702,7 +702,12 @@ public partial class DuckDbInitializer : IDisposable
     /// buffer manager to release cached pages (#4262 round 1 finding 1). Internal so a test can call this
     /// directly instead of waiting on <see cref="_trimTimer"/>'s real interval.
     /// </summary>
-    internal void RunMemoryTrimCycle()
+    /// <param name="closedServerName">
+    /// Null for the timer's tick. A server tab close passes the closed server's name (#8535), which only tags the log lines so a
+    /// reader can tell a close-triggered trim from a tick. The cycle is the same one and never waits on a lock, so the close
+    /// never waits on it; a busy store means the next tick takes the trim.
+    /// </param>
+    internal void RunMemoryTrimCycle(string? closedServerName = null)
     {
         /* Snapshot rather than repeated field reads: a concurrent ResetDatabaseAsync/Dispose can set
            _sentinel to null (or a new instance) between any two reads here, and ObjectDisposedException
@@ -723,6 +728,12 @@ public partial class DuckDbInitializer : IDisposable
         if (!s_dbLock.TryEnterReadLock(TrimLockWaitForTests))
         {
             RecordTrimSkip();
+            if (closedServerName is not null)
+            {
+                /* #8535: a tick writes nothing here (the hourly skip line covers it), but a close asked for this trim, so say it waits. */
+                _logger?.LogInformation("{Trigger}: the local database was busy, so the trim was skipped and waits for the next tick.",
+                    TrimTriggerLabel(closedServerName));
+            }
             return;
         }
         var readHoldId = StoreLockHolders.Register(nameof(RunMemoryTrimCycle), "DuckDbInitializer.cs", write: false);
@@ -766,7 +777,7 @@ public partial class DuckDbInitializer : IDisposable
                 _logger?.LogDebug(
                     "Trim cycle: skipped, write lock unavailable ({BeforeMb:F0} MiB in use)",
                     beforeBytes.Value / (1024.0 * 1024.0));
-                LogTrimTick(beforeTags, $"Over the {Mb(TrimThresholdBytes)} MB trim threshold, but the local database was busy, so the trim was skipped.");
+                LogTrimTick(beforeTags, $"Over the {Mb(TrimThresholdBytes)} MB trim threshold, but the local database was busy, so the trim was skipped.", closedServerName);
                 return;
             }
         }
@@ -815,7 +826,8 @@ public partial class DuckDbInitializer : IDisposable
             if (lowerFailure is not null)
             {
                 LogTrimTick(TryReadMemoryTags(lockedSentinel),
-                    $"Over the {Mb(TrimThresholdBytes)} MB trim threshold, but DuckDB would not lower memory_limit to {target}: {lowerFailure}");
+                    $"Over the {Mb(TrimThresholdBytes)} MB trim threshold, but DuckDB would not lower memory_limit to {target}: {lowerFailure}",
+                    closedServerName);
                 return;
             }
 
@@ -838,7 +850,8 @@ public partial class DuckDbInitializer : IDisposable
                 configuredMemoryLimit);
             LogTrimTick(TryReadMemoryTags(lockedSentinel),
                 $"Trimmed from {Mb((long)beforeBytes.Value)} MB to {Mb((long)(afterBytes ?? 0))} MB in {stopwatch.ElapsedMilliseconds} ms " +
-                $"(memory_limit {target}, then {configuredMemoryLimit}).");
+                $"(memory_limit {target}, then {configuredMemoryLimit}).",
+                closedServerName);
         }
         finally
         {

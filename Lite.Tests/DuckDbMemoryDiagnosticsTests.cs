@@ -206,6 +206,135 @@ public sealed class DuckDbMemoryDiagnosticsTests : IDisposable
         Assert.DoesNotContain("busy", entry.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Closing a server tab asks for a trim (#8535): the buffer pool keeps what the tab read after the tab is gone. The close line
+    /// comes first, then the trim runs the timer's own cycle, and its Information line names the close.
+    /// </summary>
+    [Fact]
+    public async Task OnServerTabClosedAsync_OverTheThreshold_WritesTheCloseLineThenTrimsAndNamesTheClose()
+    {
+        var (initializer, log) = await OpenStoreAsync();
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = 0;
+        try
+        {
+            var before = log.Entries.Count;
+            await initializer.OnServerTabClosedAsync("Alpha", bound: TimeSpan.Zero, delay: TimeSpan.Zero);
+
+            Assert.Equal(1, initializer.CompletedTrimCycleCount);
+            var added = log.Entries.Skip(before).ToList();
+            var closeLine = added.FindIndex(e => e.Message.StartsWith("Server tab closed (Alpha): ", StringComparison.Ordinal));
+            var trimLine = added.FindIndex(e => e.Message.StartsWith("Memory trim after server tab closed (Alpha): ", StringComparison.Ordinal));
+            Assert.True(closeLine >= 0, "the close line was not written");
+            Assert.True(trimLine > closeLine, "the trim line must follow the close line");
+            Assert.Equal(LogLevel.Information, added[trimLine].Level);
+            Assert.Contains("Trimmed from ", added[trimLine].Message, StringComparison.Ordinal);
+            Assert.DoesNotContain(added, e => e.Message.StartsWith("Memory trim tick:", StringComparison.Ordinal));
+        }
+        finally
+        {
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+        }
+    }
+
+    /// <summary>
+    /// A close under the threshold trims nothing and writes no trim line, the same as a tick: the close line carries the numbers.
+    /// </summary>
+    [Fact]
+    public async Task OnServerTabClosedAsync_UnderTheThreshold_WritesNoTrimLineAndDoesNotTrim()
+    {
+        var (initializer, log) = await OpenStoreAsync();
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = long.MaxValue;
+        try
+        {
+            var before = log.Entries.Count;
+            await initializer.OnServerTabClosedAsync("Alpha", bound: TimeSpan.Zero, delay: TimeSpan.Zero);
+
+            Assert.Equal(0, initializer.CompletedTrimCycleCount);
+            Assert.DoesNotContain(log.Entries.Skip(before), e => e.Message.StartsWith("Memory trim after", StringComparison.Ordinal));
+        }
+        finally
+        {
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+        }
+    }
+
+    /// <summary>
+    /// A tab load holding the store when the tab closes: the close returns without trimming, says the trim was skipped and waits
+    /// for the next tick, and the tick (the same cycle with no close name) takes the trim once the store is free.
+    /// </summary>
+    [Fact]
+    public async Task OnServerTabClosedAsync_WhileAReaderHoldsTheStore_SkipsWithoutBlockingAndTheNextTickTrims()
+    {
+        var (initializer, log) = await OpenStoreAsync();
+        initializer.TrimLockWaitForTests = TimeSpan.Zero;
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = 0;
+        var readerReady = new ManualResetEventSlim();
+        var releaseReader = new ManualResetEventSlim();
+        try
+        {
+            var readerTask = Task.Run(() =>
+            {
+                using var readLock = initializer.AcquireReadLock();
+                readerReady.Set();
+                releaseReader.Wait(LockHangGuard);
+            });
+            Assert.True(readerReady.Wait(LockHangGuard));
+
+            var before = log.Entries.Count;
+            await initializer.OnServerTabClosedAsync("Alpha", bound: TimeSpan.Zero, delay: TimeSpan.Zero);
+
+            var skipped = Assert.Single(log.Entries.Skip(before), e => e.Message.StartsWith("Memory trim after server tab closed (Alpha): ", StringComparison.Ordinal));
+            Assert.Equal(LogLevel.Information, skipped.Level);
+            Assert.Contains("the local database was busy, so the trim was skipped.", skipped.Message, StringComparison.Ordinal);
+            Assert.Equal(0, initializer.CompletedTrimCycleCount);
+
+            releaseReader.Set();
+            await readerTask;
+
+            initializer.RunMemoryTrimCycle();
+            Assert.Equal(1, initializer.CompletedTrimCycleCount);
+            Assert.Contains(log.Entries.Skip(before), e => e.Message.StartsWith("Memory trim tick: ", StringComparison.Ordinal)
+                && e.Message.Contains("Trimmed from ", StringComparison.Ordinal));
+        }
+        finally
+        {
+            releaseReader.Set();
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+        }
+    }
+
+    /// <summary>
+    /// The other busy path: a writer holds the store, so even the read lock the trim takes first is refused. The close still
+    /// writes its line and a trim line saying the trim waits for the next tick, and does not trim.
+    /// </summary>
+    [Fact]
+    public async Task OnServerTabClosedAsync_WhileAWriterHoldsTheStore_SaysTheTrimWaitsForTheNextTick()
+    {
+        var (initializer, log) = await OpenStoreAsync();
+        initializer.TrimLockWaitForTests = TimeSpan.Zero;
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = 0;
+        var releaseWriter = HoldWriteLockOnAnotherThread(initializer);
+        try
+        {
+            var before = log.Entries.Count;
+            await initializer.OnServerTabClosedAsync("Alpha", bound: TimeSpan.FromMilliseconds(100), delay: TimeSpan.FromMilliseconds(20));
+
+            var skipped = Assert.Single(log.Entries.Skip(before), e => e.Message.StartsWith("Memory trim after server tab closed (Alpha): ", StringComparison.Ordinal));
+            Assert.Equal(LogLevel.Information, skipped.Level);
+            Assert.Contains("waits for the next tick", skipped.Message, StringComparison.Ordinal);
+            Assert.Equal(0, initializer.CompletedTrimCycleCount);
+        }
+        finally
+        {
+            releaseWriter();
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+        }
+    }
+
     [Fact]
     public async Task RunMemoryTrimCycle_UnderTheThreshold_WritesNothingAndDoesNotTrim()
     {
