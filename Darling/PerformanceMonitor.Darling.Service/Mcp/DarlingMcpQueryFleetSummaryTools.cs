@@ -112,6 +112,11 @@ public sealed class DarlingMcpQueryFleetSummaryTools
         """;
     }
 
+    /// <summary>#8570: OFF until the per-pair LIMIT 1 probes of <see cref="BuildMidSql"/> stop at the first index row. On a 12-server uncompressed seed
+    /// the statement reads about 7,600 pages against the old statement's 2,000 (the probes read a day of heap pages each), so the tool keeps the old
+    /// statement. The route, its guards and its equality tests are in place and run through <see cref="PlanDailyMid"/> directly.</summary>
+    public const bool MidRouteEnabled = false;
+
     /// <summary>#8570: the fewest whole closed days the daily tier must hold before the mid route is worth its probes. Below it the
     /// two partial edge days are most of the window and the old statement is the same read.</summary>
     public const int MinMidDays = 2;
@@ -456,7 +461,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                     /* #8570: whole closed days come from the daily tier. The hourly rollup reads one heap page per row on a cold cache
                        (and decompresses a day's batches on a compressed chunk), the daily rollup 24 times fewer rows. Any guard that
                        fails leaves the hourly read alone. */
-                    mid = PlanDailyMid(coverage, hourlyRelation, start, windowEnd, ceiling);
+                    mid = MidRouteEnabled ? PlanDailyMid(coverage, hourlyRelation, start, windowEnd, ceiling) : null;
                     if (mid is not null && !await DailyHasNoHoleAsync(postgres, mid, cancellationToken))
                     {
                         mid = null;

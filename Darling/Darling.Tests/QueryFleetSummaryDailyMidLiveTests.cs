@@ -456,6 +456,72 @@ public sealed class QueryFleetSummaryDailyMidLiveTests
         }
     }
 
+    /// <summary>The cost the issue measured: on a cold cache the hourly rollup's only hash index holds no other column, so every matching row
+    /// is one heap page, and the hourly rows were written one hour at a time (a hash's rows share a page with other hashes' rows). A 7-day
+    /// window over twelve servers: the old statement reads a heap page for about each of the hash's 2,300 hourly rows, the mid route reads the
+    /// two edge days' rows and one daily row per pair and day. Red on the old statement (it is the same count), green on the new.</summary>
+    [Fact(Skip = "#8570 open: on this 12-server seed the mid route's per-pair LIMIT 1 probes read about 7,600 pages against the old statement's 2,000 (a one-bound probe read 45,000). The probes must stop at the first index row before this can be asserted.")]
+    public async Task SevenDayWindow_ReadsAFractionOfThePages_OfTheHourlyOnlyStatement()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await CreateStoreAsync(ct);
+        await using var scratch = store.Scratch;
+        await using var c = store.Connection;
+        var bodySucceeded = false;
+        try
+        {
+            var t = NewTimeline();
+            var from = t.End.AddDays(-8);
+            const int serverCount = 12;
+            const int groups = 60;
+            for (var i = 1; i <= serverCount; i++)
+            {
+                await DarlingMcpTestData.RegisterServerAsync(c, -858000 - i, "p8570-" + i, ct);
+            }
+
+            await Exec(c, $@"INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+                  delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, total_logical_reads, sample_interval_seconds)
+                SELECT 800000000::bigint + row_number() OVER (), h.ts + interval '10 minutes', -858000 - s, 'p8570-' || s, 'db' || (g % 10),
+                  CASE WHEN g = 1 THEN '{Hash}' ELSE '0x' || g END, 'h' || g, 1 + (extract(hour FROM h.ts))::int % 5, 1000 + g, 2000 + g, 100, 1000, 3600
+                FROM generate_series(TIMESTAMP '{from:yyyy-MM-dd HH:mm:ss}', TIMESTAMP '{t.End.AddHours(-1):yyyy-MM-dd HH:mm:ss}', interval '1 hour') AS h(ts)
+                CROSS JOIN generate_series(1, {serverCount}) s CROSS JOIN generate_series(1, {groups}) g", ct);
+
+            /* One hour per refresh, as the hourly policy writes it. */
+            for (var at = from; at < t.End; at = at.AddHours(1))
+            {
+                await Refresh(c, TimescaleSupport.QueryStatsIntervalHourlyView, at, at.AddHours(1), ct);
+            }
+
+            /* The daily policy ends a day behind. */
+            await Refresh(c, TimescaleSupport.QueryStatsIntervalDailyView, from.Date.AddDays(1), t.DEnd.AddDays(-1), ct);
+            await Exec(c, "VACUUM (ANALYZE) collect.query_stats", ct);
+            await Exec(c, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+            await using var pg = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+            var (plan, hourlyRelation, rawFrom, _) = await PlanAsync(pg, t, ct);
+            Assert.NotNull(plan);
+            var old = await AnalyzeAsync(pg, OldSql(hourlyRelation), t, rawFrom, null, ct);
+            var mid = await AnalyzeAsync(pg, DarlingMcpQueryFleetSummaryTools.BuildMidSql(hourlyRelation, plan!.DailyRelation), t, rawFrom, plan, ct);
+            Assert.True(old > 1_000, $"the seed must put the hash on about a page per hourly row: the old statement read {old} pages");
+            Assert.True(mid * 2 <= old, $"old statement {old} pages, mid route {mid} pages");
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    private static async Task<long> AnalyzeAsync(NpgsqlDataSource pg, string sql, Timeline t, DateTime rawFrom, DarlingMcpQueryFleetSummaryTools.DailyMidPlan? mid, CancellationToken ct)
+    {
+        await using var command = pg.CreateCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql);
+        AddParameters(command, t, rawFrom, mid);
+        var json = (string)(await command.ExecuteScalarAsync(ct))!;
+        using var doc = JsonDocument.Parse(json);
+        var plan = doc.RootElement[0].GetProperty("Plan").Clone();
+        return ExplainBuffers.DataPages(plan);
+    }
+
     /// <summary>A window with fewer than <see cref="DarlingMcpQueryFleetSummaryTools.MinMidDays"/> whole days stays on the old statement.</summary>
     [Fact]
     public async Task WindowUnderTwoWholeDays_StaysOnTheHourlyRollup()
