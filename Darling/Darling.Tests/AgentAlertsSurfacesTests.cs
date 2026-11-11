@@ -40,9 +40,6 @@ public sealed class ViewerAgentAlertsTextTests : IDisposable
 
     public void Dispose() => ViewerTimeHelper.CurrentDisplayMode = _savedMode;
 
-    /// <summary>#7343: the picked server's clock (UTC+05:30, no daylight change), so Server mode differs from UTC and from Local on any machine outside India.</summary>
-    private static readonly ServerClock s_india = ServerClock.FixedOffset(330);
-
     public static TheoryData<TimeDisplayMode> Modes => new() { TimeDisplayMode.ServerTime, TimeDisplayMode.UTC, TimeDisplayMode.LocalTime };
 
     /// <summary>The time of <paramref name="utc"/> as each display mode words it on the page's clock (#8576), to the second with its zone: UTC in
@@ -64,7 +61,7 @@ public sealed class ViewerAgentAlertsTextTests : IDisposable
         ViewerTimeHelper.CurrentDisplayMode = mode;
         var captured = new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc);
 
-        Assert.EndsWith("Captured: " + Worded(captured, mode), ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray()), s_india), StringComparison.Ordinal);
+        Assert.EndsWith("Captured: " + Worded(captured, mode), ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray())), StringComparison.Ordinal);
     }
 
     /// <summary>#8576: the capture time is stamped to the second and names its zone, on the same clock as the tab's "Last refreshed" stamp. Server
@@ -75,10 +72,10 @@ public sealed class ViewerAgentAlertsTextTests : IDisposable
         var read = Read(Complete().ToArray());
 
         ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
-        Assert.EndsWith("Captured: 2026-10-28 12:00:00 UTC", ViewerAgentAlertsText.StatusLine(read, s_india), StringComparison.Ordinal);
+        Assert.EndsWith("Captured: 2026-10-28 12:00:00 UTC", ViewerAgentAlertsText.StatusLine(read), StringComparison.Ordinal);
 
         ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
-        Assert.EndsWith("Captured: " + LocalWorded(new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc)), ViewerAgentAlertsText.StatusLine(read, s_india), StringComparison.Ordinal);
+        Assert.EndsWith("Captured: " + LocalWorded(new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc)), ViewerAgentAlertsText.StatusLine(read), StringComparison.Ordinal);
     }
 
 
@@ -127,8 +124,8 @@ public sealed class ViewerAgentAlertsTextTests : IDisposable
         var read = Read(Complete().Where(a => a.Severity != 21).ToArray());
         var captured = LocalWorded(new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc));
 
-        Assert.Equal($"Alert setup: 1 gap   Alerts defined: 9   Captured: {captured}", ViewerAgentAlertsText.StatusLine(read, ServerClock.Utc));
-        Assert.StartsWith("Alert setup: OK   Alerts defined: 10", ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray()), ServerClock.Utc), StringComparison.Ordinal);
+        Assert.Equal($"Alert setup: 1 gap   Alerts defined: 9   Captured: {captured}", ViewerAgentAlertsText.StatusLine(read));
+        Assert.StartsWith("Alert setup: OK   Alerts defined: 10", ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray())), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -176,7 +173,7 @@ public sealed class ViewerAgentAlertsTextTests : IDisposable
         var read = new ViewerAgentAlertsRead(ViewerAgentAlertsRead.NotCollected, "Azure SQL Database does not have this data.", null,
             new AgentAlertRead([], null, null, 0));
 
-        Assert.Equal("Azure SQL Database does not have this data.", ViewerAgentAlertsText.StatusLine(read, ServerClock.Utc));
+        Assert.Equal("Azure SQL Database does not have this data.", ViewerAgentAlertsText.StatusLine(read));
         /* #6907: the status line carries the sentence, so the grid notes must not repeat it. */
         Assert.Equal(ViewerAgentAlertsText.NoData, ViewerAgentAlertsText.GapsEmptyText(read));
         Assert.Equal(ViewerAgentAlertsText.NoData, ViewerAgentAlertsText.AlertsEmptyText(read));
@@ -281,7 +278,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
                 Assert.Equal("not_collected", web.GetProperty("status").GetString());
                 Assert.Equal(ViewerAgentAlertsRead.NotCollected, read.Status);
                 Assert.Contains("agent_alerts", read.Message, StringComparison.Ordinal);
-                Assert.Equal(read.Message, ViewerAgentAlertsText.StatusLine(read, ServerClock.Utc));
+                Assert.Equal(read.Message, ViewerAgentAlertsText.StatusLine(read));
                 return 0;
             });
     }
