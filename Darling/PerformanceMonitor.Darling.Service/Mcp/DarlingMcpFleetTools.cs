@@ -272,7 +272,7 @@ public sealed class DarlingMcpFleetTools
             node["budget_truncated"] = leftOut.Count > 0;
             node["budget_note"] = leftOut.Count > 0
                 ? McpResponseBudget.PageCutNote(page.Count, kept, "worst first", "cards",
-                    $"Call again with card_offset {cardOffset + kept} for the next page, or narrow the cards with worst_only or band.")
+                    $"Call again with card_offset {cardOffset + kept} for the next page, or narrow the cards with band.")
                 : null;
             node["cards_left_out_count"] = leftOut.Count;
             node["cards_left_out"] = new JsonArray(leftOut.Take(MaxCardsLeftOutNamed).Select(c => c["server_name"]?.DeepClone()).ToArray());

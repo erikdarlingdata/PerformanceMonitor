@@ -185,7 +185,15 @@ public static class McpResponseBudget
     /// <c>truncated</c> here is the budget cut only: a tool whose own payload also carries a window-floor flag keeps that
     /// flag under its own name.
     /// </summary>
-    public static string CapPage(System.Text.Json.Nodes.JsonObject payload, string arrayKey, string order, string noun, int budgetBytes = DefaultBytes)
+    public static string CapPage(System.Text.Json.Nodes.JsonObject payload, string arrayKey, string order, string noun, int budgetBytes = DefaultBytes) =>
+        CapPage(payload, arrayKey, order, noun, remedy: null, budgetBytes);
+
+    /// <summary>
+    /// <see cref="CapPage(System.Text.Json.Nodes.JsonObject, string, string, string, int)"/> with the read's own way to
+    /// the rows left out (#8568), a whole sentence, in place of the shared one: a ranked page keeps its heaviest rows,
+    /// so fewer rows asked for returns the same ones, and the read names the filter that lists the lighter ones.
+    /// </summary>
+    public static string CapPage(System.Text.Json.Nodes.JsonObject payload, string arrayKey, string order, string noun, string? remedy, int budgetBytes = DefaultBytes)
     {
         if (payload[arrayKey] is not System.Text.Json.Nodes.JsonArray page)
         {
@@ -200,7 +208,7 @@ public static class McpResponseBudget
             var cut = n < inScope;
             payload[arrayKey] = new System.Text.Json.Nodes.JsonArray(rowNodes.Take(n).Select(x => x?.DeepClone()).ToArray());
             payload["truncated"] = cut;
-            payload["budget_note"] = cut ? PageCutNote(inScope, n, order, noun) : null;
+            payload["budget_note"] = !cut ? null : remedy is null ? PageCutNote(inScope, n, order, noun) : PageCutNote(inScope, n, order, noun, remedy);
             return payload.ToJsonString(McpHelpers.JsonOptions);
         }
 

@@ -300,7 +300,7 @@ public sealed partial class DarlingMcpAlertTools
                 budget_truncated = kept < page.Count,
                 budget_note = kept < page.Count
                     ? McpResponseBudget.PageCutNote(page.Count, kept, "newest first", "alerts",
-                        "Pass as_of at oldest_returned_alert_time to read on from there, or narrow the page with server_name, metric_name, family or a smaller limit.")
+                        "Pass as_of at oldest_returned_alert_time to read on from there, or narrow the page with server_name, metric_name or family.")
                     : null,
                 oldest_returned_alert_time = McpHelpers.FormatEffectiveStart(page.Take(kept).Min(r => r.AlertTime)),
                 newest_returned_alert_time = McpHelpers.FormatEffectiveStart(page.Take(kept).Max(r => r.AlertTime)),

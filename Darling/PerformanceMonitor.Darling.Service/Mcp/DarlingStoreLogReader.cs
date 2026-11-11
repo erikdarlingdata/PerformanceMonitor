@@ -363,6 +363,12 @@ LIMIT $3";
         /// <summary>How many rows <see cref="RetainedEvents"/> holds.</summary>
         [JsonPropertyName("retained_events_returned")] public int RetainedEventsReturned => RetainedEvents.Count;
 
+        /// <summary>The oldest <c>last_capture_at</c> among <see cref="RetainedEvents"/>, which are newest capture
+        /// first: where this answer's rows stop, and the time <c>as_of</c> reads on from (#8568). Null when the answer
+        /// holds no row.</summary>
+        [JsonPropertyName("oldest_returned_last_capture_at")]
+        public string? OldestReturnedLastCaptureAt => RetainedEvents.Count == 0 ? null : RetainedEvents[^1].LastCaptureAt;
+
         /// <summary>True when retained rows were left off the end to fit the response budget (#8568).</summary>
         [JsonPropertyName("budget_truncated")] public bool BudgetTruncated { get; init; }
 
@@ -597,6 +603,36 @@ LIMIT $3";
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// The way on from a retained page cut for the budget (#8568). The rows are newest capture first, so the ones left
+    /// out are older and an earlier window end is what reaches them: a smaller limit or a shorter hours_back returns
+    /// the newest rows again. Every message of one capture carries that capture's time and the window includes its
+    /// end, so when the rows kept are all from one capture a window ending there returns them again. The ways on are
+    /// then the previews, which fit more of that capture's messages, and a window that ends before it.
+    /// </summary>
+    public static string RetainedCutRemedy(IReadOnlyList<RetainedEvent> retained, int kept, bool fullText)
+    {
+        if (kept == 0)
+        {
+            return fullText
+                ? "Omit full_text to read the messages as 400-character previews."
+                : $"Pass an as_of earlier than {retained[0].LastCaptureAt} to read the messages captured before the newest one.";
+        }
+
+        var oldest = retained[kept - 1].LastCaptureAt;
+        if (!string.Equals(retained[0].LastCaptureAt, oldest, StringComparison.Ordinal))
+        {
+            return "Pass as_of at oldest_returned_last_capture_at to read on from there.";
+        }
+
+        /* A message only this capture holds, past the ones that fit, has no window that lists it. */
+        var sameCaptureLeftOut = !fullText && string.Equals(retained[kept].LastCaptureAt, oldest, StringComparison.Ordinal);
+        return "Every message returned was last captured at oldest_returned_last_capture_at, and a window ending there returns them again. "
+            + (fullText ? "Omit full_text to fit more of that capture's messages as 400-character previews, or pass" : "Pass")
+            + " an as_of earlier than it to read the captures before it."
+            + (sameCaptureLeftOut ? " The messages only that capture holds, past these, cannot be listed: classes counts them." : string.Empty);
     }
 
     /// <summary>Naive-UTC store value to an unambiguous ISO string, the same shape every other read

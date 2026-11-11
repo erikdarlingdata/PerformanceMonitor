@@ -778,6 +778,15 @@ public sealed class DarlingMcpDataTools
     internal const int TopQueryTextFullLength = 2000;
 
     /// <summary>
+    /// The way on from a get_top_queries_by_cpu page cut for the budget (#8568). The page is heaviest first, so the
+    /// queries left out are lighter ones and a smaller top returns the heaviest again: a filter lists them, and so do
+    /// the previews when the page carries the longer text.
+    /// </summary>
+    internal static string TopQueriesCutRemedy(bool fullText) => fullText
+        ? "Omit full_text to fit more queries as 400-character previews, or narrow the page with database_name or tag to read the ones left out."
+        : "Narrow the page with database_name or tag to read the queries left out.";
+
+    /// <summary>
     /// #5226: the body of <see cref="GetTopQueriesByCpu"/> with the ranking choice the web page offers. The MCP tool
     /// stays CPU-only (it calls this with no <paramref name="order_by"/>, and its parameters and description are
     /// unchanged); the web read dispatch passes the page's <c>order_by</c> (cpu, duration, reads or executions; absent
@@ -1171,7 +1180,7 @@ public sealed class DarlingMcpDataTools
             /* #8568: under a response budget the page ends at the last whole row that fits it, heaviest first, and says
                so (truncated, budget_note). The web viewer's page passes none and keeps its rows exactly. */
             return responseByteBudget is int budget
-                ? McpResponseBudget.CapPage(queriesPayload, "queries", "heaviest first", "queries", budget)
+                ? McpResponseBudget.CapPage(queriesPayload, "queries", "heaviest first", "queries", TopQueriesCutRemedy(queryTextLength > QueryTextPreviewLength), budget)
                 : queriesPayload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
