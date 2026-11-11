@@ -133,9 +133,8 @@ public sealed class QueryStoreSliceTieBreakSourceTests
         var declared = Regex.Match(darlingSource, @"Assert\.Equal\((?<total>\d+), total\);");
         Assert.True(declared.Success, "Darling's guard no longer declares a total dedup-site count.");
         /* 18 -> 19 with #5631, mirroring Darling's guard (the eighth plan-regression array_agg: avg_rowcount).
-           19 -> 18 with #5506, mirroring Darling's guard (the viewer's two regressions dedups became one shared window in Storage).
-           18 -> 17 with #8549, mirroring Darling's guard (the Viewer's Query Store slicer keeps the newest snapshot with a hash aggregate, not a window). */
-        Assert.Equal(17, int.Parse(declared.Groups["total"].Value, System.Globalization.CultureInfo.InvariantCulture));
+           19 -> 18 with #5506, mirroring Darling's guard (the viewer's two regressions dedups became one shared window in Storage). */
+        Assert.Equal(18, int.Parse(declared.Groups["total"].Value, System.Globalization.CultureInfo.InvariantCulture));
 
         /* And it must still enumerate its files rather than globbing, for the same reason this one does. */
         Assert.Contains("DedupSites", darlingSource, StringComparison.Ordinal);
