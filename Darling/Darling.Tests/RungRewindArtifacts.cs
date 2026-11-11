@@ -767,6 +767,9 @@ DROP TABLE IF EXISTS collect.schema_capture_passes;"),
         // rewind drops whichever shape stands (the product's own discriminating drop), and a re-run of V259 or the ensure sweep makes it
         // again. Safe on a store that never had it.
         new(259, "hasWaitStatsDaily", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.WaitStatsDailyView)),
+        // V260 (#8570): the oversized-plan backlog's two median indexes. The probe's sentinel is the first of them, so the rewind drops both and
+        // a re-run of V260 makes them again. Safe on a store that never had them.
+        new(260, "hasOversizedPlanBacklogMedianIndexes", "DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_server_bytes; DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_collector_bytes;"),
     ];
 
     /// <summary>

@@ -119,8 +119,17 @@ internal static class DarlingOversizedPlanBacklogReader
     /// The continuous one interpolates between two rows and returns <c>double precision</c>, which would
     /// need a cast to survive a two-argument <c>round</c> — PostgreSQL has no
     /// <c>round(double precision, integer)</c> — and would report a byte count no plan ever had.</para>
+    ///
+    /// <para>#8570: the median is the discrete percentile read through the index, not computed by the aggregate. <c>percentile_disc(0.5)</c>
+    /// is the value at position <c>ceil(n / 2)</c> of the sorted column, which is <c>OFFSET (n + 1) / 2 - 1</c> of
+    /// <c>ORDER BY observed_bytes</c> (<c>observed_bytes</c> is NOT NULL, so every row counts, as it does in <c>count(*)</c>). The aggregate
+    /// form sorted every row of every server, wide rows and all (3,000,000 rows: a 228 MB spill, 5.9 s), and no index can feed an
+    /// ordered-set aggregate. The lateral read walks half of a server's rows through <c>idx_oversized_plan_backlog_server_bytes</c> (V260):
+    /// two narrow columns, no heap fetch. The other aggregates run on their own hash aggregate. Without the index the same statement
+    /// still answers, by sorting.</para>
     /// </summary>
     public const string PerServerRollupSql = @"
+WITH agg AS (
 SELECT
     b.server_id                                                              AS server_id,
     s.server_name                                                            AS server_name,
@@ -147,7 +156,6 @@ SELECT
     max(b.captured_at)                                                       AS last_captured_at,
     max(b.expired_at) FILTER (WHERE b.last_attempt_at IS NOT NULL)           AS last_expired_at,
     min(b.observed_bytes)                                                    AS min_observed_bytes,
-    percentile_disc(0.5) WITHIN GROUP (ORDER BY b.observed_bytes)            AS median_observed_bytes,
     max(b.observed_bytes)                                                    AS max_observed_bytes,
     count(*) FILTER (WHERE b.first_seen_at >= $2)                            AS rows_added_last_day,
     count(*) FILTER (WHERE b.captured_at >= $2)                              AS rows_captured_last_day,
@@ -163,15 +171,56 @@ LEFT JOIN servers AS s
 WHERE ($1::integer IS NULL OR b.server_id = $1)
 GROUP BY
     b.server_id,
-    s.server_name
+    s.server_name)
+SELECT
+    agg.server_id,
+    agg.server_name,
+    agg.total_rows,
+    agg.pending_rows,
+    agg.captured_rows,
+    agg.expired_rows,
+    agg.rows_with_content,
+    agg.query_stats_rows,
+    agg.procedure_stats_rows,
+    agg.pending_rows_attempted,
+    agg.pending_attempts,
+    agg.max_attempts_on_a_pending_row,
+    agg.oldest_first_seen_at,
+    agg.last_seen_at,
+    agg.last_attempt_at,
+    agg.last_captured_at,
+    agg.last_expired_at,
+    agg.min_observed_bytes,
+    med.observed_bytes                                                       AS median_observed_bytes,
+    agg.max_observed_bytes,
+    agg.rows_added_last_day,
+    agg.rows_captured_last_day,
+    agg.rows_expired_last_day,
+    agg.dropped_rows,
+    agg.rows_dropped_last_day
+FROM agg
+LEFT JOIN LATERAL
+(
+    SELECT m.observed_bytes
+    FROM " + OversizedPlanBacklog.TableName + @" AS m
+    WHERE m.server_id = agg.server_id
+    ORDER BY m.observed_bytes
+    OFFSET ((agg.total_rows + 1) / 2 - 1)
+    LIMIT 1
+) AS med ON true
 ORDER BY
-    pending_rows DESC,
-    total_rows DESC,
-    b.server_id";
+    agg.pending_rows DESC,
+    agg.total_rows DESC,
+    agg.server_id";
 
     /// <summary>
     /// The same scope ($1 = an optional server_id, or NULL for every server) split by COLLECTOR rather
     /// than by server — the census, and the first thing to read.
+    ///
+    /// <para>#8570: this is the FLEET form (no parameter; <see cref="CollectorCensusForServerSql"/> is the one-server form). It used to
+    /// sort every row of the table twice, for <c>count(DISTINCT server_id)</c> (7 s of 8 on a 3,000,000-row store) and for the median. The
+    /// server count now comes from a hash aggregate over the distinct (collector, server) pairs, and the median from
+    /// <c>idx_oversized_plan_backlog_collector_bytes</c> (V260), the way <see cref="PerServerRollupSql"/> reads its own.</para>
     ///
     /// <para>It exists because the two collectors' shares of this table are not predictable from each
     /// other and not stable across stores: measured the day after the V121 fleet install,
@@ -181,6 +230,70 @@ ORDER BY
     /// wrong on one of the two stores whichever way they guess.</para>
     /// </summary>
     public const string CollectorCensusSql = @"
+WITH agg AS (
+SELECT
+    b.collector_name                                                         AS collector_name,
+    count(*)                                                                 AS total_rows,
+    count(*) FILTER (WHERE " + PendingPredicate + @")                        AS pending_rows,
+    count(*) FILTER (WHERE b.captured_at IS NOT NULL)                        AS captured_rows,
+    count(*) FILTER (WHERE b.captured_at IS NULL
+                     AND   b.expired_at IS NOT NULL
+                     AND   b.last_attempt_at IS NOT NULL)                    AS expired_rows,
+    max(b.captured_at)                                                       AS last_captured_at,
+    max(b.expired_at) FILTER (WHERE b.last_attempt_at IS NOT NULL)           AS last_expired_at,
+    min(b.observed_bytes)                                                    AS min_observed_bytes,
+    max(b.observed_bytes)                                                    AS max_observed_bytes,
+    count(*) FILTER (WHERE " + DroppedPredicate + @")                        AS dropped_rows
+FROM " + OversizedPlanBacklog.TableName + @" AS b
+GROUP BY
+    b.collector_name),
+sv AS (
+SELECT
+    x.collector_name,
+    count(*)                                                                 AS servers
+FROM
+(
+    SELECT b.collector_name, b.server_id
+    FROM " + OversizedPlanBacklog.TableName + @" AS b
+    GROUP BY b.collector_name, b.server_id
+) AS x
+GROUP BY
+    x.collector_name)
+SELECT
+    agg.collector_name,
+    sv.servers,
+    agg.total_rows,
+    agg.pending_rows,
+    agg.captured_rows,
+    agg.expired_rows,
+    agg.last_captured_at,
+    agg.last_expired_at,
+    agg.min_observed_bytes,
+    med.observed_bytes                                                       AS median_observed_bytes,
+    agg.max_observed_bytes,
+    agg.dropped_rows
+FROM agg
+JOIN sv
+  ON sv.collector_name = agg.collector_name
+LEFT JOIN LATERAL
+(
+    SELECT m.observed_bytes
+    FROM " + OversizedPlanBacklog.TableName + @" AS m
+    WHERE m.collector_name = agg.collector_name
+    ORDER BY m.observed_bytes
+    OFFSET ((agg.total_rows + 1) / 2 - 1)
+    LIMIT 1
+) AS med ON true
+ORDER BY
+    agg.total_rows DESC,
+    agg.collector_name";
+
+    /// <summary>
+    /// The census for one server ($1 = server_id): the statement this read had before #8570, unchanged. One server's rows are a small,
+    /// bounded set (the sweep caps what it keeps per server), so the aggregate's own sort of them is cheap, and a per-collector median for
+    /// one server cannot ride <c>idx_oversized_plan_backlog_collector_bytes</c>, which holds no server.
+    /// </summary>
+    public const string CollectorCensusForServerSql = @"
 SELECT
     b.collector_name                                                         AS collector_name,
     count(DISTINCT b.server_id)                                              AS servers,
@@ -409,9 +522,13 @@ AND   collection_time >= $3";
     {
         var rows = new List<BacklogCollectorCensus>();
 
-        await using var command = postgres.CreateCommand(CollectorCensusSql);
+        // #8570: the fleet form has no parameter and reads its median through an index; one server keeps the statement it had.
+        await using var command = postgres.CreateCommand(serverId.HasValue ? CollectorCensusForServerSql : CollectorCensusSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        command.Parameters.AddWithValue(serverId.HasValue ? serverId.Value : (object)DBNull.Value);
+        if (serverId.HasValue)
+        {
+            command.Parameters.AddWithValue(serverId.Value);
+        }
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
