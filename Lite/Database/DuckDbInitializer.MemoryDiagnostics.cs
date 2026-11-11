@@ -137,8 +137,15 @@ public partial class DuckDbInitializer
     /// not open (no sentinel), the store lock is busy (a writer holds or is taking it) or the read failed. Never blocks, so
     /// the UI thread and the trim timer can both call it, and never throws.
     /// </summary>
-    internal string? DescribeCurrentMemory()
+    internal string? DescribeCurrentMemory() => DescribeCurrentMemory(out _);
+
+    /// <summary>
+    /// <see cref="DescribeCurrentMemory()"/>, saying whether a null came from a busy store lock (<paramref name="lockBusy"/>):
+    /// the one null a later try can turn into a line (#8535).
+    /// </summary>
+    private string? DescribeCurrentMemory(out bool lockBusy)
     {
+        lockBusy = false;
         if (_sentinel is null)
             return null;
 
@@ -147,7 +154,10 @@ public partial class DuckDbInitializer
         try
         {
             if (!s_dbLock.TryEnterReadLock(TimeSpan.Zero))
+            {
+                lockBusy = true;
                 return null;
+            }
             held = true;
             holdId = StoreLockHolders.Register(nameof(DescribeCurrentMemory), "DuckDbInitializer.MemoryDiagnostics.cs", write: false);
 
@@ -195,13 +205,54 @@ public partial class DuckDbInitializer
     internal static string ServerTabEventName(string serverName, bool opened) =>
         (opened ? "Server tab opened" : "Server tab closed") + " (" + serverName + ")";
 
+    /// <summary>How long a server tab's open or close line keeps trying while the store lock is busy (#8535).</summary>
+    private static readonly TimeSpan TabLineBusyBound = TimeSpan.FromSeconds(30);
+
+    /// <summary>The pause between two tries of a server tab's line while the store lock is busy (#8535).</summary>
+    private static readonly TimeSpan TabLineBusyDelay = TimeSpan.FromMilliseconds(250);
+
     /// <summary>
     /// Writes the memory line for a server tab's open or close (#8535) off the calling thread, so the window never waits for it.
-    /// Fire and forget: <see cref="LogMemory"/> never throws and never waits on the store lock.
+    /// Fire and forget: it never throws and never blocks the caller.
     /// </summary>
     internal void LogServerTabMemoryInBackground(string serverName, bool opened)
     {
         var eventName = ServerTabEventName(serverName, opened);
-        _ = System.Threading.Tasks.Task.Run(() => LogMemory(eventName));
+        _ = System.Threading.Tasks.Task.Run(() => LogServerTabMemoryAsync(eventName, TabLineBusyBound, TabLineBusyDelay));
+    }
+
+    /// <summary>
+    /// Writes a server tab's open or close line (#8535), and always writes one. A close right after a collection, or during
+    /// one, finds the store lock held by a writer, and the single try <see cref="LogMemory"/> makes writes nothing, so a field
+    /// walk lost the very line that shows what a close gives back. This runs off the UI thread, so it may wait: it tries the
+    /// read again every <paramref name="delay"/> while the lock is busy, for at most <paramref name="bound"/>, taking the
+    /// lock only for each try (never across a delay). When the lock is still busy at the end, or the read fails, it writes
+    /// the event with the process figures that need no lock and says the DuckDB figures were not read.
+    /// </summary>
+    internal async System.Threading.Tasks.Task<string> LogServerTabMemoryAsync(string eventName, TimeSpan bound, TimeSpan delay)
+    {
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        var lockBusy = false;
+        string? line;
+        while (true)
+        {
+            line = DescribeCurrentMemory(out lockBusy);
+            if (line is not null || !lockBusy || started.Elapsed >= bound)
+                break;
+
+            await System.Threading.Tasks.Task.Delay(delay).ConfigureAwait(false);
+        }
+
+        if (line is null)
+        {
+            var reason = lockBusy
+                ? "the local database was busy"
+                : "the local database could not be read";
+            line = $"DuckDB figures not read because {reason}. " +
+                   $"Process private bytes {Mb(ReadPrivateBytes())} MB, gc heap {Mb(GC.GetTotalMemory(forceFullCollection: false))} MB.";
+        }
+
+        _logger?.LogInformation("{Event}: {Line}", eventName, line);
+        return line;
     }
 }
