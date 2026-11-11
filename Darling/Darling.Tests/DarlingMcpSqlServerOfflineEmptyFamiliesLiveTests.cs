@@ -63,7 +63,7 @@ VALUES ($1, $2, $3, $4, 'nosuchdb', 42, 7, 'Regular', '0xE2EDATAHASH', '0xPLANHA
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at.AddHours(-1)), serverId, name);
 
         /* Three successful runs of each collector that stored no row: the empty-page answers read "the collector looked and nothing ran". */
-        foreach (var collector in new[] { "procedure_stats", "query_store", "query_stats" })
+        foreach (var collector in new[] { "procedure_stats", "query_store", "query_stats", "long_query_completions" })
         {
             await DarlingMcpTestData.ExecAsync(c, ct,
                 @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)

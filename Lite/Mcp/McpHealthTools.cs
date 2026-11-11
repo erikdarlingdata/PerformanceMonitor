@@ -1154,6 +1154,13 @@ public sealed class McpHealthTools
                 collectorName: collector_name, minDurationMs: min_duration_ms, status: status);
             var truncated = rows.Count > effectiveLimit;
             if (truncated) rows = rows.Take(effectiveLimit).ToList();
+            /* #8571, Darling's twin: runs_total is the runs that matched the filters in the window, counted only when the over-fetch saw more than the limit. */
+            long matchingRuns = rows.Count;
+            if (truncated)
+            {
+                matchingRuns = Math.Max(rows.Count, await dataService.CountRecentCollectionLogAsync(
+                    resolved.ServerId, hours, asOfUtc: windowEnd, collectorName: collector_name, minDurationMs: min_duration_ms, status: status));
+            }
 
             var filtered = !string.IsNullOrWhiteSpace(collector_name) || min_duration_ms is not null
                 || !string.IsNullOrWhiteSpace(status);
@@ -1313,7 +1320,7 @@ public sealed class McpHealthTools
                    keeps its own `status`, where nothing collides. */
                 status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
                 runs_returned = pageCount,
-                runs_total = rows.Count,
+                runs_total = matchingRuns,
                 size_note = cut
                     ? $"{rows.Count - pageCount} of the {CountText.Plural(rows.Count, "run")} this read selected {(rows.Count - pageCount == 1 ? "was" : "were")} left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one collector_name / status to read the rest in full."
                     : null,
@@ -1369,6 +1376,13 @@ public sealed class McpHealthTools
                 collectorName: collector_name, minDurationMs: min_duration_ms, status: status);
             var truncated = rows.Count > limit;
             if (truncated) rows = rows.Take(limit).ToList();
+            /* #8571, Darling's twin: runs_total is the runs that matched the filters in the window across the enabled fleet, counted only when the over-fetch saw more than the limit. */
+            long matchingRuns = rows.Count;
+            if (truncated)
+            {
+                matchingRuns = Math.Max(rows.Count, await dataService.CountRecentCollectionLogFleetAsync(
+                    serverIds, hours, asOfUtc: windowEnd, collectorName: collector_name, minDurationMs: min_duration_ms, status: status));
+            }
 
             var filtered = !string.IsNullOrWhiteSpace(collector_name)
                 || min_duration_ms is not null
@@ -1435,7 +1449,7 @@ public sealed class McpHealthTools
                 min_duration_ms,
                 status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
                 runs_returned = pageCount,
-                runs_total = rows.Count,
+                runs_total = matchingRuns,
                 size_note = cut
                     ? $"{rows.Count - pageCount} of the {CountText.Plural(rows.Count, "run")} this read selected {(rows.Count - pageCount == 1 ? "was" : "were")} left off the end to keep this answer within about 32 KB. Ask for fewer rows (limit), a narrower window (hours_back or as_of), or one server_name / collector_name / status to read the rest in full."
                     : null,
