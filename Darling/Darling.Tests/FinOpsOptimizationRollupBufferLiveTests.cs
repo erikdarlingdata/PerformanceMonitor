@@ -99,6 +99,8 @@ public sealed class FinOpsOptimizationRollupBufferLiveTests
                 await refresh.ExecuteNonQueryAsync(ct);
             }
 
+            /* The index the service's tuning pass creates: the read's text and plan lookups probe it, and a store without it reads raw. */
+            await Exec(setup, "CREATE INDEX IF NOT EXISTS idx_query_stats_server_hash_time ON collect.query_stats (server_id, query_hash, collection_time DESC)", ct);
             await Exec(setup, "ANALYZE collect.query_stats", ct);
             await using (var size = new NpgsqlCommand("SELECT hypertable_size('collect.query_stats') / 8192.0, (SELECT oid FROM pg_database WHERE datname = current_database())::bigint", setup))
             await using (var reader = await size.ExecuteReaderAsync(ct))

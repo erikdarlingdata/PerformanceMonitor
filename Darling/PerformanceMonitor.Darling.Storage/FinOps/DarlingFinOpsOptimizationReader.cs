@@ -611,7 +611,9 @@ ORDER BY t.cpu DESC, t.database_name, t.sql_handle, t.query_text";
     /// #8552: the hourly rollup route of the expensive-queries read, or null when the raw statement must answer. The route needs the per-statement
     /// hourly rollup that carries CPU and logical reads (<see cref="TimescaleSupport.QueryStatsIoHourlyView"/>), its oldest bucket at or before the
     /// first whole hour of the window (a rollup that began later holds only part of the window, and a sum over it would be short), and a
-    /// materialization watermark past that first whole hour (a rollup that has not caught up leaves the raw statement the whole window).
+    /// materialization watermark past that first whole hour (a rollup that has not caught up leaves the raw statement the whole window). The
+    /// text and plan lookups need <c>idx_query_stats_server_hash_time</c>, which the service's tuning pass creates: without it each lookup walks the
+    /// window's rows (394,690 buffers measured on a 36 hour store, 18 times the raw statement), so a store that lacks it reads raw.
     /// </summary>
     public static async Task<ExpensiveQueriesRoute?> ResolveExpensiveQueriesRouteAsync(
         NpgsqlDataSource dataSource, DateTime cutoffUtc, int commandTimeoutSeconds, CancellationToken cancellationToken)
@@ -623,6 +625,14 @@ ORDER BY t.cpu DESC, t.database_name, t.sql_handle, t.query_text";
         var ceilingHour = CeilingHour(cutoffUtc);
         if (coverage.FloorOf(TimescaleSupport.QueryStatsIoHourlyView) is not DateTime floor || floor > ceilingHour)
             return null;
+
+        await using (var indexProbe = dataSource.CreateCommand(
+            "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'collect' AND tablename = 'query_stats' AND indexname = 'idx_query_stats_server_hash_time')"))
+        {
+            indexProbe.CommandTimeout = commandTimeoutSeconds;
+            if (await indexProbe.ExecuteScalarAsync(cancellationToken) is not true)
+                return null;
+        }
 
         var watermark = await RollupMaterializationWatermark.GetAsync(
             dataSource, TimescaleSupport.QueryStatsIoHourlyView, TimescaleSupport.HourlyBucket, commandTimeoutSeconds, cancellationToken);
