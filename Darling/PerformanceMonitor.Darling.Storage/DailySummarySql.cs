@@ -124,17 +124,63 @@ public static class DailySummarySql
             WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
             GROUP BY 1
         ),
+        /* #8549: coll counts runs and errors per day, and it read the raw log for the whole window. On a busy store the
+           uncompressed chunks hold every server's rows on shared pages, so one server's rows sit two to a heap block and
+           a bitmap scan of one chunk read about 4,000 blocks (5.5 s cold for the 30-day window, 19,800 blocks for 40,400
+           rows). The hourly rollup (V186, collect.collection_log_hourly, the table the 7-day health read uses) already
+           holds the same two counts per closed hour, from the same cycle-row exclusion, for the last 7 days: exactly
+           the chunks that are expensive. So closed hours come from it, summed per day, and the raw log is read only for
+           the hours it does not hold: the window's partial edge hours, any closed hour the rollup pass has not reached
+           or failed on (the viewer reads the store directly, so that happens), the open hour, and everything older than
+           the table keeps, which is compressed and cheap. The same island shape as CollectionHealthStatements.ComposedSql,
+           bounded by the window on both ends. A rolled hour's row holds every collector that ran in it, so an hour with
+           no row is read raw and found empty, which is the raw answer. */
+        coll_rolled AS MATERIALIZED (
+            SELECT hr.hour_start, SUM(hr.total_runs) AS runs, SUM(hr.error_count) AS errs
+            FROM collect.collection_log_hourly AS hr
+            WHERE hr.server_id = $1 AND hr.hour_start >= $2 AND hr.hour_start <= $3 - INTERVAL '1 hour'
+            GROUP BY hr.hour_start
+        ),
+        coll_raw_ranges AS (
+            /* The window's hours the rollup does not hold, as islands of consecutive hours, clipped to the window. */
+            SELECT GREATEST(MIN(g.hour_start), $2) AS range_start,
+                   LEAST(MAX(g.hour_start) + INTERVAL '1 hour', $3) AS range_end
+            FROM (
+                SELECT s.hour_start,
+                       s.hour_start - ROW_NUMBER() OVER (ORDER BY s.hour_start) * INTERVAL '1 hour' AS island
+                FROM generate_series(date_trunc('hour', $2::timestamp), date_trunc('hour', $3::timestamp - INTERVAL '1 microsecond'), INTERVAL '1 hour') AS s(hour_start)
+                WHERE NOT EXISTS (SELECT 1 FROM coll_rolled AS r WHERE r.hour_start = s.hour_start)
+            ) AS g
+            GROUP BY g.island
+        ),
+        coll_raw AS (
+            /* #5506's bounded probe per range: OFFSET 0 keeps the planner from flattening the LATERAL into a join over
+               the server's whole window, the plan that read every uncompressed chunk. */
+            SELECT date_trunc('day', l.collection_time) AS d,
+                   COUNT(*) AS runs,
+                   COUNT(*) FILTER (WHERE l.status = 'ERROR') AS errs
+            FROM coll_raw_ranges AS rr
+            CROSS JOIN LATERAL (
+                SELECT x.collection_time, x.status
+                FROM v_collection_log AS x
+                WHERE x.server_id = $1
+                AND   x.collection_time >= rr.range_start AND x.collection_time < rr.range_end
+                AND   x.{CollectionCycleRow.NotCycleRowSql}
+                OFFSET 0
+            ) AS l
+            GROUP BY 1
+        ),
         coll AS (
             /* Any run (all statuses) marks the day as collected -> it appears even if every metric is quiet
                (a quiet monitored day is Healthy/green, not No-Data/grey). runs is also the denominator the
                error SHARE bands on (#3539 A2); errs alone used to make the day Critical on presence. */
-            SELECT date_trunc('day', collection_time) AS d,
-                   COUNT(*) AS runs,
-                   COUNT(*) FILTER (WHERE status = 'ERROR') AS errs
-            FROM v_collection_log
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-            AND   {CollectionCycleRow.NotCycleRowSql}
-            GROUP BY 1
+            SELECT p.d, SUM(p.runs)::bigint AS runs, SUM(p.errs)::bigint AS errs
+            FROM (
+                SELECT date_trunc('day', hour_start) AS d, runs, errs FROM coll_rolled
+                UNION ALL
+                SELECT d, runs, errs FROM coll_raw
+            ) AS p
+            GROUP BY p.d
         ),
         mem AS (
             /* #7691: one event is one (second, notification), however many memory nodes reported it. The distinct pairs come from one GROUP BY
