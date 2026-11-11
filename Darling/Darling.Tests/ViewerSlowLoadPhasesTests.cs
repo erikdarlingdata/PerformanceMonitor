@@ -64,7 +64,8 @@ public sealed class ViewerSlowLoadPhasesTests
     {
         var expected = expectedPhases.Split(',');
         var port = FreePort();
-        var booked = StaTestThread.Run(async () =>
+        List<string> booked = new();
+        StaTestThread.Run(async () =>
         {
             var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
             ResourceDictionary? added = null;
@@ -89,6 +90,12 @@ public sealed class ViewerSlowLoadPhasesTests
                     var inner = (TabControl)tab.FindName("InnerTabs");
                     var index = inner.Items.OfType<TabItem>().ToList().FindIndex(t => Equals(t.Header, header));
                     Assert.True(index >= 0, header);
+                    if (header == "Queries")
+                    {
+                        /* The Queries tab loads its active sub-tab. Its sub-tabs only select once the outer tab is shown, so pick Performance Trends the way a first open does. */
+                        ((TabControl)tab.FindName("QueriesSubTabControl")).SelectedIndex = 0;
+                    }
+
                     var timer = new ViewerLoadTimer();
                     await tab.LoadInnerTabAsync(index, timer);
 
@@ -98,7 +105,7 @@ public sealed class ViewerSlowLoadPhasesTests
                         await Task.Delay(50);
                     }
 
-                    return timer.PhaseNames.ToList();
+                    booked = timer.PhaseNames.ToList();
                 }
                 finally
                 {
@@ -116,7 +123,7 @@ public sealed class ViewerSlowLoadPhasesTests
 
         foreach (var phase in expected)
         {
-            Assert.Contains(phase, booked);
+            Assert.True(booked.Contains(phase), "got " + string.Join(",", booked) + " want " + phase);
         }
     }
 
