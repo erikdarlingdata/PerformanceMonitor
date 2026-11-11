@@ -567,14 +567,16 @@ public static class DailySummarySql
         /* #8549: a hash whose only row on a day the daily holds is a restart row is in raw's count and not in the interval daily's. The daily
            half unions those hashes in, so the daily tier answers what raw does on every day the daily holds. */
         var heldDayRestartRows = hourlySource is null
-            ? string.Empty
+            ? HeldDayRestartRows(relation, RestartRowPredicate(relation, string.Empty), hourlyGrain: true)
             : HeldDayRestartRows(relation, RestartRowPredicate(hourlySource, " AND c.collection_time < (SELECT raw_from FROM queries_ceiling)"));
 
         /* #7505: the partial ceiling day's raw rows are counted with the rollup's own source filter, so that day
            is not read higher than the rollup would have read it once it catches up (a restart row's hash counts in
            raw and not in the interval-honest successor). Days past the ceiling keep reading raw unfiltered, as they
            always did. The filter is a no-op for a rollup with none. */
-        var partialDayFilter = filter.Length == 0
+        /* #8549: on the Hourly tier itself (its source is raw) the held-day restart read below counts a restart-only hash on every day the rollup holds,
+           the partial ceiling day included, so the tail no longer leaves those rows out: the day reads raw's count now and once the rollup catches up. */
+        var partialDayFilter = filter.Length == 0 || hourlySource is null
             ? string.Empty
             : $"\n                  AND (collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2) OR ({filter}))";
 
@@ -689,11 +691,29 @@ public static class DailySummarySql
     /// <c>UNION</c> put every daily row through a text sort (0.27 s for 80,000 rows on the test store), and an anti-join over the daily's whole
     /// window sorted it the same way, taking the queries part from 0.16 s to 0.51 s. A per-restart-row <c>EXISTS</c> was 3,456 probes. Bounding the
     /// anti-join to the held days' span and probing per distinct day cost the part 20 ms.</para>
+    ///
+    /// <para><paramref name="hourlyGrain"/> is the Hourly tier's own read (#8549): its relation is the interval hourly rollup, whose rows are hours, so the
+    /// same member probes a day by any of its buckets and lists a hash for the day by any bucket the window reads, and the restart rows count from the first
+    /// whole hour of the window. Nothing is bounded to a ceiling there: a day the hourly holds, the partial ceiling day included, reads raw's count.</para>
     /// </summary>
-    private static string HeldDayRestartRows(string dailyRelation, string? restartPredicate)
-        => restartPredicate is null
-            ? string.Empty
-            : $"""
+    private static string HeldDayRestartRows(string dailyRelation, string? restartPredicate, bool hourlyGrain = false)
+    {
+        if (restartPredicate is null)
+        {
+            return string.Empty;
+        }
+
+        /* The hourly rollup's rows are hours, not days: a day is held when it has any bucket, a hash is listed for the day when any of the day's
+           buckets in the window carries it, and a restart row counts only from the first hour the window reads whole, as the hourly half does. */
+        var restartHourFloor = hourlyGrain ? "date_trunc('hour', c.collection_time)" : "date_trunc('day', c.collection_time)";
+        var heldProbe = hourlyGrain
+            ? "h.bucket >= x.d AND h.bucket < x.d + INTERVAL '1 day'"
+            : "h.bucket = x.d";
+        var listedProbe = hourlyGrain
+            ? "h.bucket >= p.d AND h.bucket < p.d + INTERVAL '1 day' AND h.bucket >= $2 AND h.bucket < $3"
+            : "h.bucket >= (SELECT min(k.d) FROM held_days AS k) AND h.bucket <= (SELECT max(k.d) FROM held_days AS k) AND h.bucket = p.d";
+
+        return $"""
 
                 UNION ALL
                 SELECT e.d, e.query_hash
@@ -702,19 +722,19 @@ public static class DailySummarySql
                         SELECT DISTINCT date_trunc('day', c.collection_time) AS d, c.query_hash
                         FROM collect.query_stats AS c
                         WHERE c.server_id = $1 AND c.collection_time >= $2 AND c.collection_time < $3
-                          AND date_trunc('day', c.collection_time) >= $2{restartPredicate}
+                          AND {restartHourFloor} >= $2{restartPredicate}
                     ),
                     held_days AS MATERIALIZED (
                         SELECT x.d FROM (SELECT DISTINCT p.d FROM restart_pairs AS p) AS x
-                        WHERE EXISTS (SELECT 1 FROM collect.{dailyRelation} AS h WHERE h.server_id = $1 AND h.bucket = x.d OFFSET 0)
+                        WHERE EXISTS (SELECT 1 FROM collect.{dailyRelation} AS h WHERE h.server_id = $1 AND {heldProbe} OFFSET 0)
                     )
                     SELECT p.d, p.query_hash FROM restart_pairs AS p
                     WHERE p.d IN (SELECT k.d FROM held_days AS k)
                       AND NOT EXISTS (SELECT 1 FROM collect.{dailyRelation} AS h
-                                      WHERE h.server_id = $1 AND h.bucket >= (SELECT min(k.d) FROM held_days AS k) AND h.bucket <= (SELECT max(k.d) FROM held_days AS k)
-                                        AND h.bucket = p.d AND h.query_hash = p.query_hash)
+                                      WHERE h.server_id = $1 AND {listedProbe} AND h.query_hash = p.query_hash)
                 ) AS e
             """;
+    }
 
     /// <summary>
     /// The member of the daily <c>queries</c> CTE that counts the days at and after the daily rollup's ceiling (#8549). The daily's refresh
@@ -840,7 +860,9 @@ public static class DailySummarySql
         /* #8604: invariant culture, so a host whose time separator is not a colon cannot spoil the literal. */
         var boundary = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{boundaryDay:yyyy-MM-dd HH:mm:ss.ffffff}'");
         /* #7505: the partial ceiling day's raw rows carry the owning side's source filter. See QueriesCteForCagg. */
-        var partialDaySuccessor = successorFilter.Length == 0 ? "TRUE" : $"({successorFilter})";
+        var hierarchical = IsRollup(legacyTarget.Source) && IsRollup(successorTarget.Source);
+        /* #8549: a hourly successor (its source is raw) gets the held-day restart read below, so its partial ceiling day's tail keeps the restart rows. */
+        var partialDaySuccessor = successorFilter.Length == 0 || !hierarchical ? "TRUE" : $"({successorFilter})";
         var partialDayLegacy = legacyFilter.Length == 0 ? "TRUE" : $"({legacyFilter})";
         var legacyWidth = (long)legacyTarget.BucketWidth.TotalSeconds;
         var successorWidth = (long)successorTarget.BucketWidth.TotalSeconds;
@@ -848,7 +870,6 @@ public static class DailySummarySql
         /* #8549: the closed-hours member, when both dailies read an hourly rollup. Hours before the boundary day read the legacy
            hourly and hours from it the successor's, the split the daily halves already make. See QueriesCteForCagg. */
         const string stitchedRawFrom = "COALESCE((SELECT raw_from FROM queries_ceiling_successor), (SELECT raw_from FROM queries_ceiling_legacy))";
-        var hierarchical = IsRollup(legacyTarget.Source) && IsRollup(successorTarget.Source);
         var closedHours = hierarchical
             ? ClosedHoursMember(
                 stitchedRawFrom,
@@ -864,7 +885,7 @@ public static class DailySummarySql
             ? HeldDayRestartRows(
                 successor,
                 RestartRowPredicate(successorTarget.Source, $" AND c.collection_time >= {boundary} AND c.collection_time < (SELECT raw_from FROM queries_ceiling_successor)"))
-            : string.Empty;
+            : HeldDayRestartRows(successor, RestartRowPredicate(successor, $" AND c.collection_time >= {boundary}"), hourlyGrain: true);
 
         return $"""
         /* #7505: raw_from is the day in which each side's newest bucket ends, the first day that side does not

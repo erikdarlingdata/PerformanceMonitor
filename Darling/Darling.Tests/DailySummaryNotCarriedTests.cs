@@ -129,7 +129,8 @@ public sealed class DailySummaryNotCarriedTests
             /* The three members, in order: rollup half, raw tail, not-carried. */
             /* Counted inside the queries CTE only: the blocking waits chain (BlockingWaits.HourlyChosenWaitsSql) holds its own UNION ALL. */
             var queriesAt = sql.IndexOf("queries AS (", StringComparison.Ordinal);
-            Assert.Equal(2, sql[queriesAt..sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal)].Split("UNION ALL").Length - 1);
+            /* The Hourly tier's held-day restart read (#8549) is a UNION ALL tail inside the rollup half's pair set, not a member: the members are the ones a COUNT or the not-carried row follows. */
+            Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql[queriesAt..sql.IndexOf("deadlocks AS (", queriesAt, StringComparison.Ordinal)], @"UNION ALL\s+(/\*(?:(?!\*/).)*\*/\s+)?SELECT (x\.d, COUNT\(|b\.d, NULL)", System.Text.RegularExpressions.RegexOptions.Singleline).Count);
             var rollupAt = sql.IndexOf("SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash", StringComparison.Ordinal);
             var rawAt = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
             var notCarriedAt = sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal);
@@ -516,8 +517,9 @@ VALUES ($1, $2, $3, $4, 'CalendarDb', $5, $5, 1000, 1000, 10, $6)", connection);
         }
 
         /* D0 is closed and whole: three hashes at 01:00 and 23:30, so its newest bucket is the day's last (23:00).
-           A restart row (interval 0) that only raw counts makes raw read 4 against the successor rollup's 3, so
-           a 3 proves the day was read from the rollup. */
+           A restart row (interval 0) is counted by raw and skipped by the successor rollup, and the Hourly tier adds
+           it back from raw (#8549), so the day reads 4. A hash planted after the refresh (0xLATE) is raw's alone, so
+           raw reads 5 and a 4 proves the day was read from the rollup. */
         foreach (var h in new[] { "0xH0", "0xH1", "0xH2" })
         {
             await Plant(D(0).AddHours(1), h);
@@ -529,8 +531,8 @@ VALUES ($1, $2, $3, $4, 'CalendarDb', $5, $5, 1000, 1000, 10, $6)", connection);
 
         /* D1 is the rollup's newest day and is partial: two hashes were rolled up at 01:00, then three more
            arrived at 10:00 that the rollup has not reached, with a restart row (interval 0) the rollup will never
-           hold. The partial day's raw half leaves that row out, so D1 reads 5 and not 6. D2 is past the rollup
-           altogether (raw only). */
+           hold. The Hourly tier counts that row from raw on every day the rollup holds (#8549), the partial day
+           included, so D1 reads 6 now and once the rollup catches up. D2 is past the rollup altogether (raw only). */
         await Plant(D(1).AddHours(1), "0xH0");
         await Plant(D(1).AddHours(1), "0xH1");
         await RefreshAsync(connection, successor, D(1), D(2), ct);
@@ -543,10 +545,12 @@ VALUES ($1, $2, $3, $4, 'CalendarDb', $5, $5, 1000, 1000, 10, $6)", connection);
         await Plant(D(2).AddHours(3), "0xH0");
         await Plant(D(2).AddHours(3), "0xH1");
 
+        await Plant(D(0).AddHours(12), "0xLATE");
+
         var sql = DailySummarySql.RangeSqlFor(RetentionTier.Hourly, successor);
         var read = await ReadCalendarAsync(connection, sql, PartialServerId, D(0), D(3), ct);
         Assert.Equal(new[] { D(0), D(1), D(2) }, read.Select(r => r.Day).ToArray());
-        Assert.Equal(new long?[] { 3L, 5L, 2L }, read.Select(r => r.UniqueQueries).ToArray());
+        Assert.Equal(new long?[] { 4L, 6L, 2L }, read.Select(r => r.UniqueQueries).ToArray());
 
         /* The stitched read (legacy rollup below the successor's first whole day, successor from it) answers the
            same for the successor's days. D0 comes from the legacy rollup, which admits the restart row. */
@@ -556,14 +560,14 @@ VALUES ($1, $2, $3, $4, 'CalendarDb', $5, $5, 1000, 1000, 10, $6)", connection);
         Assert.True(coverage.StitchFloor(hourly, RollupCoverage.StitchTier.Hourly, D(0)).HasValue, "the stitch must apply for the stitched assertions to mean anything");
         var stitched = await ReadCalendarAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Hourly, coverage, D(0)), PartialServerId, D(0), D(3), ct);
         Assert.Equal(new[] { D(0), D(1), D(2) }, stitched.Select(r => r.Day).ToArray());
-        Assert.Equal(new long?[] { 4L, 5L, 2L }, stitched.Select(r => r.UniqueQueries).ToArray());
+        Assert.Equal(new long?[] { 5L, 6L, 2L }, stitched.Select(r => r.UniqueQueries).ToArray());
 
         /* THE DAILY TIER IS UNCHANGED: its buckets are whole days, so its ceiling day (D0) reads the rollup,
            including the restart row the legacy admits, and only the days after it read raw, unfiltered as they
            always were, so D1 counts its restart row here. */
         await RefreshAsync(connection, daily, D(0), D(1), ct);
         var dailyTier = await ReadCalendarAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Daily), PartialServerId, D(0), D(3), ct);
-        Assert.Equal(new long?[] { 4L, 6L, 2L }, dailyTier.Select(r => r.UniqueQueries).ToArray());
+        Assert.Equal(new long?[] { 5L, 6L, 2L }, dailyTier.Select(r => r.UniqueQueries).ToArray());
 
         /* RAW HAS LOST THE DAY (retention, or a rollup that stopped refreshing): the rollup's partial count
            stays, never 0 and never fewer than it holds. */
@@ -576,7 +580,7 @@ VALUES ($1, $2, $3, $4, 'CalendarDb', $5, $5, 1000, 1000, 10, $6)", connection);
         }
 
         var purged = await ReadCalendarAsync(connection, sql, PartialServerId, D(0), D(3), ct);
-        Assert.Equal(new long?[] { 3L, 2L, 2L }, purged.Select(r => r.UniqueQueries).ToArray());
+        Assert.Equal(new long?[] { 4L, 2L, 2L }, purged.Select(r => r.UniqueQueries).ToArray());
 
         /* A QUIET SERVER: D3 is closed but its newest bucket (02:00) is not the day's last. Raw holds it and
            agrees with the rollup, so the day reads 2 as one row; once raw has lost it the rollup's 2 stays. */
@@ -585,7 +589,7 @@ VALUES ($1, $2, $3, $4, 'CalendarDb', $5, $5, 1000, 1000, 10, $6)", connection);
         await RefreshAsync(connection, successor, D(2), D(4), ct);
         var quiet = await ReadCalendarAsync(connection, sql, PartialServerId, D(0), D(4), ct);
         Assert.Equal(new[] { D(0), D(1), D(2), D(3) }, quiet.Select(r => r.Day).ToArray());
-        Assert.Equal(new long?[] { 3L, 2L, 2L, 2L }, quiet.Select(r => r.UniqueQueries).ToArray());
+        Assert.Equal(new long?[] { 4L, 2L, 2L, 2L }, quiet.Select(r => r.UniqueQueries).ToArray());
 
         await using (var purge = new NpgsqlCommand("DELETE FROM collect.query_stats WHERE server_id = $1 AND collection_time >= $2", connection))
         {
@@ -595,7 +599,7 @@ VALUES ($1, $2, $3, $4, 'CalendarDb', $5, $5, 1000, 1000, 10, $6)", connection);
         }
 
         var quietPurged = await ReadCalendarAsync(connection, sql, PartialServerId, D(0), D(4), ct);
-        Assert.Equal(new long?[] { 3L, 2L, 2L, 2L }, quietPurged.Select(r => r.UniqueQueries).ToArray());
+        Assert.Equal(new long?[] { 4L, 2L, 2L, 2L }, quietPurged.Select(r => r.UniqueQueries).ToArray());
     }
 
     private sealed record CalendarRow(DateTime Day, long? UniqueQueries, int SignalSourcesPresent);
