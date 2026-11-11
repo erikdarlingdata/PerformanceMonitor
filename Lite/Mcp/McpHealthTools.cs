@@ -177,7 +177,7 @@ public sealed class McpHealthTools
     /// branch on a parameter it may not have sent. They share the ONE aggregate underneath, which is what
     /// stops them ever disagreeing about a day.</para>
     /// </summary>
-    [McpServerTool(Name = "get_daily_summary_range"), Description("Gets one row per day over a span ending at as_of (default now), same per-day fields as get_daily_summary: health band, wait time (sec), queries, deadlocks, blocking, CPU, memory, errors, alerts. A day with ANY collection appears here even if quiet (Healthy), so a gap is a COLLECTION gap. status empty: no collected day in range but the server has history elsewhere; status unavailable: nothing was ever collected. Before retention_horizon: data_state purged rows' zeros are absences; past_horizon rows are real but a zero may be either; both health_band NoData, never Healthy. <<GUIDE>> Gets the daily health summary for a SPAN of days rather than one: one row per collected day, each with its composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count (distinct statements with a stored row: a collection stores at most the top 200 by each ranking, so on a busy server this is a lower bound), deadlocks, blocking events with the peak block wait, high-CPU samples, memory pressure, collection errors and actionable alert count. This is what the desktop viewer's Performance Calendar month grid draws, and it is the read to use when the question is WHICH day rather than how one day went: scan the bands, then call get_daily_summary for the day that stands out. A day on which anything at all was collected appears here even if every signal was quiet (that day is Healthy, not missing), so a gap in the returned days is a gap in COLLECTION: INSIDE RETENTION. The per-signal tables age out at the store's shortest retention while the collection log and alert log live longer, so retention_horizon is the oldest day every signal can still answer for; a returned day before it carries data_state=purged (no signal table holds it) or past_horizon (some still do, the purge has not reached it), health_band=NoData and a data_note, NEVER Healthy: a purged day's zeros are absences, and days_before_horizon counts both kinds. A day inside retention with no collector run recorded is data_state=no_run_record: it keeps its band (an alert-only day is Warning), with the caveat that the error share has no denominator. Purged and past_horizon rows carry no verdict." + McpHelpers.UtcDayDescription)]
+    [McpServerTool(Name = "get_daily_summary_range"), Description("Gets one row per day over a span ending at as_of (default now), same per-day fields as get_daily_summary: health band, wait time (sec), queries, deadlocks, blocking, CPU, memory, errors, alerts. A day with ANY collection appears here even if quiet (Healthy), so a gap is a COLLECTION gap. status empty: no collected day in range but the server has history elsewhere; status unavailable: nothing was ever collected. Before retention_horizon: data_state purged rows' zeros are absences; past_horizon rows are real but a zero may be either; both health_band NoData, never Healthy. <<GUIDE>> Gets the daily health summary for a SPAN of days rather than one: one row per collected day, each with its composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count (distinct statements with a stored row: a collection stores at most the top 200 by each ranking, so on a busy server this is a lower bound), deadlocks, blocking events with the peak block wait, high-CPU samples, memory pressure, collection errors and actionable alert count. This is what the desktop viewer's Performance Calendar month grid draws, and it is the read to use when the question is WHICH day rather than how one day went: scan the bands, then call get_daily_summary for the day that stands out. A day on which anything at all was collected appears here even if every signal was quiet (that day is Healthy, not missing), so a gap in the returned days is a gap in COLLECTION: INSIDE RETENTION. The per-signal tables age out at the store's shortest retention while the collection log and alert log live longer, so retention_horizon is the oldest day every signal can still answer for; a returned day before it carries data_state=purged (no signal table holds it) or past_horizon (some still do, the purge has not reached it), health_band=NoData and a data_note, NEVER Healthy: a purged day's zeros are absences, and days_before_horizon counts both kinds. A day inside retention with no collector run recorded is data_state=no_run_record: it keeps its band (an alert-only day is Warning), with the caveat that the error share has no denominator. Purged and past_horizon rows carry no verdict The reply is held to the 32,768-byte response budget, whole days only, so a wide days_back can return fewer days than asked for: the newest days are kept, day_count is how many it lists, budget_truncated says days were left out, and budget_note names the as_of and days_back that read the older ones." + McpHelpers.UtcDayDescription)]
     public static async Task<string> GetDailySummaryRange(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -242,7 +242,15 @@ public sealed class McpHealthTools
                         new { from_date = fromDate.ToString("yyyy-MM-dd"), to_date = lastDay.ToString("yyyy-MM-dd") });
             }
 
-            return JsonSerializer.Serialize(new
+            /* #8682: the newest days that fit the response budget, as Darling's twin keeps them. A year of days is 100 KB and
+               more, so days are left off the OLD end whole, never cut, and every count below is that of the days the reply
+               kept. The caller's way to the rest is as_of at the day before the oldest day kept. */
+            string Reply(int kept)
+            {
+                var shown = rows.Skip(rows.Count - kept).ToList();
+                var cut = kept < rows.Count;
+                var beforeOldest = shown[0].SummaryDate.Date.AddDays(-1);
+                return JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 days_back,
@@ -253,15 +261,15 @@ public sealed class McpHealthTools
                 /* Days the spine holds, not days in the span. The two differ exactly where collection has a
                    hole, and that difference is the most useful thing on this payload — read it together with
                    days_before_horizon, because a held day before the horizon is a shell, not a collected day. */
-                day_count = rows.Count,
+                day_count = shown.Count,
                 /* #3541 A9: the store's horizon (reader clock, Lite's one archive retention — see the reader)
                    and how many returned days fall before it. Every row carries the same horizon, so the
                    first row's is the range's. */
-                retention_horizon = rows[0].RetentionHorizon?.ToString("yyyy-MM-dd"),
-                days_before_horizon = rows.Count(row => row.DataState is DailySummaryDataState.Purged or DailySummaryDataState.PastHorizon),
-                purged_day_count = rows.Count(row => row.DataState == DailySummaryDataState.Purged),
-                collected_day_count = rows.Count(row => row.DataState == DailySummaryDataState.Collected),
-                days = rows.Select(row => new
+                retention_horizon = shown[0].RetentionHorizon?.ToString("yyyy-MM-dd"),
+                days_before_horizon = shown.Count(row => row.DataState is DailySummaryDataState.Purged or DailySummaryDataState.PastHorizon),
+                purged_day_count = shown.Count(row => row.DataState == DailySummaryDataState.Purged),
+                collected_day_count = shown.Count(row => row.DataState == DailySummaryDataState.Collected),
+                days = shown.Select(row => new
                 {
                     summary_date = row.SummaryDate.ToString("yyyy-MM-dd"),
                     /* #3653: one spelling for one band — see get_daily_summary. */
@@ -284,7 +292,16 @@ public sealed class McpHealthTools
                     collection_runs = row.CollectionRuns,
                     blocking_rate_per_hour = TrendPayloads.RoundRate(ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window), 2), // #8572: 0.32255504310332606 otherwise
                 }),
+                /* #8682: the shared budget keys, spelled as every budgeted read spells them. */
+                budget_truncated = cut,
+                budget_note = cut
+                    ? McpResponseBudget.PageCutNote(rows.Count, kept, "newest days first", "days",
+                        $"The oldest {rows.Count - kept:#,0} days are not listed. Call again with as_of {beforeOldest:yyyy-MM-dd} and days_back {Math.Max(1, (beforeOldest - fromDate).Days + 1)} to read them.")
+                    : null,
             }, McpHelpers.JsonOptions);
+            }
+
+            return McpResponseBudget.FitPrefix(rows.Count, Reply, McpResponseBudget.DefaultBytes).Json;
         }
         catch (Exception ex)
         {
