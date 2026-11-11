@@ -34,6 +34,7 @@ public sealed class ViewerLoadTimer
     private readonly List<(string Step, long Ms)> _clientSteps = new();
     private readonly object _gate = new();
     private readonly int _slowThresholdMs;
+    private readonly long _alreadyElapsedMs;
 
     public ViewerLoadTimer() : this(SlowLoadThresholdMs)
     {
@@ -42,6 +43,17 @@ public sealed class ViewerLoadTimer
     /// <summary>A clock with its own slow-load threshold, so a test reads the line a load would log without waiting three seconds (#8549).</summary>
     internal ViewerLoadTimer(int slowThresholdMs) => _slowThresholdMs = slowThresholdMs;
 
+    /// <summary>#8549: a clock that starts <paramref name="alreadyElapsedMs"/> in, for a load whose first stretch (a tab's construction)
+    /// ran before the clock could exist. The line's total and every phase's time count from the load's true start.</summary>
+    internal ViewerLoadTimer(int slowThresholdMs, long alreadyElapsedMs) : this(slowThresholdMs) => _alreadyElapsedMs = alreadyElapsedMs;
+
+    /// <summary>Milliseconds on the load's clock, counting any stretch the load ran before this clock started.</summary>
+    internal long ElapsedMs => _alreadyElapsedMs + _total.ElapsedMilliseconds;
+
+    /// <summary>#8549: text put before the surface in the slow-load line, so a tab's first open reads "server tab first open > Overview"
+    /// whichever sub-tab loader then names its own surface.</summary>
+    internal string Lead { get; set; } = "";
+
     /// <summary>What the load is: set by a loader that knows its sub-tab ("Queries > Top Queries by Duration").</summary>
     internal string Surface { get; set; } = "";
 
@@ -49,14 +61,14 @@ public sealed class ViewerLoadTimer
     /// caller awaits it exactly as before. A faulted or cancelled task is still recorded; its own awaiter sees the error.</summary>
     internal Task<T> Track<T>(string phase, Task<T> task)
     {
-        _ = Watch(phase, _total.ElapsedMilliseconds, task);
+        _ = Watch(phase, ElapsedMs, task);
         return task;
     }
 
     /// <summary><see cref="Track{T}"/> for a task with no result.</summary>
     internal Task Track(string phase, Task task)
     {
-        _ = Watch(phase, _total.ElapsedMilliseconds, task);
+        _ = Watch(phase, ElapsedMs, task);
         return task;
     }
 
@@ -65,14 +77,14 @@ public sealed class ViewerLoadTimer
     /// after another on the UI thread, so they are summed per name and listed after the client share. A step that throws is still booked.</summary>
     internal void Step(string step, Action work)
     {
-        var started = _total.ElapsedMilliseconds;
+        var started = ElapsedMs;
         try
         {
             work();
         }
         finally
         {
-            RecordStep(step, _total.ElapsedMilliseconds - started);
+            RecordStep(step, ElapsedMs - started);
         }
     }
 
@@ -84,6 +96,13 @@ public sealed class ViewerLoadTimer
         Step(step, run);
         return result!;
     }
+
+    /// <summary>#8549: books a stretch of client work that ran before this clock could time it (a tab's construction) as <paramref name="step"/>.</summary>
+    internal void BookStep(string step, long ms) => RecordStep(step, ms);
+
+    /// <summary>#8549: books a wait that has no task to hand to <see cref="Track{T}"/> (a refresh queued behind another one) as a phase
+    /// from <paramref name="startedMs"/> to now on the load's clock.</summary>
+    internal void BookPhaseEndingNow(string phase, long startedMs) => Record(phase, startedMs);
 
     private void RecordStep(string step, long ms)
     {
@@ -112,7 +131,7 @@ public sealed class ViewerLoadTimer
 
     private void Record(string phase, long startedMs)
     {
-        var ended = _total.ElapsedMilliseconds;
+        var ended = ElapsedMs;
         lock (_gate)
         {
             _phases.Add((phase, startedMs, ended));
@@ -196,7 +215,7 @@ public sealed class ViewerLoadTimer
         _total.Stop();
         lock (_gate)
         {
-            return Describe(string.IsNullOrEmpty(Surface) ? fallbackSurface : Surface, _total.ElapsedMilliseconds, _phases.ToList(), _clientSteps.ToList(), _slowThresholdMs);
+            return Describe(Lead + (string.IsNullOrEmpty(Surface) ? fallbackSurface : Surface), ElapsedMs, _phases.ToList(), _clientSteps.ToList(), _slowThresholdMs);
         }
     }
 }
