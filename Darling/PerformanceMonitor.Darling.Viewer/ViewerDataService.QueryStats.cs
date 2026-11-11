@@ -133,6 +133,55 @@ public sealed class ViewerQueryStatsRow : QueryTagRowBase
 public sealed partial class ViewerDataService
 {
     /// <summary>
+    /// The <c>module</c> CTE of <see cref="TopQueriesSql"/> (#1568 module attribution): one <c>procedure_stats</c> identity per ranked
+    /// <c>sql_handle</c>. Its own constant so a live test can run it against a stand-in <c>ranked</c> CTE (#8549).
+    /// $1 server_id; reads <c>ranked.sql_handle</c>.
+    /// </summary>
+    public static readonly string TopQueriesModuleCte = """
+        module AS MATERIALIZED (
+            /* #1568 module attribution: one procedure_stats identity per sql_handle (latest
+               collection_time wins) so a statement whose sql_handle matches a cached
+               procedure/function/trigger inherits its db.schema.object and the query_stats row never
+               fans out. Both stores persist the SAME normalized CONVERT(varchar(130), ..., 1) handle
+               text, so the join key lines up; unmatched -> ad hoc. MATERIALIZED so the page joins to one run of it, not one per ranked row.
+               #6804: only the handles of the ranked groups, and no collection_time bound. A handle whose newest row is older
+               than the window still names its module, which a bound would turn into 'ad hoc'.
+               #8549: the newest row of each handle is found without sorting. This was a ROW_NUMBER over every row of the ranked
+               handles, which sorts them (126,732 rows to keep 55 on a four-day rig, an external merge with temp files, 476 ms of a
+               959 ms statement). Now a hash aggregate takes the newest collection_time per ranked handle, and a join back on
+               idx_procedure_stats_time (server_id, collection_time) fetches each winner's row. The pass over the server's rows
+               stays, because this table has no (server_id, sql_handle) index (#4247 dropped it for its WAL cost) and a handle
+               with no row at all (an ad hoc statement) can only be proved absent by reading every row, but nothing is sorted
+               and the join back touches only the winners' rows. Both columns of the sort key are NOT NULL, so no NULL ordering applies.
+               The tie-break (DISTINCT ON over the few rows of a tied time) is the row collected last (the higher collection_id), the rule Lite's module lookup uses;
+               the ROW_NUMBER left a tie unspecified. A module whose newest row has NULL names answers NULL, as before.
+               idx_procedure_stats_time is part of the schema, not the tuning pass, so every store has it. */
+            SELECT DISTINCT ON (w.sql_handle)
+                w.sql_handle,
+                p.object_name,
+                p.schema_name,
+                p.database_name
+            FROM
+            (
+                SELECT
+                    sql_handle,
+                    MAX(collection_time) AS newest
+                FROM procedure_stats
+                WHERE server_id = $1
+                AND   sql_handle IS NOT NULL
+                AND   sql_handle <> ''
+                AND   sql_handle IN (SELECT sql_handle FROM ranked)
+                GROUP BY sql_handle
+            ) AS w
+            JOIN procedure_stats AS p
+                ON  p.server_id = $1
+                AND p.collection_time = w.newest
+                AND p.sql_handle = w.sql_handle
+            ORDER BY w.sql_handle, p.collection_id DESC
+        )
+        """;
+
+    /// <summary>
     /// The Top-Queries-by-Duration read — Lite's <c>GetTopQueriesByCpuAsync</c> (despite the name it
     /// ranks by summed <c>delta_elapsed_time</c>, matching the grid's default TotalElapsedMs-descending
     /// sort) ported to Postgres against <c>v_query_stats</c> (the view resolves the #1767 payload
@@ -309,42 +358,7 @@ public sealed partial class ViewerDataService
             ) AS l
             LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
         ),
-        module AS (
-            /* #1568 module attribution: one procedure_stats identity per sql_handle (latest
-               collection_time wins) so a statement whose sql_handle matches a cached
-               procedure/function/trigger inherits its db.schema.object and the query_stats row never
-               fans out. Both stores persist the SAME normalized CONVERT(varchar(130), ..., 1) handle
-               text, so the join key lines up; unmatched -> ad hoc. */
-            SELECT
-                sql_handle,
-                object_name,
-                schema_name,
-                database_name
-            FROM
-            (
-                SELECT
-                    sql_handle,
-                    object_name,
-                    schema_name,
-                    database_name,
-                    ROW_NUMBER() OVER (PARTITION BY sql_handle ORDER BY collection_time DESC) AS rn
-                FROM procedure_stats
-                WHERE server_id = $1
-                AND   sql_handle IS NOT NULL
-                AND   sql_handle <> ''
-                /* #6804: only the handles of the ranked groups. Without this the ROW_NUMBER below ranked EVERY
-                   procedure_stats row the server retains (2.9 million rows in, 2,302 out, 10 to 12 s of a 13 s read on a large
-                   server): the cost grew with retention, not with the window. The page joins on r.sql_handle alone, so a handle
-                   outside the ranked groups was never used, and a handle inside them keeps the same newest row: the answer is
-                   exactly what the unfiltered read gave, including a handle whose newest procedure_stats row is older than the
-                   window. There is deliberately no collection_time bound. It would be faster still, but it would turn that
-                   handle into 'ad hoc', and this table has no (server_id, sql_handle) index to look a handle up by (#4247
-                   dropped it for its WAL cost), so the read cannot skip the other handles' rows and instead stops them before
-                   the sort. */
-                AND   sql_handle IN (SELECT sql_handle FROM ranked)
-            ) AS ranked_modules
-            WHERE rn = 1
-        ),
+        {TopQueriesModuleCte},
         page AS (
         SELECT
             r.database_name,

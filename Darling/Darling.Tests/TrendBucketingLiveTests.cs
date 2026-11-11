@@ -135,10 +135,10 @@ public sealed class TrendBucketingLiveTests
             Assert.DoesNotContain(trend, p => p.GetProperty("database_name").GetString() == "dbZ");
             Assert.Equal(7, trend.Length);   // six lines at 10:00, dbB alone at 10:10
 
-            /* Left to size itself, one hour over six lines is two-minute buckets: 31 x 6 = 186 points, inside 200. */
+            /* Left to size itself, one hour over six lines is five-minute buckets: 13 x 6 = 78 points, inside the read's 120. */
             var auto = Root(await DarlingMcpTrendTools.GetFileIoTrend(postgres, ServerName, 1, "2026-03-04T11:00:00Z"));
-            Assert.Equal(2, auto.GetProperty("bucket_minutes").GetInt32());
-            Assert.Contains("near 200 points", auto.GetProperty("aggregate_note").GetString()!, StringComparison.Ordinal);
+            Assert.Equal(5, auto.GetProperty("bucket_minutes").GetInt32());
+            Assert.Contains("near 120 points", auto.GetProperty("aggregate_note").GetString()!, StringComparison.Ordinal);
 
             /* ── scoped to one database: its files, one line each ── */
             var scoped = Root(await DarlingMcpTrendTools.GetFileIoTrend(postgres, ServerName, 1, "2026-03-04T11:00:00Z", bucket_minutes: 10, database_name: "dbA"));

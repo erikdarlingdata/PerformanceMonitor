@@ -156,7 +156,7 @@ public sealed class McpIoTools
                     dataService, QueryWindowRelation.FileIoStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "file_io_stats");
             }
 
-            var budget = TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints);
+            var budget = TrendBudget.Mcp(TrendBuckets.FileIoMcpAutoPoints, TrendBuckets.FileIoMaxPoints);
             var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, TrendPayloads.LinesFor(series.Count), budget, out var bucketMinutes);
             if (bucketError != null) return bucketError;
 

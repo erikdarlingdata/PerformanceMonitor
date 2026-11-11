@@ -78,20 +78,23 @@ public partial class ViewerServerTab
     /// sub-tab reads the per-file latency trend, the Throughput sub-tab reads the per-file MB/s trend.
     /// Both window on the toolbar's settable range like every other viewer surface.
     /// </summary>
-    private async Task LoadFileIoAsync()
+    private async Task LoadFileIoAsync(ViewerLoadTimer? timer = null)
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        /* #8549: the read is booked by name and the chart draw is a client step, so a slow File I/O says which of the two it was. */
         switch (FileIoSubTabs.SelectedIndex)
         {
             case 1: // File I/O Throughput
-                var throughput = await _dataService.GetFileIoThroughputTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
-                RenderFileIoThroughputCharts(throughput, startUtc, endUtc);
+                timer?.Surface = "File I/O > Throughput";
+                var throughput = await Timed(timer, "throughput trend read", _dataService.GetFileIoThroughputTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+                ClientStep(timer, "throughput chart draw", () => RenderFileIoThroughputCharts(throughput, startUtc, endUtc));
                 break;
             case 0: // File I/O Latency
             default:
-                var latency = await _dataService.GetFileIoLatencyTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
-                RenderFileIoLatencyCharts(latency, startUtc, endUtc);
+                timer?.Surface = "File I/O > Latency";
+                var latency = await Timed(timer, "latency trend read", _dataService.GetFileIoLatencyTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter));
+                ClientStep(timer, "latency chart draw", () => RenderFileIoLatencyCharts(latency, startUtc, endUtc));
                 break;
         }
     }

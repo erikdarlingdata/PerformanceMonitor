@@ -144,13 +144,12 @@ public sealed class ViewerQueriesSqlTests
     public void TopQueriesSql_StitchesModuleByHandle_DedupsToLatest_LeftJoinsForAdHocFallback()
     {
         /* #1568: read-time attribution. A dedicated CTE picks ONE procedure_stats identity per sql_handle
-           (latest collection_time, via ROW_NUMBER + WHERE rn = 1 — Postgres has no QUALIFY), then a LEFT
+           (latest collection_time; #8549 finds it with a hash aggregate and a lateral probe, not a ROW_NUMBER, and
+           TopQueriesModuleLiveTests runs it against the old statement's answers), then a LEFT
            JOIN on the shared normalized handle surfaces db.schema.object; unmatched rows stay ad hoc. */
         var sql = ViewerDataService.TopQueriesSql;
-        Assert.Contains("module AS (", sql, StringComparison.Ordinal);
+        Assert.Contains("module AS", sql, StringComparison.Ordinal);
         Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("ROW_NUMBER() OVER (PARTITION BY sql_handle ORDER BY collection_time DESC) AS rn", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE rn = 1", sql, StringComparison.Ordinal);
         Assert.Contains("LEFT JOIN module AS m ON m.sql_handle = r.sql_handle", sql, StringComparison.Ordinal);
         Assert.Contains("m.object_name AS module_object_name", sql, StringComparison.Ordinal);
         Assert.Contains("m.schema_name AS module_schema_name", sql, StringComparison.Ordinal);

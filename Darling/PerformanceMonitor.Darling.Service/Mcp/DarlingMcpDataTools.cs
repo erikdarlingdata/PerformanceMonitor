@@ -654,7 +654,7 @@ public sealed class DarlingMcpDataTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
         CancellationToken cancellationToken = default) =>
-        GetTempDbTrend(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.TempDbMaxPoints), cancellationToken);
+        GetTempDbTrend(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.TempDbMcpAutoPoints, TrendBuckets.TempDbMaxPoints), cancellationToken);
 
     /// <summary>get_tempdb_trend under an explicit <paramref name="budget"/> (#3960): the MCP tool passes its own, the
     /// web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>.</summary>
@@ -754,7 +754,7 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ query performance ═══════════════════════════ */
 
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start says where the answer begins. Row cap is top (not limit). <<GUIDE>> On tier_used=hourly, min/max_cpu_ms and min/max_elapsed_ms are null, as are the columns the rollup does not carry (see precision_note), and parallel_only/min_dop/group_by=host_object keep the read on raw. Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spilled pages (total_spills counts 8 KB pages written to tempdb, not spill events), and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc): groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). 'host_object' rolls all of a procedure's statements into one row: use it when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up. Set group_by='host_object' to roll all of a procedure's statements into one row: necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. detail='full' adds the desktop grid's remaining columns (last_execution_time, creation_time, physical-read, row, grant, spilled-page (8 KB pages) and thread min/max, total_clr_ms, plan_generation_num, worker_time_per_second), non-null only, raw tier only. Every detail='full' min/max figure, total_clr_ms and plan_generation_num are LIFETIME values for the plan's time in cache (the highest stored value of a cumulative counter in the window), not window figures; only the totals and averages are windowed deltas. Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed: totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism with analyze_query_plan, which reads the actual plan. With no database_name, rows from a database the server no longer lists rank after the listed ones and carry database_dropped: true." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start says where the answer begins. Row cap is top (not limit). <<GUIDE>> On tier_used=hourly, min/max_cpu_ms and min/max_elapsed_ms are null, as are the columns the rollup does not carry (see precision_note), and parallel_only/min_dop/group_by=host_object keep the read on raw. Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spilled pages (total_spills counts 8 KB pages written to tempdb, not spill events), and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc): groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). 'host_object' rolls all of a procedure's statements into one row: use it when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up. Set group_by='host_object' to roll all of a procedure's statements into one row: necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. detail='full' adds the desktop grid's remaining columns (last_execution_time, creation_time, physical-read, row, grant, spilled-page (8 KB pages) and thread min/max, total_clr_ms, plan_generation_num, worker_time_per_second), non-null only, raw tier only. Every detail='full' min/max figure, total_clr_ms and plan_generation_num are LIFETIME values for the plan's time in cache (the highest stored value of a cumulative counter in the window), not window figures; only the totals and averages are windowed deltas. Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed: totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism with analyze_query_plan, which reads the actual plan. With no database_name, rows from a database the server no longer lists rank after the listed ones and carry database_dropped: true. query_text is a 400-character preview (query_text_truncated says it was cut); full_text = true returns up to 2,000 characters. The page is held to the 32,768-byte response budget, heaviest first, whole rows only: truncated = true says rows were left off the end for it, and budget_note says how many of how many fit." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static Task<string> GetTopQueriesByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -768,8 +768,23 @@ public sealed class DarlingMcpDataTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("'summary' (default) or 'full': full adds the remaining desktop columns (grants, threads, extremes, times), omitting nulls.")] string detail = "summary",
         ILogger? logger = null,
+        [Description("Return each row's query_text up to 2,000 characters instead of a 400-character preview. Default false.")] bool full_text = false,
         CancellationToken cancellationToken = default)
-        => GetTopQueriesRanked(postgres, server_name, hours_back, top, database_name, parallel_only, min_dop, group_by, as_of, detail, order_by: null, cancellationToken, tag, logger);
+        => GetTopQueriesRanked(postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), parallel_only, min_dop, group_by, as_of, detail, order_by: null, cancellationToken, tag, logger,
+            full_text ? TopQueryTextFullLength : QueryTextPreviewLength, McpResponseBudget.DefaultBytes);
+
+    /// <summary>The most characters of <c>query_text</c> a get_top_queries_by_cpu row carries: what <c>full_text</c>
+    /// and the web viewer's page get. The MCP default is <see cref="QueryTextPreviewLength"/> (#8568).</summary>
+    internal const int TopQueryTextFullLength = 2000;
+
+    /// <summary>
+    /// The way on from a get_top_queries_by_cpu page cut for the budget (#8568). The page is heaviest first, so the
+    /// queries left out are lighter ones and a smaller top returns the heaviest again: a filter lists them, and so do
+    /// the previews when the page carries the longer text.
+    /// </summary>
+    internal static string TopQueriesCutRemedy(bool fullText) => fullText
+        ? "Omit full_text to fit more queries as 400-character previews, or narrow the page with database_name or tag to read the ones left out."
+        : "Narrow the page with database_name or tag to read the queries left out.";
 
     /// <summary>
     /// #5226: the body of <see cref="GetTopQueriesByCpu"/> with the ranking choice the web page offers. The MCP tool
@@ -792,7 +807,8 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     internal static async Task<string> GetTopQueriesRanked(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, DatabaseFilter databases, bool parallel_only, int min_dop,
-        string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken, string? tag = null, ILogger? logger = null)
+        string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken, string? tag = null, ILogger? logger = null,
+        int queryTextLength = TopQueryTextFullLength, int? responseByteBudget = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -1084,7 +1100,10 @@ public sealed class DarlingMcpDataTools
                 // null = ad-hoc/prepared text (literal-collapse behavior unchanged). History rows
                 // predating the column read as null and age out with raw retention.
                 host_object = r.HostObjectName,
-                query_text = r.QueryText is null ? null : McpHelpers.TruncateStatement(r.QueryText, 2000),
+                query_text = r.QueryText is null ? null : McpHelpers.TruncateStatement(r.QueryText, queryTextLength),
+                /* #8568: the row's own cut flag, measured on the text as it is printed (a statement judged sensitive
+                   prints as its placeholder, which is never cut). */
+                query_text_truncated = (SensitiveStatements.Text(r.QueryText)?.Length ?? 0) > queryTextLength,
                 // #2012 stage 1's disclosure, now the residual: with proc-hosted callers split by
                 // host_object, distinct_texts > 1 marks ad-hoc literal blends (or pre-stage-2
                 // history where the split can't apply yet).
@@ -1158,7 +1177,11 @@ public sealed class DarlingMcpDataTools
                     row => row["query_hash"]?.GetValue<string>(), cancellationToken);
             }
 
-            return queriesPayload.ToJsonString(McpHelpers.JsonOptions);
+            /* #8568: under a response budget the page ends at the last whole row that fits it, heaviest first, and says
+               so (truncated, budget_note). The web viewer's page passes none and keeps its rows exactly. */
+            return responseByteBudget is int budget
+                ? McpResponseBudget.CapPage(queriesPayload, "queries", "heaviest first", "queries", TopQueriesCutRemedy(queryTextLength > QueryTextPreviewLength), budget)
+                : queriesPayload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -28,7 +28,7 @@ public sealed class McpTempDbTools
             if (hoursError != null) return hoursError;
 
             /* #3960: bucketed as on Darling; the desktop chart's per-collection read (GetTempDbTrendAsync) is untouched. */
-            var budget = TrendBudget.Mcp(TrendBuckets.TempDbMaxPoints);
+            var budget = TrendBudget.Mcp(TrendBuckets.TempDbMcpAutoPoints, TrendBuckets.TempDbMaxPoints);
             var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
             if (bucketError != null) return bucketError;
 

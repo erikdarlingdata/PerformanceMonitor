@@ -91,9 +91,11 @@ public sealed class StoreMetricsExactSweepBuffersLiveTests
         Assert.All(rows, r => Assert.Equal(exactTime, r.MetricTime));
         Assert.Contains(rows, r => r.ObjectKind == "store" && r.ObjectName == "store");
 
-        /* Whole statement, as the tool runs it. The walk of every sweep touched 10,000 buffers or more on this seed. */
+        /* Whole statement, as the tool runs it. The walk of every sweep touched 10,000 buffers or more on this seed. The figure is the pages the
+           scans read (#8570), not the root node's total, which also counts the catalog buffers a backend reads to rebuild its cache of the
+           chunks and moves with a cache reset from another test creating a database on the same server. */
         var buffers = await StatementBuffersAsync(connection, ct);
-        Assert.True(buffers < 3000, $"the exact-sweep statement touched {buffers} buffers");
+        Assert.True(buffers < 3000, $"the exact-sweep statement read {buffers} pages");
 
         /* The last three days hold no exact sweep (every hypertable row is an estimate from 7 November on): the newest one is
            00:00 on 6 November, found by the whole-history read the recent window falls through to. */
@@ -112,8 +114,6 @@ public sealed class StoreMetricsExactSweepBuffersLiveTests
     private static async Task<long> StatementBuffersAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + DarlingStoreMetricsReader.StoreMetricsExactSweepSql, connection);
-        using var doc = JsonDocument.Parse(Convert.ToString(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture)!);
-        var plan = doc.RootElement[0].GetProperty("Plan");
-        return plan.GetProperty("Shared Hit Blocks").GetInt64() + plan.GetProperty("Shared Read Blocks").GetInt64();
+        return ExplainBuffers.DataPages(await command.ExecuteScalarAsync(ct));
     }
 }

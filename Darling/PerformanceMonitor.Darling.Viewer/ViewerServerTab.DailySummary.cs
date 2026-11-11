@@ -30,9 +30,9 @@ public partial class ViewerServerTab
     /// Entry point from LoadInnerTabAsync (index 14) and the auto-refresh loop: (re)load the calendar's
     /// currently displayed month. LoadInnerTabAsync owns this path's try/catch.
     /// </summary>
-    private async Task LoadDailySummaryAsync()
+    private async Task LoadDailySummaryAsync(ViewerLoadTimer? timer = null)
     {
-        await LoadCalendarMonthAsync(DailyCalendar.DisplayMonth);
+        await LoadCalendarMonthAsync(DailyCalendar.DisplayMonth, timer);
     }
 
     /// <summary>
@@ -41,14 +41,15 @@ public partial class ViewerServerTab
     /// signals + key metrics so the shared day-detail panel can explain the day and offer the right drills.
     /// The calendar re-shows the day-detail panel for the selected day itself when it stays in view.
     /// </summary>
-    private async Task LoadCalendarMonthAsync(DateTime month)
+    private async Task LoadCalendarMonthAsync(DateTime month, ViewerLoadTimer? timer = null)
     {
         var start = new DateTime(month.Year, month.Month, 1);
         var end = start.AddMonths(1);
 
-        var rows = await _dataService.GetDailySummaryRangeAsync(_server.ServerId, start, end);
+        /* #8549: the one store read is booked by name, and the calendar's cell build is a client step, so a slow Daily Summary says which it was. */
+        var rows = await Timed(timer, "daily summary read", _dataService.GetDailySummaryRangeAsync(_server.ServerId, start, end));
 
-        DailyCalendar.Days = rows.Select(r => new PerformanceCalendarDay
+        ClientStep(timer, "calendar days build", () => DailyCalendar.Days = rows.Select(r => new PerformanceCalendarDay
         {
             Date = r.SummaryDate.Date,
             Band = r.HealthBand,
@@ -58,7 +59,7 @@ public partial class ViewerServerTab
             TotalWaitSeconds = r.TotalWaitTimeSec,
             UniqueQueries = r.UniqueQueries,
             PeakBlockMs = r.MaxBlockDurationMs,
-        }).ToList();
+        }).ToList());
     }
 
     private async void DailyCalendar_MonthChanged(object? sender, PerformanceCalendarMonthEventArgs e)
