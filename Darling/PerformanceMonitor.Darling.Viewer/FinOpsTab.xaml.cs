@@ -297,7 +297,7 @@ public partial class FinOpsTab : UserControl
         try
         {
             await LoadFinOpsAsync();
-            StatusChanged?.Invoke($"{_server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+            StatusChanged?.Invoke($"{_server.DisplayName}: refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {

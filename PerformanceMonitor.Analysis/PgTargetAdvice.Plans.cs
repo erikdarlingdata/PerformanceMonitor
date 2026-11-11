@@ -444,7 +444,7 @@ public static partial class PgTargetAdvice
            side, then the qualstats witness), how big the relation is, then the gates and the co-fires. */
         var inv = new StringBuilder();
         inv.Append(CultureInfo.InvariantCulture,
-            $"Statement queryid {queryId} was captured {CountText.Plural((long)(captures ?? 0), "time")} in {observedHours:0.#} observed hours ({perHour ?? 0:0.#} per hour, a lower bound: only executions slower than auto_explain.log_min_duration are logged) with a Seq Scan over {relation} carrying a Filter");
+            $"Statement queryid {queryId} was captured {CountText.Plural((long)(captures ?? 0), "time")} in {observedHours:0.#} observed hours ({PerformanceMonitor.Common.DailyHealthBandCalculator.RatePerHourText(perHour ?? 0, "0.#")} per hour, a lower bound: only executions slower than auto_explain.log_min_duration are logged) with a Seq Scan over {relation} carrying a Filter");
         inv.Append(removedShare is { } share
             ? string.Format(CultureInfo.InvariantCulture, "; across those captures the filter removed {0:0.#}% of the rows the scan read (Rows Removed by Filter against Actual Rows).", share * 100)
             : "; the captured plans carry no Actual Rows (auto_explain.log_analyze is off), so how many rows the filter removed is not known from the plan.");
@@ -486,7 +486,7 @@ public static partial class PgTargetAdvice
             for (var rank = 2; rank <= pairs; rank++)
             {
                 var id = PgTargetScorer.SeqScanQueryId(fact, rank)?.ToString(CultureInfo.InvariantCulture) ?? "?";
-                inv.Append(CultureInfo.InvariantCulture, $" queryid {id} at {Pair(fact, PgTargetScorer.SeqScanCapturesPerHourKey, rank) ?? 0:0.#} per hour");
+                inv.Append(CultureInfo.InvariantCulture, $" queryid {id} at {PerformanceMonitor.Common.DailyHealthBandCalculator.RatePerHourText(Pair(fact, PgTargetScorer.SeqScanCapturesPerHourKey, rank) ?? 0, "0.#")} per hour");
                 if (Pair(fact, PgTargetScorer.SeqScanSelectivityKey, rank) is { } s2) inv.Append(CultureInfo.InvariantCulture, $", {s2 * 100:0.#}% filtered");
                 if (Pair(fact, PgTargetScorer.SeqScanHeapBytesKey, rank) is { } h2) inv.Append(CultureInfo.InvariantCulture, $", heap {KnobBytes(h2)}");
                 inv.Append(PgTargetScorer.SeqScanPairClearsEveryGate(fact, rank) ? " (clears every gate)" : " (under the bars)");

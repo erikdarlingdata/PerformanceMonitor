@@ -1,6 +1,7 @@
 /* Runs the shipped FinOps Utilization and Server Inventory tabs (wwwroot/js/pages/finops/utilization.js, server-inventory.js) against a
    canned fetch and a node-tree DOM, and prints as one line of JSON the text each shows for the verdicts the service can send (#6139):
-   too few CPU samples, a high stolen-memory share, and a verdict with neither.
+   too few CPU samples, a high stolen-memory share, and a verdict with neither. It also prints the Day cell of each row of a seven-day
+   provisioning trend whose last row is the day still running (#8548).
        node finops-verdict-wording-harness.mjs <path to wwwroot/js> */
 import fs from "node:fs";
 import os from "node:os";
@@ -97,6 +98,20 @@ try {
   out.oneSample = await utilizationText(util("NOT_ENOUGH_DATA", 1, 20, null, "x"));
   out.highStolen = await utilizationText(util("UNDER_PROVISIONED", 288, 72.5, "73% of the memory SQL Server holds is outside the buffer pool.", "Memory is under pressure: stolen memory is 73%."));
   out.plain = await utilizationText(util("OVER_PROVISIONED", 288, 20, null, "Low CPU."));
+
+  const tagged = (node, tag, found = []) => {
+    if (node.tag === tag) found.push(node);
+    node.children.forEach((child) => tagged(child, tag, found));
+    return found;
+  };
+  /* Seven trend rows, the six whole days and then the day still running, which the payload marks part_day. */
+  const week = ["2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16", "2026-10-17", "2026-10-18"].map((day, i, days) => ({
+    day, avg_cpu_pct: 5, p95_cpu_pct: 8, max_cpu_pct: 9, memory_ratio: 1, verdict: "RIGHT_SIZED", part_day: i === days.length - 1,
+  }));
+  reads["get_finops"] = { ...util("RIGHT_SIZED", 288, 20, null, "Sized for its load."), provisioning_trend: week };
+  const trendRoot = utilization.build("srv-a", {});
+  await settle();
+  out.trendDayCells = tagged(trendRoot, "tr").map((row) => tagged(row, "td")[0]).filter(Boolean).map((cell) => cell.textContent);
 
   const inventoryText = async (status) => {
     reads["get_finops_inventory"] = { status: "ok", total_servers: 1, truncated: false, servers: [{ server: "srv-a", provisioning_status: status, health_band: "good" }] };

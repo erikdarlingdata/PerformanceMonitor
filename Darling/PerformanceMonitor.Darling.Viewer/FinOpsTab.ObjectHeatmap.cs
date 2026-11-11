@@ -188,9 +188,11 @@ public partial class FinOpsTab
             FinOpsObjectGrowthHeatmapChart,
             _finopsObjHeatmapMatrix,
             "Reserved (MB)",
-            $"{databaseName} — Object Reserved Footprint",
+            $"{databaseName}: Object Reserved Footprint",
             _finopsObjHeatmapHandle);
         _finopsObjHeatmapPlottable = _finopsObjHeatmapHandle.Plottable;
+        /* The hover reads the matrix the chart drew, whose columns include the days with no sample. */
+        _finopsObjHeatmapMatrix = _finopsObjHeatmapHandle.Matrix ?? _finopsObjHeatmapMatrix;
     }
 
     private async Task LoadFinOpsObjectIndexDetailAsync(string databaseName, string schemaName, string tableName)
@@ -275,15 +277,24 @@ public partial class FinOpsTab
         }
 
         double mb = _finopsObjHeatmapMatrix.Intensities[row, col];
+        var day = _finopsObjHeatmapMatrix.Days[col];
         if (mb <= 0)
         {
-            _finopsObjHeatmapPopup.IsOpen = false;
-            return;
-        }
+            /* A blank cell on a day some object has a sample for says nothing. A day with no sample for any object is a
+               collection gap, and the popup says so. */
+            if (!FinOpsHeatmapBuilder.IsGapDay(_finopsObjHeatmapMatrix, col))
+            {
+                _finopsObjHeatmapPopup.IsOpen = false;
+                return;
+            }
 
-        var label = row < _finopsObjHeatmapMatrix.RowLabels.Length ? _finopsObjHeatmapMatrix.RowLabels[row] : "?";
-        var day = _finopsObjHeatmapMatrix.Days[col];
-        _finopsObjHeatmapPopupText.Text = $"{label}  |  {day:M/d}  |  {mb:N1} MB reserved";
+            _finopsObjHeatmapPopupText.Text = $"{day:M/d}  |  no sample collected";
+        }
+        else
+        {
+            var label = row < _finopsObjHeatmapMatrix.RowLabels.Length ? _finopsObjHeatmapMatrix.RowLabels[row] : "?";
+            _finopsObjHeatmapPopupText.Text = $"{label}  |  {day:M/d}  |  {mb:N1} MB reserved";
+        }
 
         _finopsObjHeatmapPopup.HorizontalOffset = pos.X + 15;
         _finopsObjHeatmapPopup.VerticalOffset = pos.Y + 15;

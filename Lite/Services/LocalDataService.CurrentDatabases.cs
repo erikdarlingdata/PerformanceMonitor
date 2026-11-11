@@ -76,6 +76,68 @@ public partial class LocalDataService
         }
     }
 
+    /// <summary>How old the newest size snapshot may be and still fill the Index Analysis picker: seven days, as far back as the
+    /// dropped-database read looks. An older snapshot says too little about what the server holds now, so the picker lists nothing
+    /// and takes a typed name.</summary>
+    internal static readonly TimeSpan IndexAnalysisFallbackMaxAge = TimeSpan.FromDays(7);
+
+    /// <summary>The databases the Index Analysis picker offers, and for a list taken from a size snapshot, when that snapshot was
+    /// collected (UTC); <paramref name="AsOfUtc"/> is null for the current list and for an empty one.</summary>
+    public sealed record IndexAnalysisDatabaseList(IReadOnlyList<string> Names, DateTime? AsOfUtc);
+
+    /// <summary>
+    /// The databases the Index Analysis picker offers for a server: its current ones (<see cref="GetCurrentDatabasesAsync"/>) when the
+    /// store holds a recent <c>database_states</c> snapshot, else the databases named in its newest <c>database_size_stats</c>
+    /// snapshot when that is no older than <see cref="IndexAnalysisFallbackMaxAge"/>, with the snapshot's time so the picker can
+    /// say how old its list is: a store with no recent state snapshot (collection paused, or that collector off) still lists the
+    /// databases it last knew, and a database dropped since may be among them. Empty when the store knows none recent enough; the
+    /// picker is then a free text box. The fallback reads the snapshot's distinct names, not its file rows.
+    /// </summary>
+    public async Task<IndexAnalysisDatabaseList> GetIndexAnalysisDatabaseListAsync(int serverId, DateTime? nowUtc = null)
+    {
+        if (await GetCurrentDatabasesAsync(serverId) is { Count: > 0 } current)
+        {
+            return new IndexAnalysisDatabaseList(current, null);
+        }
+
+        var now = nowUtc ?? DateTime.UtcNow;
+        if (await GetLatestDatabaseSizeSnapshotAsync(serverId) is not { } snapshot
+            || now - snapshot.CollectionTime > IndexAnalysisFallbackMaxAge)
+        {
+            return new IndexAnalysisDatabaseList(Array.Empty<string>(), null);
+        }
+
+        var names = new List<string>();
+        using (var connection = await OpenConnectionAsync())
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = $@"
+SELECT DISTINCT database_name
+FROM {snapshot.Relation}
+WHERE server_id = $1
+AND   collection_time = $2
+AND   database_name IS NOT NULL
+AND   database_name <> ''";
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = snapshot.CollectionTime });
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                names.Add(reader.GetString(0));
+            }
+        }
+
+        var ordered = names
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(name => name, StringComparer.Ordinal)
+            .ToList();
+        return new IndexAnalysisDatabaseList(ordered, ordered.Count == 0 ? null : snapshot.CollectionTime);
+    }
+
+    /// <summary>The names of <see cref="GetIndexAnalysisDatabaseListAsync"/>.</summary>
+    public async Task<IReadOnlyList<string>> GetIndexAnalysisDatabasesAsync(int serverId) =>
+        (await GetIndexAnalysisDatabaseListAsync(serverId)).Names;
+
     /// <summary>
     /// #6651 (#5633 item 4): the databases a desktop grid's all-databases ranking over [<paramref name="startUtc"/>, <paramref name="endUtc"/>]
     /// leaves out, the way get_top_procedures_by_cpu does: the ones the server DROPPED. Null when a database is chosen (a named database is
