@@ -10,12 +10,15 @@
   pwsh -NoProfile -File C:\GitHub\PerformanceMonitor\.claude\skills\lane-orders\rig-stop.ps1 -DataDir <RigDir>\data
 #>
 param(
-    [Parameter(Mandatory)][string]$DataDir
+    [Parameter(Mandatory)][string]$DataDir,
+    # The registry file. Defaults to the one every lane shares; a test passes a scratch file so it never touches it.
+    [string]$RegistryPath = ''
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'rig-common.ps1')
+if ($RegistryPath) { $script:RigRegistryPath = $RegistryPath }
 
 $data = ConvertTo-RigPath $DataDir
 # Read the line and stop under the registry lock, as rig-sweep.ps1 does, so a sweep and a stop never act on

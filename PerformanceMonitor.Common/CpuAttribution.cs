@@ -176,11 +176,11 @@ namespace PerformanceMonitor.Common
             string? note = null;
             if (ratio > OverAttributionThreshold)
             {
-                note = $"the returned rows' CPU is {pct}% of the SQL process's measured CPU-seconds — more than the process consumed. Treat this as an impossible-claim marker: suspect double-counted deltas, clock skew between the two series, or a CPU-series gap before trusting the ranking's absolute numbers.";
+                note = $"the returned rows' CPU is {pct}% of the SQL process's measured CPU-seconds: more than the process consumed. Treat this as an impossible-claim marker: suspect double-counted deltas, clock skew between the two series, or a CPU-series gap before trusting the ranking's absolute numbers.";
             }
             else if (ratio < LowRatioThreshold)
             {
-                note = $"the returned rows explain {pct}% of the SQL process's measured CPU-seconds in this window. The remainder is plans evicted between snapshots, statements outside the top-N or filters, zero-cost rows, and non-query CPU — a low ratio means the visible ranking is not the whole story.";
+                note = $"the returned rows explain {pct}% of the SQL process's measured CPU-seconds in this window. The remainder is plans evicted between snapshots, statements outside the top-N or filters, zero-cost rows, and non-query CPU. A low ratio means the visible ranking is not the whole story.";
             }
 
             return new Result(ranked, Math.Round(sqlCpuSeconds, 1), Math.Round(ratio, 3), note);

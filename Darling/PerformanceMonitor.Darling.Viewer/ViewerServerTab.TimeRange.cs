@@ -93,6 +93,9 @@ public partial class ViewerServerTab
             return;
         }
 
+        /* #8549: the picker already names the new range, but the grid and the slicer keep the old range's rows until the read returns
+           (half a minute on Query Store by Duration over 30 days), and a pick made while a refresh is reading is only queued. Say so. */
+        StatusChanged?.Invoke(ViewerRangeRefreshStatus.Loading(_server.DisplayName, e.Spec));
         await RefreshActiveInnerTabAsync();
     }
 

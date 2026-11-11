@@ -209,6 +209,15 @@ AND   size_estimated IS TRUE
 ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time DESC";
 
     /// <summary>
+    /// #8570: how far back from the newest store row the exact-sweep read looks first. The service sizes the store exactly once a day,
+    /// so the newest exact sweep is almost always inside this window. The statement walked every retained sweep (up to 400 days of hourly
+    /// sweeps, each probed for an estimate row) to find it: 138,000 buffers on a store holding 400 days of 250 objects, against about
+    /// 1,000 for the recent window. A store with no exact sweep in the window falls through to the whole-history read, which gives the same
+    /// answer the whole-history read always did.
+    /// </summary>
+    internal const string ExactSweepRecentWindow = "2 days";
+
+    /// <summary>
     /// Every row of the newest sweep that was sized EXACTLY (#5857): the sweep whose store row carries a size and
     /// whose stamp holds no estimate row. The hourly sweeps size hypertables and aggregates from the catalog (a little
     /// low), one a day sizes them exactly, so attributing <c>pg_database_size</c> to object rows is only meaningful on
@@ -233,21 +242,44 @@ SELECT
     m.toast_live_bytes,
     m.size_estimated
 FROM collect.store_metrics AS m
-WHERE m.metric_time =
+WHERE m.metric_time = COALESCE
 (
-    SELECT s.metric_time
-    FROM collect.store_metrics AS s
-    WHERE s.object_kind = '{StoreSelfMetrics.StoreObjectKind}'
-    AND   s.total_bytes IS NOT NULL
-    AND   NOT EXISTS
-          (
-              SELECT 1
-              FROM collect.store_metrics AS e
-              WHERE e.metric_time = s.metric_time
-              AND   e.size_estimated IS TRUE
-          )
-    ORDER BY s.metric_time DESC
-    LIMIT 1
+    (
+        SELECT s.metric_time
+        FROM collect.store_metrics AS s
+        WHERE s.object_kind = '{StoreSelfMetrics.StoreObjectKind}'
+        AND   s.total_bytes IS NOT NULL
+        AND   s.metric_time >=
+              (
+                  SELECT MAX(n.metric_time)
+                  FROM collect.store_metrics AS n
+                  WHERE n.object_kind = '{StoreSelfMetrics.StoreObjectKind}'
+              ) - INTERVAL '{ExactSweepRecentWindow}'
+        AND   NOT EXISTS
+              (
+                  SELECT 1
+                  FROM collect.store_metrics AS e
+                  WHERE e.metric_time = s.metric_time
+                  AND   e.size_estimated IS TRUE
+              )
+        ORDER BY s.metric_time DESC
+        LIMIT 1
+    ),
+    (
+        SELECT s.metric_time
+        FROM collect.store_metrics AS s
+        WHERE s.object_kind = '{StoreSelfMetrics.StoreObjectKind}'
+        AND   s.total_bytes IS NOT NULL
+        AND   NOT EXISTS
+              (
+                  SELECT 1
+                  FROM collect.store_metrics AS e
+                  WHERE e.metric_time = s.metric_time
+                  AND   e.size_estimated IS TRUE
+              )
+        ORDER BY s.metric_time DESC
+        LIMIT 1
+    )
 )";
 
     /// <summary>

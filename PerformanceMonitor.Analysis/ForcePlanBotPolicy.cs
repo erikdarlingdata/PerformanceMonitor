@@ -349,7 +349,7 @@ public static class ForcePlanBotPolicy
         {
             blockers.Add(new ForcePlanBlocker(
                 ReasonApcEnabledForDatabase,
-                $"plan_correction: force_last_good_plan_actual_state = {state.ForceLastGoodPlanActualState} for {target.Database} at {FactRemediation.Stamp(state.EnablementObservedAtUtc)} — automatic plan correction owns plan forcing on this database; the bot stands down rather than be the second forcer (#3652: a manual force on a plan the engine is verifying replaces AUTO forcing and removes its revert path)"));
+                $"plan_correction: force_last_good_plan_actual_state = {state.ForceLastGoodPlanActualState} for {target.Database} at {FactRemediation.Stamp(state.EnablementObservedAtUtc)}: automatic plan correction owns plan forcing on this database, so forcing stands down here rather than be a second forcer. A manual force on a plan the engine is verifying replaces AUTO forcing and removes its revert path."));
         }
 
         if (state is not null && FactRemediation.ApcNamesPlanAsRegressed(target, state))
@@ -384,7 +384,7 @@ public static class ForcePlanBotPolicy
                collector's own AppliesTo): on a server it never collects from, nothing was ever going to be there. */
             blockers.Add(new ForcePlanBlocker(
                 ReasonApcEnablementUnknown,
-                $"plan_correction: no force_last_good_plan_actual_state row for {target.Database} in the last {ForcePlanTargetState.Lookback.TotalHours:0} hours — whether automatic plan correction owns plan forcing on this database is unknown (its captures skipped it, or the collector is off), and an unattended force cannot proceed on unknown"));
+                $"plan_correction: no force_last_good_plan_actual_state row for {target.Database} in the last {ForcePlanTargetState.Lookback.TotalHours:0} hours, so whether automatic plan correction owns plan forcing on this database is unknown (its captures skipped it, or the collector is off), and an unattended force cannot proceed on unknown"));
         }
 
         return blockers;

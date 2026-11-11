@@ -1321,6 +1321,13 @@ ORDER BY capture_time, trace_flag";
     /// collection_time)</c>), so this is a scan of the server's rows in a curated, low-volume table with a
     /// 30-day retention; and it runs only when the snapshot diff found a change in the pass window, which
     /// the connect cadence makes rare. Exposed const for the dialect pins.</para>
+    ///
+    /// <para><b>The <c>collection_time</c> bound (#8570).</b> A redundant bound on the indexed column, so the read walks
+    /// the <c>(server_id, collection_time)</c> index over the span and not every event the server has kept for 30
+    /// days (a parallel scan of 30,000 pages on a 1.5 million row plant). A line is collected after it happens, so a
+    /// row collected more than a day before the span's start cannot hold a line inside it. The day is the margin
+    /// the plan regression reads use for clock skew: a monitored server's clock running fast puts an event's time
+    /// after its collection. It is not part of the span: the span stays exclusive below and inclusive above.</para>
     /// </summary>
     public const string ReconfigureTraceLinesForAttributionSql = @"
 WITH newest AS (
@@ -1344,6 +1351,7 @@ SELECT
 FROM default_trace_events AS dte, svr
 WHERE dte.server_id = $1
 AND   dte.error_number = 15457
+AND   dte.collection_time >= $2 - interval '1 day'
 AND   dte.event_time - make_interval(mins => svr.offset_minutes) > $2 - interval '1 hour'
 AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3 + interval '1 hour'
 ORDER BY event_time_local";

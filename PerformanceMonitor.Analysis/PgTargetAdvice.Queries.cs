@@ -155,8 +155,7 @@ public static partial class PgTargetAdvice
             "share and its mean cleared the cutoff, so one busy minute does not fire it. This is the bad actor's " +
             "grade: a statement at its usual share, however large, is the workload; a statement far above its usual " +
             "share is the story, and the absolute share is context, on the measured fleet the top statement of a " +
-            "busy hour routinely holds a quarter to six tenths of it. The statement's PG_BAD_ACTOR card carries the " +
-            "share, the calls, the per-call mean and the drill-down's text, and this anomaly walks into it. queryid " +
+            "busy hour routinely holds a quarter to six tenths of it. queryid " +
             "is re-keyed by a major upgrade, so the statement's own baseline restarts with it." + s_anomalyHedge,
         Remediation:
             "get_pg_query_duration_trend for the statement says whether its mean STEPPED (a plan change) or its calls " +
@@ -201,7 +200,9 @@ public static partial class PgTargetAdvice
             inv.Append(CultureInfo.InvariantCulture, $" The statement ran {calls:N0} {(calls == 1 ? "call" : "calls")}");
             if (card.Metadata.TryGetValue("mean_exec_ms", out var meanMs))
                 inv.Append(CultureInfo.InvariantCulture, $" averaging {meanMs:0.#} ms per call");
-            inv.Append(" this window; its PG_BAD_ACTOR card carries the rest and the drill-down's text.");
+            /* #8572: no pointer at a PG_BAD_ACTOR card or a drill-down here. The reply holds this anomaly finding and may hold neither of them,
+               so a sentence that sends the reader to them can send them to nothing. */
+            inv.Append(" this window.");
         }
 
         inv.Append(CultureInfo.InvariantCulture,
