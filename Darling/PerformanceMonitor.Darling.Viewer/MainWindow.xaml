@@ -88,6 +88,8 @@
             <Setter Property="ui:DataGridSortBehavior.SortDescendingFirst" Value="True"/>
             <Setter Property="ui:DataGridFillColumn.Enabled" Value="True"/>
             <Setter Property="ui:DataGridHeaderFit.Enabled" Value="True"/>
+            <!-- #8634: a keyed style does not inherit the theme's implicit DataGrid style, so a text column with no element style cut a long value at the cell edge. -->
+            <Setter Property="ui:DataGridCellTrimming.Enabled" Value="True"/>
             <Setter Property="ui:ScrollPanBehavior.EnableMiddleClickPanning" Value="True"/>
             <Setter Property="AutoGenerateColumns" Value="False"/>
             <Setter Property="IsReadOnly" Value="True"/>

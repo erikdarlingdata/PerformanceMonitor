@@ -1342,7 +1342,7 @@ public partial class MainWindow : Window
             switch (selected)
             {
                 case TabItem { Content: ViewerServerTab serverTab }:
-                    /* The tab writes its own line, "<display name> — refreshed …" or "refresh failed: …", through the writer wired in OpenServerTab. */
+                    /* The tab writes its own line, "<display name>: refreshed …" or "refresh failed: …", through the writer wired in OpenServerTab. */
                     await serverTab.RefreshActiveInnerTabAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, OverviewTab):
@@ -1351,7 +1351,7 @@ public partial class MainWindow : Window
                 case TabItem tab when ReferenceEquals(tab, RecommendationsTab):
                     await LoadRecommendationsAsync();
                     break;
-                /* Each fleet tab below writes its own line through the writer wired to it in the constructor: "<tab> — refreshed …" when
+                /* Each fleet tab below writes its own line through the writer wired to it in the constructor: "<tab>: refreshed …" when
                    its load finishes, or its failure line when a read fails. Its refresh returns normally either way, so nothing here
                    writes after it. */
                 case TabItem tab when ReferenceEquals(tab, AlertsTab):
