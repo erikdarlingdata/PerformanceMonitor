@@ -1726,4 +1726,7 @@ public partial class ViewerServerTab
     /// Pass the wheel to the page unless the grid under the pointer can still scroll that way itself (PageScroll.ForwardWheel, shared with the FinOps pages).
     /// </summary>
     private void PgVacuumScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e) => PageScroll.ForwardWheel(sender, e);
+
+    /// <summary>#8663: the Storage page scrolls as one, like Vacuum: a wheel over a grid at its end moves the page.</summary>
+    private void PgStorageScroll_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e) => PageScroll.ForwardWheel(sender, e);
 }
