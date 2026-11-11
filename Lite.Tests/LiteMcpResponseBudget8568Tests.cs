@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -156,6 +157,97 @@ public sealed class LiteMcpResponseBudget8568Tests : IDisposable
     }
 
     /// <summary>A digest's long text, distinct per alert from its first characters on.</summary>
+    /// <summary>
+    /// The alert page is newest first, so the alerts left out are older: <c>as_of</c> at the oldest one returned reads
+    /// on to every alert, and fewer rows asked for is the same newest alerts again, which the note does not offer.
+    /// </summary>
+    [Fact]
+    public async Task AlertHistory_CutForTheBudget_FollowingAsOfReadsEveryAlert_AndTheNoteDoesNotOfferFewerRows()
+    {
+        const int seeded = 60;
+        var helper = new TestAlertDataHelper(Path.Combine(_tempDir, "tool.duckdb"));
+        using (var connection = _duckDb.CreateConnection())
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            for (var i = 0; i < seeded; i++)
+            {
+                await helper.InsertLiveAlertAsync(connection, _now.AddMinutes(-2 - i), _serverId, ServerName, $"Collector Cost Digest {i:D2}", detailText: DetailText(i, 3000));
+            }
+        }
+
+        var first = AssertWithinBudget("get_alert_history", await McpAlertTools.GetAlertHistory(_service));
+        var held = first.GetProperty("alerts").EnumerateArray().Select(a => a.GetProperty("metric_name").GetString()!).ToList();
+        Assert.True(first.GetProperty("budget_truncated").GetBoolean());
+
+        /* Fewer rows asked for returns alerts the cut page already held, and none it left out. */
+        var fewer = AssertWithinBudget("get_alert_history limit", await McpAlertTools.GetAlertHistory(_service, limit: held.Count - 1));
+        Assert.All(fewer.GetProperty("alerts").EnumerateArray(), a => Assert.Contains(a.GetProperty("metric_name").GetString()!, held));
+        var note = first.GetProperty("budget_note").GetString();
+        Assert.Contains("as_of at oldest_returned_alert_time", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("limit", note, StringComparison.Ordinal);
+
+        var seen = new List<string>(held);
+        var asOf = first.GetProperty("oldest_returned_alert_time").GetString();
+        for (var calls = 0; calls < seeded; calls++)
+        {
+            var page = AssertWithinBudget("get_alert_history as_of", await McpAlertTools.GetAlertHistory(_service, as_of: asOf));
+            var fresh = page.GetProperty("alerts").EnumerateArray().Select(a => a.GetProperty("metric_name").GetString()!).Except(seen).ToList();
+            Assert.True(fresh.Count > 0, $"the page read at as_of {asOf} held no alert the pages before it had not.");
+            seen.AddRange(fresh);
+            if (!page.GetProperty("truncated").GetBoolean())
+            {
+                break;
+            }
+
+            asOf = page.GetProperty("oldest_returned_alert_time").GetString();
+        }
+
+        Assert.Equal(Enumerable.Range(0, seeded).Select(i => $"Collector Cost Digest {i:D2}"), seen);
+    }
+
+    /// <summary>
+    /// The query page is heaviest first, so the queries left out are lighter ones. Fewer rows asked for is the same
+    /// heaviest queries again, which the note does not offer; one database's page reads queries the wide page left out.
+    /// </summary>
+    [Fact]
+    public async Task TopQueriesByCpu_CutForTheBudget_TheNotesFilterReadsQueriesLeftOut_AndItDoesNotOfferFewerRows()
+    {
+        const int queries = 120;
+        using (var connection = _duckDb.CreateConnection())
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            for (var i = 0; i < queries; i++)
+            {
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText =
+                    "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, last_execution_time, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, delta_logical_writes, query_text) "
+                    + "VALUES ($1, $2, $3, 'x', $7, $4, $2, 1, $5, $5, 10, 1, $6)";
+                foreach (var value in new object[] { (long)(i + 1), _now.AddMinutes(-60), _serverId, QueryHash(i), (queries - i) * 1_000_000L, QueryText(i), i % 2 == 0 ? "Sales" : "Billing" })
+                {
+                    cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = value });
+                }
+
+                await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+            }
+        }
+
+        var wide = AssertWithinBudget("get_top_queries_by_cpu top=120", await McpQueryTools.GetTopQueriesByCpu(_service, _serverManager, ServerName, top: queries));
+        var held = wide.GetProperty("queries").EnumerateArray().Select(r => r.GetProperty("query_hash").GetString()!).ToList();
+        Assert.True(wide.GetProperty("truncated").GetBoolean());
+        Assert.InRange(held.Count, 2, queries - 1);
+
+        /* Fewer rows asked for returns queries the cut page already held, and none it left out. */
+        var fewer = AssertWithinBudget("get_top_queries_by_cpu fewer", await McpQueryTools.GetTopQueriesByCpu(_service, _serverManager, ServerName, top: held.Count - 1));
+        Assert.All(fewer.GetProperty("queries").EnumerateArray(), r => Assert.Contains(r.GetProperty("query_hash").GetString()!, held));
+        var note = wide.GetProperty("budget_note").GetString();
+        Assert.DoesNotContain("row count", note, StringComparison.Ordinal);
+        Assert.Contains("database_name", note, StringComparison.Ordinal);
+
+        /* One database's page holds queries the wide page left out. */
+        var billing = AssertWithinBudget("get_top_queries_by_cpu Billing", await McpQueryTools.GetTopQueriesByCpu(_service, _serverManager, ServerName, top: queries, database_name: "Billing"));
+        Assert.Contains(billing.GetProperty("queries").EnumerateArray().Select(r => r.GetProperty("query_hash").GetString()!), hash => !held.Contains(hash));
+    }
+
     private static string DetailText(int i, int length)
     {
         var text = new StringBuilder($"Digest {i:D2}: ");

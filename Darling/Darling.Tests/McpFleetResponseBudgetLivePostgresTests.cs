@@ -278,6 +278,16 @@ public sealed class McpFleetResponseBudgetLivePostgresTests
                 var worst = root.GetProperty("worst_servers").EnumerateArray().Select(w => w.GetProperty("server_id").GetInt32()).ToList();
                 var lead = cards.Take(Math.Min(worst.Count, cards.Count)).Select(c => c.GetProperty("server_id").GetInt32()).ToList();
                 Assert.Equal(worst.Take(lead.Count), lead);
+
+                /* The cards left out are the ones after the page, and card_offset is the way to them. worst_only lists
+                   only the needs-attention cards, which lead the page already, so the note does not offer it. */
+                using (var worstOnlyDoc = JsonDocument.Parse(await DarlingMcpFleetTools.GetFleetOverview(postgres, hours_back: 1, detail: "cards", worst_only: true)))
+                {
+                    Assert.All(worstOnlyDoc.RootElement.GetProperty("cards").EnumerateArray(), c => Assert.Contains(c.GetProperty("server_id").GetInt32(), worst));
+                }
+
+                Assert.Contains($"card_offset {cards.Count}", root.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
+                Assert.DoesNotContain("worst_only", root.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
             }
 
             /* Nothing is dropped: following next_card_offset reads every seeded server's card exactly once, each page within the budget. */

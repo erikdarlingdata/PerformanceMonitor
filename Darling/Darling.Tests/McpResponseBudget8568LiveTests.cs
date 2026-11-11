@@ -417,6 +417,195 @@ VALUES ($1, $2, $3, $4, $5, $6, 'kB', 'Resource Usage / Memory', 'sighup', 'inte
         });
     }
 
+    /// <summary>
+    /// A reply cut for the budget keeps its newest rows, so the rows left out are older ones and the way to them is
+    /// an earlier window end. The reply names the oldest <c>last_capture_at</c> it returned, its note points
+    /// <c>as_of</c> there, and a reader who follows it reaches every message.
+    /// </summary>
+    [Fact]
+    public async Task StoreLog_CutForTheBudget_PointsAsOfAtTheOldestRowReturned_AndFollowingItReadsEveryMessageLeftOut()
+    {
+        await WithStoreAsync(async (_, postgres, ct) =>
+        {
+            const int plans = 40;
+            var newest = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-5);
+            for (var i = 0; i < plans; i++)
+            {
+                await WriteCaptureAsync(postgres, newest.AddMinutes(-i), LoggedPlan(i), ct);
+            }
+
+            /* Whole evidence lines: a page holds a handful of the 40 messages, one capture each. */
+            var seen = new List<string>();
+            string? asOf = null;
+            for (var calls = 0; calls < plans; calls++)
+            {
+                var root = AssertWithinBudget("get_store_log full_text", await DarlingMcpStoreLogTools.GetStoreLog(postgres, as_of: asOf, full_text: true, cancellationToken: ct));
+                var rows = root.GetProperty("retained_events").EnumerateArray().ToList();
+                var fresh = rows.Select(r => r.GetProperty("message_text").GetString()!).Except(seen).ToList();
+                Assert.True(fresh.Count > 0, $"the page read at as_of {asOf ?? "(now)"} held no message the pages before it had not.");
+                seen.AddRange(fresh);
+                if (!root.GetProperty("budget_truncated").GetBoolean())
+                {
+                    break;
+                }
+
+                Assert.True(root.TryGetProperty("oldest_returned_last_capture_at", out var oldest) && oldest.ValueKind == JsonValueKind.String,
+                    "a reply cut for the budget names the oldest last_capture_at among the rows it returned.");
+                Assert.Equal(rows.Min(r => ParseUtc(r.GetProperty("last_capture_at").GetString()!)), ParseUtc(oldest.GetString()!));
+                var note = root.GetProperty("budget_note").GetString();
+                Assert.Contains("as_of at oldest_returned_last_capture_at", note, StringComparison.Ordinal);
+                asOf = oldest.GetString();
+            }
+
+            Assert.Equal(plans, seen.Count);
+        });
+    }
+
+    /// <summary>
+    /// Every message of one capture carries that capture's time, and a window includes its end. When the rows that
+    /// fit are all from one capture, a window ending at that time returns them again, so the note names the two ways
+    /// that do move: previews, which fit more of that capture's messages, and a window that ends before it.
+    /// </summary>
+    [Fact]
+    public async Task StoreLog_CutInsideOneCapture_SendsTheReaderToPreviewsAndToTheCapturesBeforeIt()
+    {
+        await WithStoreAsync(async (_, postgres, ct) =>
+        {
+            var newest = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-5);
+            var earlier = newest.AddHours(-1);
+            await WriteCaptureAsync(postgres, newest, string.Concat(Enumerable.Range(0, 12).Select(LoggedPlan)), ct);
+            await WriteCaptureAsync(postgres, earlier, string.Concat(Enumerable.Range(12, 2).Select(LoggedPlan)), ct);
+
+            var root = AssertWithinBudget("get_store_log full_text", await DarlingMcpStoreLogTools.GetStoreLog(postgres, full_text: true, cancellationToken: ct));
+            var held = root.GetProperty("retained_events").EnumerateArray().Select(r => r.GetProperty("message_text").GetString()!).ToList();
+            Assert.True(root.GetProperty("budget_truncated").GetBoolean());
+            Assert.InRange(held.Count, 1, 11);
+            Assert.True(root.TryGetProperty("oldest_returned_last_capture_at", out var oldest) && oldest.ValueKind == JsonValueKind.String,
+                "a reply cut for the budget names the oldest last_capture_at among the rows it returned.");
+            Assert.Equal(newest, ParseUtc(oldest.GetString()!));
+
+            /* A window ending at that capture is the same page. */
+            var again = AssertWithinBudget("get_store_log at the capture", await DarlingMcpStoreLogTools.GetStoreLog(postgres, as_of: oldest.GetString(), full_text: true, cancellationToken: ct));
+            Assert.Equal(held, again.GetProperty("retained_events").EnumerateArray().Select(r => r.GetProperty("message_text").GetString()!));
+
+            var note = root.GetProperty("budget_note").GetString();
+            Assert.DoesNotContain("as_of at oldest_returned_last_capture_at", note, StringComparison.Ordinal);
+            Assert.Contains("full_text", note, StringComparison.Ordinal);
+            Assert.Contains("as_of earlier than", note, StringComparison.Ordinal);
+
+            /* Previews: more of the capture's twelve messages fit, among them ones the whole lines left out. */
+            var previews = AssertWithinBudget("get_store_log", await DarlingMcpStoreLogTools.GetStoreLog(postgres, cancellationToken: ct));
+            var previewed = previews.GetProperty("retained_events").EnumerateArray().Select(r => r.GetProperty("message_text").GetString()!).ToList();
+            Assert.Contains(previewed, message => !held.Contains(message));
+
+            /* A window that ends before the capture reads the one before it. */
+            var before = AssertWithinBudget("get_store_log before the capture", await DarlingMcpStoreLogTools.GetStoreLog(
+                postgres, as_of: newest.AddSeconds(-1).ToString("o", System.Globalization.CultureInfo.InvariantCulture), full_text: true, cancellationToken: ct));
+            var beforeRows = before.GetProperty("retained_events").EnumerateArray().ToList();
+            Assert.Equal(2, beforeRows.Count);
+            Assert.All(beforeRows, r =>
+            {
+                Assert.Equal(earlier, ParseUtc(r.GetProperty("last_capture_at").GetString()!));
+                Assert.DoesNotContain(r.GetProperty("message_text").GetString()!, held);
+            });
+        });
+    }
+
+    /// <summary>
+    /// The alert page is newest first, so the alerts left out are older: <c>as_of</c> at the oldest one returned reads
+    /// on to every alert, and fewer rows asked for is the same newest alerts again, which the note does not offer.
+    /// </summary>
+    [Fact]
+    public async Task AlertHistory_CutForTheBudget_FollowingAsOfReadsEveryAlert_AndTheNoteDoesNotOfferFewerRows()
+    {
+        await WithStoreAsync(async (connection, postgres, ct) =>
+        {
+            const int seeded = 60;
+            var newest = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+            for (var i = 0; i < seeded; i++)
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO config_alert_log
+    (alert_time, server_id, server_name, metric_name, current_value, threshold_value,
+     alert_sent, notification_type, send_error, muted, dismissed, detail_text, context_json)
+VALUES ($1, $2, $3, $4, 91.5, 80, TRUE, 'email', NULL, FALSE, FALSE, $5, NULL)",
+                    DarlingMcpTestData.Naive(newest.AddMinutes(-i)), ServerId, ServerName, $"Collector Cost Digest {i:D2}",
+                    DetailText(i, 3000));
+            }
+
+            var first = AssertWithinBudget("get_alert_history", await DarlingMcpAlertTools.GetAlertHistory(postgres, ServerName));
+            var held = first.GetProperty("alerts").EnumerateArray().Select(a => a.GetProperty("metric_name").GetString()!).ToList();
+            Assert.True(first.GetProperty("budget_truncated").GetBoolean());
+
+            /* Fewer rows asked for returns alerts the cut page already held, and none it left out. */
+            var fewer = AssertWithinBudget("get_alert_history limit", await DarlingMcpAlertTools.GetAlertHistory(postgres, ServerName, limit: held.Count - 1));
+            Assert.All(fewer.GetProperty("alerts").EnumerateArray(), a => Assert.Contains(a.GetProperty("metric_name").GetString()!, held));
+            var note = first.GetProperty("budget_note").GetString();
+            Assert.Contains("as_of at oldest_returned_alert_time", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("limit", note, StringComparison.Ordinal);
+
+            var seen = new List<string>(held);
+            var asOf = first.GetProperty("oldest_returned_alert_time").GetString();
+            for (var calls = 0; calls < seeded; calls++)
+            {
+                var page = AssertWithinBudget("get_alert_history as_of", await DarlingMcpAlertTools.GetAlertHistory(postgres, ServerName, as_of: asOf));
+                var fresh = page.GetProperty("alerts").EnumerateArray().Select(a => a.GetProperty("metric_name").GetString()!).Except(seen).ToList();
+                Assert.True(fresh.Count > 0, $"the page read at as_of {asOf} held no alert the pages before it had not.");
+                seen.AddRange(fresh);
+                if (!page.GetProperty("truncated").GetBoolean())
+                {
+                    break;
+                }
+
+                asOf = page.GetProperty("oldest_returned_alert_time").GetString();
+            }
+
+            Assert.Equal(Enumerable.Range(0, seeded).Select(i => $"Collector Cost Digest {i:D2}"), seen);
+        });
+    }
+
+    /// <summary>
+    /// The query page is heaviest first, so the queries left out are lighter ones. Fewer rows asked for is the same
+    /// heaviest queries again, which the note does not offer; one database's page reads queries the wide page left out.
+    /// </summary>
+    [Fact]
+    public async Task TopQueriesByCpu_CutForTheBudget_TheNotesFilterReadsQueriesLeftOut_AndItDoesNotOfferFewerRows()
+    {
+        await WithStoreAsync(async (connection, postgres, ct) =>
+        {
+            const int queries = 120;
+            var at = DarlingMcpTestData.Naive(DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-10));
+            for (var i = 0; i < queries; i++)
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name,
+                                       query_hash, query_plan_hash, sql_handle, plan_handle, query_text,
+                                       query_text_digest, delta_execution_count, delta_worker_time,
+                                       delta_elapsed_time, delta_logical_reads, min_dop, max_dop)
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
+                    CollectionIdGenerator.Next(), at, ServerId, ServerName, i % 2 == 0 ? "Sales" : "Billing",
+                    QueryHash(i), "0xPLANHASH", $"0xSQLH{i:D6}", "0xPLANH", QueryText(i),
+                    DBNull.Value, 1000L + (queries - i), (queries - i) * 1_000_000L, (queries - i) * 2_000_000L, 5000L, 1, 1);
+            }
+
+            var wide = AssertWithinBudget("get_top_queries_by_cpu top=120", await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, top: queries, cancellationToken: ct));
+            var held = wide.GetProperty("queries").EnumerateArray().Select(r => r.GetProperty("query_hash").GetString()!).ToList();
+            Assert.True(wide.GetProperty("truncated").GetBoolean());
+            Assert.InRange(held.Count, 2, queries - 1);
+
+            /* Fewer rows asked for returns queries the cut page already held, and none it left out. */
+            var fewer = AssertWithinBudget("get_top_queries_by_cpu fewer", await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, top: held.Count - 1, cancellationToken: ct));
+            Assert.All(fewer.GetProperty("queries").EnumerateArray(), r => Assert.Contains(r.GetProperty("query_hash").GetString()!, held));
+            var note = wide.GetProperty("budget_note").GetString();
+            Assert.DoesNotContain("row count", note, StringComparison.Ordinal);
+            Assert.Contains("database_name", note, StringComparison.Ordinal);
+
+            /* One database's page holds queries the wide page left out. */
+            var billing = AssertWithinBudget("get_top_queries_by_cpu Billing", await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, top: queries, database_name: "Billing", cancellationToken: ct));
+            Assert.Contains(billing.GetProperty("queries").EnumerateArray().Select(r => r.GetProperty("query_hash").GetString()!), hash => !held.Contains(hash));
+        });
+    }
+
     private static DateTime ParseUtc(string value) =>
         DateTime.Parse(value, System.Globalization.CultureInfo.InvariantCulture,
             System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal);
