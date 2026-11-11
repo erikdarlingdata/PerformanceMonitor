@@ -251,6 +251,69 @@ public sealed class McpFleetResponseBudgetLivePostgresTests
             Assert.True(summaryBytes <= McpResponseBudget.DefaultBytes,
                 $"detail=summary was {summaryBytes:N0} bytes, over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
 
+            /* #8568: the cards answer is held to the same budget. It keeps whole cards, worst first, counts what it
+               selected and what it holds, and names every server whose card it left out. */
+            Assert.True(cardsBytes <= McpResponseBudget.DefaultBytes,
+                $"detail=cards was {cardsBytes:N0} bytes, over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
+            using (var cardsDoc = JsonDocument.Parse(cardsJson))
+            {
+                var root = cardsDoc.RootElement;
+                var cards = root.GetProperty("cards").EnumerateArray().ToList();
+                var total = root.GetProperty("cards_total").GetInt32();
+                Assert.True(total >= ByteFleetIds.Length, $"the fleet holds the {ByteFleetIds.Length} seeded servers, and cards_total was {total}.");
+                Assert.InRange(cards.Count, 1, total - 1);
+                Assert.Equal(cards.Count, root.GetProperty("cards_returned").GetInt32());
+                Assert.True(root.GetProperty("budget_truncated").GetBoolean());
+                Assert.Contains("32,768-byte response budget", root.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
+                Assert.Contains($"only {cards.Count} fit", root.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
+                Assert.Equal(total - cards.Count, root.GetProperty("cards_left_out_count").GetInt32());
+                Assert.Equal(cards.Count, root.GetProperty("next_card_offset").GetInt32());
+
+                var leftOut = root.GetProperty("cards_left_out").EnumerateArray().Select(n => n.GetString()).ToList();
+                var shown = cards.Select(c => c.GetProperty("server_name").GetString()).ToList();
+                Assert.Equal(Math.Min(total - cards.Count, 100), leftOut.Count);
+                Assert.Empty(shown.Intersect(leftOut));
+
+                /* Worst first: the needs-attention ranking leads the page, in the ranking's own order. */
+                var worst = root.GetProperty("worst_servers").EnumerateArray().Select(w => w.GetProperty("server_id").GetInt32()).ToList();
+                var lead = cards.Take(Math.Min(worst.Count, cards.Count)).Select(c => c.GetProperty("server_id").GetInt32()).ToList();
+                Assert.Equal(worst.Take(lead.Count), lead);
+
+                /* The cards left out are the ones after the page, and card_offset is the way to them. worst_only lists
+                   only the needs-attention cards, which lead the page already, so the note does not offer it. */
+                using (var worstOnlyDoc = JsonDocument.Parse(await DarlingMcpFleetTools.GetFleetOverview(postgres, hours_back: 1, detail: "cards", worst_only: true)))
+                {
+                    Assert.All(worstOnlyDoc.RootElement.GetProperty("cards").EnumerateArray(), c => Assert.Contains(c.GetProperty("server_id").GetInt32(), worst));
+                }
+
+                Assert.Contains($"card_offset {cards.Count}", root.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
+                Assert.DoesNotContain("worst_only", root.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
+            }
+
+            /* Nothing is dropped: following next_card_offset reads every seeded server's card exactly once, each page within the budget. */
+            var seenCards = new System.Collections.Generic.List<string>();
+            var nextCardOffset = 0;
+            for (var calls = 0; calls < 200; calls++)
+            {
+                var pageJson = await DarlingMcpFleetTools.GetFleetOverview(postgres, hours_back: 1, detail: "cards", card_offset: nextCardOffset);
+                Assert.True(Encoding.UTF8.GetByteCount(pageJson) <= McpResponseBudget.DefaultBytes,
+                    $"detail=cards at card_offset {nextCardOffset} was {Encoding.UTF8.GetByteCount(pageJson):N0} bytes, over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
+                using var pageDoc = JsonDocument.Parse(pageJson);
+                Assert.Equal(nextCardOffset, pageDoc.RootElement.GetProperty("card_offset").GetInt32());
+                seenCards.AddRange(pageDoc.RootElement.GetProperty("cards").EnumerateArray().Select(c => c.GetProperty("server_name").GetString()!));
+                if (!pageDoc.RootElement.GetProperty("budget_truncated").GetBoolean())
+                {
+                    Assert.Equal(JsonValueKind.Null, pageDoc.RootElement.GetProperty("next_card_offset").ValueKind);
+                    break;
+                }
+
+                nextCardOffset = pageDoc.RootElement.GetProperty("next_card_offset").GetInt32();
+            }
+
+            Assert.Equal(
+                Enumerable.Range(0, ByteFleetIds.Length).Select(i => $"zz-m2b-byte-{i:D3}"),
+                seenCards.Where(name => name.StartsWith("zz-m2b-byte-", StringComparison.Ordinal)).OrderBy(name => name, StringComparer.Ordinal));
+
             bodySucceeded = true;
         }
         finally

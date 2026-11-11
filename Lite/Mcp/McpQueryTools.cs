@@ -11,7 +11,20 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpQueryTools
 {
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start says where the answer begins. Row cap is top (not limit). <<GUIDE>> Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spilled pages (total_spills counts 8 KB pages written to tempdb, not spill events), and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc): groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed: totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism when Query Store is on: find the statement in get_query_store_top (filter by database_name, match on query_hash) and pass that row's database_name and plan_id to analyze_query_store_plan, which fetches the compiled plan from the monitored server's Query Store (Lite keeps no plans, so analyze_query_plan cannot answer). Reads the raw tier only, which on a store with a lowered retention_days or less history than the window can be shorter than hours_back: window_truncated is the store's retention floor, not a page cut, and effective_start / effective_hours_back say where the answer begins. With no database_name, rows from a database the server no longer lists rank after the listed ones and carry database_dropped: true." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    /// <summary>The most characters of <c>query_text</c> a get_top_queries_by_cpu row carries, what <c>full_text</c>
+    /// gets; the default is <see cref="QueryTextPreviewLength"/> (#8568).</summary>
+    internal const int TopQueryTextFullLength = 2000;
+
+    /// <summary>
+    /// The way on from a get_top_queries_by_cpu page cut for the budget (#8568), as Darling's twin words it. The page
+    /// is heaviest first, so the queries left out are lighter ones and a smaller top returns the heaviest again: a
+    /// filter lists them, and so do the previews when the page carries the longer text.
+    /// </summary>
+    internal static string TopQueriesCutRemedy(bool fullText) => fullText
+        ? "Omit full_text to fit more queries as 400-character previews, or narrow the page with database_name or tag to read the ones left out."
+        : "Narrow the page with database_name or tag to read the queries left out.";
+
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. window_truncated marks a window floor, not a page cut; effective_start says where the answer begins. Row cap is top (not limit). <<GUIDE>> Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spilled pages (total_spills counts 8 KB pages written to tempdb, not spill events), and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc): groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed: totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism when Query Store is on: find the statement in get_query_store_top (filter by database_name, match on query_hash) and pass that row's database_name and plan_id to analyze_query_store_plan, which fetches the compiled plan from the monitored server's Query Store (Lite keeps no plans, so analyze_query_plan cannot answer). Reads the raw tier only, which on a store with a lowered retention_days or less history than the window can be shorter than hours_back: window_truncated is the store's retention floor, not a page cut, and effective_start / effective_hours_back say where the answer begins. With no database_name, rows from a database the server no longer lists rank after the listed ones and carry database_dropped: true. query_text is a 400-character preview (query_text_truncated says it was cut); full_text = true returns up to 2,000 characters. The page is held to the 32,768-byte response budget, heaviest first, whole rows only: truncated = true says rows were left off the end for it, and budget_note says how many of how many fit." + McpHelpers.WindowTruncatedDescription + " " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static async Task<string> GetTopQueriesByCpu(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -22,10 +35,14 @@ public sealed class McpQueryTools
         [Description("If true, only return queries whose cached plan has EVER run at DOP > 1 (a LIFETIME max_dop; can read stale after a MAXDOP change). See the tool's reading guide.")] bool parallel_only = false,
         [Description("Minimum DOP to filter on. Implies parallel filtering. Filters the same lifetime-max value as parallel_only, not current parallelism.")] int min_dop = 0,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description(QueryTagReadScope.ParameterDescription)] string? tag = null)
+        [Description(QueryTagReadScope.ParameterDescription)] string? tag = null,
+        [Description("Return each row's query_text up to 2,000 characters instead of a 400-character preview. Default false.")] bool full_text = false)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
+
+        /* #8568: the row's query_text is a preview unless the caller asks for the longer cut, as Darling's twin prints it. */
+        var queryTextLength = full_text ? TopQueryTextFullLength : QueryTextPreviewLength;
 
         try
         {
@@ -197,7 +214,8 @@ public sealed class McpQueryTools
                 // separate, correctly-labeled rows; null = ad-hoc/prepared text (or pre-upgrade
                 // history, which ages out with retention).
                 host_object = r.HostObjectName,
-                query_text = McpHelpers.TruncateStatement(r.QueryText, 2000),
+                query_text = McpHelpers.TruncateStatement(r.QueryText, queryTextLength),
+                query_text_truncated = (SensitiveStatements.Text(r.QueryText)?.Length ?? 0) > queryTextLength,
                 distinct_texts = r.DistinctTexts,
                 text_note = r.DistinctTexts > 1
                     ? $"this group blends {r.DistinctTexts} distinct statement texts (ad-hoc literal variants; or history predating the host-object split for INSERT...EXEC callers); query_text is one representative"
@@ -239,7 +257,9 @@ public sealed class McpQueryTools
                 DroppedDatabaseMark.Mark(queryRows, rows.Select(r => (string?)r.DatabaseName).ToList(), droppedDatabases);
             }
 
-            return payload.ToJsonString(McpHelpers.JsonOptions);
+            /* #8568: the page ends at the last whole row that fits the response budget, heaviest first, and says so
+               (truncated, budget_note), as Darling's twin does. */
+            return McpResponseBudget.CapPage(payload, "queries", "heaviest first", "queries", TopQueriesCutRemedy(full_text));
         }
         catch (Exception ex)
         {

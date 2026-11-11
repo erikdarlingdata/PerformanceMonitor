@@ -1581,6 +1581,8 @@ public sealed class McpPayloadContractCensusTests
             "#7455: get_pg_blocking's lock cycles[] share the tool's limit with the chain page and are fetched limit + 1, so the cycle list says on its own whether the window held more cycles than it shows, beside the chain page's truncated — two bounds in one payload, the second spelled <bound>_truncated"),
         ("has_more", ["DarlingMcpSchemaTools.cs"],
             "#7643: the offset-paged schema reads (get_schema_changes and find_schema_objects) say whether another page follows, observed off a limit + 1 fetch (or the response-budget cut), beside next_offset and the page's own truncated, the paging flag get_forced_plans and get_query_store_hints already publish — a caller pages on has_more and next_offset"),
+        ("budget_truncated", ["DarlingMcpAlertTools.cs", "DarlingMcpFleetTools.cs", "DarlingMcpForcedPlanTools.cs", "DarlingMcpPgServerStateTools.cs", "DarlingMcpPgSessionStatesTools.cs", "DarlingMcpStoreLogTools.cs", "McpAlertTools.cs"],
+            "#8568: the 32,768-byte response budget ended the page before the row limit did, whole rows only, observed off the serialized answer (McpResponseBudget.FitPrefix); truncated beside it is true for either bound, and budget_note says how many rows of how many fit and how to read the rest"),
         ("findings_truncated", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
             "#4198: get_analysis_findings' GROUP PAGE cut — limit caps the collapsed per-chain groups returned (default 18), independent of the pre-existing truncated above (the raw WindowCoveringLimit occurrence read, beside truncation_note): truncated warns occurrence stats may under-report, findings_truncated warns other diagnostic chains exist but are not on this page at all"),
     ];
@@ -1640,6 +1642,8 @@ public sealed class McpPayloadContractCensusTests
             "#4198: get_blocking/get_blocked_process_reports' blocking_sql_text, previewed the same way as blocked_sql_text_truncated"),
         ("last_query_text_truncated", ["DarlingMcpPgSessionStatesTools.cs"],
             "#7428: get_pg_session_states' last_query_text is the statement text behind last_query_id, a 400-character preview by default (the same rules as get_pg_top_queries) with full_text: true returning it whole"),
+        ("detail_text_truncated", ["DarlingMcpAlertTools.cs", "McpAlertTools.cs"],
+            "#8568: get_alert_history's detail_text is a 400-character preview by default (DetailTextPreviewLength on both SKUs) with detail_text_length beside it; full_text returns it whole"),
         ("top_query_text_truncated", ["DarlingMcpQueryHeatmapTools.cs", "McpQueryTools.cs"],
             "get_query_heatmap's (#4198) per-cell top-query preview width (DefaultPreviewLength on both SKUs) — the full statement is already in the store; full_text opts back into it rather than re-paging, so this is not the page dialect's truncated and nothing was lost the way a source-side cut loses it"),
     ];

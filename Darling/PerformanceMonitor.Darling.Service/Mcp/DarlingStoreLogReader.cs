@@ -164,6 +164,9 @@ ORDER BY sum(g.occurrences) DESC, g.event_class";
     /// <see cref="StoreLogClassifier.GroupingKeyOf"/>), so the same error for two values is one row; the tool
     /// shows the sample's own message. $1/$2 window (naive UTC), $3 row cap.
     ///
+    /// <para>The order ends on the grouping key, so it is total: rows that tie on capture and count keep one order
+    /// on every read, which is what lets an offset page through them (#8568).</para>
+    ///
     /// <para><c>message_text IS NOT NULL</c> is the whole predicate, and it is a structural test rather than
     /// a class list: the sweep writes text only for the classes the classifier retains, so asking for rows
     /// that HAVE text asks exactly the right population and cannot drift from the classifier's own decision
@@ -183,7 +186,7 @@ WHERE e.capture_time >= $1
 AND   e.capture_time <= $2
 AND   e.message_text IS NOT NULL
 GROUP BY e.event_class, e.severity, e.message_text
-ORDER BY max(e.capture_time) DESC, sum(e.occurrences) DESC
+ORDER BY max(e.capture_time) DESC, sum(e.occurrences) DESC, e.event_class, e.severity, e.message_text
 LIMIT $3";
 
     /// <summary>The capture denominator for the window.</summary>
@@ -281,6 +284,13 @@ LIMIT $3";
         /// normalized. The classified fields are an interpretation; this is the evidence, and it carries the
         /// server's own timestamp in the server's own <c>log_timezone</c> — uninterpreted, on purpose.</summary>
         [JsonPropertyName("sample_line")] public string? SampleLine { get; init; }
+
+        /// <summary>True when <see cref="SampleLine"/> is a preview of the stored entry (#8568): a logged plan or
+        /// statement runs to thousands of characters, and <c>full_text</c> returns it whole.</summary>
+        [JsonPropertyName("sample_line_truncated")] public bool SampleLineTruncated { get; init; }
+
+        /// <summary>The stored entry's whole length in characters, beside the preview.</summary>
+        [JsonPropertyName("sample_line_length")] public int? SampleLineLength { get; init; }
     }
 
     /// <summary>A class this build classifies into that had no rows in the window.</summary>
@@ -353,6 +363,24 @@ LIMIT $3";
 
         [JsonPropertyName("retained_events")] public IReadOnlyList<RetainedEvent> RetainedEvents { get; init; } = [];
 
+        /// <summary>Retained rows skipped before <see cref="RetainedEvents"/>: the caller's offset (#8568).</summary>
+        [JsonIgnore] public int RetainedEventsSkipped { get; init; }
+
+        /// <summary>How many rows <see cref="RetainedEvents"/> holds.</summary>
+        [JsonPropertyName("retained_events_returned")] public int RetainedEventsReturned => RetainedEvents.Count;
+
+        /// <summary>The oldest <c>last_capture_at</c> among <see cref="RetainedEvents"/>, which are newest capture
+        /// first: where this answer's rows stop, and the time <c>as_of</c> reads on from (#8568). Null when the answer
+        /// holds no row.</summary>
+        [JsonPropertyName("oldest_returned_last_capture_at")]
+        public string? OldestReturnedLastCaptureAt => RetainedEvents.Count == 0 ? null : RetainedEvents[^1].LastCaptureAt;
+
+        /// <summary>True when retained rows were left off the end to fit the response budget (#8568).</summary>
+        [JsonPropertyName("budget_truncated")] public bool BudgetTruncated { get; init; }
+
+        /// <summary>How many rows were read and how many fit the budget; null when none were left out.</summary>
+        [JsonPropertyName("budget_note")] public string? BudgetNote { get; init; }
+
         /// <summary>
         /// The sentence, DERIVED from the counts above rather than assigned — <c>deadlock_coverage</c>'s
         /// convention (#3017), for its reason: a settable note is a note that can be omitted, or can drift
@@ -416,8 +444,17 @@ LIMIT $3";
             note.Append(". ");
         }
 
-        note.Append(CultureInfo.InvariantCulture,
-            $"{CountText.Plural(report.RetainedEvents.Count, "distinct message")} {(report.RetainedEvents.Count == 1 ? "is" : "are")} retained with their text. ");
+        if (report.BudgetTruncated || report.RetainedEventsSkipped > 0)
+        {
+            /* A page of the retained messages: the count is this answer's, not the window's. */
+            note.Append(CultureInfo.InvariantCulture,
+                $"{report.RetainedEvents.Count:N0} of the distinct messages retained with their text {(report.RetainedEvents.Count == 1 ? "is" : "are")} listed here. ");
+        }
+        else
+        {
+            note.Append(CultureInfo.InvariantCulture,
+                $"{CountText.Plural(report.RetainedEvents.Count, "distinct message")} {(report.RetainedEvents.Count == 1 ? "is" : "are")} retained with their text. ");
+        }
 
         if (summary.MessagesFolded > 0)
         {
@@ -528,21 +565,26 @@ LIMIT $3";
         return rows;
     }
 
-    /// <summary>Reads the retained messages for the window.</summary>
-    public static async Task<List<RetainedEvent>> GetRetainedEventsAsync(
+    /// <summary>Reads the retained messages for the window: up to <paramref name="limit"/> rows after the first
+    /// <paramref name="offset"/> of the read's order. <c>Skipped</c> is how many rows the offset passed over, which is
+    /// less than the offset when the window holds fewer.</summary>
+    public static async Task<(List<RetainedEvent> Rows, int Skipped)> GetRetainedEventsAsync(
         NpgsqlDataSource postgres,
         DateTime windowStartUtc,
         DateTime windowEndUtc,
         int limit,
+        int offset,
+        int? sampleLinePreviewLength,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<RetainedEvent>();
+        var skipped = 0;
 
         await using var command = postgres.CreateCommand(RetainedEventsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(DateTime.SpecifyKind(windowStartUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(windowEndUtc, DateTimeKind.Unspecified));
-        command.Parameters.AddWithValue(limit);
+        command.Parameters.AddWithValue(offset + limit);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -562,6 +604,16 @@ LIMIT $3";
                 continue;
             }
 
+            /* The offset counts the rows an answer lists, so a row with no text to show is not one of them. */
+            if (skipped < offset)
+            {
+                skipped++;
+                continue;
+            }
+
+            /* #8568: the evidence line is a preview when the caller gave a length; the message stays whole, because it is
+               what tells one row from another. */
+            var line = McpResponseBudget.Preview(sample, sampleLinePreviewLength ?? 0, whole: sampleLinePreviewLength is null);
             rows.Add(new RetainedEvent
             {
                 EventClass = eventClass,
@@ -570,11 +622,45 @@ LIMIT $3";
                 Occurrences = reader.GetInt64(3),
                 FirstCaptureAt = reader.IsDBNull(4) ? null : Iso(reader.GetDateTime(4)),
                 LastCaptureAt = reader.IsDBNull(5) ? null : Iso(reader.GetDateTime(5)),
-                SampleLine = sample,
+                SampleLine = line.Text,
+                SampleLineTruncated = line.Truncated,
+                SampleLineLength = line.Length,
             });
         }
 
-        return rows;
+        return (rows, skipped);
+    }
+
+    /// <summary>
+    /// The way on from a retained page cut for the budget (#8568). The rows keep one order for a window, so an offset
+    /// past the rows returned reads on from the last of them, inside a capture as well as across captures: a smaller
+    /// limit or a shorter hours_back returns the head of the page again. The window has to stay where it is for the
+    /// offset to count the same rows, so the note holds as_of at the answer's own. The rows are newest capture first,
+    /// so an earlier window end reaches the older captures. Every message of one capture carries that capture's time
+    /// and the window includes its end, so when the rows kept are all from one capture a window ending there returns
+    /// them again: the offset is then the way on, ahead of the previews, which fit more of that capture's messages,
+    /// and a window that ends before it. With no row kept the offset has nothing to move past.
+    /// </summary>
+    public static string RetainedCutRemedy(IReadOnlyList<RetainedEvent> retained, int kept, bool fullText, int offset)
+    {
+        if (kept == 0)
+        {
+            return fullText
+                ? "Omit full_text to read the messages as 400-character previews."
+                : $"Pass an as_of earlier than {retained[0].LastCaptureAt} to read the messages captured before the newest one.";
+        }
+
+        var oldest = retained[kept - 1].LastCaptureAt;
+        if (!string.Equals(retained[0].LastCaptureAt, oldest, StringComparison.Ordinal))
+        {
+            return string.Create(CultureInfo.InvariantCulture,
+                $"Pass offset={offset + kept} with as_of at this answer's as_of to read on from the last row returned, or as_of at oldest_returned_last_capture_at with no offset to read on from that time.");
+        }
+
+        return string.Create(CultureInfo.InvariantCulture,
+                $"Every message returned was last captured at oldest_returned_last_capture_at, and a window ending there returns them again. Pass offset={offset + kept} with as_of at this answer's as_of to read on from the last row returned. ")
+            + (fullText ? "Omitting full_text fits more of that capture's messages as 400-character previews, and an" : "An")
+            + " as_of earlier than it reads the captures before it.";
     }
 
     /// <summary>Naive-UTC store value to an unambiguous ISO string, the same shape every other read

@@ -116,7 +116,7 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, $7, $8, $9)",
         await using var __ = source;
 
         /* The precondition: the old read, the newest 1,000 rows, does not reach server A's one actionable alert. */
-        var history = JsonDocument.Parse(await DarlingMcpAlertTools.GetAlertHistory(source, null, 24, 1000, cancellationToken: ct)).RootElement;
+        var history = JsonDocument.Parse(await DarlingMcpAlertTools.GetAlertHistory(source, null, 24, 1000, as_of: null, include_dismissed: false, metric_name: null, family: null, include_streak: false, maskSetting: null, full_text: true, responseByteBudget: null, cancellationToken: ct)).RootElement;
         Assert.True(history.GetProperty("truncated").GetBoolean());
         Assert.DoesNotContain(history.GetProperty("alerts").EnumerateArray(), a =>
             a.GetProperty("server_id").GetInt32() == ServerA && !a.GetProperty("muted").GetBoolean() && a.GetProperty("severity").GetString() != "resolution");
@@ -144,7 +144,7 @@ VALUES ($1, $2, $3, $4, 45, 30, $5, 'email', NULL, $6, $7, $8, $9)",
 
         /* The old badge, done over a page big enough to hold the window: a row counts when it is not muted, not a resolution and not dismissed
            (the default read leaves dismissed rows out), critical when any such row's severity says so. */
-        var history = JsonDocument.Parse(await DarlingMcpAlertTools.GetAlertHistory(source, null, 24, 1000, cancellationToken: ct)).RootElement;
+        var history = JsonDocument.Parse(await DarlingMcpAlertTools.GetAlertHistory(source, null, 24, 1000, as_of: null, include_dismissed: false, metric_name: null, family: null, include_streak: false, maskSetting: null, full_text: true, responseByteBudget: null, cancellationToken: ct)).RootElement;
         Assert.False(history.GetProperty("truncated").GetBoolean());
         var expected = history.GetProperty("alerts").EnumerateArray()
             .Where(a => !a.GetProperty("muted").GetBoolean() && a.GetProperty("severity").GetString() != "resolution" && !a.GetProperty("dismissed").GetBoolean())
