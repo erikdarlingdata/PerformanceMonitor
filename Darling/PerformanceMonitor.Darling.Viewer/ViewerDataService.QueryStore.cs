@@ -988,7 +988,6 @@ public sealed partial class ViewerDataService
                  only break a tie of time AND count, which the old ORDER BY left to the engine.
                The values are bigint, so the microsecond count (about 1.8e15 now) and every metric stay exact. */
             SELECT
-                query_id,
                 MAX(ARRAY[
                     CAST(EXTRACT(EPOCH FROM collection_time) * 1000000 AS bigint),
                     execution_count,
@@ -997,7 +996,8 @@ public sealed partial class ViewerDataService
                     avg_duration_us,
                     avg_logical_io_reads,
                     avg_logical_io_writes,
-                    avg_physical_io_reads
+                    avg_physical_io_reads,
+                    query_id
                 ]) AS snap
             FROM query_store_stats
             WHERE server_id = $1
@@ -1031,13 +1031,18 @@ public sealed partial class ViewerDataService
             AND   collection_time >= $2 - {{CollectionFloorSlackSql}}
             AND   collection_time <= $3 + {{CollectionCeilingSql}}
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
-            GROUP BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+            /* The key is ONE record, not seven columns, and that is a plan choice (#8549), not a spelling one. Grouped on seven columns
+               the planner multiplies their distinct counts, lands near the row count, judges the hash table too big for work_mem and
+               sorts every raw row instead (the sort this replaces, seen again on a 155,000-row seed). A record has no statistics, so
+               it is estimated at a few hundred groups and hashed. If the real groups outgrow memory the hash spills by partition, which
+               costs far less than sorting every row. Record equality treats two NULLs as equal, as PARTITION BY did. */
+            GROUP BY ROW(database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role)
         ),
         deduped AS (
             /* Back to columns, under the names the bucket expression below reads. A NULL interval start stays NULL, so
                a legacy row still buckets on its collection_time. */
             SELECT
-                query_id,
+                snap[9] AS query_id,
                 TIMESTAMP '1970-01-01' + snap[1] * INTERVAL '1 microsecond' AS collection_time,
                 TIMESTAMP '1970-01-01' + snap[3] * INTERVAL '1 microsecond' AS interval_start_time_utc,
                 snap[2] AS execution_count,
