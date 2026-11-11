@@ -314,15 +314,16 @@ public sealed class ViewerEmptyAndCountTextTests
 
                     Shoot(window, $"FinOpsLocking-{theme}-{width}x{height}.png");
 
-                    /* Index Analysis: the lower grid shows the one empty sentence, centred in it. */
+                    /* Index Analysis: both grids are collapsed while it is empty, so the one empty sentence is the whole page, centred in it (#8621). */
                     var lower = Find<DataGrid>(tab, "FinOpsIndexAnalysisDetailGrid");
                     var sentence = Find<TextBlock>(tab, "FinOpsIndexAnalysisNoDataMessage");
                     Reveal(lower);
                     sentence.Visibility = Visibility.Visible;
                     Settle(window);
+                    var page = (FrameworkElement)VisualTreeHelper.GetParent(sentence);
                     found.AddRange(Muted(sentence, tab, muted, $"{at}: FinOpsIndexAnalysisNoDataMessage", weight: false));
-                    found.AddRange(Inside(sentence, lower, tab, $"{at}: FinOpsIndexAnalysisNoDataMessage"));
-                    found.AddRange(CentredOn(sentence, lower, tab, $"{at}: FinOpsIndexAnalysisNoDataMessage"));
+                    found.AddRange(Inside(sentence, page, tab, $"{at}: FinOpsIndexAnalysisNoDataMessage"));
+                    found.AddRange(CentredOn(sentence, page, tab, $"{at}: FinOpsIndexAnalysisNoDataMessage"));
                     Shoot(window, $"FinOpsIndexAnalysis-{theme}-{width}x{height}.png");
 
                     /* Optimization: each empty sentence sits inside its grid. */
@@ -583,7 +584,7 @@ public sealed class ViewerEmptyAndCountTextTests
     }
 
     /// <summary><paramref name="sentence"/> lies wholly inside <paramref name="grid"/>'s bounds.</summary>
-    private static List<string> Inside(TextBlock sentence, DataGrid grid, FrameworkElement tab, string what)
+    private static List<string> Inside(TextBlock sentence, FrameworkElement grid, FrameworkElement tab, string what)
     {
         var problems = new List<string>();
         if (!sentence.IsVisible)
@@ -602,7 +603,7 @@ public sealed class ViewerEmptyAndCountTextTests
     }
 
     /// <summary><paramref name="sentence"/> is centred on <paramref name="grid"/>, not on the grids above it as well.</summary>
-    private static List<string> CentredOn(TextBlock sentence, DataGrid grid, FrameworkElement tab, string what)
+    private static List<string> CentredOn(TextBlock sentence, FrameworkElement grid, FrameworkElement tab, string what)
     {
         var problems = new List<string>();
         if (!sentence.IsVisible)

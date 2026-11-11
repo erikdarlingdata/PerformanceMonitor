@@ -4033,7 +4033,7 @@ public sealed class ViewerStoreUnreachableException : Exception
 {
     public ViewerStoreUnreachableException(Exception innerException)
         : base(
-            "Can't reach the Darling store — is the Darling service running? Check the postgres section of " +
+            "Can't reach the Darling store. Is the Darling service running? Check the postgres section of " +
             "darling.json (the host, port, and database must point at the running service's store). " +
             /* #2117: the swallowed detail cost a field operator hours — a TLS chain rejection, a wrong
                password, a pg_hba refusal, and a dead host all read identically without it. */

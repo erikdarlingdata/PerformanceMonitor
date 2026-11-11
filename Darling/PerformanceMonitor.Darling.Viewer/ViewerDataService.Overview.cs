@@ -596,8 +596,11 @@ LIMIT 1";
 
         var identityCapacity = await GetIdentityCapacityCardAsync(serverId, nowUtc, cancellationToken);
         var databaseStates = await GetDatabaseStatesAsync(serverId, nowUtc, cancellationToken);
+        /* #8645: the card reads on its own server's clock, never the active server tab's (every card took that one clock). */
+        var cardClock = ViewerTimeHelper.ClockForServerOrMachine(await _alertClocks.GetAsync(cancellationToken), serverId, TimeZoneInfo.Local, nowUtc);
         return new ServerSummaryItem
         {
+            Clock = cardClock,
             IdentityCapacity = identityCapacity,
             DatabaseStates = databaseStates,
             DisplayName = displayName,
@@ -766,6 +769,10 @@ WHERE id = 1";
 /// </summary>
 public sealed class ServerSummaryItem
 {
+    /// <summary>This card's own server's clock (#8645), read from the fleet's held clocks, else the viewer machine's. <see cref="LastCollectionDisplay"/>
+    /// converts on it in Server Time. Null on a hand-built card, which reads on the machine's clock.</summary>
+    public PerformanceMonitor.Analysis.Baselines.ServerClock? Clock { get; init; }
+
     /// <summary>The identity columns at the warning bar or past it (#6875), the same worst band and count the web fleet card's "Identity capacity" chip
     /// carries. Null when none is, and on a server that never scans. Shown as its own row and never changes the card's band.</summary>
     public IdentityCapacityCard? IdentityCapacity { get; set; }
@@ -1340,7 +1347,7 @@ public sealed class ServerSummaryItem
     /// keeps, so what it collected is gone. Every other such card reads "Never", whatever its band.</para>
     /// </summary>
     public string LastCollectionDisplay => LastCollectionTime.HasValue
-        ? LastCollectLabelled(LastCollectionTime.Value, ViewerTimeHelper.CurrentDisplayMode, ViewerTimeHelper.ActiveServerClock, DateTime.UtcNow)
+        ? LastCollectLabelled(LastCollectionTime.Value, ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.MachineClock(), DateTime.UtcNow)
         : HistoryAgedOut(RegisteredAt, DateTime.UtcNow) ? "None retained" : "Never";
 
     /// <summary>

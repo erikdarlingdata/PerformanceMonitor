@@ -29,14 +29,16 @@
                 <TextBlock DockPanel.Dock="Top" Text="Query tags" FontWeight="Bold" Margin="0,0,0,6"
                            Foreground="{DynamicResource ForegroundBrush}"/>
                 <WrapPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
-                    <Button Content="_New Tag" Width="78" Margin="0,0,6,6" Click="NewRoot_Click"/>
-                    <Button Content="New C_hild" Width="78" Margin="0,0,6,6" Click="NewChild_Click"/>
-                    <Button Content="_Rename" Width="72" Margin="0,0,6,6" Click="Rename_Click"/>
-                    <Button Content="_Colour…" Width="72" Margin="0,0,6,6" Click="Colour_Click"/>
-                    <Button Content="_Move…" Width="72" Margin="0,0,6,6" Click="Move_Click"/>
-                    <Button Content="_Delete" Width="66" Margin="0,0,6,6" Click="Delete_Click"/>
+                    <Button Content="_New Tag" MinWidth="78" Padding="10,3" Margin="0,0,6,6" Click="NewRoot_Click"/>
+                    <Button Content="New C_hild" MinWidth="78" Padding="10,3" Margin="0,0,6,6" Click="NewChild_Click"/>
+                    <Button Content="_Rename" MinWidth="72" Padding="10,3" Margin="0,0,6,6" Click="Rename_Click"/>
+                    <Button Content="_Colour…" MinWidth="72" Padding="10,3" Margin="0,0,6,6" Click="Colour_Click"/>
+                    <Button Content="_Move…" MinWidth="72" Padding="10,3" Margin="0,0,6,6" Click="Move_Click"/>
+                    <Button Content="_Delete" MinWidth="66" Padding="10,3" Margin="0,0,6,6" Click="Delete_Click"/>
                 </WrapPanel>
                 <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+                  <!-- #8645: an empty list says so, as Credential Profiles does. -->
+                  <Grid>
                     <TreeView x:Name="TagTree" Background="{DynamicResource BackgroundBrush}" BorderThickness="0"
                               SelectedItemChanged="TagTree_SelectedItemChanged">
                         <TreeView.ItemTemplate>
@@ -56,6 +58,9 @@
                             </Style>
                         </TreeView.ItemContainerStyle>
                     </TreeView>
+                    <TextBlock x:Name="NoQueryTagsMessage" Style="{DynamicResource EmptyHint}" Margin="12,0"
+                               Text="No query tags yet. Use New Tag to add one."/>
+                  </Grid>
                 </Border>
             </DockPanel>
 

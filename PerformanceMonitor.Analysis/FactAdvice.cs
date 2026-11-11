@@ -388,12 +388,31 @@ public static class FactAdvice
         var investigation = new StringBuilder(advice.Investigation ?? string.Empty);
         foreach (var hop in story.NamedHops)
         {
-            var sentence = FactIdentity.Sentence(hop, Compose(hop.Key, byKey)?.Headline);
+            var sentence = FactIdentity.Sentence(hop, HopHeadline(hop, byKey));
             if (investigation.Length == 0)
                 sentence = sentence.TrimStart();
             investigation.Append(sentence);
         }
         return advice with { Investigation = investigation.ToString() };
+    }
+
+    /// <summary>
+    /// The headline a named hop's sentence carries after its identity (#8572). The composed headline is about the whole fact, and for
+    /// QUERY_SPILLS that is the window's total pages, 274,106 beside "most spilled query X" whose own figure was 232,588. A named
+    /// query's sentence gives the query's own pages from the fact's ranked list, where the collector already stored them. A hop whose
+    /// ranked list does not hold the named query keeps the composed headline.
+    /// </summary>
+    private static string? HopHeadline(NamedHop hop, IReadOnlyDictionary<string, Fact> byKey)
+    {
+        if (hop.Key == "QUERY_SPILLS"
+            && byKey.TryGetValue(hop.Key, out var spills)
+            && !string.IsNullOrWhiteSpace(spills.ObjectName)
+            && spills.Ranked.FirstOrDefault(o => string.Equals(o.ObjectName, spills.ObjectName, StringComparison.Ordinal)) is { } own)
+        {
+            return $"{SpilledPagesText(own.Value)} spilled to tempdb by that query: memory grants too small for their sorts/hashes";
+        }
+
+        return Compose(hop.Key, byKey)?.Headline;
     }
 
     /// <summary>

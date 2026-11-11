@@ -114,7 +114,7 @@ public partial class ServerTab : UserControl
             GraphViewerWindow.ShowGraph(
                 Window.GetWindow(this),
                 control,
-                $"Block Chain — SPID {spid} on {_server.DisplayName}");
+                $"Block Chain: SPID {spid} on {_server.DisplayName}");
         }
         catch (Exception ex)
         {

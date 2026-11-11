@@ -81,7 +81,7 @@ public static class ServerStoreCredential
     /// </summary>
     public const string UnsupportedAuthMessage =
         "The Darling service is a headless collector, so the interactive Microsoft Entra modes (MFA, device " +
-        "code, default credential) are not supported — there is nobody in front of it to answer a broker " +
+        "code, default credential) are not supported: there is nobody in front of it to answer a broker " +
         "prompt. Choose Windows, SQL, Service Principal, or Managed Identity (both non-interactive), or a SQL " +
         "credential profile.";
 }

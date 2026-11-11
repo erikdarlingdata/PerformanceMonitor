@@ -124,7 +124,7 @@
         <!-- The delta cadence cap sentence is appended in code from the shared gap-policy constants, so the
              shown numbers can't drift from what ValidateSchedule enforces (#3532). -->
         <TextBlock Grid.Row="7" x:Name="FooterHintText" Margin="0,8,0,0" FontSize="11" Foreground="{StaticResource DimTextBrush}" TextWrapping="Wrap"
-                   Text="Every (min): 0 collects once on server load. Keep (days) must be at least 1. Run at: a 24-hour time such as 02:00 on the monitored server's own clock, for a collector that runs once a day or less often. Use default takes the fleet-wide time, and on a server None stops a fleet-wide time. Databases: comma-separated allow-list for per-database collectors — blank collects every database, and a server's excluded databases always stay excluded. Changes apply on the service's next reload."/>
+                   Text="Every (min): 0 collects once on server load. Keep (days) must be at least 1. Run at: a 24-hour time such as 02:00 on the monitored server's own clock, for a collector that runs once a day or less often. Use default takes the fleet-wide time, and on a server None stops a fleet-wide time. Databases: comma-separated allow-list for per-database collectors: blank collects every database, and a server's excluded databases always stay excluded. Changes apply on the service's next reload."/>
 
         <DockPanel Grid.Row="8" Margin="0,12,0,0" LastChildFill="False">
             <!-- Fleet-scale bulk reset: clears every server's per-server override in one write so they all fall

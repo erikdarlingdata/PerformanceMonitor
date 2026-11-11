@@ -721,7 +721,7 @@ public partial class MainWindow : Window
                 {
                     Dispatcher.Invoke(() =>
                     {
-                        Title = $"Performance Monitor Lite — Update v{newVersion.TargetFullRelease.Version} available (About in the sidebar)";
+                        Title = $"Performance Monitor Lite: Update v{newVersion.TargetFullRelease.Version} available (About in the sidebar)";
                         AnnounceUpdate($"v{newVersion.TargetFullRelease.Version}");
                     });
                     return;
@@ -738,7 +738,7 @@ public partial class MainWindow : Window
             {
                 Dispatcher.Invoke(() =>
                 {
-                    Title = $"Performance Monitor Lite — Update {result.LatestVersion} available (About in the sidebar)";
+                    Title = $"Performance Monitor Lite: Update {result.LatestVersion} available (About in the sidebar)";
                     AnnounceUpdate(result.LatestVersion);
                 });
             }
@@ -765,7 +765,7 @@ public partial class MainWindow : Window
     {
         _trayService?.ShowNotification(
             "Update Available",
-            $"Performance Monitor Lite {version} is available. Click About in the left sidebar to install it — "
+            $"Performance Monitor Lite {version} is available. Click About in the left sidebar to install it. "
                 + "that updates in place and keeps your data.",
             Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
     }
@@ -1644,6 +1644,9 @@ public partial class MainWindow : Window
         ServerTabControl.Items.Add(tabItem);
         ServerTabControl.SelectedItem = tabItem;
 
+        /* #8535: DuckDB's own memory beside the process's, so a walk's growth reads as DuckDB or not DuckDB straight from the log. */
+        _databaseInitializer.LogServerTabMemoryInBackground(server.DisplayName, opened: true);
+
         // Show the tab control, hide empty state
         EmptyStatePanel.Visibility = Visibility.Collapsed;
         ServerTabControl.Visibility = Visibility.Visible;
@@ -2049,6 +2052,9 @@ public partial class MainWindow : Window
             ServerTabControl.Items.Remove(tab);
             _openServerTabs.Remove(serverId);
             _serverStatusSuffix.Remove(serverId);
+
+            /* #8535: the line a close leaves, to read against the open's. */
+            _databaseInitializer.LogServerTabMemoryInBackground(_serverManager.GetServerById(serverId)?.DisplayName ?? serverId, opened: false);
 
             /* Clean up alert state for this server */
             _alertStateService.RemoveServerState(serverId);
@@ -2839,7 +2845,7 @@ public partial class MainWindow : Window
 
                     _trayService?.ShowNotification(
                         "Capture Not Running",
-                        $"{server.DisplayNameWithIntent}: {captures} capture can't start — {reason}",
+                        $"{server.DisplayNameWithIntent}: {captures} capture can't start ({reason})",
                         Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning);
                 }
 

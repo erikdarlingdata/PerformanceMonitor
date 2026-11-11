@@ -446,6 +446,11 @@ public sealed class TopQueriesTextOneScanLiveTests
                     serverId);
             }
 
+            /* #8570: pass 2 of TopQueriesSql narrows the window to the winners' hashes with a semi join. On a table just bulk
+               loaded with no statistics the planner runs that as a nested loop that rescans the window once per winner,
+               which is cheap on a few thousand rows and not how a store that has run a day (and been analyzed) reads it.
+               Analyze first, so the bound below checks the plan a real store gets. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "VACUUM (ANALYZE) query_stats");
             await body(connection, connectionString, serverId, now, ct);
             succeeded = true;
         }

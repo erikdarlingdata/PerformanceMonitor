@@ -195,7 +195,7 @@ public partial class AddServerDialog : Window
         {
             SaveButton.IsEnabled = false;
             TestConnectionButton.IsEnabled = false;
-            StatusText.Text = "Not connected to a Darling store — server changes are unavailable.";
+            StatusText.Text = "Not connected to a Darling store: server changes are unavailable.";
         }
         else if (_dataService.IsReadOnly)
         {
@@ -339,7 +339,7 @@ public partial class AddServerDialog : Window
     /// <summary>The engine radios are disabled on edit; the tooltip says why, so the lock reads as a rule
     /// rather than a bug (#3499).</summary>
     private const string EngineLockedOnEditTooltip =
-        "The engine is part of what this server IS — its collected history is keyed to it — so an edit can't " +
+        "The engine is part of what this server IS (its collected history is keyed to it), so an edit can't " +
         "change it. To move a host between engines, add it as a new server and remove this one.";
 
     /// <summary>
@@ -351,7 +351,7 @@ public partial class AddServerDialog : Window
     /// supported and how to proceed, not just what is not.
     /// </summary>
     internal const string PostgresRequiresSqlAuthMessage =
-        "A PostgreSQL target requires username/password (SQL) authentication — integrated/Kerberos and the " +
+        "A PostgreSQL target requires username/password (SQL) authentication: integrated/Kerberos and the " +
         "Microsoft Entra modes are not supported for PostgreSQL targets, matching what the service accepts. " +
         "Enter a username and password, or pick a credential profile that carries one.";
 
@@ -371,7 +371,7 @@ public partial class AddServerDialog : Window
 
         if (!int.TryParse(text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var port))
         {
-            return (0, "Port must be a number — leave it blank for the default (5432).");
+            return (0, "Port must be a number: leave it blank for the default (5432).");
         }
 
         if (port is not 0 && port is < 1 or > 65535)
@@ -1086,7 +1086,7 @@ public partial class AddServerDialog : Window
     {
         if (result is null)
         {
-            return "The connection test is still running on the service — try again in a moment.";
+            return "The connection test is still running on the service. Try again in a moment.";
         }
 
         if (result.Status == ViewerDataService.StatusSucceeded)
@@ -1135,7 +1135,7 @@ public partial class AddServerDialog : Window
             }
 
             /* #6254: the Query Store replica's own result, after the primary's. */
-            return string.Join(" — ", parts) + "." + (ViewerDataService.ProbeReplicaNote(root) is { } replicaNote ? " " + replicaNote : "") + (ViewerDataService.ProbeMissingGrantsNote(root) is { } grantsNote ? " " + grantsNote : "");
+            return string.Join(", ", parts) + "." + (ViewerDataService.ProbeReplicaNote(root) is { } replicaNote ? " " + replicaNote : "") + (ViewerDataService.ProbeMissingGrantsNote(root) is { } grantsNote ? " " + grantsNote : "");
         }
         catch (JsonException)
         {

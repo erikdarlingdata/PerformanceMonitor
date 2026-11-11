@@ -225,6 +225,9 @@ public partial class ServerTab : UserControl
                selected when it runs, not what was selected when the request was made. */
             var (tabHoursBack, tabFromDate, tabToDate) = GetCurrentWindowUtc();
             var failedReads = await RefreshVisibleTabAsync(tabHoursBack, tabFromDate, tabToDate, subTabOnly: true, ct);
+            /* #8647: when this read is the first half of a split Full replay, the chrome half that follows words the status line,
+               so it needs to know which Overview lanes this read could not read. */
+            _tabHalfFailedReads = ct.IsCancellationRequested ? null : failedReads;
             /* A tab switch writes no "Last refresh" stamp, but an Overview lane that did not read is still named on the status
                line. A superseded pass leaves the line to its replay. */
             if (failedReads is not null && !ct.IsCancellationRequested)
@@ -232,10 +235,23 @@ public partial class ServerTab : UserControl
             return;
         }
 
+        if (scope == RefreshScope.Surround)
+        {
+            /* #8647: the chrome half of a Full replay whose tab read already ran: clock, range picker, badges, status line. */
+            var tabHalfFailedReads = _tabHalfFailedReads;
+            _tabHalfFailedReads = null;
+            await RefreshEverythingAsync(ct, readVisibleTab: false, tabHalfFailedReads);
+            return;
+        }
+
+        _tabHalfFailedReads = null;
         await RefreshEverythingAsync(ct);
     }
 
-    private async Task RefreshEverythingAsync(CancellationToken ct)
+    /// <summary>The Overview lanes the last tab-only read could not read, held for the chrome half of a split replay (#8647).</summary>
+    private string? _tabHalfFailedReads;
+
+    private async Task RefreshEverythingAsync(CancellationToken ct, bool readVisibleTab = true, string? tabHalfFailedReads = null)
     {
         /* _isRefreshing now only means "this pass is repainting": the grids' selection handlers read it so a refresh
            does not clear a slicer overlay. It no longer
@@ -259,7 +275,7 @@ public partial class ServerTab : UserControl
             using var _profiler = Helpers.MethodProfiler.StartTiming($"ServerTab-{_server?.DisplayName}");
 
             var status = await RefreshStagesAsync(
-                () => RefreshVisibleTabIfShownAsync(hoursBack, fromDate, toDate, ct),
+                () => readVisibleTab ? RefreshVisibleTabIfShownAsync(hoursBack, fromDate, toDate, ct) : Task.FromResult(tabHalfFailedReads),
                 RefreshBadgesAsync,
                 LastRefreshText,
                 ct);
@@ -428,6 +444,9 @@ public partial class ServerTab : UserControl
             case 17: await RefreshConfigChangesAsync(hoursBack, fromDate, toDate); break;
             case 18: await RefreshLongQueriesAsync(hoursBack, fromDate, toDate); break;
         }
+
+        /* #8647: a read that ended without being superseded has had its say; whatever still says "Loading..." never got an answer. */
+        if (!ct.IsCancellationRequested) ResolveFirstPaintLoading();
         return failedReads;
     }
 

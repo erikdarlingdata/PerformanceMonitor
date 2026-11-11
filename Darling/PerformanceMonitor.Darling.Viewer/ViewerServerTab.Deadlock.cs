@@ -78,7 +78,7 @@ public partial class ViewerServerTab
             GraphViewerWindow.ShowGraph(
                 Window.GetWindow(this),
                 control,
-                $"Deadlock Graph — {_server.DisplayName}");
+                $"Deadlock Graph: {_server.DisplayName}");
         }
         catch (Exception ex)
         {

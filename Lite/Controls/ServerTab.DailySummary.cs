@@ -52,6 +52,11 @@ public partial class ServerTab : UserControl
         {
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] LoadCalendarMonthAsync failed: {ex.Message}");
         }
+        finally
+        {
+            /* #8647: the read returned, with rows or without; the month is no longer "Loading...". */
+            DailyCalendar.IsLoading = false;
+        }
     }
 
     private async void DailyCalendar_MonthChanged(object? sender, PerformanceCalendarMonthEventArgs e)

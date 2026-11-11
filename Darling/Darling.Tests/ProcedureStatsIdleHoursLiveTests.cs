@@ -124,8 +124,10 @@ public sealed class ProcedureStatsIdleHoursLiveTests
             var oldWide = await McpSeriesAsync(data, OldName, asOf, 240, budget, ct);
             var newWide = await McpSeriesAsync(data, NewName, asOf, 240, budget, ct);
             Assert.Equal(oldWide.OrderBy(p => p.Key).ToArray(), newWide.OrderBy(p => p.Key).ToArray());
-            Assert.Equal((newHours[WindowStart.AddHours(1)] + newHours[WindowStart.AddHours(2)]) / 3, newWide[WindowStart], 12);
-            Assert.Equal(newHours[WindowStart.AddHours(6)] / 3, newWide[WindowStart.AddHours(4)], 12);
+            /* #8572: the replies carry the rates rounded to six places, so the hourly figures are rounded before they are
+               averaged here: a bucket that miscounted its hours is off by a third or more, far past the 2e-6 allowed. */
+            Assert.Equal((newHours[WindowStart.AddHours(1)] + newHours[WindowStart.AddHours(2)]) / 3, newWide[WindowStart], 2e-6);
+            Assert.Equal(newHours[WindowStart.AddHours(6)] / 3, newWide[WindowStart.AddHours(4)], 2e-6);
 
             /* The desktop viewer's read, the same two shapes. */
             await using var viewer = new ViewerDataService(scratch.ConnectionString);

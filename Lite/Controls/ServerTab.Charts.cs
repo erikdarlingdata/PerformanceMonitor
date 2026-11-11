@@ -139,14 +139,8 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        if (data.Count == 0)
-        {
-            CpuChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            CpuChart.Plot.Axes.SetLimitsX(ChartXStart(CpuChart.Plot, xMin, xMax), xMax);
-            ReapplyAxisColors(CpuChart);
-            CpuChart.Refresh();
-            return;
-        }
+        /* #8644: a window with no rows is the one empty look, not an empty plot on the default -10 to 10 axes. */
+        if (data.Count == 0) { RefreshEmptyChart(CpuChart, "CPU", ""); return; }
 
         /* #4766: the CPU read asks for the UTC frame (RefreshCpuAsync), so each point is plotted at its own instant:
            the two readings of a repeated hour are two points, and the ticks and the hover word the instant in the
@@ -204,14 +198,8 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        if (data.Count == 0)
-        {
-            MemoryChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            MemoryChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryChart.Plot, xMin, xMax), xMax);
-            ReapplyAxisColors(MemoryChart);
-            MemoryChart.Refresh();
-            return;
-        }
+        /* #8644: a window with no rows is the one empty look, not an empty plot on the default -10 to 10 axes. */
+        if (data.Count == 0) { RefreshEmptyChart(MemoryChart, "Memory", ""); return; }
 
         var times = data.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var totalMem = data.Select(d => d.TotalServerMemoryMb / 1024.0).ToArray();
@@ -301,18 +289,11 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        EmptyState.Show(MemoryGrantSizingChart, data.Count == 0, "No memory grants in the selected time window.");
-        EmptyState.Show(MemoryGrantActivityChart, data.Count == 0, "No memory grants in the selected time window.");
-
+        /* #8644: a window with no rows is the one empty look, not two empty plots on the default -10 to 10 axes. */
         if (data.Count == 0)
         {
-            foreach (var c in new[] { MemoryGrantSizingChart, MemoryGrantActivityChart })
-            {
-                c.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-                c.Plot.Axes.SetLimitsX(ChartXStart(c.Plot, xMin, xMax), xMax);
-                ReapplyAxisColors(c);
-                c.Refresh();
-            }
+            RefreshEmptyChart(MemoryGrantSizingChart, "Memory Grant Sizing", "");
+            RefreshEmptyChart(MemoryGrantActivityChart, "Memory Grant Activity", "");
             return;
         }
 
@@ -517,14 +498,8 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        if (data.Count == 0)
-        {
-            TempDbChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            TempDbChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbChart.Plot, xMin, xMax), xMax);
-            ReapplyAxisColors(TempDbChart);
-            TempDbChart.Refresh();
-            return;
-        }
+        /* #8644: a window with no rows is the one empty look, not an empty plot on the default -10 to 10 axes. */
+        if (data.Count == 0) { RefreshEmptyChart(TempDbChart, "tempdb", ""); return; }
 
         var times = data.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var userObj = data.Select(d => d.UserObjectReservedMb).ToArray();
@@ -573,14 +548,8 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        if (data.Count == 0)
-        {
-            TempDbSizeChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            TempDbSizeChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbSizeChart.Plot, xMin, xMax), xMax);
-            ReapplyAxisColors(TempDbSizeChart);
-            TempDbSizeChart.Refresh();
-            return;
-        }
+        /* #8644: a window with no rows is the one empty look, not an empty plot on the default -10 to 10 axes. */
+        if (data.Count == 0) { RefreshEmptyChart(TempDbSizeChart, "tempdb Size", ""); return; }
 
         var sorted = data.OrderBy(d => d.CollectionTime).ToList();
         var times = sorted.Select(d => d.CollectionTime.ToOADate()).ToArray();
@@ -615,14 +584,8 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        if (data.Count == 0)
-        {
-            TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            TempDbFileIoChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbFileIoChart.Plot, xMin, xMax), xMax);
-            ReapplyAxisColors(TempDbFileIoChart);
-            TempDbFileIoChart.Refresh();
-            return;
-        }
+        /* #8644: a window with no rows is the one empty look, not an empty plot on the default -10 to 10 axes. */
+        if (data.Count == 0) { RefreshEmptyChart(TempDbFileIoChart, "tempdb File I/O Latency", ""); return; }
 
         var files = data
             .GroupBy(d => d.DatabaseName)
@@ -674,15 +637,11 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
+        /* #8644: a window with no rows is the one empty look, not two empty plots on the default -10 to 10 axes. */
         if (data.Count == 0)
         {
-            foreach (var c in new[] { FileIoReadChart, FileIoWriteChart })
-            {
-                c.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-                c.Plot.Axes.SetLimitsX(ChartXStart(c.Plot, xMin, xMax), xMax);
-                ReapplyAxisColors(c);
-                c.Refresh();
-            }
+            RefreshEmptyChart(FileIoReadChart, "Read Latency", "");
+            RefreshEmptyChart(FileIoWriteChart, "Write Latency", "");
             return;
         }
 
@@ -797,15 +756,11 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
+        /* #8644: a window with no rows is the one empty look, not two empty plots on the default -10 to 10 axes. */
         if (data.Count == 0)
         {
-            foreach (var c in new[] { FileIoReadThroughputChart, FileIoWriteThroughputChart })
-            {
-                c.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-                c.Plot.Axes.SetLimitsX(ChartXStart(c.Plot, xMin, xMax), xMax);
-                ReapplyAxisColors(c);
-                c.Refresh();
-            }
+            RefreshEmptyChart(FileIoReadThroughputChart, "Read Throughput", "");
+            RefreshEmptyChart(FileIoWriteThroughputChart, "Write Throughput", "");
             return;
         }
 
@@ -1758,9 +1713,13 @@ public partial class ServerTab : UserControl
     internal static void PlotCollectorDurationSeries(ScottPlot.WPF.WpfPlot chart, ChartHoverHelper? hover, IReadOnlyList<CollectorDurationSeries> series)
     {
         int colorIdx = 0;
+        /* #8644: a collector with two or three buckets has no cadence of its own to judge a gap by, so it drew a straight line across
+           hours in which nothing was collected. The spans where no collector drew a bucket break every line, as the others do. */
+        var outages = TimeSeriesGaps.OutagesAcross(series.Select(s => s.Xs));
         foreach (var line in series)
         {
-            var scatter = chart.Plot.Add.TimeSeries(line.Xs, line.MaxMs);
+            var (gapXs, gapYs) = TimeSeriesGaps.BreakAtGaps(line.Xs, line.MaxMs, outages);
+            var scatter = chart.Plot.Add.Scatter(gapXs, gapYs);
             scatter.LegendText = line.Collector;
             scatter.Color = ScottPlot.Color.FromHex(SeriesColors[colorIdx % SeriesColors.Length]);
             scatter.LineWidth = 2;
@@ -1791,14 +1750,8 @@ public partial class ServerTab : UserControl
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        if (data.Count == 0)
-        {
-            CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            CollectorDurationChart.Plot.Axes.SetLimitsX(ChartXStart(CollectorDurationChart.Plot, xMin, xMax), xMax);
-            ReapplyAxisColors(CollectorDurationChart);
-            CollectorDurationChart.Refresh();
-            return;
-        }
+        /* #8644: a window with no rows is the one empty look, not an empty plot on the default -10 to 10 axes. */
+        if (data.Count == 0) { RefreshEmptyChart(CollectorDurationChart, "Collector Duration", ""); return; }
 
         /* One series per collector, each point a bucket's slowest successful run (the read keeps only the runs the chart
            has always drawn: SUCCESS with a duration). */

@@ -22,7 +22,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 public static class ViewerRangeRefreshStatus
 {
     /// <summary>The status line from the pick until the picked range's load stamps "refreshed" (or reports its failure).</summary>
-    public static string Loading(string serverName, TimeRangeSpec spec) => $"{serverName} — loading {spec.Name}…";
+    public static string Loading(string serverName, TimeRangeSpec spec) => $"{serverName}: loading {spec.Name}…";
 
     /// <summary>
     /// Whether a load that has just finished says "refreshed". It does not when another refresh is queued behind it: the queued one

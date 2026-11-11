@@ -290,7 +290,8 @@ public sealed class TopQueriesDatabaseFilterLiveTests
 
     /// <summary>The statement text pins: every pass of every tier carries the list predicate, and none keeps the one-name shape.</summary>
     [Theory]
-    [InlineData(nameof(DarlingDataReader.TopQueriesSql), 2)]
+    /* #8570: TopQueriesSql's pass 2 reads the window as two arms (the winners' hashes, the NULL-hash rows), each with the predicate. */
+    [InlineData(nameof(DarlingDataReader.TopQueriesSql), 3)]
     [InlineData(nameof(DarlingDataReader.TopQueriesByHostObjectSql), 2)]
     [InlineData(nameof(DarlingDataReader.TopQueriesHourlySql), 1)]
     [InlineData(nameof(DarlingDataReader.TopProceduresSql), 2)]

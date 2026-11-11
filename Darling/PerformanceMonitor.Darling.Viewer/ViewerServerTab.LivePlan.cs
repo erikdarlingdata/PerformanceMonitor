@@ -241,7 +241,7 @@ public partial class ViewerServerTab
             {
                 MessageBox.Show(
                     $"The plan for this process is no longer in the plan cache on {_server.DisplayName}. " +
-                    "A deadlock graph / blocked-process report only carries a sql_handle — if that plan has been " +
+                    "A deadlock graph / blocked-process report only carries a sql_handle. If that plan has been " +
                     "evicted or recompiled, it can't be recovered.",
                     "Plan Not In Cache", MessageBoxButton.OK, MessageBoxImage.Information);
             }
@@ -284,7 +284,7 @@ public partial class ViewerServerTab
     private void ShowNoResolvableHandle(string what)
         => InAppMessage.Show(Window.GetWindow(this), "No Plan Available",
                 $"The {what} has no resolvable sql_handle in its captured XML. This usually means the query ran as " +
-            "dynamic SQL or a system context — SQL Server records a zero handle there and the plan can't be recovered.");
+            "dynamic SQL or a system context: SQL Server records a zero handle there and the plan can't be recovered.");
 
     /// <summary>
     /// True (and shows an explanation) when the current seat is read-only: fetching a live plan enqueues a
@@ -296,7 +296,7 @@ public partial class ViewerServerTab
         if (!force && !_dataService.IsReadOnly) return false;
         MessageBox.Show(
             "Fetching a live plan asks the service to read the target server's plan cache, which it does by " +
-            "running a command — a read-only viewer seat can't enqueue commands. Reconnect with a read-write " +
+            "running a command: a read-only viewer seat can't enqueue commands. Reconnect with a read-write " +
             "profile to fetch live plans.",
             "Read-Only Viewer", MessageBoxButton.OK, MessageBoxImage.Information);
         return true;

@@ -74,9 +74,7 @@ public partial class AlertsHistoryTab : UserControl
         RangePicker.Value = TimeRangePresets.FromLegacyHours(24)!; /* 24 hours, as the list opened */
         /* #5562 M1: typed times and calendar periods are read in the zone the Time column is worded in (the display mode), as the
            Darling Viewer's Alert History does with its display zone. */
-        RangePicker.ZoneProvider = () => ListSpansServers
-            ? PerformanceMonitor.Ui.MultiServerTime.MixedZone(ServerTimeHelper.CurrentDisplayMode)
-            : ServerTimeHelper.CurrentDisplayZone;
+        RangePicker.ZoneProvider = PickerZone;
         /* R8: "All" is a span of 365 days, longer than anything Lite keeps (archive files are deleted by whole month, 3 months
            back, so rows older than 3 months survive until their month's file goes), through the shared control's longest choice. */
         RangePicker.SetLongestChoice(LiteTimeRange.AlertHistoryLongestChoice, "All");
@@ -111,6 +109,39 @@ public partial class AlertsHistoryTab : UserControl
     /// </summary>
     internal bool ListSpansServers => GetSelectedServerId() is null && _serversSeen.Count > 1;
 
+    /// <summary>The clock each server's rows were stamped with by the last reads (#8645), so the picker words a range in the zone the rows beside it use.</summary>
+    private readonly Dictionary<int, ServerClock> _rowClocks = new();
+
+    /// <summary>The zone the range picker reads typed times and calendar periods in (#8645): <see cref="PickerZoneFor"/> for the server this
+    /// list is on, which is the picked server, else the one server every read so far listed, else none.</summary>
+    private TimeZoneInfo PickerZone()
+    {
+        int? serverId = ListSpansServers ? null : GetSelectedServerId() ?? (_serversSeen.Count == 1 ? _serversSeen.First() : null);
+        return PickerZoneFor(ServerTimeHelper.CurrentDisplayMode, serverId, _rowClocks, _openTabClock, TimeZoneInfo.Local);
+    }
+
+    /// <summary>
+    /// The zone the range picker words a range in (#8645). This tab covers every server unless one is picked, so it never takes the
+    /// clock of whichever server tab was opened last (<c>ServerTimeHelper.ActiveServerClock</c>): with no server to name it reads the
+    /// one clock a view of several servers reads on (<see cref="PerformanceMonitor.Ui.MultiServerTime.MixedZone(TimeDisplayMode, TimeZoneInfo)"/>:
+    /// UTC in UTC mode, this machine's zone otherwise), as Job History does. With one server it is that server's clock, the one its rows
+    /// were stamped with, else its open tab's, and the machine's zone when neither is known. Pure, so a test names the mode and the machine.
+    /// </summary>
+    internal static TimeZoneInfo PickerZoneFor(
+        TimeDisplayMode mode, int? serverId, IReadOnlyDictionary<int, ServerClock> rowClocks,
+        Func<int, ServerClock?>? openTabClock, TimeZoneInfo machine)
+    {
+        if (serverId is not int one)
+        {
+            return PerformanceMonitor.Ui.MultiServerTime.MixedZone(mode, machine);
+        }
+
+        var clock = rowClocks.TryGetValue(one, out var stamped) ? stamped : openTabClock?.Invoke(one);
+        return clock is null
+            ? PerformanceMonitor.Ui.MultiServerTime.MixedZone(mode, machine)
+            : ServerTimeHelper.DisplayZoneFor(mode, clock);
+    }
+
     /// <summary>
     /// Refreshes the alert history data.
     /// </summary>
@@ -124,6 +155,11 @@ public partial class AlertsHistoryTab : UserControl
     internal int ShowAlerts(List<AlertHistoryRow> alerts)
     {
         _serversSeen.UnionWith(alerts.Select(a => a.ServerId));
+        foreach (var row in alerts)
+        {
+            if (row.Clock is { } rowClock) _rowClocks[row.ServerId] = rowClock;
+        }
+
         if (ListSpansServers)
         {
             /* One read of a list of several servers may hold one server's rows: they still draw on the list's clock. */

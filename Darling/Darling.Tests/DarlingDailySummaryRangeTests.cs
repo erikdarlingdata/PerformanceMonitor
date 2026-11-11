@@ -55,6 +55,15 @@ public sealed class DarlingDailySummaryRangeTests
     private const int NeverCollectedServerId = -949579;
     private const string NeverCollectedServerName = "daily-summary-range-never-collected";
 
+    /// <summary>
+    /// #8623: <c>DarlingHealthReader.RangeCache</c> is process-wide and keyed by server, not by test, and a block built
+    /// for a wider range donates its closed days to a narrower read of the same server. The cache test below reads
+    /// <see cref="ServerId"/>'s closed day with no collection run seeded, so a calendar read that ran after it was served
+    /// that day, not the seeded error run, and banded it Healthy. Each test therefore starts from an empty cache
+    /// (and leaves one behind), the way the other live daily-summary classes already do.
+    /// </summary>
+    private static void ResetRangeCache() => DarlingHealthReader.ResetRangeCacheForTests();
+
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
@@ -68,6 +77,7 @@ public sealed class DarlingDailySummaryRangeTests
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
+        ResetRangeCache();
         await DeleteRowsAsync(connection, ct);
 
         await using var dataSource = NpgsqlDataSource.Create(cs!);
@@ -188,9 +198,25 @@ public sealed class DarlingDailySummaryRangeTests
         }
         finally
         {
+            ResetRangeCache();
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
+    }
+
+    /// <summary>
+    /// #8623: the two tests that share <see cref="ServerId"/> and the process-wide range cache, run back to back, must
+    /// not see each other's cached days. The cache test runs first here because it is the one that leaves a cached
+    /// block behind that holds the calendar's error day with no collection run.
+    /// </summary>
+    [Fact]
+    public async Task TheCalendar_StillBandsTheErrorDay_WhenTheCacheTestRanFirstInTheSameProcess()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live daily-summary range test.");
+
+        await GetDailySummaryRangeAsync_ClosedDayCache_SecondReadDoesNotSeeANewRowOnAClosedDay_ButDoesOnToday();
+        await TheCalendar_BandsEachDaySeparately_ShowsCollectionGaps_AndAnchors();
     }
 
     private static async Task SeedRunAsync(
@@ -232,6 +258,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
+        ResetRangeCache();
         await DeleteRowsAsync(connection, ct);
 
         await using var dataSource = NpgsqlDataSource.Create(cs!);
@@ -271,6 +298,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         }
         finally
         {
+            ResetRangeCache();
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
@@ -294,6 +322,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
+        ResetRangeCache();
         await DeleteRowsAsync(connection, ct);
 
         await using var dataSource = NpgsqlDataSource.Create(cs!);
@@ -336,7 +365,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         }
         finally
         {
-            DarlingHealthReader.ResetRangeCacheForTests();
+            ResetRangeCache();
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }

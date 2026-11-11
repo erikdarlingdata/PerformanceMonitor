@@ -136,7 +136,7 @@ internal static class ViewerSettingsFile
             ViewerLogger.Warn(logSource,
                 $"'{Path.GetFileName(filePath)}' could not be read ({permit.Problem}), so this save " +
                 "replaces it. The unreadable original was copied to " +
-                $"'{Path.GetFileName(permit.QuarantinedTo)}' first — the settings it held are recoverable " +
+                $"'{Path.GetFileName(permit.QuarantinedTo)}' first. The settings it held are recoverable " +
                 "from there.");
         }
 

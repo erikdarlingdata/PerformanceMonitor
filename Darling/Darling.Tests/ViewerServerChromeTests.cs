@@ -139,8 +139,8 @@ public sealed class ViewerServerChromeTests
         Assert.Equal("Windows", new ViewerServerEntry { AuthenticationType = AuthenticationTypes.Windows }.AuthenticationDisplay);
         Assert.Equal("SQL Server", new ViewerServerEntry { AuthenticationType = AuthenticationTypes.SqlServer }.AuthenticationDisplay);
         Assert.Equal("Microsoft Entra MFA", new ViewerServerEntry { AuthenticationType = AuthenticationTypes.EntraMFA }.AuthenticationDisplay);
-        Assert.Equal("Azure — Service Principal", new ViewerServerEntry { AuthenticationType = AuthenticationTypes.ServicePrincipal }.AuthenticationDisplay);
-        Assert.Equal("Azure — Managed Identity", new ViewerServerEntry { AuthenticationType = AuthenticationTypes.ManagedIdentity }.AuthenticationDisplay);
+        Assert.Equal("Azure: Service Principal", new ViewerServerEntry { AuthenticationType = AuthenticationTypes.ServicePrincipal }.AuthenticationDisplay);
+        Assert.Equal("Azure: Managed Identity", new ViewerServerEntry { AuthenticationType = AuthenticationTypes.ManagedIdentity }.AuthenticationDisplay);
     }
 
     /// <summary>

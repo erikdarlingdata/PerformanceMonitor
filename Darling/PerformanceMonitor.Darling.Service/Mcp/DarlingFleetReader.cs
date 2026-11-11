@@ -1424,11 +1424,12 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                DeadlockRatePerHour gives: a PostgreSQL target's raw count is a structural zero, and a rate derived
                from it would publish 0.0/hr against a severity that reads Unknown (#3539 A3). */
             MaxSnapshotWaitMs = blocking.PeakSnapshotWaitMs,
-            BlockingRatePerHour = isPostgres
+            /* #8572: rounded by the one rate rule (two places, and two significant digits for a rare rate), as the health reads round the same rate. Nothing reads this field back, so no band sees the rounding. */
+            BlockingRatePerHour = TrendPayloads.RoundRate(isPostgres
                 ? ServerHealthClassifier.PostgresBlockingRatePerHour(blockingForBand, pgBlocking?.CapturesTotal ?? 0)
                 : blockingForBand.HasValue
                 ? ServerHealthClassifier.BlockingRatePerHour(blockingForBand.Value, deadlockWindow)
-                : null,
+                : null, 2),
             BlockingWindow = deadlockWindow,
             BlockingSeverity = isPostgres
                 ? ServerHealthClassifier.PostgresBlockingSeverity(blockingForBand, pgBlocking?.CapturesTotal ?? 0, blockingTiers)

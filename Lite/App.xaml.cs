@@ -962,7 +962,7 @@ public partial class App : Application
                     AppLogger.Info("App",
                         $"Migrated servers.json from '{legacyServers}' to '{sharedServers}'. " +
                         "The old file was left in place as a backup. " +
-                        "Passwords in Windows Credential Manager remain per-user — other users on this machine will need to re-enter SQL passwords for each server.");
+                        "Passwords in Windows Credential Manager remain per-user. Other users on this machine will need to re-enter SQL passwords for each server.");
                 }
                 catch (Exception ex)
                 {

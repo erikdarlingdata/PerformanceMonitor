@@ -67,6 +67,9 @@ public partial class ServerTab : UserControl
     // the drill-down loads next (async race).
     private bool _suppressActiveQueriesAutoRefresh;
     private readonly ChartRenderHelper _chartHelper = new();
+    private FirstPaintLoading? _firstPaint;
+    /// <summary>#8647: puts "Loading..." where a sub-tab's empty-state sentence goes until its first read returns, and takes it away when that pass ends.</summary>
+    private FirstPaintLoading FirstPaint => _firstPaint ??= new FirstPaintLoading(_chartHelper, ApplyTheme);
     private List<SelectableItem> _waitTypeItems = new();
     private List<SelectableItem> _perfmonCounterItems = new();
     /* #1319: per-server global database filter (display-only). Empty set = "All" (unfiltered). */
@@ -163,11 +166,11 @@ public partial class ServerTab : UserControl
     public int UtcOffsetMinutes => _serverClock.OffsetMinutesAt(DateTime.UtcNow);
 
     /// <summary>
-    /// The header's status line from the moment the tab opens until its server's first collection has run. It says where the
-    /// data comes from, so an Overview chart that finds no rows in the window meanwhile reads as loading, not as an empty
-    /// server. The refresh passes that show stored data in that time keep this line; an error replaces it.
+    /// The header's status line from the moment the tab opens until its server's first collection has run. It says the first
+    /// collection is still pending, so an Overview chart that finds no rows in the window meanwhile reads as loading, not as an empty
+    /// server. It does not say the charts are empty: they may already show the data the store holds (#8621). The refresh passes that show stored data in that time keep this line; an error replaces it.
     /// </summary>
-    internal const string ConnectingStatusText = "Connecting... the charts fill after the first collection";
+    internal const string ConnectingStatusText = "Connecting... waiting for the first collection";
 
     private bool _awaitingFirstCollection = true;
 
@@ -337,7 +340,7 @@ public partial class ServerTab : UserControl
 
         /* Apply theme immediately so charts don't flash white before data loads */
         ApplyTheme(WaitStatsChart);
-        _chartHelper.RefreshEmptyChart(WaitStatsChart, "Wait Stats", ""); // #8086: not the default -10 to 10 axes before the first read
+        _chartHelper.RefreshLoadingChart(WaitStatsChart, "Wait Stats", ""); // #8086, #8647: not the default -10 to 10 axes before the first read, and not "No data" before a read found none
         ApplyTheme(QueryDurationTrendChart);
         ApplyTheme(ProcDurationTrendChart);
         ApplyTheme(QueryStoreDurationTrendChart);
@@ -592,6 +595,10 @@ public partial class ServerTab : UserControl
             && e.Source != SystemEventsSubTabControl && e.Source != ConfigChangesSubTabControl) return;
 
         UpdateCompareDropdownState();
+
+        /* #8647: the tab just picked says "Loading..." where its empty-state sentence goes until its first read returns. Before the
+           request below, so the first frame the tab paints already has it, and before the drill-down return, which loads its own tab. */
+        ShowFirstPaintLoading((e.Source as TabControl)?.SelectedItem as TabItem);
 
         // A drill-down navigates here programmatically and loads its own filtered snapshot;
         // skip the auto-refresh so it doesn't clobber that data via an async race. The flag is

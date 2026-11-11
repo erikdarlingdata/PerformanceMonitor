@@ -59,8 +59,8 @@ public sealed class ViewerCredentialProfile
     public string AuthTypeDisplay => AuthType switch
     {
         AuthenticationTypes.SqlServer => "SQL Server",
-        AuthenticationTypes.ServicePrincipal => "Azure — Service Principal",
-        AuthenticationTypes.ManagedIdentity => "Azure — Managed Identity",
+        AuthenticationTypes.ServicePrincipal => "Azure: Service Principal",
+        AuthenticationTypes.ManagedIdentity => "Azure: Managed Identity",
         _ => AuthType
     };
 
@@ -72,5 +72,5 @@ public sealed class ViewerCredentialProfile
     public string PickerDisplay =>
         string.IsNullOrEmpty(Id) || Id.Length < 8
             ? $"{Name} ({AuthTypeDisplay})"
-            : $"{Name} ({AuthTypeDisplay}) — {Id[..8]}";
+            : $"{Name} ({AuthTypeDisplay}), {Id[..8]}";
 }

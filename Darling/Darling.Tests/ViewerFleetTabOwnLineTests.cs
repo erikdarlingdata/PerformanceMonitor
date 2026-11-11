@@ -72,7 +72,7 @@ public sealed class ViewerFleetTabOwnLineTests
                 tab.Initialize(new ViewerDataService(live));
                 await tab.RefreshAsync();
                 ClippedTextProbe.Settle(host);
-                if (lines.Count == 0 || !lines[^1].StartsWith("fleet sweeps — refreshed", StringComparison.Ordinal))
+                if (lines.Count == 0 || !lines[^1].StartsWith("fleet sweeps: refreshed", StringComparison.Ordinal))
                 {
                     findings.Add($"after a refresh against an answering store the last line is \"{Last(lines)}\"");
                 }
@@ -105,7 +105,7 @@ public sealed class ViewerFleetTabOwnLineTests
                 itemsSource.RemoveValueChanged(grid, onBound);
                 ClippedTextProbe.Settle(host);
 
-                if (lines.Count == 0 || !lines[^1].StartsWith("fleet sweeps — refreshed", StringComparison.Ordinal))
+                if (lines.Count == 0 || !lines[^1].StartsWith("fleet sweeps: refreshed", StringComparison.Ordinal))
                 {
                     findings.Add($"after the box's load finished against an answering store the last line is \"{Last(lines)}\", not the refreshed stamp");
                 }
