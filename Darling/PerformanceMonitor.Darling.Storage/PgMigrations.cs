@@ -2873,6 +2873,41 @@ BEGIN
 END $$;";
 
     /// <summary>
+    /// V259 (#8549): the daily wait totals, <c>collect.wait_stats_daily</c>, created where the store can hold it at migration time so the
+    /// Daily Summary can read closed days from it. Per server, per UTC day, per stored wait type: the summed positive
+    /// <c>delta_wait_time_ms</c>, the Daily Summary's own <c>wait_per_spelling</c> grain. On a store without TimescaleDB it is the plain view
+    /// over <c>collect.wait_stats</c> (<c>date_trunc('day')</c> for <c>time_bucket</c>). On a TimescaleDB store whose <c>wait_stats</c> is
+    /// already a hypertable (every upgrading store) it is the continuous aggregate, <c>WITH NO DATA</c>, which is catalog-only and
+    /// transaction-safe; the ensure sweep that follows on the same start finds it, gives it the daily refresh policy and the 35-day
+    /// retention, and the start-up backfill fills the closed days from raw (not here: it reads every server's rows). On a fresh
+    /// TimescaleDB store the table is not yet a hypertable here (the conversion runs after the ladder), so this rung creates the plain
+    /// view, which the sweep drops for the aggregate once the table is a hypertable, as on a store that gained the extension.
+    /// Idempotent. An older build ignores the relation and reads raw <c>wait_stats</c> as before. <b>No Lite twin:</b> Lite has no rollup tier.
+    /// </summary>
+    /* Declared before the Scripts array on purpose: a static readonly is null until its initializer runs, and the array reads it. */
+    private static readonly string V259Sql = @"
+DO $$
+DECLARE
+    v_hypertable boolean := false;
+BEGIN
+    /* timescaledb_information only exists once the extension has been created; to_regclass probes it without raising, and
+       the hypertable read goes through EXECUTE so the reference is parsed only when it runs. */
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NOT NULL THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = ''collect'' AND hypertable_name = ''wait_stats'')'
+        INTO v_hypertable;
+    END IF;
+
+    /* The relation exists from this rung on, whatever shape the store is in, so the viewer's probe reads the rung. A store that
+       already holds the relation (a rerun) keeps it: the aggregate's own IF NOT EXISTS, and CREATE OR REPLACE VIEW only on a name
+       that is not already a relation of another kind. */
+    IF v_hypertable THEN
+        EXECUTE '" + TimescaleSupport.CreateWaitStatsDailySql.Replace("'", "''") + @"';
+    ELSIF to_regclass('collect.wait_stats_daily') IS NULL THEN
+        EXECUTE '" + TimescaleSupport.CreateWaitStatsDailyFallbackViewSql.Replace("'", "''") + @"';
+    END IF;
+END $$;";
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -3388,6 +3423,7 @@ $rung$;";
         new Migration(256, "schema-tracking", V256Sql),
         new Migration(257, "collection-log-status-time", V257Sql),
         new Migration(258, "oversized-plan-backlog-dropped-index", V258Sql),
+        new Migration(259, "wait-stats-daily-rollup", V259Sql),
     };
 
     /* V256 (#7643): schema tracking. Versioned table and view definitions, kept by the schema_objects collector (Darling only).
@@ -3585,6 +3621,7 @@ CREATE INDEX IF NOT EXISTS idx_collection_log_status_time ON collect.collection_
     private const string V258Sql = @"
 CREATE INDEX IF NOT EXISTS idx_oversized_plan_backlog_dropped ON collect.oversized_plan_backlog (server_id, expired_at)
 WHERE captured_at IS NULL AND last_attempt_at IS NULL AND expired_at IS NOT NULL;";
+
 
     /// <summary>
     /// V235 (#7083): the blocking alert pages on blocked wait time. The shipped bars move: <c>blocking_count_threshold</c> 1 to 3,

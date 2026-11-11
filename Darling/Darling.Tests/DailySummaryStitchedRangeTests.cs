@@ -60,7 +60,9 @@ public sealed class DailySummaryStitchedRangeTests
         var coverage = new RollupCoverage(
             new Dictionary<string, DateTime>(StringComparer.Ordinal) { [Legacy] = DaysAgo(90), [Successor] = successorFloor },
             new Dictionary<string, DateTime>(StringComparer.Ordinal),
-            RollupAvailability.All);
+            /* #8549: the wait rollup is a different routing from the queries stitch these two compare, and takes the same statement out of
+               byte-identity with the two-argument form by design, so the availability leaves it out. */
+            RollupAvailability.All with { WaitStatsDaily = false });
 
         var windowStart = DaysAgo(10);
         var stitched = DailySummarySql.RangeSqlFor(RetentionTier.Hourly, coverage, windowStart);
@@ -158,7 +160,9 @@ public sealed class DailySummaryStitchedRangeTests
         var coverage = new RollupCoverage(
             new Dictionary<string, DateTime>(StringComparer.Ordinal) { [DailyLegacy] = DaysAgo(200) },
             new Dictionary<string, DateTime>(StringComparer.Ordinal),
-            RollupAvailability.All);
+            /* #8549: the wait rollup is a different routing from the queries stitch these two compare, and takes the same statement out of
+               byte-identity with the two-argument form by design, so the availability leaves it out. */
+            RollupAvailability.All with { WaitStatsDaily = false });
 
         var stitched = DailySummarySql.RangeSqlFor(RetentionTier.Daily, coverage, DaysAgo(10));
         var plain = DailySummarySql.RangeSqlFor(RetentionTier.Daily);

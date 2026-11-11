@@ -63,7 +63,7 @@ services:
     # policy runs never happen). The values below are the FLOOR of the formula the managed store writes
     # (DeriveWorkerFloor): max_background_workers = HypertableCount + 2, max_worker_processes = 3 + that + 8.
     # HypertableCount is 72 today (TimescaleSupport.HypertableCount) - 74 and 85. The managed store raises the
-    # pair with host RAM (16 slots per GB, up to every policy job the schema carries, 177 / 188 at 12 GB or
+    # pair with host RAM (16 slots per GB, up to every policy job the schema carries, 180 / 191 at 12 GB or
     # more; DeriveWorkerSettings); a compose container has no host-RAM figure to read, and a 2 GB container
     # is at the floor under that rule anyway. A container with a mem_limit of 12 GB or more may raise the two
     # flags to those numbers: a migrated store has 142 policy jobs, all overdue at a restart, and 74 slots

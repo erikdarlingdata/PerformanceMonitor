@@ -2849,6 +2849,8 @@ public sealed partial class DarlingWorker
         {
             await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
             var backfilled = await TimescaleSupport.BackfillBaselineAggregatesAsync(connection, _logger, stoppingToken);
+            /* #8549: the daily wait totals, on the same connection and the same off-the-start-path run. */
+            await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
             if (backfilled > 0)
             {
                 _logger.LogInformation(
