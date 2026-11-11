@@ -13,6 +13,7 @@
    each server's own clock, and the browser's clock cannot be subtracted from it. */
 
 import { VIZ } from "../../panels.js";
+import { PG_NOT_COLLECTED } from "./gate.js";
 import { el, mount, loadingStrip, emptyStrip, captionStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
 
 const LIMIT = 200;
@@ -109,7 +110,8 @@ export const tab = {
         if (mine !== seq) return;
         if (res.kind === "aborted" || res.kind === "auth") return;
         if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-        if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+        /* #8555: a store with only PostgreSQL targets never collects server properties, so "yet" would promise something that never comes. */
+        if (res.kind === "empty") return mount(body, emptyStrip(ctx && ctx.onlyPostgres ? PG_NOT_COLLECTED : res.message));
         const data = res.data || {};
         const legend = data.hardware_note_legend || {};
         const rows = (data.servers || []).map((r) => displayRow(r, legend));

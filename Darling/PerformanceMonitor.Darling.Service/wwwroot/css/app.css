@@ -1318,6 +1318,15 @@ pre.code {
 .markdown-body .md-pre code { font-family: var(--mono); font-size: 0.8rem; color: var(--dim); white-space: pre; }
 /* A "text" fence (the notebook's finding story): still literal text, but wrapped prose in the body font. */
 .markdown-body .md-pre-text code { font-family: inherit; font-size: 0.9rem; color: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Pipe tables and block quotes (markdown.js): the table scrolls sideways inside its own wrapper instead of widening the page. */
+.markdown-body .md-table-wrap { margin: 0.6em 0; overflow-x: auto; }
+.markdown-body .md-table { border-collapse: collapse; font-size: 0.9rem; }
+.markdown-body .md-table th,
+.markdown-body .md-table td { border: 1px solid var(--border); padding: 0.25rem 0.6rem; text-align: left; vertical-align: top; }
+.markdown-body .md-table th { background: var(--bg-dark); font-weight: 600; }
+.markdown-body .md-table .md-al-right { text-align: right; }
+.markdown-body .md-table .md-al-center { text-align: center; }
+.markdown-body .md-quote { margin: 0.6em 0; padding: 0.1rem 0.9rem; border-left: 3px solid var(--border); color: var(--dim); }
 .markdown-body .md-link { color: var(--accent); }
 .markdown-body .md-link:hover { text-decoration: underline; }
 

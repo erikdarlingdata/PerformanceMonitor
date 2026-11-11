@@ -76,14 +76,21 @@ public partial class ViewerServerTab
 
     /// <summary>Loads the Performance Trends sub-tab: the four per-second trend reads run concurrently
     /// (NpgsqlDataSource pools a connection each), then each result renders into its chart.</summary>
-    private async Task LoadPerformanceTrendsAsync(DateTime startUtc, DateTime endUtc, DateTime? tierNowUtc)
+    private async Task LoadPerformanceTrendsAsync(DateTime startUtc, DateTime endUtc, DateTime? tierNowUtc, ViewerLoadTimer? timer = null)
     {
+        timer?.Surface = "Queries > Performance Trends";
         using var readFanOut = ViewerReadFanOut.Of(4);
 
         var queryDurationTask = _dataService.GetQueryDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc);
         var procDurationTask = _dataService.GetProcedureDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc);
         var queryStoreDurationTask = _dataService.GetQueryStoreDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         var executionCountTask = _dataService.GetExecutionCountTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc);
+
+        /* #8549: each trend read is booked by name (Track hands the task back unchanged), so the slow one is the one the SlowLoad line names. */
+        _ = timer?.Track("query duration trend read", queryDurationTask);
+        _ = timer?.Track("procedure duration trend read", procDurationTask);
+        _ = timer?.Track("Query Store duration trend read", queryStoreDurationTask);
+        _ = timer?.Track("execution count trend read", executionCountTask);
 
         await Task.WhenAll(queryDurationTask, procDurationTask, queryStoreDurationTask, executionCountTask);
 
@@ -98,7 +105,7 @@ public partial class ViewerServerTab
         IReadOnlyList<BaselineDiscontinuity> discontinuities;
         try
         {
-            discontinuities = await _dataService.GetBaselineDiscontinuitiesAsync(_server.ServerId, startUtc, endUtc);
+            discontinuities = await Timed(timer, "baseline discontinuity read", _dataService.GetBaselineDiscontinuitiesAsync(_server.ServerId, startUtc, endUtc));
         }
         catch (Exception ex)
         {
@@ -106,10 +113,10 @@ public partial class ViewerServerTab
             discontinuities = Array.Empty<BaselineDiscontinuity>();
         }
 
-        UpdateQueryDurationTrendChart(queryDurationTask.Result, startUtc, endUtc, discontinuities);
-        UpdateProcDurationTrendChart(procDurationTask.Result, startUtc, endUtc, discontinuities);
-        UpdateQueryStoreDurationTrendChart(queryStoreDurationTask.Result, startUtc, endUtc, discontinuities);
-        UpdateExecutionCountTrendChart(executionCountTask.Result, startUtc, endUtc, discontinuities);
+        ClientStep(timer, "query duration chart draw", () => UpdateQueryDurationTrendChart(queryDurationTask.Result, startUtc, endUtc, discontinuities));
+        ClientStep(timer, "procedure duration chart draw", () => UpdateProcDurationTrendChart(procDurationTask.Result, startUtc, endUtc, discontinuities));
+        ClientStep(timer, "Query Store duration chart draw", () => UpdateQueryStoreDurationTrendChart(queryStoreDurationTask.Result, startUtc, endUtc, discontinuities));
+        ClientStep(timer, "execution count chart draw", () => UpdateExecutionCountTrendChart(executionCountTask.Result, startUtc, endUtc, discontinuities));
     }
 
     /// <summary>

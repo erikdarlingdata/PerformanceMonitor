@@ -355,8 +355,61 @@ public partial class InvestigationsWindow : Window
             text.Append("Summary: ").AppendLine(report.Summary);
         }
 
-        text.Append("Evidence: ").Append(report.EvidenceJson);
+        text.Append("Evidence: ").Append(EvidenceText(report.EvidenceJson));
         return text.ToString();
+    }
+
+    private static readonly System.Text.Json.JsonSerializerOptions EvidenceWriteOptions = new()
+    {
+        WriteIndented = true,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
+    /// <summary>
+    /// The evidence as the detail pane shows it (#8555). An agent sends <c>key_numbers</c> as a string, and the string is often JSON of its own, so
+    /// the stored text shows it with a second layer of escapes. A <c>key_numbers</c> string that parses to an object or an array is drawn as
+    /// that object; one that does not parse stays the text it was. Evidence that is not a JSON array is shown as stored.
+    /// </summary>
+    internal static string EvidenceText(string? evidenceJson)
+    {
+        if (string.IsNullOrWhiteSpace(evidenceJson))
+        {
+            return evidenceJson ?? "";
+        }
+
+        try
+        {
+            if (System.Text.Json.Nodes.JsonNode.Parse(evidenceJson) is not System.Text.Json.Nodes.JsonArray items)
+            {
+                return evidenceJson;
+            }
+
+            foreach (var item in items)
+            {
+                if (item is System.Text.Json.Nodes.JsonObject obj
+                    && obj["key_numbers"] is System.Text.Json.Nodes.JsonValue value
+                    && value.TryGetValue<string>(out var typed))
+                {
+                    try
+                    {
+                        if (System.Text.Json.Nodes.JsonNode.Parse(typed) is System.Text.Json.Nodes.JsonObject or System.Text.Json.Nodes.JsonArray)
+                        {
+                            obj["key_numbers"] = System.Text.Json.Nodes.JsonNode.Parse(typed);
+                        }
+                    }
+                    catch (System.Text.Json.JsonException)
+                    {
+                        /* Not JSON: the string stays as the agent typed it. */
+                    }
+                }
+            }
+
+            return items.ToJsonString(EvidenceWriteOptions);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return evidenceJson;
+        }
     }
 
     /// <summary>

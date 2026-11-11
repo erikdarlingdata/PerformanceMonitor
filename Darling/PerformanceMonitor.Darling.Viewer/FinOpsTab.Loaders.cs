@@ -141,7 +141,7 @@ public partial class FinOpsTab
     /// Loads the FinOps tab's ACTIVE sub-tab only (Lite's visible-only rule). The shell's
     /// <see cref="LoadInnerTabAsync"/> owns the try/catch that surfaces failures on the status bar.
     /// </summary>
-    private async Task LoadFinOpsAsync()
+    private async Task LoadFinOpsAsync(ViewerLoadTimer? timer = null)
     {
         /* A PostgreSQL target has no SQL Server data for any single-server panel: run none of their reads (ApplyServerGate
            shows the one line). Server Inventory lists the fleet and always runs. */
@@ -168,7 +168,8 @@ public partial class FinOpsTab
                 await LoadFinOpsPvsStatsAsync();
                 break;
             case FinOpsOptimizationSubTabIndex:
-                await LoadFinOpsOptimizationAsync();
+                timer?.Surface = "FinOps > Optimization";
+                await LoadFinOpsOptimizationAsync(timer);
                 break;
             case FinOpsHighImpactSubTabIndex:
                 await LoadFinOpsHighImpactAsync();
@@ -177,7 +178,8 @@ public partial class FinOpsTab
                 await LoadFinOpsApplicationConnectionsAsync();
                 break;
             case FinOpsServerInventorySubTabIndex:
-                await LoadFinOpsServerInventoryAsync();
+                timer?.Surface = "FinOps > Server Inventory";
+                await LoadFinOpsServerInventoryAsync(timer);
                 break;
             case FinOpsIndexAnalysisSubTabIndex:
                 await LoadFinOpsIndexAnalysisAsync();
@@ -525,16 +527,20 @@ public partial class FinOpsTab
 
     // ── Optimization (idle DBs + tempdb + wait categories + expensive queries + memory grants) ──
 
-    private async Task LoadFinOpsOptimizationAsync()
+    private async Task LoadFinOpsOptimizationAsync() => await LoadFinOpsOptimizationAsync(null);
+
+    /// <summary>#8549: the five panels load side by side, and each is booked on the load's clock by name (its read and its grid bind), so a slow
+    /// Optimization says which panel was slow.</summary>
+    private async Task LoadFinOpsOptimizationAsync(ViewerLoadTimer? timer)
     {
         using var readFanOut = ViewerReadFanOut.Of(5);
 
         await Task.WhenAll(
-            LoadFinOpsIdleDatabasesAsync(),
-            LoadFinOpsTempdbSummaryAsync(),
-            LoadFinOpsWaitCategorySummaryAsync(),
-            LoadFinOpsExpensiveQueriesAsync(),
-            LoadFinOpsMemoryGrantEfficiencyAsync());
+            ViewerServerTab.Timed(timer, "idle databases panel", LoadFinOpsIdleDatabasesAsync()),
+            ViewerServerTab.Timed(timer, "tempdb summary panel", LoadFinOpsTempdbSummaryAsync()),
+            ViewerServerTab.Timed(timer, "wait categories panel", LoadFinOpsWaitCategorySummaryAsync()),
+            ViewerServerTab.Timed(timer, "expensive queries panel", LoadFinOpsExpensiveQueriesAsync()),
+            ViewerServerTab.Timed(timer, "memory grants panel", LoadFinOpsMemoryGrantEfficiencyAsync()));
     }
 
     private async Task LoadFinOpsIdleDatabasesAsync()
@@ -623,17 +629,20 @@ public partial class FinOpsTab
     /* Newest Server Inventory load wins: a read that finishes after a later one began is dropped (#5492 round 2). */
     private readonly FinOpsLoadSequence _finopsInventoryLoads = new();
 
-    private async Task LoadFinOpsServerInventoryAsync()
+    private async Task LoadFinOpsServerInventoryAsync() { await LoadFinOpsServerInventoryAsync(null); }
+
+    /// <summary>#8549: the inventory read and the fleet metrics read are each booked on the load's clock by name.</summary>
+    private async Task LoadFinOpsServerInventoryAsync(ViewerLoadTimer? timer)
     {
         var token = _finopsInventoryLoads.Begin();
         var includeRemoved = FinOpsServerChoice.IncludeRemoved(FinOpsShowRemovedCheck.IsChecked);
-        var servers = await _dataService.GetServerInventoryAsync(includeRemoved);
+        var servers = await ViewerServerTab.Timed(timer, "server inventory read", _dataService.GetServerInventoryAsync(includeRemoved));
 
         /* Overlay each server's collected metrics + health score (mirrors Lite's LoadServerInventoryAsync minus the live query).
            #4227: ONE fleet round trip for every server's metrics, not one per server — the fan-out lanes
            this loop used to need (#3016) existed only to bound how many PER-SERVER reads ran concurrently,
            and there is now exactly one read total. */
-        var metrics = await _dataService.GetServerMetricsAsync();
+        var metrics = await ViewerServerTab.Timed(timer, "server metrics read", _dataService.GetServerMetricsAsync());
         if (!_finopsInventoryLoads.IsCurrent(token)) return;
         foreach (var item in servers)
         {
@@ -650,6 +659,7 @@ public partial class FinOpsTab
         }
 
         _finopsServerInventoryFilterMgr!.UpdateData(servers);
+        FinOpsNoServerInventoryMessage.Text = FinOpsServerChoice.InventoryEmptyText((ServerSelector.ItemsSource as IEnumerable<DarlingServer>)?.ToList());
         FinOpsNoServerInventoryMessage.Visibility = servers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         FinOpsServerInventoryCountIndicator.Text = FinOpsServerChoice.InventoryCountText(servers.Count, includeRemoved);
     }

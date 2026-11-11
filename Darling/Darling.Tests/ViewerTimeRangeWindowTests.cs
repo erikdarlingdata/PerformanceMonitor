@@ -271,11 +271,11 @@ public sealed class ViewerTimeRangeWindowTests
         Assert.Contains("GetQueryDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc)", trends, StringComparison.Ordinal);
         Assert.Contains("GetProcedureDurationTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc)", trends, StringComparison.Ordinal);
         Assert.Contains("GetExecutionCountTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, nowUtc: tierNowUtc)", trends, StringComparison.Ordinal);
-        Assert.Contains("LoadPerformanceTrendsAsync(DateTime startUtc, DateTime endUtc, DateTime? tierNowUtc)", trends, StringComparison.Ordinal);
+        Assert.Contains("LoadPerformanceTrendsAsync(DateTime startUtc, DateTime endUtc, DateTime? tierNowUtc, ViewerLoadTimer? timer = null)", trends, StringComparison.Ordinal);
 
         var queries = Read("ViewerServerTab.Queries.cs");
         Assert.Contains("var (startUtc, endUtc, tierNowUtc) = GetWindowUtcWithTierClock();", queries, StringComparison.Ordinal);
-        Assert.Contains("await LoadPerformanceTrendsAsync(startUtc, endUtc, tierNowUtc);", queries, StringComparison.Ordinal);
+        Assert.Contains("await LoadPerformanceTrendsAsync(startUtc, endUtc, tierNowUtc, timer);", queries, StringComparison.Ordinal);
 
         var range = Read("ViewerServerTab.TimeRange.cs");
         Assert.Contains("return (startUtc, endUtc, ViewerTimeRangeWindow.TierNowUtc(isLive, endUtc));", range, StringComparison.Ordinal);

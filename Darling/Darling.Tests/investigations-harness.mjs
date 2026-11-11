@@ -197,7 +197,7 @@ try {
     requests: [],
     reports: [
       { request_id: A, report_format: 1, agent_id: "agent-a", submitted_at: "2026-10-14T10:12:00Z", verdict: "needs_person", root_cause: "ROOTCAUSE <b>bold</b>",
-        root_cause_found: false, summary: "SUMMARY <img src=x onerror=alert(1)>", evidence: [{ tool: "get_blocking", key_numbers: "head blocker 412 s" }],
+        root_cause_found: false, summary: "SUMMARY <img src=x onerror=alert(1)>", evidence: [{ tool: "get_blocking", key_numbers: "head blocker 412 s" }, { tool: "get_cpu", key_numbers: "{\"sql_cpu\":\"17.9% average, 32% peak\",\"path\":\"a-\\u003Eb\"}" }],
         labels: ["unreviewed", "self_attributed"] },
     ],
     journal: [
