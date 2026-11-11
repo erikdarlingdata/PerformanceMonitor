@@ -237,8 +237,7 @@ public sealed class RetentionTierRouterTests
         /* #7028: counted inside the queries CTE only (it ends where deadlocks begins): the blocking waits chain that
            follows (BlockingWaits.HourlyChosenWaitsSql) holds its own NOT EXISTS and UNION ALL. */
         var queriesCte = sql[sql.IndexOf("queries AS (", StringComparison.Ordinal)..sql.IndexOf("deadlocks AS (", StringComparison.Ordinal)];
-        /* #8549: the daily carries one more member, the hours at and after its ceiling, between the raw tail and the not-carried member. */
-        Assert.Equal(tier == RetentionTier.Daily ? 3 : 2, queriesCte.Split("UNION ALL").Length - 1);
+        Assert.Equal(2, queriesCte.Split("UNION ALL").Length - 1);
 
         /* The untouched sources still read raw. */
         foreach (var untouched in new[] { "FROM v_wait_stats", "FROM v_deadlocks", "FROM v_cpu_utilization_stats", "FROM v_collection_log", "FROM v_memory_pressure_events" })

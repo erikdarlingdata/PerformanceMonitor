@@ -24,7 +24,9 @@ namespace Darling.Tests;
 /// rollup holds, plus the open day's last hours. The result must stay the raw statement's: EXCEPT both ways over a window whose
 /// yesterday is missing from the daily rollup and partly missing from the hourly one, on the legacy daily, on the stitched daily, on
 /// windows that start and end inside an hour (microseconds kept) and on a daily that holds nothing, and the hourly tier's statement is
-/// unchanged. The raw rows the plan reads (<see cref="ExplainBuffers.RowsRead"/>) stay at the hours no rollup holds.
+/// unchanged. The raw rows the plan reads (<see cref="ExplainBuffers.RowsRead"/>) stay at the hours no rollup holds. A hash seen only in a
+/// restart row (<c>sample_interval_seconds = 0</c>, which the interval-honest hourly skips) is still counted, as the raw tail counted it, and
+/// the stitched daily's legacy-hourly branch, for hours before the boundary day, runs in a case of its own.
 ///
 /// <para><b>Own store</b> (<c>#1776 own-store</c>): the test mints its own scratch database through <see cref="ScratchPostgres"/> and
 /// drops it whole.</para>
@@ -46,12 +48,7 @@ public sealed class DailySummaryClosedHoursLiveTests
 
         await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-        Assert.SkipWhen(!await TimescaleSupport.TryEnableAsync(connection, null, ct), "The live #8549 tests need TimescaleDB.");
-        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
-        await ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
-        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+        await PrepareAsync(scratch, connection, ct);
 
         var now = LiveClock.Now();
         var today = DateTime.SpecifyKind(now.Date, DateTimeKind.Unspecified);
@@ -132,6 +129,196 @@ public sealed class DailySummaryClosedHoursLiveTests
         await AssertSameRowsAsync(connection, RetentionTier.Daily, stitched, yesterday.AddHours(6).AddMinutes(30).AddTicks(10), yesterday.AddHours(12).AddMinutes(30).AddTicks(6543210), ct);
         var stitchedRows = await RowsReadAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Daily, stitched, start), start, end, rawChunks, ct);
         Assert.True(stitchedRows <= allowed, $"the stitched statement read {stitchedRows} raw query_stats rows, more than the {allowed} of the hours no rollup holds");
+    }
+
+    [Fact]
+    public async Task TheQueriesPart_CountsAHashSeenOnlyInARestartRow_AsTheRawTailDid_OnEveryShapeOfDaily()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await PrepareAsync(scratch, connection, ct);
+
+        var now = LiveClock.Now();
+        var today = DateTime.SpecifyKind(now.Date, DateTimeKind.Unspecified);
+        var yesterday = today.AddDays(-1);
+        var hourEnd = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(-1);
+        await SeedAsync(connection, today, now, ct);
+
+        /* Restart rows: no counter was knowable, so every delta is 0 and the interval is 0. The two window edges are yesterday 14:30 and 19:30
+           (a microsecond is ten ticks). Hours 9 and 21 to 23 of yesterday are missing from the hourly below, so RST_RAW sits in a raw hour and
+           the others in held hours. */
+        var windowStart = yesterday.AddHours(14).AddMinutes(30);
+        var windowEnd = yesterday.AddHours(19).AddMinutes(30);
+        await PlantAsync(connection, 854998000L, new (DateTime At, string? Hash, int Interval)[]
+        {
+            (yesterday.AddHours(11).AddMinutes(25), "RST_HELD", 0),
+            (yesterday.AddHours(22).AddMinutes(25), "RST_RAW", 0),
+            (yesterday.AddHours(15).AddMinutes(25), "RST_AND_NORMAL", 0),
+            (yesterday.AddHours(16).AddMinutes(25), "RST_AND_NORMAL", 120),
+            (yesterday.AddHours(17).AddMinutes(25), null, 0),
+            (yesterday.AddHours(13).AddMinutes(20), "RST_BEFORE", 0),
+            (yesterday.AddHours(20).AddMinutes(20), "RST_AFTER", 0),
+            (windowStart.AddTicks(-10), "RST_EDGE_OUT", 0),
+            (windowStart, "RST_EDGE_IN", 0),
+            (windowEnd.AddTicks(-10), "RST_END_IN", 0),
+            (windowEnd, "RST_END_OUT", 0),
+        }, ct);
+
+        /* Legacy shape. Its hourly has no filter and keeps restart rows, so this is the control. */
+        await RefreshAsync(connection, TimescaleSupport.QueryStatsHourlyView, today.AddDays(-6), hourEnd, ct);
+        await RefreshAsync(connection, TimescaleSupport.QueryStatsDailyView, today.AddDays(-6), yesterday, ct);
+        var legacyHourly = await ResolveAsync(connection, TimescaleSupport.QueryStatsHourlyView, ct);
+        await ExecuteAsync(connection, $"DELETE FROM {legacyHourly} WHERE bucket = '{Ts(yesterday.AddHours(9))}' OR (bucket >= '{Ts(yesterday.AddHours(21))}' AND bucket < '{Ts(today)}')", ct);
+        var start = today.AddDays(-5);
+        var end = today.AddDays(1);
+        await AssertSameRowsAsync(connection, RetentionTier.Daily, NoCoverage, start, end, ct);
+        await AssertSameRowsAsync(connection, RetentionTier.Daily, NoCoverage, windowStart, windowEnd, ct);
+
+        /* Stitched shape: the interval-honest successor holds the last three days. A hash seen only in a restart row of a held hour (RST_HELD,
+           RST_AND_NORMAL) or of a raw hour (RST_RAW) of yesterday is counted, and the rows outside a window are not. */
+        await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, today.AddDays(-3), hourEnd, ct);
+        await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalDailyView, today.AddDays(-3), yesterday, ct);
+        var intervalHourly = await ResolveAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, ct);
+        await ExecuteAsync(connection, $"DELETE FROM {intervalHourly} WHERE bucket = '{Ts(yesterday.AddHours(9))}' OR (bucket >= '{Ts(yesterday.AddHours(21))}' AND bucket < '{Ts(today)}')", ct);
+        Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM {intervalHourly} WHERE query_hash LIKE 'RST%' AND query_hash <> 'RST_AND_NORMAL'", ct));
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var stitched = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, await TimescaleSupport.DetectRollupsAsync(dataSource, ct), ct);
+        Assert.Contains("queries_ceiling_successor", DailySummarySql.RangeSqlFor(RetentionTier.Daily, stitched, start), StringComparison.Ordinal);
+        await AssertSameRowsAsync(connection, RetentionTier.Daily, stitched, start, end, ct);
+        await AssertSameRowsAsync(connection, RetentionTier.Daily, stitched, windowStart, windowEnd, ct);
+
+        /* The interval-honest daily alone: the successor reaches the window start, so the legacy daily drops out of the statement. */
+        await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, today.AddDays(-6), today.AddDays(-3), ct);
+        await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalDailyView, today.AddDays(-6), today.AddDays(-3), ct);
+        var alone = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, await TimescaleSupport.DetectRollupsAsync(dataSource, ct), ct);
+        var aloneSql = DailySummarySql.RangeSqlFor(RetentionTier.Daily, alone, start);
+        Assert.DoesNotContain("queries_ceiling_successor", aloneSql, StringComparison.Ordinal);
+        Assert.Contains(TimescaleSupport.QueryStatsIntervalDailyView, aloneSql, StringComparison.Ordinal);
+        await AssertSameRowsAsync(connection, RetentionTier.Daily, alone, start, end, ct);
+        await AssertSameRowsAsync(connection, RetentionTier.Daily, alone, windowStart, windowEnd, ct);
+
+        /* The disagreement that was already there: a day the interval daily HOLDS leaves a restart-only hash out and raw counts it. The routed
+           statement keeps the daily's count for that day, one fewer than the raw statement's. */
+        var heldDay = today.AddDays(-2);
+        await PlantAsync(connection, 854997000L, new (DateTime At, string? Hash, int Interval)[] { (heldDay.AddHours(12).AddMinutes(25), "RST_IN_A_HELD_DAY", 0) }, ct);
+        await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, today.AddDays(-6), yesterday, ct);
+        await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalDailyView, today.AddDays(-6), yesterday, ct);
+        var rawCount = await UniqueQueriesAsync(connection, DailySummarySql.RangeSql, heldDay, yesterday, ct);
+        var routedCount = await UniqueQueriesAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Daily, alone, heldDay), heldDay, yesterday, ct);
+        Assert.Equal(rawCount - 1, routedCount);
+    }
+
+    /// <summary>
+    /// The stitched daily's legacy-hourly branch. Hours before the boundary day read the legacy hourly and hours from it the interval one, and
+    /// that holds only while a server's successor daily has nothing at or after the boundary, so the statement's raw_from is the legacy
+    /// daily's and lies before it. The test gives the other server successor rows (which sets the fleet-wide boundary) and takes this
+    /// server's out, then stops its legacy daily two days before the boundary. The raw rows the plan reads must then stay at the hours no
+    /// rollup holds: the legacy hourly holds the day before the boundary, so a probe or a read that asked the interval hourly for those hours
+    /// would fall through to raw and fail the row ceiling.
+    /// </summary>
+    [Fact]
+    public async Task TheStitchedQueriesPart_ReadsTheHoursBeforeTheBoundaryDay_FromTheLegacyHourly()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await PrepareAsync(scratch, connection, ct);
+
+        var now = LiveClock.Now();
+        var today = DateTime.SpecifyKind(now.Date, DateTimeKind.Unspecified);
+        var hourEnd = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(-1);
+        await SeedAsync(connection, today, now, ct);
+
+        var boundary = today.AddDays(-3);
+        await RefreshAsync(connection, TimescaleSupport.QueryStatsHourlyView, today.AddDays(-6), hourEnd, ct);
+        await RefreshAsync(connection, TimescaleSupport.QueryStatsDailyView, today.AddDays(-6), today.AddDays(-1), ct);
+        await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, boundary, hourEnd, ct);
+        await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalDailyView, boundary, today.AddDays(-1), ct);
+        var intervalDaily = await ResolveAsync(connection, TimescaleSupport.QueryStatsIntervalDailyView, ct);
+        var legacyDaily = await ResolveAsync(connection, TimescaleSupport.QueryStatsDailyView, ct);
+        await ExecuteAsync(connection, $"DELETE FROM {intervalDaily} WHERE server_id = {ServerId}", ct);
+        await ExecuteAsync(connection, $"DELETE FROM {legacyDaily} WHERE server_id = {ServerId} AND bucket >= '{Ts(today.AddDays(-4))}'", ct);
+        Assert.True(await ScalarAsync<long>(connection, $"SELECT count(*) FROM {intervalDaily} WHERE server_id <> {ServerId}", ct) > 0);
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var coverage = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, await TimescaleSupport.DetectRollupsAsync(dataSource, ct), ct);
+        var start = today.AddDays(-5);
+        var end = today.AddDays(1);
+        Assert.Equal(boundary, coverage.StitchFloor(TimescaleSupport.QueryStatsDailyView, RollupCoverage.StitchTier.Daily, start));
+        var sql = DailySummarySql.RangeSqlFor(RetentionTier.Daily, coverage, start);
+        Assert.Contains("queries_ceiling_successor", sql, StringComparison.Ordinal);
+
+        await AssertSameRowsAsync(connection, RetentionTier.Daily, coverage, start, end, ct);
+        await AssertSameRowsAsync(connection, RetentionTier.Daily, coverage, today.AddDays(-4).AddHours(6).AddMinutes(30).AddTicks(10), today.AddDays(-2).AddHours(12).AddMinutes(30).AddTicks(6543210), ct);
+
+        var rawChunks = new HashSet<string>(StringComparer.Ordinal);
+        await using (var chunks = new NpgsqlCommand("SELECT chunk_name FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_stats'", connection))
+        await using (var reader = await chunks.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                rawChunks.Add(reader.GetString(0));
+            }
+        }
+
+        Assert.NotEmpty(rawChunks);
+        var windowRows = await ScalarAsync<long>(connection,
+            $"SELECT count(*) FROM collect.query_stats WHERE server_id = {ServerId} AND collection_time >= '{Ts(today.AddDays(-4))}' AND collection_time < '{Ts(end)}'", ct);
+        var allowed = await ScalarAsync<long>(connection,
+            $"SELECT count(*) FROM collect.query_stats AS q WHERE q.server_id = {ServerId} AND q.collection_time >= '{Ts(today.AddDays(-4))}' AND q.collection_time < '{Ts(end)}' "
+            + $"AND NOT EXISTS (SELECT 1 FROM collect.{TimescaleSupport.QueryStatsHourlyView} AS h WHERE h.server_id = {ServerId} AND h.bucket = date_trunc('hour', q.collection_time) AND h.bucket < '{Ts(boundary)}') "
+            + $"AND NOT EXISTS (SELECT 1 FROM collect.{TimescaleSupport.QueryStatsIntervalHourlyView} AS h WHERE h.server_id = {ServerId} AND h.bucket = date_trunc('hour', q.collection_time) AND h.bucket >= '{Ts(boundary)}')", ct);
+        Assert.True(allowed > 0 && allowed * 10 < windowRows, $"the seed leaves {allowed} rows in hours no rollup holds, of {windowRows} from the legacy daily's ceiling");
+        var routedRows = await RowsReadAsync(connection, sql, start, end, rawChunks, ct);
+        Assert.True(routedRows <= allowed, $"the stitched statement read {routedRows} raw query_stats rows, more than the {allowed} of the hours no rollup holds");
+    }
+
+    /// <summary>Opens <paramref name="connection"/>, migrates, enables TimescaleDB on a connection of the probe's own (#1922) and builds the rollups.</summary>
+    private static async Task PrepareAsync(ScratchPostgres scratch, NpgsqlConnection connection, CancellationToken ct)
+    {
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.SkipWhen(!await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct), "The live #8549 tests need TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        await ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+    }
+
+    private static async Task PlantAsync(NpgsqlConnection connection, long firstId, IEnumerable<(DateTime At, string? Hash, int Interval)> rows, CancellationToken ct)
+    {
+        var id = firstId;
+        foreach (var (at, hash, interval) in rows)
+        {
+            await using var insert = new NpgsqlCommand("""
+                INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+                                                 delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
+                VALUES ($1, $2, $3, 'closed-hours-server', 'db', $4, '0x01', $6, $6, $6, $5)
+                """, connection);
+            insert.Parameters.AddWithValue(id++);
+            insert.Parameters.AddWithValue(at);
+            insert.Parameters.AddWithValue(ServerId);
+            insert.Parameters.AddWithValue(hash is null ? DBNull.Value : hash);
+            insert.Parameters.AddWithValue(interval);
+            insert.Parameters.AddWithValue(interval == 0 ? 0L : 10L);
+            await insert.ExecuteNonQueryAsync(ct);
+        }
+    }
+
+    /// <summary>The sum of <c>unique_queries</c> the statement returns over [start, end).</summary>
+    private static async Task<long> UniqueQueriesAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, CancellationToken ct)
+    {
+        await ExecuteAsync(connection, "DROP TABLE IF EXISTS pg_temp.qs_sum; DEALLOCATE ALL", ct);
+        await ExecuteAsync(connection, $"PREPARE qs_sum_q(int, timestamp, timestamp, timestamp) AS {sql}", ct);
+        await ExecuteAsync(connection, $"CREATE TEMP TABLE qs_sum AS EXECUTE qs_sum_q({ServerId}, '{Ts(start)}', '{Ts(end)}', '{Ts(EventWindowFloor.For(start))}')", ct);
+        return await ScalarAsync<long>(connection, "SELECT COALESCE(sum(unique_queries), 0)::bigint FROM qs_sum", ct);
     }
 
     /// <summary>EXCEPT both ways between the raw statement and the routed statement over [start, end), whole rows; returns the row count.</summary>

@@ -561,7 +561,7 @@ public static class DailySummarySql
             : ClosedHoursMember(
                 "(SELECT raw_from FROM queries_ceiling)",
                 $"EXISTS (SELECT 1 FROM collect.{hourlySource} AS s WHERE s.server_id = $1 AND s.bucket = g.h OFFSET 0)",
-                (hourlySource, string.Empty)) + "\n            UNION ALL\n            ";
+                (hourlySource, string.Empty, RestartRowPredicate(hourlySource, string.Empty)));
         var rawTailGate = hourlySource is null ? string.Empty : "\n                  AND (SELECT raw_from FROM queries_ceiling) IS NULL";
 
         /* #7505: the partial ceiling day's raw rows are counted with the rollup's own source filter, so that day
@@ -604,11 +604,11 @@ public static class DailySummarySql
                 SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
                 FROM v_query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-                  AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling), $2){partialDayFilter}{rawTailGate}
+                  AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling), $2){partialDayFilter}{rawTailGate}{closedHours}
             ) AS x
             GROUP BY x.d
             UNION ALL
-            {closedHours}/* #3653 A6: the days at or below this server's ceiling that the rollup holds NO row for while its
+            /* #3653 A6: the days at or below this server's ceiling that the rollup holds NO row for while its
                source still holds rows the rollup's own WHERE admits -- "not carried at this tier". One row per
                such day with a NULL count; the outer select passes it through as unique_queries = NULL and the
                readers list the day in days_missing[]. The two probes are the hole scan's
@@ -644,6 +644,29 @@ public static class DailySummarySql
         => TimescaleSupport.RollupCoverageProbeTargets.Any(t => string.Equals(t.View, view, StringComparison.Ordinal));
 
     /// <summary>
+    /// The restart rows a held hour owes the count, as the tail of a <c>WHERE</c> on <c>collect.query_stats AS c</c> (#8549), or null when the
+    /// hourly rollup keeps them. The interval-honest hourlies skip <c>sample_interval_seconds = 0</c> (a first sighting, an uncredited counter
+    /// reset, a gap) and the raw tail they replace does not, so a hash seen only in such a row is counted by raw and absent from the hourly.
+    /// The member reads those rows from raw through the partial index built for them (<c>PgTableTuning.QueryStatsRestartRowIndexName</c>,
+    /// whose predicate the read must carry as written) and unions their hashes with the hourly's. The legacy hourly has no filter and keeps
+    /// them, so it needs no such read. A filter this does not know is refused here instead of read wrongly.
+    /// </summary>
+    private static string? RestartRowPredicate(string hourlyView, string timePredicate)
+    {
+        var hourly = TimescaleSupport.RollupCoverageProbeTargets.First(t => string.Equals(t.View, hourlyView, StringComparison.Ordinal));
+        var filter = TimescaleSupport.MaterializationHoleSourceFilterFor(hourly.CreateSql);
+        if (filter.Length == 0)
+        {
+            return null;
+        }
+
+        return string.Equals(filter, "sample_interval_seconds IS DISTINCT FROM 0", StringComparison.Ordinal)
+            ? $" AND c.sample_interval_seconds = 0{timePredicate}"
+            : throw new NotSupportedException(
+                $"'{hourlyView}' filters its source with '{filter}', which the daily summary's closed-hours member does not know how to read back from raw (#8549).");
+    }
+
+    /// <summary>
     /// The member of the daily <c>queries</c> CTE that counts the days at and after the daily rollup's ceiling (#8549). The daily's refresh
     /// leaves yesterday out until the next UTC midnight, so for a day it lacks, a closed day, the old raw tail read every raw row of
     /// the day: 381 of the 482 buffers of a 30-day read on a test store. This member reads the HOURLY rollup for the hours it holds and raw
@@ -658,16 +681,21 @@ public static class DailySummarySql
     ///
     /// <para><b>One count per day over both halves.</b> A day can hold held hours and raw hours, and two counts of distinct hashes cannot
     /// be added, so the two halves are combined with <c>UNION</c> (which removes a hash seen in both) before the one <c>COUNT</c> per day.
-    /// Days past the ceiling never meet the daily half, which ends at the ceiling, or the not-carried member, which stops there too.</para>
+    /// The member returns only those pairs, to be placed inside the raw tail's pair set: the tail's gate is closed whenever this grid is
+    /// not empty, so the two never overlap, and the tail's one <c>COUNT(x.query_hash)</c> per day (a count of distinct pairs, never a
+    /// <c>COUNT(DISTINCT</c>) counts them. Days past the ceiling never meet the daily half, which ends at the ceiling, or the not-carried
+    /// member, which stops there too.</para>
     ///
     /// <para><b>Restart rows.</b> The interval-honest hourly skips <c>sample_interval_seconds = 0</c>, so a hash seen only in a restart
-    /// row is counted by the raw hours and not by the held ones. Raw hours stay unfiltered, as the days past the ceiling always were, and a
-    /// held hour counts what the daily will hold for it tomorrow.</para>
+    /// row would be counted by the raw tail this member replaces and not by a held hour. The reply must be the raw tail's for the same store,
+    /// so the member also reads the window's restart rows from raw (<see cref="RestartRowPredicate"/>, through the partial index on them) and
+    /// unions their hashes in, where the raw hours already count them. A hash seen in a restart row of a held hour and in an ordinary row of
+    /// another counts once. The days the daily itself holds still leave a restart-only hash out, as they did before this member.</para>
     ///
     /// <para>With no ceiling (<paramref name="rawFrom"/> NULL, an empty daily) the grid is empty and the raw tail reads the window as before:
     /// reading a month of the hourly for a daily that holds nothing is the read this member avoids.</para>
     /// </summary>
-    private static string ClosedHoursMember(string rawFrom, string heldProbe, params (string Relation, string Predicate)[] hourlyReads)
+    private static string ClosedHoursMember(string rawFrom, string heldProbe, params (string Relation, string Predicate, string? RestartPredicate)[] hourlyReads)
     {
         var hourly = string.Concat(hourlyReads.Select(read => $"""
                 SELECT date_trunc('day', s.bucket) AS d, s.query_hash
@@ -676,13 +704,19 @@ public static class DailySummarySql
                   AND s.bucket >= {rawFrom}{read.Predicate}
                 UNION
 
-            """));
+            """ + (read.RestartPredicate is null ? string.Empty : $"""
+                SELECT date_trunc('day', c.collection_time) AS d, c.query_hash
+                FROM collect.query_stats AS c
+                WHERE c.server_id = $1 AND c.collection_time >= $2 AND c.collection_time < $3
+                  AND c.collection_time >= {rawFrom}{read.RestartPredicate}
+                UNION
 
-        return $"""
+            """)));
+
+        return "\n" + $"""
             /* #8549: the hours at and after the daily's ceiling. A held hour is read from the hourly rollup, every other hour from raw,
-               and the two are UNIONed before the one count per day. See ClosedHoursMember. */
-            SELECT x.d, COUNT(x.query_hash) AS c
-            FROM (
+               and the pairs are UNIONed with the raw tail's (empty here, its gate is closed) under the tail's one count per day. See ClosedHoursMember. */
+            UNION
             {hourly}                SELECT date_trunc('day', q.h) AS d, r.query_hash
                 FROM (
                     SELECT g.h,
@@ -699,8 +733,6 @@ public static class DailySummarySql
                       AND c.collection_time < LEAST(q.h + INTERVAL '1 hour', $3)
                 ) AS r
                 WHERE NOT q.held
-            ) AS x
-            GROUP BY x.d
             """;
     }
 
@@ -772,8 +804,8 @@ public static class DailySummarySql
                 stitchedRawFrom,
                 $"CASE WHEN g.h < {boundary} THEN EXISTS (SELECT 1 FROM collect.{legacyTarget.Source} AS s WHERE s.server_id = $1 AND s.bucket = g.h OFFSET 0) "
                 + $"ELSE EXISTS (SELECT 1 FROM collect.{successorTarget.Source} AS s WHERE s.server_id = $1 AND s.bucket = g.h OFFSET 0) END",
-                (legacyTarget.Source, $" AND s.bucket < {boundary}"),
-                (successorTarget.Source, $" AND s.bucket >= {boundary}")) + "\n            UNION ALL\n            "
+                (legacyTarget.Source, $" AND s.bucket < {boundary}", RestartRowPredicate(legacyTarget.Source, $" AND c.collection_time < {boundary}")),
+                (successorTarget.Source, $" AND s.bucket >= {boundary}", RestartRowPredicate(successorTarget.Source, $" AND c.collection_time >= {boundary}")))
             : string.Empty;
         var rawTailGate = hierarchical ? $"\n                  AND {stitchedRawFrom} IS NULL" : string.Empty;
 
@@ -821,11 +853,11 @@ public static class DailySummarySql
                   AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling_successor), (SELECT raw_from FROM queries_ceiling_legacy), $2)
                   AND (collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_successor), (SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_legacy), $2)
                        OR ((SELECT last_day FROM queries_ceiling_successor) IS NOT NULL AND {partialDaySuccessor})
-                       OR ((SELECT last_day FROM queries_ceiling_successor) IS NULL AND {partialDayLegacy})){rawTailGate}
+                       OR ((SELECT last_day FROM queries_ceiling_successor) IS NULL AND {partialDayLegacy})){rawTailGate}{closedHours}
             ) AS x
             GROUP BY x.d
             UNION ALL
-            {closedHours}SELECT b.d, NULL::bigint AS c
+            SELECT b.d, NULL::bigint AS c
             FROM (
                 SELECT g.d
                 FROM generate_series(date_trunc('day', $2::timestamp), date_trunc('day', $3::timestamp), INTERVAL '1 day') AS g(d)

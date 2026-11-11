@@ -129,10 +129,7 @@ public sealed class DailySummaryNotCarriedTests
             /* The three members, in order: rollup half, raw tail, not-carried. */
             /* Counted inside the queries CTE only: the blocking waits chain (BlockingWaits.HourlyChosenWaitsSql) holds its own UNION ALL. */
             var queriesAt = sql.IndexOf("queries AS (", StringComparison.Ordinal);
-            /* #8549: a daily whose source is itself a rollup carries a fourth member between the raw tail and the not-carried one, the hours at and after
-               its ceiling (read from the hourly rollup, and from raw only where neither holds the hour). */
-            var hierarchicalSource = TimescaleSupport.RollupCoverageProbeTargets.Any(t => t.View == target.Source);
-            Assert.Equal(hierarchicalSource ? 3 : 2, sql[queriesAt..sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal)].Split("UNION ALL").Length - 1);
+            Assert.Equal(2, sql[queriesAt..sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal)].Split("UNION ALL").Length - 1);
             var rollupAt = sql.IndexOf("SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash", StringComparison.Ordinal);
             var rawAt = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
             var notCarriedAt = sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal);
