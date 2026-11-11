@@ -60,6 +60,10 @@ internal static class DarlingMcpWritePolicy
         "set_server_action",
     };
 
+    /// <summary>The server admin tools by name, in ordinal order and joined with "/", for the instructions and the start
+    /// logs (#8610): built from <see cref="ServerAdminTools"/>, so a tool added to the set is named without an edit to the text.</summary>
+    internal static string ServerAdminToolList => string.Join("/", ServerAdminTools.Order(StringComparer.Ordinal));
+
     /// <summary>
     /// Every registered tool that writes to the monitoring store's CONFIGURATION (the server registry, alert
     /// settings and routes, mute rules, custom alert rules, Custom Views, the analysis mute registry).
@@ -478,7 +482,7 @@ internal static class DarlingMcpWritePolicy
     /// (<c>DarlingMcpInstructionsBudgetTests</c>).</summary>
     internal static readonly string InstructionsLine =
         "Its write tools (alerting, mutes, custom alert rules, Custom Views, collector schedules, service flags, collection state, the server registry) change only the " +
-        "MONITORING store and are served when darling.json sets mcp.allowWrites (add_servers/edit_server/remove_server " +
+        "MONITORING store and are served when darling.json sets mcp.allowWrites (" + ServerAdminToolList + " " +
         "also need mcp.allowServerAdmin; both default off). An unserved write fails as unknown: ask the operator, do not " +
         "retry. Investigation tools (" + InvestigationToolList + ") write only investigation " +
         "state and are served when darling.json sets mcp.allowInvestigations with a token and mcp.allowWrites is off. " +

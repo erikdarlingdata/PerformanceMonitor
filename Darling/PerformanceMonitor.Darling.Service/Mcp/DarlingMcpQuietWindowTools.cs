@@ -84,7 +84,7 @@ public sealed class DarlingMcpQuietWindowTools
         "Repeating the same call is safe: an identical window already in force answers already_exists with its id. The running service " +
         "applies the window on its next collection sweep, when the write's config_version bump makes it reload its mute cache. " +
         "Answer: {status:\"created\", rule_id, scope, starts_at_utc, ends_at_utc, state, previous: null, undo:{tool:\"clear_quiet_window\", " +
-        "arguments:{rule_id}}}. Needs mcp.allowWrites; an agent investigation arm can never call it.")]
+        "arguments:{rule_id}}}. Needs mcp.allowWrites or a named operator token; an agent investigation arm can never call it.")]
     public static async Task<string> SetQuietWindow(
         NpgsqlDataSource postgres,
         [Description("ISO-8601 UTC end of the window (e.g. 2026-10-21T06:00:00Z). Required; must be in the future.")] string ends_at,
@@ -223,7 +223,7 @@ public sealed class DarlingMcpQuietWindowTools
         "invalid and is left alone, so this cannot delete an ordinary mute. Answer: {status:\"cleared\", rule_id, previous:{scope, " +
         "starts_at_utc, ends_at_utc, state, reason}, undo:{tool:\"set_quiet_window\", arguments:{...}}}; the undo carries the same server, " +
         "start and end and is only offered while the end is still ahead. {status:\"not_found\"} when no rule has that id. The running " +
-        "service applies the change on its next collection sweep. Needs mcp.allowWrites; an agent investigation arm can never call it.")]
+        "service applies the change on its next collection sweep. Needs mcp.allowWrites or a named operator token; an agent investigation arm can never call it.")]
     public static async Task<string> ClearQuietWindow(
         NpgsqlDataSource postgres,
         [Description("The id of the quiet window's rule (from set_quiet_window or get_mute_rules).")] string rule_id,

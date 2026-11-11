@@ -126,7 +126,7 @@ public sealed class McpWritePolicyTests
 
     /// <summary>The host's own registration (<see cref="McpHostService.RegisterMcpServer"/>) and JSON guard behind a
     /// test web server: what a client reaches when it calls a tool on the real endpoint.</summary>
-    private static async Task<TestServer> BuildServer(bool allowWrites)
+    private static async Task<TestServer> BuildServer(bool allowWrites, McpHostService.McpServing? serving = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -146,7 +146,7 @@ public sealed class McpWritePolicyTests
             builder.Services.AddSingleton(serviceType, _ => null!);
         }
 
-        McpHostService.RegisterMcpServer(builder.Services, allowWrites);
+        McpHostService.RegisterMcpServer(builder.Services, allowWrites, serving: serving);
 
         var app = builder.Build();
         McpHostService.UseJsonPostGuard(app);
@@ -299,6 +299,32 @@ public sealed class McpWritePolicyTests
         Assert.True(census.Success, "the instructions carry no '## Tools / N tools' census");
         Assert.Equal(served, int.Parse(census.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture));
         Assert.Equal(allowWrites, !instructions.Contains("in the catalog", StringComparison.Ordinal));
+    }
+
+    /* #8610: the census used to say "`mcp_allow_writes` is off" whenever the write tools were absent. With the switch on, they are also absent
+       when the tokenless opt-out leaves no token or the token is under the floor, and a client told the switch is off could not tell the
+       operator what to change. Each state is run through the host's own decision (DecideServing) and registration. */
+    private const string UsableToken = "0123456789abcdefghij";
+
+    [Theory]
+    [InlineData(false, false, UsableToken, "`mcp_allow_writes` is off, so the")]
+    [InlineData(true, true, null, "`mcp_allow_writes` is on, but `mcp_allow_tokenless_loopback` is on too and the write tools need an MCP token")]
+    [InlineData(true, false, "short", "`mcp_allow_writes` is on, but the MCP token is not usable (it needs a token of at least")]
+    [InlineData(true, false, "aaaaaaaaaaaaaaaaaaaaaaaa", "`mcp_allow_writes` is on, but the MCP token is not usable (it needs a token of at least")]
+    public async Task InitializeInstructions_SayWhyTheWriteToolsAreNotServed_ForEachState(
+        bool allowWrites, bool tokenless, string? token, string expected)
+    {
+        var serving = McpHostService.DecideServing(token, tokenless, allowWrites, allowInvestigations: false);
+        Assert.False(serving.Writes);
+        using var server = await BuildServer(serving.Writes, serving);
+
+        var initBody = await PostAsync(server,
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"," +
+            "\"capabilities\":{},\"clientInfo\":{\"name\":\"state-test\",\"version\":\"1.0\"}}}");
+        var instructions = ResultOf(initBody).GetProperty("instructions").GetString() ?? "";
+
+        Assert.Contains(expected, instructions, StringComparison.Ordinal);
+        Assert.Equal(!allowWrites, instructions.Contains("`mcp_allow_writes` is off", StringComparison.Ordinal));
     }
 
     /// <summary>#5789 correction: no sentence of the rendered instructions points a client at a tool this server

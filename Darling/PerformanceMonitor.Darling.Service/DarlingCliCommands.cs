@@ -4092,7 +4092,7 @@ public static partial class DarlingCliCommands
             ? null
             : $"NOTE: darling.json gives {section} no token, so the service will not start it. Set {section}.network.encryptedToken " +
               $"(from --encrypt-password) or {section}.network.token and restart the service, or set {section}.allowTokenlessLoopback " +
-              (mcp ? "to true to serve loopback with no token (the write tools stay off)." : "to true to serve loopback with no token, for reads only.");
+              (mcp ? $"to true to serve loopback with no token (the write and investigation tools stay off; they need a token of at least {DarlingHostBinding.MinimumTokenLength} characters with at least {DarlingHostBinding.MinimumDistinctTokenCharacters} different ones)." : "to true to serve loopback with no token, for reads only.");
     }
 
     /// <summary>Whether darling.json gives the endpoint a token value (presence only; the value is never read here).</summary>

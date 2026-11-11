@@ -57,7 +57,7 @@ public sealed partial class DarlingMcpAlertTools
         "A webhook value is sealed for its proxy: changing a proxy while its URL or key is saved needs the URL or key again. The generic headers are sealed for the generic URL as stored, so generic_headers goes with generic_webhook_url in the same call and a new generic URL needs the headers again; a saved signing key blocks a generic URL or proxy change until it is removed in the Viewer. " +
         "A URL must be an absolute http or https URL; a link-local or cloud instance address is refused. Recipients are comma separated plain addresses, at most 50. generic_headers is a JSON object, generic_body_template a template; the Viewer's checks apply. " +
         "If the service has no password key the secret fields are refused with the same words the Viewer shows; nothing is written. " +
-        "Needs mcp.allowWrites and a token. The database role this tool runs as can neither read nor write a secret column: the row is changed by the store's own config.set_notification_channels function, which re-reads the row under its lock. " +
+        "Needs a named operator token, or a token with mcp.allowWrites. The database role this tool runs as can neither read nor write a secret column: the row is changed by the store's own config.set_notification_channels function, which re-reads the row under its lock. " +
         "Returns {status:\"updated\", changed, settings:{field:{before, after}}, undo:{tool, arguments, note}}, or {status:\"unchanged\"}. undo puts the non-secret settings back; a secret cannot be restored by undo, pass it again.")]
     public static Task<string> UpdateNotificationChannels(
         NpgsqlDataSource postgres,

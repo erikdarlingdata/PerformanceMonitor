@@ -292,7 +292,7 @@ internal sealed class DarlingHttpRefusalLog
         DarlingRefusalGate.SignIn => "OIDC sign-in flow (web.network.oidc)",
         DarlingRefusalGate.PreAuthFailure => "failure before the request was authenticated",
         DarlingRefusalGate.JsonContentType => "JSON-only POST check (Content-Type)",
-        DarlingRefusalGate.ReadsOnlyDashboard => $"reads-only dashboard (set web.network.encryptedToken, at least {DarlingHostBinding.MinimumTokenLength} characters, to make changes)",
+        DarlingRefusalGate.ReadsOnlyDashboard => $"reads-only dashboard (set web.network.encryptedToken, at least {DarlingHostBinding.MinimumTokenLength} characters with at least {DarlingHostBinding.MinimumDistinctTokenCharacters} different ones, to make changes)",
         DarlingRefusalGate.TokenSignInSite => "same-site check on the token sign-in form (set web.publicBaseUrl behind a proxy that rewrites Host)",
         _ => gate.ToString(),
     };
