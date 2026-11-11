@@ -250,6 +250,11 @@ public sealed class McpAnalysisTools
                         }
                     }, f.SideLeafKeys, McpHelpers.JsonOptions), McpHelpers.JsonOptions)!;
                 }).ToList();
+            /* #8572: a drill-down, a fact's ranked objects and the remediation evidence carry stored doubles; round the float noise out of each finding. */
+            foreach (var findingNode in findingNodes)
+            {
+                McpHelpers.RoundFloatNoise(findingNode);
+            }
             var findingLabels = findings.Select(AnalysisFindingsBudget.LabelFor).ToList();
 
             /* #8081, #8569: the findings ride severity-first, and the reply is packed to the shared response budget in that
@@ -448,7 +453,8 @@ public sealed class McpAnalysisTools
                 }, f, McpHelpers.JsonOptions), f.Ranked, McpHelpers.JsonOptions))
                 .ToList();
 
-            return JsonSerializer.Serialize(collection.Attach(new
+            /* #8572: the ranked objects carry stored doubles; the reply is rounded as a whole. */
+            return McpHelpers.RoundFloatNoise(JsonSerializer.Serialize(collection.Attach(new
             {
                 server = resolved.DisplayName,
                 total_facts = facts.Count,
@@ -466,7 +472,7 @@ public sealed class McpAnalysisTools
                     collectionCaveat),
                 coverage = coverage.ToPayload(),
                 facts = result
-            }, McpHelpers.JsonOptions), McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), McpHelpers.JsonOptions));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1001,7 +1007,8 @@ public sealed class McpAnalysisTools
             var (forcePlanStates, forcePlanStateNote) =
                 await analysisService.TryGetForcePlanTargetStatesAsync(resolved.ServerId, groups.Select(g => g.Latest));
 
-            return JsonSerializer.Serialize(new
+            /* #8572: the stored root and leaf values are doubles; the reply is rounded as a whole, as analyze_server's findings are. */
+            return McpHelpers.RoundFloatNoise(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 finding_count = groups.Count,
@@ -1111,7 +1118,7 @@ public sealed class McpAnalysisTools
                         standing_state = FactKinds.IsStandingStateKey(f.RootFactKey)
                     };
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions));
         }
         catch (Exception ex)
         {

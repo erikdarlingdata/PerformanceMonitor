@@ -152,7 +152,7 @@ public static partial class SensitiveStatements
     /// <summary>What a plan window says, in place of a plan, for a plan the filter withheld whole (the document's own
     /// value is <see cref="PlaceholderText"/>). The viewers show it as the empty state and refuse to save the plan with
     /// it, so "withheld" is never read as "could not be read". One sentence, so the apps and the tests share it.</summary>
-    public const string WithheldPlanSentence = "This plan was withheld by the statement filter (#4348).";
+    public const string WithheldPlanSentence = "This plan was withheld by the statement filter.";
 
     /// <summary>Whether a plan document is the whole-plan marker (what <see cref="Xml(string?, int)"/> returns for a
     /// plan it withholds whole) rather than a plan. A real plan is never equal to it.</summary>

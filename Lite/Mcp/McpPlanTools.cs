@@ -20,7 +20,7 @@ public sealed class McpPlanTools
     /// #4348: said when the statement filter withheld a plan whole, so the analysis is skipped instead of reading the
     /// placeholder as XML and reporting a parse error. Worded once for the four analysis tools.
     /// </summary>
-    internal const string WithheldPlanMessage = "This plan was withheld by the statement filter (#4348), so it was not analysed.";
+    internal const string WithheldPlanMessage = "This plan was withheld by the statement filter, so it was not analysed.";
 
     /// <summary>
     /// Where the <c>get_plan_xml</c> tool cuts a plan for transport (500 KB of characters, the "Truncated at 500KB" in its

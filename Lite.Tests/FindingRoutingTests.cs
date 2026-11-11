@@ -206,7 +206,7 @@ public class FindingRoutingTests
            a path-length statistic, not an evidence score, and a lone-symptom 1.0 means UNCORROBORATED. */
         var decision = FindingRouting.ClassifyPersisted("PAGEIOLATCH_SH", 1.0, 1, FindingRoute.Digest, 1.9, 1.5, null);
         Assert.Equal(FindingRoute.Digest, decision.Route);
-        Assert.Contains("pre-#3538", decision.Reason, StringComparison.Ordinal);
+        Assert.Contains("older confidence formula", decision.Reason, StringComparison.Ordinal);
 
         /* The two by-construction 1.0s are named first and never read as legacy. */
         Assert.Equal(FindingRoute.Page, FindingRouting.ClassifyPersisted(StoryConfidence.PileupRootKey, 1.0, 1, FindingRoute.Digest, 1.5, 1.5, null).Route);

@@ -430,7 +430,7 @@ public static partial class PgTargetAdvice
         if (heldCaptures > 0)
             inv.Append($"Across that run the horizon never came nearer than {Fmt(floor)} transactions and reached {Fmt(runPeak)}; the severity is graded on the floor, because that is the age it held for every capture of the run. ");
         inv.Append(persistenceArm
-            ? "That is the pinned-horizon shape the xmin alert pages on, graded on the same bars, and it is graded on the AGE rather than on one holder's identity, because equally old transactions taking turns as the winner hold the horizon exactly as hard as one transaction does (the shape that read 0 before #3691). "
+            ? "That is the pinned-horizon shape the xmin alert pages on, graded on the same bars, and it is graded on the AGE rather than on one holder's identity, because equally old transactions taking turns as the winner hold the horizon exactly as hard as one transaction does (the shape an older reading scored as 0). "
             : "That does not meet the pinned-horizon standard (a query that ran long and finished looks like this), so it is context, not a finding, exactly as the alert would decline to page it. ");
         if (heldCaptures > 0)
         {

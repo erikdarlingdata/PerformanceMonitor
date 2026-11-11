@@ -886,7 +886,7 @@ public sealed class DarlingMcpStoreMetricsTools
                     + "ran between the sweeps, so no delta is stated for this interval rather than a negative or a clamped zero; "
                     + "the next sweep differences cleanly against the post-reset row."
                     + (reading.PostmasterRestarted
-                        ? " The store's postmaster did restart inside this interval (#3955), which is the second of those causes: an "
+                        ? " The store's postmaster did restart inside this interval, which is the second of those causes: an "
                           + "unclean stop discards the statistics."
                         : string.Empty);
 
@@ -1018,7 +1018,7 @@ public sealed class DarlingMcpStoreMetricsTools
         {
             sb.Append(" RECONCILED: every row together accounts for ")
               .Append(inventory.AttributedPercent is { } ap ? $"{Invariant(ap)}%" : "an unknown share")
-              .Append(" of pg_database_size; the residual of ").Append(Invariant(inventory.ResidualBytes))
+              .Append(" of pg_database_size; the residual of ").Append(CountText.Grouped(inventory.ResidualBytes))
               .Append(" bytes is the database directory's non-relation files plus whatever moved between the ")
               .Append("sweep's statements, inside the ").Append(Gib(inventory.ToleranceBytes)).Append(" bar.");
         }
@@ -1137,7 +1137,7 @@ public sealed class DarlingMcpStoreMetricsTools
         return magnitude >= 1L << 30 ? (bytes / (double)(1L << 30)).ToString("0.0", CultureInfo.InvariantCulture) + " GiB"
             : magnitude >= 1L << 20 ? (bytes / (double)(1L << 20)).ToString("0.0", CultureInfo.InvariantCulture) + " MiB"
             : magnitude >= 1L << 10 ? (bytes / (double)(1L << 10)).ToString("0.0", CultureInfo.InvariantCulture) + " KiB"
-            : bytes.ToString(CultureInfo.InvariantCulture) + " bytes";
+            : CountText.Grouped(bytes) + " bytes";
     }
 
     private static string Invariant(double value) => value.ToString(CultureInfo.InvariantCulture);

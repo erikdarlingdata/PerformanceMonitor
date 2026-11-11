@@ -108,7 +108,7 @@ public static class QueryStoreSnapshotStaleness
         var days = (int)age.TotalDays;
         var hours = age.Hours;
         return days > 0
-            ? string.Format(CultureInfo.InvariantCulture, "{0} day{1} {2} hour{3}", days, days == 1 ? "" : "s", hours, hours == 1 ? "" : "s")
+            ? string.Format(CultureInfo.InvariantCulture, "{0:N0} day{1} {2} hour{3}", days, days == 1 ? "" : "s", hours, hours == 1 ? "" : "s")
             : string.Format(CultureInfo.InvariantCulture, "{0} hour{1}", hours, hours == 1 ? "" : "s");
     }
 }
