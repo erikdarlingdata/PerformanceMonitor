@@ -44,6 +44,10 @@ queries AS (
     SELECT date_trunc('day', collection_time) AS d, COUNT(DISTINCT query_hash) AS c
     FROM v_query_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+      /* #8651: unique queries counts queries with credited executions in the window. A restart row (sample_interval_seconds = 0:
+         a first sighting, an uncredited counter reset or a gap, stored beside a 0 delta) does not count its hash. A NULL interval
+         (a row from before the column) passes. Darling's twin is the queries CTE in DailySummarySql. */
+      AND sample_interval_seconds IS DISTINCT FROM 0
     GROUP BY 1
 ),
 deadlocks AS (
