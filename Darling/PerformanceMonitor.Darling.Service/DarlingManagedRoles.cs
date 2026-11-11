@@ -2284,6 +2284,9 @@ BEGIN
          || ' CASCADE';
    END LOOP;
 END $do$;
+
+-- Managed web credentials have their own protected-table carve, after every blanket grant.
+{WebAccessGroupSchema.ReassertPermissionsSql}
 ";
     }
 

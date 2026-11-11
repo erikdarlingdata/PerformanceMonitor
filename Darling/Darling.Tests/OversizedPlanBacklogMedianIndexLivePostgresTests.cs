@@ -89,6 +89,8 @@ ORDER BY collector_name;";
 
         Assert.Equal(new[] { "server_id", "observed_bytes" }, await KeyColumnsAsync(connection, ServerIndex, ct));
         Assert.Equal(new[] { "collector_name", "observed_bytes" }, await KeyColumnsAsync(connection, CollectorIndex, ct));
+        // Newer rungs move the probe past this one: drop their sentinels so the probe names this rung.
+        await RungRewindArtifacts.DropSentinelsAboveAsync(connection, RungVersion, ct);
         Assert.Equal(RungVersion, await ProbedVersionAsync(connection, ct));
 
         await RungRewindArtifacts.DropSentinelsAboveAsync(connection, RungVersion - 1, ct);

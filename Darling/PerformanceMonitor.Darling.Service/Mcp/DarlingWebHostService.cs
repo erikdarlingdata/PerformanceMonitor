@@ -106,6 +106,7 @@ public sealed class DarlingWebHostService : BackgroundService
     /// point of that endpoint is that it answers without depending on anything that can be down.</summary>
     private readonly CollectorRuntimeState _collectorState;
     private WebApplication? _app;
+    private DarlingWebGroupTokens? _managedGroups;
     private NpgsqlDataSource? _appDataSource;
     /* The read-only viewer pool /api/compose/run runs on (null when the store has no viewer login to give: the run then uses the web pool). */
     private NpgsqlDataSource? _composeReadDataSource;
@@ -349,6 +350,9 @@ public sealed class DarlingWebHostService : BackgroundService
                     break;
             }
 
+            if (_app is not null && _managedGroups is not null)
+                await _managedGroups.RefreshAsync(stoppingToken);
+
             lastEnabled = toggle.Enabled;
 
             try
@@ -389,6 +393,8 @@ public sealed class DarlingWebHostService : BackgroundService
         }
 
         _app = null;
+        _managedGroups?.Dispose();
+        _managedGroups = null;
 
         if (_composeReadDataSource is not null)
         {
@@ -440,6 +446,8 @@ public sealed class DarlingWebHostService : BackgroundService
     /// Internal so a test drives the real cleanup against the published certificate state.</summary>
     internal async Task DisposeFailedStartAsync()
     {
+        _managedGroups?.Dispose();
+        _managedGroups = null;
         if (_app is not null)
         {
             try { await _app.DisposeAsync(); } catch { /* best-effort */ }
@@ -1119,7 +1127,11 @@ public sealed class DarlingWebHostService : BackgroundService
                was parsed before any degrade and still holds it afterwards, so it goes through the MCP host's
                ResolveHostGuardListenIp (the one rule both hosts share) with the final mode: a start that fell back to
                loopback-only admits loopback names only, whatever it parsed. */
-            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpTokens: mcpTokens, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource, webTokens: webTokens, publicOrigin: publicOrigin);
+            _managedGroups = frontDoorProxy is null && _ownerSource is not null && postgres is not null
+                ? new DarlingWebGroupTokens(() => _ownerSource.Read(), postgres, () => DarlingPasswordKey.Current,
+                    accessToken, webTokens, mcpTokens, _logger)
+                : null;
+            ConfigurePipeline(_app, postgres, networkMode, DarlingMcpHostService.ResolveHostGuardListenIp(networkMode, networkListenIp), allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer, requireTokenWhenLoopbackOnly, trustedProxies: trustedProxies, sendHsts: network?.Hsts ?? false, dataDetail: McpDataDetailModes.Resolve(config.Mcp.DataDetail), mcpTokens: mcpTokens, sharedTokenReadsOnlyProblem: writeTokenProblem, adminArm: _adminArm, allowWindowsAuthOverUnverifiedTls: web.AllowWindowsAuthOverUnverifiedTls, frontDoorProxy: frontDoorProxy, composeReadPostgres: _composeReadDataSource, webTokens: webTokens, publicOrigin: publicOrigin, managedGroups: _managedGroups);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -1382,7 +1394,8 @@ public sealed class DarlingWebHostService : BackgroundService
         DarlingFrontDoorWebProxy? frontDoorProxy = null,
         NpgsqlDataSource? composeReadPostgres = null,
         DarlingWebTokenSet? webTokens = null,
-        Uri? publicOrigin = null)
+        Uri? publicOrigin = null,
+        DarlingWebGroupTokens? managedGroups = null)
     {
         /* A caller that does not say whether the token is under the length floor gets the same answer the start path
            computes: a short shared token serves reads only. Without this a forgotten argument meant writes. */
@@ -1569,6 +1582,30 @@ public sealed class DarlingWebHostService : BackgroundService
                 var isAuthFlowRoute = IsAuthFlowPath(context.Request.Path.Value ?? "/", oidcClient is not null);
 
                 var connectionIp = context.Items.TryGetValue(ConnectionIpItemKey, out var stashedIp) ? stashedIp as IPAddress : null;
+                // Only a cryptographically valid managed cookie, already inside the network gate, may read current group metadata.
+                // Every request it rides is checked, the page itself included, so a holder the group no longer admits is shown the
+                // sign-in form; only the page's own scripts and stylesheets, which carry no data, cost no store trip. A database
+                // failure must never reuse stale grants.
+                if (hasValidCookie && seat.GroupId is Guid groupId &&
+                    !IsPageAssetPath(context.Request.Path) &&
+                    DecideWebRequest(remote, cidr, isAuthFlowRoute, hasValidCookie, connectionIp) == WebRequestAction.Allow)
+                {
+                    try
+                    {
+                        var current = managedGroups is null ? null
+                            : await managedGroups.ResolveAsync(groupId, seat.GroupGeneration!.Value, context.RequestAborted);
+                        if (current is null) hasValidCookie = false;
+                        else seat = current;
+                    }
+                    catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { throw; }
+                    catch (Exception)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                        await context.Response.WriteAsJsonAsync(new { error = "Managed access is temporarily unavailable." });
+                        return;
+                    }
+                }
+
                 switch (DecideWebRequest(remote, cidr, isAuthFlowRoute, hasValidCookie, connectionIp))
                 {
                     case WebRequestAction.Allow:
@@ -1653,7 +1690,7 @@ public sealed class DarlingWebHostService : BackgroundService
                            abort still propagates — that is not a failure to report. */
                         try
                         {
-                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName, clock, mcpTokens, webTokens, frontDoor: frontDoorProxy is not null);
+                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals, token, signInThrottle, admittedHostName, clock, mcpTokens, webTokens, managedGroups, frontDoor: frontDoorProxy is not null);
                         }
                         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
                         {
@@ -1915,6 +1952,12 @@ public sealed class DarlingWebHostService : BackgroundService
     internal static bool IsApiPath(string path)
         => path.Equals("/api", StringComparison.OrdinalIgnoreCase)
             || path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True for one of the page's own scripts or stylesheets (<c>/js/*</c>, <c>/css/*</c>): static files that carry no data.
+    /// A managed group cookie is checked against the store on every other request, the page itself included.</summary>
+    internal static bool IsPageAssetPath(PathString path)
+        => path.StartsWithSegments("/js", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWithSegments("/css", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The body a read-only seat's write is refused with: <see cref="DarlingWebEndpoints.ReadOnlyAccountText"/> and the
     /// <see cref="DarlingWebStoreWrites.RefusalReason.ReadOnlySeat"/> reason (#7955).</summary>
@@ -2195,7 +2238,7 @@ public sealed class DarlingWebHostService : BackgroundService
         string? publicHostName,
         Func<DateTime> clock,
         IReadOnlyList<string>? mcpTokens,
-        DarlingWebTokenSet? webTokens,
+        DarlingWebTokenSet? webTokens, DarlingWebGroupTokens? managedGroups,
         bool frontDoor = false)
     {
         var path = context.Request.Path.Value ?? "/";
@@ -2203,7 +2246,7 @@ public sealed class DarlingWebHostService : BackgroundService
 
         if (string.Equals(path, LoginPath, StringComparison.OrdinalIgnoreCase))
         {
-            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null, publicHostName, clock, mcpTokens, webTokens, frontDoor: frontDoor);
+            await HandleTokenSignInAsync(context, accessToken, signingKey, signInThrottle, refusals, oidcClient is not null, publicHostName, clock, mcpTokens, webTokens, managedGroups, frontDoor: frontDoor);
             return;
         }
 
@@ -2476,7 +2519,7 @@ public sealed class DarlingWebHostService : BackgroundService
         string? publicHostName,
         Func<DateTime> clock,
         IReadOnlyList<string>? mcpTokens,
-        DarlingWebTokenSet? webTokens = null,
+        DarlingWebTokenSet? webTokens = null, DarlingWebGroupTokens? managedGroups = null,
         bool frontDoor = false)
     {
         var remote = context.Connection.RemoteIpAddress;
@@ -2568,14 +2611,36 @@ public sealed class DarlingWebHostService : BackgroundService
         /* The shared token's compare runs first and always, then every named token's (DarlingWebTokenSet.Match never stops early). */
         var sharedMatch = DarlingHostBinding.FixedTimeTokenEquals(posted, accessToken);
         var namedMatch = webTokens?.Match(posted);
-        if (!sharedMatch && namedMatch is null)
+        var groupMatch = managedGroups?.FindMatch(posted);
+        var groupCheckFailed = false;
+        if (!sharedMatch && namedMatch is null && groupMatch is not null && managedGroups is not null)
+        {
+            try
+            {
+                if (!managedGroups.Available ||
+                    await managedGroups.ResolveAsync(groupMatch.GroupId, groupMatch.Generation, context.RequestAborted) is null)
+                    groupMatch = null;
+            }
+            catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { throw; }
+            catch (Exception)
+            {
+                /* A store failure here takes the refusal every unknown token gets, below, so an outage cannot tell a presenter that
+                   the string they hold is a live group token; the throttle counts the miss there as well. The per-request path keeps
+                   its 503, because that holder is already signed in. The service log alone says the store could not be asked. */
+                groupMatch = null;
+                groupCheckFailed = true;
+            }
+        }
+        if (!sharedMatch && namedMatch is null && groupMatch is null)
         {
             signInThrottle.Missed(attempt);
             refusals.Report(
                 _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status200OK, remote,
-                webTokens is { HasNamed: true }
-                    ? "the posted token matches neither web.network.encryptedToken nor a web.network.tokens entry, so the login page was served instead"
-                    : "the posted token does not match web.network.encryptedToken, so the login page was served instead",
+                groupCheckFailed
+                    ? "the posted token is a managed group's and the group could not be checked against the store, so the login page was served instead"
+                    : webTokens is { HasNamed: true }
+                        ? "the posted token matches neither web.network.encryptedToken nor a web.network.tokens entry, so the login page was served instead"
+                        : "the posted token does not match web.network.encryptedToken, so the login page was served instead",
                 now);
             /* The form is served again as the answer to this POST, so its address is /auth/login: the page names
                the target it was covering in the form itself, or the retry would post the form's own address. */
@@ -2600,6 +2665,11 @@ public sealed class DarlingWebHostService : BackgroundService
         if (sharedMatch)
         {
             AppendSessionCookie(context, signingKey);
+        }
+        else if (groupMatch is not null && namedMatch is null)
+        {
+            AppendSessionCookie(context, signingKey, DarlingWebSeat.EncodeGroupCookieSubject(groupMatch.GroupId, groupMatch.Generation));
+            _logger.LogInformation("Web dashboard sign-in: managed group {GroupId} as reader from {Remote}", groupMatch.GroupId, remote);
         }
         else
         {

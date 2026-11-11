@@ -931,6 +931,11 @@ END $$;";
     /// </summary>
     private static readonly string V173Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.CreateSql;
 
+    /* V258 (#7988): the Viewer-managed web access groups. The rung puts a trigger on config.server_tags and marks it ENABLE ALWAYS, which take
+       strong locks on a table the Viewer edits, so it opens with the ladder's lock_timeout, V173's shape: a held lock fails the rung cleanly
+       and the retry loop reports who holds it. */
+    private static readonly string V261Sql = "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + WebAccessGroupSchema.CreateSql;
+
     /// <summary>
     /// V174 (#5655) — <c>config.service_version</c>: one row per service host with the product version the service reported at
     /// start, its process start time and the time the row was written. The Manage Servers window reads it to show the SERVICE's
@@ -3459,6 +3464,8 @@ $rung$;";
         new Migration(258, "oversized-plan-backlog-dropped-index", V258Sql),
         new Migration(259, "wait-stats-daily-rollup", V259Sql),
         new Migration(260, "oversized-plan-backlog-median-indexes", V260Sql),
+        new Migration(WebAccessGroupSchema.Version, "viewer-managed-web-access-groups", V261Sql),
+        new Migration(WebAccessAdvancedSchema.Version, "advanced-web-access-opt-in", WebAccessAdvancedSchema.CreateSql),
         new Migration(263, "job-history-oldest-daily-rollup", V263Sql),
     };
 

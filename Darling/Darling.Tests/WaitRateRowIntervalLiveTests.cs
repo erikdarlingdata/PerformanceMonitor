@@ -170,7 +170,7 @@ public sealed class WaitRateRowIntervalLiveTests
         var parameters = map.GetParameters();
         var rate = Array.FindIndex(parameters, p => p.Name == "hasWaitStatsCadenceBaseline");
         Assert.True(rate >= 0, "the probe has a hasWaitStatsCadenceBaseline sentinel");
-        Assert.Equal(parameters.Length - 7, rate);
+        Assert.Equal(parameters.Length - 9, rate);
 
         var allTrue = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)map.Invoke(null, allTrue)!);

@@ -44,7 +44,7 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// </summary>
 /// <param name="AllowedTagIds">The scoped reader's server tag ids, or null for every other seat. The tag tree and the tag map are read
 /// on each request, so a tag change applies to the next request without a new sign-in.</param>
-internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? OwnerKey = null, string? TokenName = null, IReadOnlyList<int>? AllowedTagIds = null)
+internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? OwnerKey = null, string? TokenName = null, IReadOnlyList<int>? AllowedTagIds = null, Guid? GroupId = null, Guid? GroupGeneration = null)
 {
     /// <summary>The shared-token seat: full edit reach, exactly what the token granted before per-user identity
     /// existed.</summary>
@@ -173,6 +173,9 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
     /// <summary>Encodes a named web token's seat for the session cookie's subject slot (#7735): <c>t1:{name}</c>.</summary>
     internal static string EncodeTokenCookieSubject(string name) => TokenPrefix + name;
 
+    internal static string EncodeGroupCookieSubject(Guid groupId, Guid generation) =>
+        "g1:" + groupId.ToString("N") + ":" + generation.ToString("N");
+
     /// <summary>
     /// Resolves a validated session cookie's subject slot to a seat. Null (the two-segment shared-token
     /// cookie) is the shared-token seat; a recognized <c>o1:</c> or <c>o2:</c> encoding is that OIDC seat (<c>o1</c> with no owner key); a
@@ -187,6 +190,19 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
         {
             seat = SharedToken;
             return true;
+        }
+
+        if (cookieSubject.StartsWith("g1:", StringComparison.Ordinal))
+        {
+            var parts=cookieSubject.Split(':');
+            if(parts.Length==3 && Guid.TryParseExact(parts[1],"N",out var group) && group!=Guid.Empty &&
+                Guid.TryParseExact(parts[2],"N",out var generation) && generation!=Guid.Empty)
+            {
+                seat=new DarlingWebSeat(null,false,GroupId:group,GroupGeneration:generation);
+                return true;
+            }
+            seat=ReadsOnly;
+            return false;
         }
 
         if (cookieSubject.StartsWith(TokenPrefix, StringComparison.Ordinal) && cookieSubject.Length > TokenPrefix.Length)

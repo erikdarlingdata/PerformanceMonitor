@@ -38,6 +38,17 @@ public sealed class PasswordBinding
     /// <summary>The purpose of a webhook URL, the PagerDuty routing key and the generic webhook's headers.</summary>
     public const string WebhookPurpose = "webhook";
 
+    /// <summary>A managed web credential, bound to its immutable group and token generation.</summary>
+    public const string WebAccessTokenPurpose = "web_access_token";
+
+    /// <summary>Group names and tag edits do not change this binding; rotation always does.</summary>
+    public static PasswordBinding ForWebAccessToken(Guid groupId, Guid tokenGeneration)
+    {
+        if (groupId == Guid.Empty || tokenGeneration == Guid.Empty)
+            throw new ArgumentException("A web token binding requires a group and token generation.");
+        return new(WebAccessTokenPurpose, new string?[] { groupId.ToString("D"), tokenGeneration.ToString("D") });
+    }
+
     /// <summary>The webhook slots, in the order the notification row lists its columns: the Teams URL, the Slack URL,
     /// the generic URL, the PagerDuty routing key and the generic headers, then the generic webhook's signing key (#5998).
     /// The signing key and the previous signing key share the one slot: a rotation moves the sealed text from one column to
@@ -93,6 +104,7 @@ public sealed class PasswordBinding
         [RemediationPurpose] = 7,
         [SmtpPurpose] = 4,
         [WebhookPurpose] = 4,
+        [WebAccessTokenPurpose] = 2,
     };
 
     /// <summary>The server purpose's field count when a Query Store replica host is bound as an eleventh field (#6254).</summary>
