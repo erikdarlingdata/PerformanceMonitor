@@ -49,7 +49,7 @@ public sealed class DailySummaryCollRolledLiveTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
-        var now = DateTime.UtcNow;
+        var now = LiveClock.Now();
         var today = DateTime.SpecifyKind(now.Date, DateTimeKind.Unspecified);
         var currentHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
         await SeedAndRollUpAsync(connection, today.AddDays(-29), now, ct);
@@ -100,7 +100,7 @@ public sealed class DailySummaryCollRolledLiveTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
-        var now = DateTime.UtcNow;
+        var now = LiveClock.Now();
         var today = DateTime.SpecifyKind(now.Date, DateTimeKind.Unspecified);
         await SeedAndRollUpAsync(connection, today.AddDays(-29), now, ct);
 

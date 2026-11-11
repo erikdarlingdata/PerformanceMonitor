@@ -158,7 +158,7 @@ public static class DailySummarySql
                the server's whole window, the plan that read every uncompressed chunk. */
             SELECT date_trunc('day', l.collection_time) AS d,
                    COUNT(*) AS runs,
-                   COUNT(*) FILTER (WHERE l.status = 'ERROR') AS errs
+                   COUNT(*) FILTER (WHERE status = 'ERROR') AS errs
             FROM coll_raw_ranges AS rr
             CROSS JOIN LATERAL (
                 SELECT x.collection_time, x.status
