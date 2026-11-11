@@ -187,26 +187,65 @@ LEFT JOIN query_plan_dim AS d
     /// id, so a standing force that needs a person is never what a cap drops. It reads one row past the cap so the caller can tell the read was cut.
     /// First seen (#6833) comes from one grouped pass over the plan rows (<c>firsts</c>): the earliest row after the force's last absence. A correlated
     /// per-force minimum scanned every captured row once per force (500 forces over 24 hours of captures took 11 seconds).
+    /// <para>#8570: the capture rows are read once. One grouped pass finds each force's newest row time, its first row time and how many captures
+    /// (marker rows) it was present in; the newest row itself is then probed at that time through <c>idx_query_store_forced_plans_time</c>, not
+    /// picked by sorting every row of the window. A force that was present in every capture from its first row on was never absent after it, so its
+    /// first sighting is its first row: that is every force but the ones with a gap or a removal, and only those go through the absence step (<c>absent</c>,
+    /// <c>firsts</c>) the statement used to run for all of them. The old statement sorted 427,000 rows twice (28 MB and 14 MB to disk) and took 6,800 ms
+    /// on a 24 hour window of 300 forces, against 380 ms.</para>
     /// </summary>
     internal static string ForcesSql(DatabaseFilter databases, int maxForces) => $@"
-WITH {BaseCtes(databases)},
-absent AS (
-    SELECT p.database_name, p.plan_id, MAX(m.collection_time) AS last_absent
-    FROM (SELECT DISTINCT database_name, plan_id FROM plans) AS p
-    JOIN win AS m ON m.database_name = p.database_name AND m.plan_id IS NULL
-    WHERE NOT EXISTS (SELECT 1 FROM plans AS x WHERE x.database_name = p.database_name AND x.plan_id = p.plan_id AND x.collection_time = m.collection_time)
+WITH markers AS (
+    SELECT database_name, collection_time
+    FROM collect.query_store_forced_plans
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)} AND plan_id IS NULL),
+newest AS (
+    SELECT database_name, MAX(collection_time) AS newest_capture FROM markers GROUP BY database_name),
+plans AS NOT MATERIALIZED (
+    SELECT database_name, collection_time, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason,
+           variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope
+    FROM collect.query_store_forced_plans
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)}
+    AND   plan_id IS NOT NULL AND ($5::bigint IS NULL OR query_id = $5) AND ($6::bigint IS NULL OR plan_id = $6)),
+bounds AS (
+    SELECT p.database_name, p.plan_id, MAX(p.collection_time) AS latest_time, MIN(p.collection_time) AS first_row,
+           COUNT(m.collection_time) AS markers_present
+    FROM plans AS p
+    LEFT JOIN markers AS m ON m.database_name = p.database_name AND m.collection_time = p.collection_time
     GROUP BY p.database_name, p.plan_id),
+latest AS (
+    SELECT DISTINCT ON (p.database_name, p.plan_id) p.database_name, p.plan_id, p.query_id, p.plan_forcing_type, p.force_failure_count,
+           p.last_force_failure_reason, p.collection_time, p.variant_plan_ids, p.plan_guide_name, p.plan_guide_enabled, p.plan_guide_scope
+    FROM (SELECT DISTINCT latest_time FROM bounds) AS t
+    JOIN plans AS p ON p.collection_time = t.latest_time
+    JOIN bounds AS b ON b.database_name = p.database_name AND b.plan_id = p.plan_id AND b.latest_time = p.collection_time
+    ORDER BY p.database_name, p.plan_id, p.collection_time DESC),
+due AS (
+    SELECT b.database_name, b.plan_id, b.first_row, b.markers_present,
+           (SELECT COUNT(*) FROM markers AS m WHERE m.database_name = b.database_name AND m.collection_time >= b.first_row) AS markers_due
+    FROM bounds AS b),
+gappy AS (
+    SELECT database_name, plan_id FROM due WHERE markers_present <> markers_due),
+absent AS (
+    SELECT g.database_name, g.plan_id, MAX(m.collection_time) AS last_absent
+    FROM gappy AS g
+    JOIN markers AS m ON m.database_name = g.database_name
+    WHERE NOT EXISTS (SELECT 1 FROM plans AS x WHERE x.database_name = g.database_name AND x.plan_id = g.plan_id AND x.collection_time = m.collection_time)
+    GROUP BY g.database_name, g.plan_id),
 firsts AS (
     SELECT x.database_name, x.plan_id, MIN(x.collection_time) AS first_seen
     FROM plans AS x
+    JOIN gappy AS g ON g.database_name = x.database_name AND g.plan_id = x.plan_id
     LEFT JOIN absent AS a ON a.database_name = x.database_name AND a.plan_id = x.plan_id
     WHERE a.last_absent IS NULL OR x.collection_time > a.last_absent
     GROUP BY x.database_name, x.plan_id)
 SELECT l.database_name, l.plan_id, l.query_id, l.plan_forcing_type, l.force_failure_count, l.last_force_failure_reason, l.collection_time,
-       f.first_seen,
+       CASE WHEN g.plan_id IS NULL THEN d.first_row ELSE f.first_seen END,
        n.newest_capture,
        l.variant_plan_ids, l.plan_guide_name, l.plan_guide_enabled, l.plan_guide_scope
 FROM latest AS l
+JOIN due AS d ON d.database_name = l.database_name AND d.plan_id = l.plan_id
+LEFT JOIN gappy AS g ON g.database_name = l.database_name AND g.plan_id = l.plan_id
 LEFT JOIN firsts AS f ON f.database_name = l.database_name AND f.plan_id = l.plan_id
 LEFT JOIN newest AS n ON n.database_name = l.database_name
 ORDER BY CASE WHEN l.collection_time >= n.newest_capture AND (l.force_failure_count > 0 OR btrim(COALESCE(l.last_force_failure_reason, '')) <> '') THEN 0
@@ -236,20 +275,6 @@ JOIN newest AS n ON n.database_name = p.database_name AND p.collection_time >= n
 WHERE p.server_id = $1 AND p.collection_time <= $3 AND p.plan_id IS NOT NULL
 AND   ($5::bigint IS NULL OR p.query_id = $5) AND ($6::bigint IS NULL OR p.plan_id = $6){databases.Clause("p.database_name", 4)}
 GROUP BY p.database_name";
-
-    private static string BaseCtes(DatabaseFilter databases) => $@"win AS (
-    SELECT database_name, collection_time, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason,
-           variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope
-    FROM collect.query_store_forced_plans
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)}),
-plans AS (
-    SELECT * FROM win WHERE plan_id IS NOT NULL AND ($5::bigint IS NULL OR query_id = $5) AND ($6::bigint IS NULL OR plan_id = $6)),
-newest AS (
-    SELECT database_name, MAX(collection_time) AS newest_capture FROM win WHERE plan_id IS NULL GROUP BY database_name),
-latest AS (
-    SELECT DISTINCT ON (database_name, plan_id) database_name, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason, collection_time,
-           variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope
-    FROM plans ORDER BY database_name, plan_id, collection_time DESC)";
 
     /// <summary>Each database's newest marker row in the window. $1 server, $2 start, $3 end, $4 database filter.</summary>
     public static string CapturesSql(DatabaseFilter databases) => $@"
