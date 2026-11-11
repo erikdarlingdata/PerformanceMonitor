@@ -226,7 +226,7 @@ public sealed partial class ViewerDataService
     /// <see cref="QueryStoreIntervalWide.FirstExecUpperSlackSql"/> while the window was placed by <c>collection_time</c>.</para>
     /// </summary>
     private static readonly string QueryStoreTopTablePrefix = $$"""
-        WITH deduped AS (
+        WITH deduped AS NOT MATERIALIZED (
             SELECT
                 *,
                 1 AS rn
@@ -244,25 +244,10 @@ public sealed partial class ViewerDataService
 
         """;
 
-    /// <summary>
-    /// The table twin of <see cref="QueryStoreTopSql"/> (#3953): <see cref="QueryStoreTopTablePrefix"/> reading
-    /// <c>query_store_interval_wide</c> instead of the raw dedupe, sharing <see cref="QueryStoreTopSuffix"/> so
-    /// the two reads cannot drift below <c>ranked</c>. Chosen per call by
-    /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>; never used for <see cref="QueryStoreComparisonSql"/>.
-    /// $1 server_id, $2 the gate's clamp (<c>max(window start, raw's chunk floor)</c>), $3 window end (naive
-    /// UTC, NULL for an open/preset end), $4 top, $5 database filter.
-    /// <para>A static readonly (#4605), declared AFTER <see cref="QueryStoreTopTablePrefix"/> on purpose: static
-    /// initializers run in textual order, so declared above it this would concatenate a null prefix.</para>
-    /// </summary>
-    public static readonly string QueryStoreTopTableSql = QueryStoreTopTablePrefix + QueryStoreTopSuffix;
-
-    /// <summary>Everything from <c>ranked</c> down, shared by <see cref="QueryStoreTopSql"/> and
-    /// <see cref="QueryStoreTopTableSql"/> — both prefixes above produce the same "one row per identity, every
-    /// column deduped's dedupe/the table's own upsert already kept" shape, so this aggregates either one
-    /// identically. References $1, $4 and $6, plus $2/$3 (#5420: the inline-text fallback's window bound, the same $2/$3 both prefixes bind), so both share it unchanged.</summary>
-    private const string QueryStoreTopSuffix = $$"""
-        ranked AS (
-            SELECT
+    /// <summary>The select list of <c>ranked</c>: the group keys and every aggregate, one row per identity. Shared by the raw
+    /// read's <see cref="QueryStoreTopSuffix"/> and the interval-table read's <see cref="QueryStoreTopTableRankedHead"/>, so the two
+    /// cannot drift in what they return.</summary>
+    private const string QueryStoreTopRankedColumns = $$"""
                 database_name,
                 query_id,
                 plan_id,
@@ -325,6 +310,17 @@ public sealed partial class ViewerDataService
                 {{QueryStoreWeightedAverage.NumPhysicalIoReads}} AS avg_num_physical_io_reads,
                 MIN(CAST(min_num_physical_io_reads AS double precision)) AS min_num_physical_io_reads,
                 MAX(CAST(max_num_physical_io_reads AS double precision)) AS max_num_physical_io_reads
+        """;
+
+    /// <summary>The raw read's <c>ranked</c> and everything below it: <see cref="QueryStoreTopRankedColumns"/> grouped, ranked and
+    /// capped in one step, then <see cref="QueryStoreTopTail"/>. References $1, $4 and $6, plus $2/$3 (#5420: the inline-text
+    /// fallback's window bound, the same $2/$3 the raw prefix binds). The raw dedupe is a window function, so this read keeps its one
+    /// pass over it; the interval-table read has its own head (<see cref="QueryStoreTopTableRankedHead"/>, #8549).</summary>
+    private const string QueryStoreTopSuffix = QueryStoreTopRawRankedHead + "\n" + QueryStoreTopTail;
+
+    private const string QueryStoreTopRawRankedHead = "        ranked AS (\n            SELECT\n" + QueryStoreTopRankedColumns + "\n" + QueryStoreTopRawRankedFrom;
+
+    private const string QueryStoreTopRawRankedFrom = $$"""
             FROM deduped
             WHERE rn = 1
             /*SELFKEY:deduped*/
@@ -333,6 +329,60 @@ public sealed partial class ViewerDataService
             ORDER BY {{QueryStoreWeightedAverage.RankByDuration}} DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $6
         ),
+        """;
+
+    /// <summary>The NULL-safe match of a <c>deduped</c> row to a <c>keys</c> row on the six group columns, written so PostgreSQL can
+    /// hash it: <c>IS NOT DISTINCT FROM</c> cannot be a hash condition, so each column is matched as its value under COALESCE plus
+    /// whether it is NULL. Equal to <c>IS NOT DISTINCT FROM</c> for every value, a stored empty string and 0 included.</summary>
+    private const string KeyMatch =
+        "COALESCE(k.database_name, '') = COALESCE(deduped.database_name, '') AND (k.database_name IS NULL) = (deduped.database_name IS NULL)" +
+        "\n                  AND   COALESCE(k.query_id, 0) = COALESCE(deduped.query_id, 0) AND (k.query_id IS NULL) = (deduped.query_id IS NULL)" +
+        "\n                  AND   COALESCE(k.plan_id, 0) = COALESCE(deduped.plan_id, 0) AND (k.plan_id IS NULL) = (deduped.plan_id IS NULL)" +
+        "\n                  AND   COALESCE(k.query_hash, '') = COALESCE(deduped.query_hash, '') AND (k.query_hash IS NULL) = (deduped.query_hash IS NULL)" +
+        "\n                  AND   COALESCE(k.execution_type_desc, '') = COALESCE(deduped.execution_type_desc, '') AND (k.execution_type_desc IS NULL) = (deduped.execution_type_desc IS NULL)" +
+        "\n                  AND   COALESCE(k.replica_role, '') = COALESCE(deduped.replica_role, '') AND (k.replica_role IS NULL) = (deduped.replica_role IS NULL)";
+
+    /// <summary>
+    /// #8549: the interval-table read's <c>ranked</c>, in two steps so the sort carries narrow rows. One step (the raw read's
+    /// shape) grouped the table's wide rows: on a field store the Query Store grid over 30 days sorted about 1.29 million
+    /// rows per worker, 453 bytes wide, into external merges that wrote 1.8 GB of temp files, for 115,093 groups of which 250
+    /// were kept, and took 32.7 s cold. <c>keys</c> groups and ranks on the group key and the columns the rank needs, so its
+    /// sort or hash aggregate is narrow, and keeps the candidate limit ($6); the self-statement slot and the tag filter stay
+    /// there, before that limit (#7736). <c>ranked</c> then reads the same rows again and aggregates only the groups <c>keys</c>
+    /// kept. The rows, their keys and the candidate count are the one-step read's: <c>keys</c> ranks by the same expression and
+    /// tie-breaks, and the match to a kept key is NULL-safe (<see cref="KeyMatch"/>), because replica_role is NULL off an
+    /// availability group. <c>deduped</c> is <c>NOT MATERIALIZED</c> in <see cref="QueryStoreTopTablePrefix"/>: this reads it
+    /// twice, and a materialized copy of every wide row is the temp file this exists to avoid.
+    /// </summary>
+    private const string QueryStoreTopTableRankedHead = $$"""
+        keys AS (
+            SELECT
+                database_name,
+                query_id,
+                plan_id,
+                query_hash,
+                execution_type_desc,
+                replica_role
+            FROM deduped
+            WHERE rn = 1
+            /*SELFKEY:deduped*/
+            /*TAG:hash:query_hash*/
+            GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+            ORDER BY {{QueryStoreWeightedAverage.RankByDuration}} DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+            LIMIT $6
+        ),
+        ranked AS (
+            SELECT
+        {{QueryStoreTopRankedColumns}}
+            FROM deduped
+            WHERE rn = 1
+            AND   EXISTS (SELECT 1 FROM keys AS k WHERE {{KeyMatch}})
+            GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+        ),
+        """;
+
+    /// <summary>The page and its candidate count, from <c>page AS (</c> down, shared by the raw and the interval-table reads.</summary>
+    private const string QueryStoreTopTail = $$"""
         page AS (
         SELECT
             p.database_name,
@@ -458,6 +508,18 @@ public sealed partial class ViewerDataService
         LEFT JOIN page AS p ON TRUE
         ORDER BY p.page_ord
         """;
+
+    /// <summary>
+    /// The table twin of <see cref="QueryStoreTopSql"/> (#3953): <see cref="QueryStoreTopTablePrefix"/> reading
+    /// <c>query_store_interval_wide</c> instead of the raw dedupe, with the two-step <see cref="QueryStoreTopTableRankedHead"/> (#8549)
+    /// and the <see cref="QueryStoreTopTail"/> the raw read shares, so the two reads cannot drift below <c>ranked</c>.
+    /// Chosen per call by <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>; never used for <see cref="QueryStoreComparisonSql"/>.
+    /// $1 server_id, $2 the gate's clamp (<c>max(window start, raw's chunk floor)</c>), $3 window end (naive
+    /// UTC, NULL for an open/preset end), $4 top, $5 database filter.
+    /// <para>A static readonly (#4605), declared AFTER <see cref="QueryStoreTopTablePrefix"/> on purpose: static
+    /// initializers run in textual order, so declared above it this would concatenate a null prefix.</para>
+    /// </summary>
+    public static readonly string QueryStoreTopTableSql = QueryStoreTopTablePrefix + QueryStoreTopTableRankedHead + "\n" + QueryStoreTopTail;
 
     /// <summary>
     /// The store schema version <see cref="GetQueryStoreTopQueriesAsync"/> (the grid) requires before it will

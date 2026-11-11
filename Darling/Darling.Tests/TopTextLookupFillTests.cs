@@ -51,7 +51,10 @@ public sealed class TopTextLookupFillTests
     [MemberData(nameof(RawStatements))]
     public void TheLatestTextIsOneLookupForAllRankedGroups_NotOnePerRow(string name)
     {
-        var sql = Sql(name);
+        /* The Viewer statement's module CTE (#8549) probes idx_procedure_stats_time with a LATERAL ... LIMIT 1 once per ranked handle
+           (at most the candidate limit, an index probe, never a scan of the raw table). That is the module lookup, not the text lookup
+           this pin is about, so the module CTE is cut out before the text lookup's shape is checked. */
+        var sql = Sql(name).Replace(ViewerDataService.TopQueriesModuleCte, string.Empty, StringComparison.Ordinal);
         /* Materialized: the join to the lookup is NULL-safe, which PostgreSQL cannot hash, so a plain CTE is inlined into a
            nested loop and re-run per ranked row (#5309's per-row re-run in a new shape; TopTextLookupPlanLiveTests reads it
            from the plan). */

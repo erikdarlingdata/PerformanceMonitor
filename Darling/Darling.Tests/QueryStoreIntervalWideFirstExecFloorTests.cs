@@ -77,7 +77,6 @@ public sealed class QueryStoreIntervalWideFirstExecFloorTests
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
 
         Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, DarlingDataReader.QueryStoreTopSql, StringComparison.Ordinal);
-        Assert.StartsWith("WITH deduped AS (", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -94,7 +93,6 @@ public sealed class QueryStoreIntervalWideFirstExecFloorTests
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
 
         Assert.DoesNotContain(QueryStoreIntervalWide.PurgeEdgeMarginSql, ViewerDataService.QueryStoreTopSql, StringComparison.Ordinal);
-        Assert.StartsWith("WITH deduped AS (", sql, StringComparison.Ordinal);
     }
 
     [Fact]
