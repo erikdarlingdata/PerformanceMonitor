@@ -77,15 +77,23 @@ public static class DarlingFinOpsInventoryReader
     /// finding: a 4-day raw retention silently narrowed a 7-day claim).</para>
     /// </summary>
     public const string ServerMetricsSql = @"
-WITH cpu_24h AS (
+/* #8570: the window's rows are read first, on their own, and aggregated after. Grouped straight off the table, the planner fed the ordered-set
+   PERCENTILE_CONT through the (server_id, collection_time) index to skip a sort, which walks the heap server by server: every server revisits the whole
+   chunk's pages in a scattered order, and the index's own pages come with it (1,073 pages for 60,000 rows on a 42 server store, against 625 read in
+   file order here). A cold first call pays a disk wait for each scattered page. The 60,000 rows sort in memory in a few milliseconds. */
+WITH cpu_rows AS MATERIALIZED (
+    SELECT server_id, sqlserver_cpu_utilization
+    FROM v_cpu_utilization_stats
+    WHERE collection_time >= $1
+),
+cpu_24h AS (
     SELECT
         server_id,
         AVG(CAST(sqlserver_cpu_utilization AS DECIMAL(5,2))) AS avg_cpu_pct,
         MAX(sqlserver_cpu_utilization) AS max_cpu_pct,
         PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY sqlserver_cpu_utilization) AS p95_cpu_pct,
         COUNT(*) AS cpu_samples
-    FROM v_cpu_utilization_stats
-    WHERE collection_time >= $1
+    FROM cpu_rows
     GROUP BY server_id
 ),
 /* The worker counts feed the verdict (memory_ratio used to feed this read's own CASE, and that CASE was the #2246 bug), and the
