@@ -172,4 +172,19 @@ public sealed class CultureInvariantTimestampLiteralTests
             AssertLiterals(sql, watermark, Now.AddDays(-3));
         });
     }
+
+    [Fact]
+    public void ExpensiveQueriesSqlFor_UsesInvariantLiterals_OnADotTimeSeparatorHost()
+    {
+        var ceiling = new DateTime(2026, 11, 4, 5, 0, 0, DateTimeKind.Unspecified);
+        var trailing = new DateTime(2026, 11, 10, 22, 0, 0, DateTimeKind.Unspecified);
+
+        UnderDanishCulture(() =>
+        {
+            var sql = DarlingFinOpsOptimizationReader.ExpensiveQueriesSqlFor(
+                new DarlingFinOpsOptimizationReader.ExpensiveQueriesRoute(ceiling, trailing));
+
+            AssertLiterals(sql, ceiling, trailing);
+        });
+    }
 }
