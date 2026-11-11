@@ -1166,10 +1166,15 @@ SELECT
     /// <returns>True when it ran a refresh.</returns>
     public static Task<bool> BackfillWaitStatsDailyAsync(
         NpgsqlConnection connection, ILogger? logger, DateTime utcNow, CancellationToken cancellationToken = default)
+        => BackfillWaitStatsDailyAsync(connection, logger, utcNow, DailyBackfillLockRetryDelay, DailyBackfillLockRetryBound, cancellationToken);
+
+    /// <summary>The same backfill with the lock-wait delay and bound given, so a test runs in seconds (#8549).</summary>
+    internal static Task<bool> BackfillWaitStatsDailyAsync(
+        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, TimeSpan lockRetryDelay, TimeSpan lockRetryBound, CancellationToken cancellationToken)
         => BackfillDailyAsync(
             connection, logger, utcNow, WaitStatsDailyView, WaitStatsDailyBackfillProbeSql, BaselineRetentionSpan, sliceDays: null,
             "the Daily Summary reads those closed days from it", "the Daily Summary reads the days it does not hold from raw wait_stats, exactly but slower",
-            cancellationToken);
+            lockRetryDelay, lockRetryBound, cancellationToken);
 
     /// <summary>
     /// Backfills <see cref="JobHistoryOldestDailyView"/> from raw over the days it does not cover yet (#8549), as
@@ -1184,15 +1189,26 @@ SELECT
         => BackfillDailyAsync(
             connection, logger, utcNow, JobHistoryOldestDailyView, JobHistoryOldestDailyBackfillProbeSql, TimeSpan.FromDays(36500), JobHistoryBackfillSliceDays,
             "the Job History time range picker reads those closed days from it", "the picker's Data starts note reads the days it does not hold from raw job_history, exactly but slower",
-            cancellationToken);
+            DailyBackfillLockRetryDelay, DailyBackfillLockRetryBound, cancellationToken);
 
     /// <summary>The slice <see cref="BackfillJobHistoryOldestDailyAsync"/> refreshes per call: seven days, so a month of a large store is five short transactions.</summary>
     public const int JobHistoryBackfillSliceDays = 7;
 
+    /// <summary>
+    /// How long <see cref="BackfillDailyAsync"/> waits before it retries a slice whose refresh raised <c>55P03</c>, and the most total time it
+    /// waits on one slice (#8549). The refresh policy created with the aggregate runs at once and holds it: on a store with hundreds of millions
+    /// of rows that first run took 22 s, and the start-up backfill that began inside it gave up, so 30 of the 35 days stayed out of the rollup
+    /// until the next restart. The policy covers four days and the backfill needs the whole horizon, so stepping aside would lose the coverage.
+    /// </summary>
+    internal static readonly TimeSpan DailyBackfillLockRetryDelay = TimeSpan.FromSeconds(15);
+
+    /// <inheritdoc cref="DailyBackfillLockRetryDelay"/>
+    internal static readonly TimeSpan DailyBackfillLockRetryBound = TimeSpan.FromMinutes(10);
+
     private static async Task<bool> BackfillDailyAsync(
         NpgsqlConnection connection, ILogger? logger, DateTime utcNow, string view,
         Func<(string Schema, string Name)?, string> probeSql, TimeSpan horizon, int? sliceDays,
-        string servesText, string failureText, CancellationToken cancellationToken)
+        string servesText, string failureText, TimeSpan lockRetryDelay, TimeSpan lockRetryBound, CancellationToken cancellationToken)
     {
         if (connection is null)
         {
@@ -1207,6 +1223,7 @@ SELECT
                 return false;
             }
 
+            DateTime? sourceOldest = null;
             DateTime? coverageOldest = null;
             DateTime? needFrom = null;
             using (var probe = new NpgsqlCommand(probeSql(materialization), connection) { CommandTimeout = SetupTimeoutSeconds })
@@ -1215,9 +1232,17 @@ SELECT
                 await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
                 if (await reader.ReadAsync(cancellationToken))
                 {
+                    sourceOldest = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
                     coverageOldest = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
                     needFrom = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
                 }
+            }
+
+            /* Raw holds nothing (#8549): the probe's need_from is then the horizon itself (GREATEST ignores the NULL), which for job_history is
+               36,500 days back, about 5,200 seven-day refreshes on every start, and coverage never appears to end the loop. */
+            if (sourceOldest is null)
+            {
+                return false;
             }
 
             var windowEnd = DateTime.SpecifyKind(utcNow.Date, DateTimeKind.Unspecified);
@@ -1233,14 +1258,40 @@ SELECT
                 var sliceStart = sliceDays is int days && sliceEnd.AddDays(-days) > needFrom.Value
                     ? sliceEnd.AddDays(-days)
                     : needFrom.Value;
-                using var refresh = new NpgsqlCommand(
-                    $"CALL refresh_continuous_aggregate('collect.{view}'::regclass, $1::timestamp, $2::timestamp)", connection)
+                var waited = Stopwatch.StartNew();
+                var loggedWait = false;
+                while (true)
                 {
-                    CommandTimeout = BackfillTimeoutSeconds,
-                };
-                refresh.Parameters.AddWithValue(sliceStart);
-                refresh.Parameters.AddWithValue(sliceEnd);
-                await refresh.ExecuteNonQueryAsync(cancellationToken);
+                    try
+                    {
+                        using var refresh = new NpgsqlCommand(
+                            $"CALL refresh_continuous_aggregate('collect.{view}'::regclass, $1::timestamp, $2::timestamp)", connection)
+                        {
+                            CommandTimeout = BackfillTimeoutSeconds,
+                        };
+                        refresh.Parameters.AddWithValue(sliceStart);
+                        refresh.Parameters.AddWithValue(sliceEnd);
+                        await refresh.ExecuteNonQueryAsync(cancellationToken);
+                        break;
+                    }
+                    catch (PostgresException ex) when (
+                        string.Equals(ex.SqlState, PostgresErrorCodes.LockNotAvailable, StringComparison.Ordinal)
+                        && waited.Elapsed + lockRetryDelay <= lockRetryBound)
+                    {
+                        /* Another refresh holds the aggregate (#8549), and the policy's four days are not this slice's days, so wait and retry
+                           the same slice instead of stepping aside: the policy run ends in seconds. */
+                        if (!loggedWait)
+                        {
+                            loggedWait = true;
+                            logger?.LogInformation(
+                                "TimescaleDB: {View} is being refreshed by its refresh policy; the backfill (#8549) waits and retries every {Seconds:F0} s.",
+                                view, lockRetryDelay.TotalSeconds);
+                        }
+
+                        await Task.Delay(lockRetryDelay, cancellationToken);
+                    }
+                }
+
                 sliceEnd = sliceStart;
             }
 
