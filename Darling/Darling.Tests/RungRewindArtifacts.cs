@@ -763,6 +763,10 @@ DROP TABLE IF EXISTS collect.schema_capture_passes;"),
         // V258 (#8567): the oversized-plan backlog's dropped-row index. The probe's sentinel is the index itself, so the rewind drops it and a
         // re-run of V258 makes it again. Safe on a store that never had it.
         new(258, "hasOversizedPlanBacklogDroppedIndex", "DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_dropped;"),
+        // V259 (#8549): the daily wait totals. The probe's sentinel is the relation itself, a continuous aggregate or the plain view, so the
+        // rewind drops whichever shape stands (the product's own discriminating drop), and a re-run of V259 or the ensure sweep makes it
+        // again. Safe on a store that never had it.
+        new(259, "hasWaitStatsDaily", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.WaitStatsDailyView)),
     ];
 
     /// <summary>
