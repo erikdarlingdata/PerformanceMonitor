@@ -46,7 +46,7 @@ public sealed class WaitStatsDailyRollupLiveTests
         await using var connection = await BuildTimescaleStoreAsync(scratch, ct);
         await SeedThirtyDaysAsync(connection, ct, minutes: 1);
 
-        var today = DateTime.UtcNow.Date;
+        var today = LiveClock.Now().Date;
         var start = today.AddDays(-29);
         var end = today.AddDays(1);
 
@@ -54,8 +54,8 @@ public sealed class WaitStatsDailyRollupLiveTests
         Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.WaitStatsDailyView}", ct));
         await AssertSameRowsAsync(connection, start, end, ct);
 
-        Assert.True(await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, null, DateTime.UtcNow, ct), "the backfill fills the closed days");
-        Assert.False(await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, null, DateTime.UtcNow, ct), "and converges: a second pass finds the coverage it needs");
+        Assert.True(await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, null, LiveClock.Now(), ct), "the backfill fills the closed days");
+        Assert.False(await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, null, LiveClock.Now(), ct), "and converges: a second pass finds the coverage it needs");
         Assert.True(await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.WaitStatsDailyView} WHERE server_id = {ServerId} AND bucket = '{Ts(today.AddDays(-1))}'", ct) > 0,
             "yesterday is a closed day and is in the rollup");
         Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.WaitStatsDailyView} WHERE bucket >= '{Ts(today)}'", ct));
@@ -80,6 +80,39 @@ public sealed class WaitStatsDailyRollupLiveTests
     }
 
     [Fact]
+    public async Task TheHourlyTier_ReadsTheRollupToo_AndEqualsTheRawStatement()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = await BuildTimescaleStoreAsync(scratch, ct);
+        await SeedThirtyDaysAsync(connection, ct);
+
+        var today = LiveClock.Now().Date;
+        var start = today.AddDays(-29);
+        var end = today.AddDays(1);
+        Assert.Contains("wait_stats_daily", RollupSql(start, RetentionTier.Hourly), StringComparison.Ordinal);
+        Assert.DoesNotContain("wait_stats_daily", RawSql(start, RetentionTier.Hourly), StringComparison.Ordinal);
+
+        /* Empty aggregate: every day reads raw. */
+        await AssertSameRowsAsync(connection, start, end, ct, RetentionTier.Hourly);
+
+        /* Filled: the closed days read the rollup. */
+        Assert.True(await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, null, LiveClock.Now(), ct));
+        var rows = await AssertSameRowsAsync(connection, start, end, ct, RetentionTier.Hourly);
+        Assert.True(rows >= 30, $"the window has a row per day, got {rows}");
+
+        /* A hole in the rollup, and a window that starts and ends inside a day: those days read raw. */
+        var materialization = await TimescaleSupport.ResolveMaterializationAsync(connection, TimescaleSupport.WaitStatsDailyView, ct);
+        Assert.NotNull(materialization);
+        await ExecuteAsync(connection, $"DELETE FROM \"{materialization!.Value.Schema}\".\"{materialization.Value.Name}\" WHERE bucket = '{Ts(today.AddDays(-10))}'", ct);
+        await AssertSameRowsAsync(connection, start, end, ct, RetentionTier.Hourly);
+        await AssertSameRowsAsync(connection, today.AddDays(-12).AddHours(14).AddMinutes(30), today.AddHours(9).AddMinutes(10), ct, RetentionTier.Hourly);
+    }
+
+    [Fact]
     public async Task WithoutTheRelation_TheReadFallsBackToTheRawShape_AndStillRuns()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -95,11 +128,11 @@ public sealed class WaitStatsDailyRollupLiveTests
         var availability = await TimescaleSupport.DetectRollupsAsync(dataSource, ct);
         Assert.False(availability.WaitStatsDaily, "the probe sees no relation");
 
-        var start = DateTime.UtcNow.Date.AddDays(-29);
+        var start = LiveClock.Now().Date.AddDays(-29);
         var coverage = new RollupCoverage(new Dictionary<string, DateTime>(StringComparer.Ordinal), new Dictionary<string, DateTime>(StringComparer.Ordinal), availability);
         var sql = DailySummarySql.RangeSqlFor(RetentionTier.Daily, coverage, start);
         Assert.DoesNotContain("wait_stats_daily", sql, StringComparison.Ordinal);
-        Assert.True(await ReadRowCountAsync(connection, sql, start, DateTime.UtcNow.Date.AddDays(1), ct) >= 30);
+        Assert.True(await ReadRowCountAsync(connection, sql, start, LiveClock.Now().Date.AddDays(1), ct) >= 30);
     }
 
     [Fact]
@@ -150,7 +183,7 @@ public sealed class WaitStatsDailyRollupLiveTests
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
         Assert.Equal(1L, await ScalarAsync<long>(connection,
             $"SELECT count(*) FROM timescaledb_information.jobs WHERE hypertable_schema = 'collect' AND hypertable_name = '{TimescaleSupport.WaitStatsDailyView}' AND proc_name = 'policy_refresh_continuous_aggregate'", ct));
-        Assert.True(await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, null, DateTime.UtcNow, ct));
+        Assert.True(await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, null, LiveClock.Now(), ct));
         Assert.True(await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.WaitStatsDailyView}", ct) > 0);
     }
 
@@ -170,7 +203,7 @@ public sealed class WaitStatsDailyRollupLiveTests
 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         Assert.True((await TimescaleSupport.DetectRollupsAsync(dataSource, ct)).WaitStatsDaily, "the plain view is the relation the probe finds");
-        Assert.False(await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, null, DateTime.UtcNow, ct), "a plain view has no materialization to fill");
+        Assert.False(await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, null, LiveClock.Now(), ct), "a plain view has no materialization to fill");
 
         const string raw = "SELECT server_id, date_trunc('day', collection_time) AS bucket, wait_type, SUM(delta_wait_time_ms) AS delta_wait_time_ms FROM collect.wait_stats WHERE delta_wait_time_ms > 0 GROUP BY 1, 2, 3";
         const string view = "SELECT server_id, bucket, wait_type, delta_wait_time_ms FROM collect.wait_stats_daily";
@@ -179,9 +212,9 @@ public sealed class WaitStatsDailyRollupLiveTests
         Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM (({view}) EXCEPT ({raw})) AS x", ct));
     }
 
-    private static string RawSql(DateTime start) => DailySummarySql.RangeSqlFor(RetentionTier.Daily, Coverage(RollupAvailability.None), start);
+    private static string RawSql(DateTime start, RetentionTier tier = RetentionTier.Daily) => DailySummarySql.RangeSqlFor(tier, Coverage(RollupAvailability.None), start);
 
-    private static string RollupSql(DateTime start) => DailySummarySql.RangeSqlFor(RetentionTier.Daily, Coverage(WithRollup), start);
+    private static string RollupSql(DateTime start, RetentionTier tier = RetentionTier.Daily) => DailySummarySql.RangeSqlFor(tier, Coverage(WithRollup), start);
 
     private static RollupCoverage Coverage(RollupAvailability availability)
         => new(new Dictionary<string, DateTime>(StringComparer.Ordinal), new Dictionary<string, DateTime>(StringComparer.Ordinal), availability);
@@ -192,12 +225,12 @@ public sealed class WaitStatsDailyRollupLiveTests
         => $"{ServerId}, '{Ts(start)}', '{Ts(end)}', '{Ts(EventWindowFloor.For(start))}'";
 
     /// <summary>EXCEPT both ways between the raw statement and the rollup statement over [start, end); returns the row count.</summary>
-    private static async Task<long> AssertSameRowsAsync(NpgsqlConnection connection, DateTime start, DateTime end, CancellationToken ct)
+    private static async Task<long> AssertSameRowsAsync(NpgsqlConnection connection, DateTime start, DateTime end, CancellationToken ct, RetentionTier tier = RetentionTier.Daily)
     {
         const string types = "int, timestamp, timestamp, timestamp";
         await ExecuteAsync(connection, "DROP TABLE IF EXISTS pg_temp.ws_raw; DROP TABLE IF EXISTS pg_temp.ws_roll; DEALLOCATE ALL", ct);
-        await ExecuteAsync(connection, $"PREPARE ws_raw_q({types}) AS {RawSql(start)}", ct);
-        await ExecuteAsync(connection, $"PREPARE ws_roll_q({types}) AS {RollupSql(start)}", ct);
+        await ExecuteAsync(connection, $"PREPARE ws_raw_q({types}) AS {RawSql(start, tier)}", ct);
+        await ExecuteAsync(connection, $"PREPARE ws_roll_q({types}) AS {RollupSql(start, tier)}", ct);
         await ExecuteAsync(connection, $"CREATE TEMP TABLE ws_raw AS EXECUTE ws_raw_q({Args(start, end)})", ct);
         await ExecuteAsync(connection, $"CREATE TEMP TABLE ws_roll AS EXECUTE ws_roll_q({Args(start, end)})", ct);
 
