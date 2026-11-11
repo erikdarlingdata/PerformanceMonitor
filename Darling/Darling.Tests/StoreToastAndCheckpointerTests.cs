@@ -543,7 +543,7 @@ public sealed class StoreToastAndCheckpointerTests
         var crash = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(
             new(t1, 3, 4, 1, after), new(t0, 115, 78, 2, before)));
         Assert.Contains("read LOWER than before", crash, StringComparison.Ordinal);
-        Assert.Contains("The store's postmaster did restart inside this interval (#3955)", crash, StringComparison.Ordinal);
+        Assert.Contains("The store's postmaster did restart inside this interval, which is the second of those causes", crash, StringComparison.Ordinal);
     }
 
     [Fact]
