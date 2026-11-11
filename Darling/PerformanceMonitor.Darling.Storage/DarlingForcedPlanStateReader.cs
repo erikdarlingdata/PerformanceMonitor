@@ -193,20 +193,30 @@ LEFT JOIN query_plan_dim AS d
     /// first sighting is its first row: that is every force but the ones with a gap or a removal, and only those go through the absence step (<c>absent</c>,
     /// <c>firsts</c>) the statement used to run for all of them. The old statement sorted 427,000 rows twice (28 MB and 14 MB to disk) and took 6,800 ms
     /// on a 24 hour window of 300 forces, against 380 ms.</para>
+    /// <para>#8570 regression (a busy primary with 274 forces: 21 s, against 9 s before): <c>due</c> counted the markers from each force's first row on
+    /// with a correlated COUNT over the <c>markers</c> CTE, which has no index, so each of the forces read every marker of EVERY database (172,800 markers
+    /// of 600 databases, 24 hours at one capture every five minutes: 18 s of the 22 s). The markers are now ranked once per database, so the count is the
+    /// database's marker total less the rank of the marker at the force's first row, a lookup on (database, time). A first row with no marker at its
+    /// time (the collector writes both at one time, so none in practice) keeps the old count as the fallback. The markers are also read only for
+    /// databases that have a force row in the window: a database without a force never reaches <c>bounds</c>, <c>newest</c> or the absence step,
+    /// and a store of hundreds of databases with a handful of forces read and sorted every database's markers for nothing.</para>
     /// </summary>
     internal static string ForcesSql(DatabaseFilter databases, int maxForces) => $@"
-WITH markers AS (
-    SELECT database_name, collection_time
-    FROM collect.query_store_forced_plans
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)} AND plan_id IS NULL),
-newest AS (
-    SELECT database_name, MAX(collection_time) AS newest_capture FROM markers GROUP BY database_name),
-plans AS NOT MATERIALIZED (
+WITH plans AS NOT MATERIALIZED (
     SELECT database_name, collection_time, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason,
            variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope
     FROM collect.query_store_forced_plans
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)}
     AND   plan_id IS NOT NULL AND ($5::bigint IS NULL OR query_id = $5) AND ($6::bigint IS NULL OR plan_id = $6)),
+markers AS (
+    SELECT database_name, collection_time,
+           RANK() OVER (PARTITION BY database_name ORDER BY collection_time) AS marker_rank,
+           COUNT(*) OVER (PARTITION BY database_name) AS marker_total
+    FROM collect.query_store_forced_plans
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)} AND plan_id IS NULL
+    AND   database_name IN (SELECT database_name FROM plans)),
+newest AS (
+    SELECT database_name, MAX(collection_time) AS newest_capture FROM markers GROUP BY database_name),
 bounds AS (
     SELECT p.database_name, p.plan_id, MAX(p.collection_time) AS latest_time, MIN(p.collection_time) AS first_row,
            COUNT(m.collection_time) AS markers_present
@@ -222,8 +232,10 @@ latest AS (
     ORDER BY p.database_name, p.plan_id, p.collection_time DESC),
 due AS (
     SELECT b.database_name, b.plan_id, b.first_row, b.markers_present,
-           (SELECT COUNT(*) FROM markers AS m WHERE m.database_name = b.database_name AND m.collection_time >= b.first_row) AS markers_due
-    FROM bounds AS b),
+           COALESCE(f.marker_total - f.marker_rank + 1,
+                    (SELECT COUNT(*) FROM markers AS m WHERE m.database_name = b.database_name AND m.collection_time >= b.first_row)) AS markers_due
+    FROM bounds AS b
+    LEFT JOIN markers AS f ON f.database_name = b.database_name AND f.collection_time = b.first_row),
 gappy AS (
     SELECT database_name, plan_id FROM due WHERE markers_present <> markers_due),
 absent AS (

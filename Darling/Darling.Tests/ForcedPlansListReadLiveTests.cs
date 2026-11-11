@@ -127,6 +127,39 @@ LIMIT 2001";
             Assert.Equal("<null>", FirstSeen("1003"));
         });
 
+    /// <summary>
+    /// The first-row step counts a force's due markers from the database's marker rank at the force's first row, and keeps the plain count for a first row
+    /// with no marker at its time (an orphan row; the collector never writes one, but the statement must still agree with the old one). Plan 1099 has an orphan
+    /// row 3 minutes before its first captured row (30 seconds off every marker) and then a gap, so its first sighting depends on the markers after the orphan
+    /// time. A third database holds markers and no force: its markers must not change any reply.
+    /// </summary>
+    [Fact]
+    public Task AForceWhoseFirstRowHasNoMarker_AndADatabaseWithoutForces_ReplyAsTheOldStatementDid() =>
+        WithSeedAsync(async (connection, serverId, from, to, ct) =>
+        {
+            await ExecAsync(connection, ct,
+                @"INSERT INTO collect.query_store_forced_plans (collection_id, collection_time, server_id, server_name, database_name, plan_id, query_id, query_plan_hash, plan_forcing_type)
+                  SELECT $1 + 70000000 + m, $2 - m * interval '1 minute' - interval '30 seconds', $3, 'a8570', 'DbA', 1099, 5099, '0xPH1099', 'MANUAL'
+                  FROM generate_series(10, 12) m
+                  UNION ALL
+                  SELECT $1 + 71000000 + m, $2 - m * interval '1 minute', $3, 'a8570', 'DbA', 1099, 5099, '0xPH1099', 'MANUAL'
+                  FROM generate_series(0, 9) m WHERE m NOT IN (4, 5)",
+                CollectionIdGenerator.Next(), to.AddMinutes(-1), serverId);
+            await ExecAsync(connection, ct,
+                @"INSERT INTO collect.query_store_forced_plans (collection_id, collection_time, server_id, server_name, database_name)
+                  SELECT $1 + 72000000 + m, $2 - m * interval '1 minute', $3, 'a8570', 'DbC'
+                  FROM generate_series(0, $4 - 1) m",
+                CollectionIdGenerator.Next(), to.AddMinutes(-1), serverId, Captures);
+            await ExecAsync(connection, ct, "ANALYZE collect.query_store_forced_plans");
+
+            var expected = await RowsAsync(connection, OldSql, serverId, from, to, null, null, ct);
+            var actual = await RowsAsync(connection, DarlingForcedPlanStateReader.ForcesSql(DatabaseFilter.All, 2000), serverId, from, to, null, null, ct);
+
+            Assert.Equal(Forces + 1, expected.Count);
+            Assert.Equal(expected, actual);
+            Assert.Contains(actual, r => r.Split('|')[1] == "1099" && r.Split('|')[7] != "<null>");
+        });
+
     private static async Task<List<string>> RowsAsync(NpgsqlConnection connection, string sql, int serverId, DateTime from, DateTime to, long? queryId, long? planId, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
