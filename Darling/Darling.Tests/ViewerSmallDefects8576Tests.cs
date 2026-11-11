@@ -85,7 +85,7 @@ public sealed class ViewerSmallDefects8576Tests : IDisposable
     {
         var text = HealthRow(60).CollectedText(new DateTime(2026, 11, 10, 9, 0, 0, DateTimeKind.Utc));
 
-        Assert.Equal("2026-10-20 12:00:00 UTC (20 days 21 hours old)", text);
+        Assert.Equal("2026-10-20 12:00:00 (20 days 21 hours old)", text);
     }
 
     [Fact]
@@ -93,15 +93,15 @@ public sealed class ViewerSmallDefects8576Tests : IDisposable
     {
         var row = HealthRow(60);
 
-        Assert.Equal("2026-10-20 12:00:00 UTC", row.CollectedText(row.CaptureTime.AddMinutes(90)));
-        Assert.Equal("2026-10-20 12:00:00 UTC", row.CollectedText(row.CaptureTime.AddMinutes(120)));
-        Assert.Equal("2026-10-20 12:00:00 UTC (2 hours old)", row.CollectedText(row.CaptureTime.AddMinutes(121)));
+        Assert.Equal("2026-10-20 12:00:00", row.CollectedText(row.CaptureTime.AddMinutes(90)));
+        Assert.Equal("2026-10-20 12:00:00", row.CollectedText(row.CaptureTime.AddMinutes(120)));
+        Assert.Equal("2026-10-20 12:00:00 (2 hours old)", row.CollectedText(row.CaptureTime.AddMinutes(121)));
     }
 
     [Fact]
     public void AQueryStoreRowWhoseCadenceIsNotKnown_SaysNothingOfAge()
     {
-        Assert.Equal("2026-10-20 12:00:00 UTC", HealthRow(0).CollectedText(new DateTime(2026, 11, 10, 9, 0, 0, DateTimeKind.Utc)));
+        Assert.Equal("2026-10-20 12:00:00", HealthRow(0).CollectedText(new DateTime(2026, 11, 10, 9, 0, 0, DateTimeKind.Utc)));
     }
 
     // ── 5: the capture and analysis stamps follow the page's clock ──────────────
