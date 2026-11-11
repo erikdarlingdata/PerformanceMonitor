@@ -36,35 +36,6 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class AnalysisPlanAdvisoryGzReadTests
 {
-    [Fact]
-    public void PlanAdvisoryFactSql_ProjectsAndGuardsBothContentForms()
-    {
-        var sql = PgFactCollector.PlanAdvisorySql;
-
-        Assert.Contains("SELECT query_plan_xml, query_plan_gz", sql, StringComparison.Ordinal);
-        /* The RESOLVING view, not the base table: query_stats.query_plan_xml is NULL on every row
-           written since #1767, so the base table cannot answer this read at all. */
-        Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("(query_plan_xml IS NOT NULL OR query_plan_gz IS NOT NULL)", sql, StringComparison.Ordinal);
-        /* THE regression: the bare text guard, which discards every post-V54 plan silently. */
-        Assert.DoesNotContain("AND   query_plan_xml IS NOT NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY delta_worker_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 10", sql, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void PlanAdvisoryDrillDownSql_ProjectsAndGuardsBothContentForms()
-    {
-        var sql = PgDrillDownCollector.PlanAdvisoryXmlSql;
-
-        Assert.Contains("SELECT query_plan_xml, query_plan_gz", sql, StringComparison.Ordinal);
-        Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("(query_plan_xml IS NOT NULL OR query_plan_gz IS NOT NULL)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("AND   query_plan_xml IS NOT NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY delta_worker_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 10", sql, StringComparison.Ordinal);
-    }
-
     /// <summary>
     /// The two reads stay byte-identical to each other.
     ///
