@@ -339,7 +339,7 @@ export const SERVER_TABS = [
         zeroFill: true,
         sourceKey: "source",
         bySource: BLOCKING_BY_SOURCE,
-        emptyText: "No blocked process reports in this window — an empty trend here means none were captured, not that nothing was collected.",
+        emptyText: "No blocked process reports in this window: an empty trend here means none were captured, not that nothing was collected.",
       }),
       linePanel("Deadlock trend", "get_deadlock_trend", { server, hours: ctx.hours }, "trend", "time", COUNT_SERIES, {
         subtitle: ctx.label,
@@ -1257,7 +1257,7 @@ export const POSTGRES_TABS = [
           subtitle: ctx.label + ", Amazon Aurora only (AWS Performance Insights)",
           format: "pct",
           unit: "%",
-          emptyText: "No CPU samples in this window. This is an Amazon Aurora feature — on a stock PostgreSQL target this panel is permanently empty.",
+          emptyText: "No CPU samples in this window. This is an Amazon Aurora feature. On a stock PostgreSQL target this panel is permanently empty.",
           /* Click-through 3: on a server that is not Aurora the read answers "not collected", and the panel is not drawn. */
           hideWhenNotCollected: true,
           atTime: false,
