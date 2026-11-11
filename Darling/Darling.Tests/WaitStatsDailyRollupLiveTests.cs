@@ -164,7 +164,8 @@ public sealed class WaitStatsDailyRollupLiveTests
         Assert.True(await ScalarAsync<bool>(connection, TimescaleSupport.BaselineRelationExistsSql(TimescaleSupport.WaitStatsDailyView), ct), "the rung creates the relation on every store");
         Assert.Equal(StorageVersion.SchemaVersion, await ScalarAsync<int>(connection, "SELECT max(version) FROM darling_schema_version", ct));
 
-        Assert.SkipWhen(!await TimescaleSupport.TryEnableAsync(connection, null, ct), "The live #8549 fresh-store test needs TimescaleDB.");
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live #8549 fresh-store test needs TimescaleDB.");
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
         await ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
@@ -327,7 +328,8 @@ public sealed class WaitStatsDailyRollupLiveTests
         var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
-        Assert.SkipWhen(!await TimescaleSupport.TryEnableAsync(connection, null, ct), "The live #8549 tests need TimescaleDB.");
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live #8549 tests need TimescaleDB.");
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
         Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
         await ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
