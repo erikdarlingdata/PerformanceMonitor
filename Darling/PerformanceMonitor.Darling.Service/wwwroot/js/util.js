@@ -984,6 +984,30 @@ export function axisTime(date, withDate, withSeconds = false, withZone = false) 
   return date.toLocaleTimeString([], time);
 }
 
+/** A normalized pin's display label ("last 2 days" / "8/21/26, 12:00 AM → 8/22/26, 12:00 AM") — shared with
+ *  the notebook editor's pin strip, a read cell's pinned window (#8577) and the composed cell's badge, so every surface describes a pin identically. */
+export function pinRangeLabel(range) {
+  return range.windowStart ? pinWindowLabel(range.windowStart, range.windowEnd) : "last " + pinHoursLabel(range.hours);
+}
+
+/** The badge's window text for an absolute pin — compact local date+time, "start → end". */
+export function pinWindowLabel(startIso, endIso) {
+  const from = new Date(startIso);
+  const to = new Date(endIso);
+  if (isNaN(from.getTime()) || isNaN(to.getTime())) return "custom window";
+  const opts = { dateStyle: "short", timeStyle: "short" };
+  return from.toLocaleString(undefined, opts) + " → " + to.toLocaleString(undefined, opts);
+}
+
+/** The badge's window text for a relative pin (whole days render as days, mirroring the range picker's labels). */
+function pinHoursLabel(hours) {
+  if (hours % 24 === 0 && hours >= 24) {
+    const d = hours / 24;
+    return d + (d === 1 ? " day" : " days");
+  }
+  return hours + (hours === 1 ? " hour" : " hours");
+}
+
 /**
  * The x-axis DOMAIN window for a "last N hours" trend chart (#2802): [now - hours, now] as UTC-epoch ms, for
  * renderLineChart's windowStart/windowEnd. windowEnd is the client's render-time now, NOT the last data point —
@@ -993,9 +1017,10 @@ export function axisTime(date, withDate, withSeconds = false, withZone = false) 
  * tick labels). Anchoring to the last data point instead would slide an old sparse burst to the right edge and
  * read as current — the #2802 bug. Returns null for a missing/non-positive hours so the chart falls back to its
  * data-extent domain unchanged (byte-for-byte the pre-#2802 behavior). `Date.now()` is a UTC epoch, directly
- * comparable to the parseUtc'd data times.
+ * comparable to the parseUtc'd data times. With an `asOf` in the past (a read cell pinned to the time of an alert, #8577) the window
+ * ends there instead, the same end the read was asked for.
  */
-export function windowFromHours(hours) {
+export function windowFromHours(hours, asOf = null) {
   const h = Number(hours);
   if (!isFinite(h) || h < 1) return null;
   /* A custom range's own reads span the exact pair the reader picked, not the whole hours they were fetched over. */
@@ -1004,8 +1029,44 @@ export function windowFromHours(hours) {
   if (liveRange() && h === activeRange.narrowedTo) {
     return { windowStart: Math.max(activeRange.startMs, activeRange.endMs - h * 3600000), windowEnd: activeRange.endMs };
   }
-  const windowEnd = Date.now();
+  /* #8577: a read that names an `as_of` in the past covers the `hours` ending there, so its axis ends there too. */
+  const pinned = pinnedEndMs(asOf);
+  const windowEnd = pinned != null ? pinned : Date.now();
   return { windowStart: windowEnd - h * 3600000, windowEnd };
+}
+
+/**
+ * #8577: the end of a read's pinned window in UTC-epoch ms, or null when the read is not pinned. A read pins its window with `as_of`
+ * (an alert notebook's read cells name the time of the alert). An `as_of` that is missing, unreadable, or not before now is no pin:
+ * the service anchors that read at its own clock, so its window ends now and so does the axis.
+ */
+export function pinnedEndMs(asOf) {
+  if (asOf == null || asOf === "") return null;
+  const d = parseUtc(String(asOf));
+  const ms = d ? d.getTime() : NaN;
+  return Number.isFinite(ms) && ms < Date.now() ? ms : null;
+}
+
+/**
+ * #8577: the window a read cell with an `as_of` covers, as { windowStart, windowEnd } in UTC-epoch ms, or null for a read that ends now.
+ * `hours` is the width the read answered for (the cell's own, or the hours a kept-history retry narrowed it to).
+ */
+export function readPinWindow(params, hours) {
+  const h = Number(hours != null ? hours : params && params.hours);
+  const end = params ? pinnedEndMs(params.as_of) : null;
+  if (end == null || !isFinite(h) || h < 1) return null;
+  return { windowStart: end - h * 3600000, windowEnd: end };
+}
+
+/**
+ * #8577: a read's own sentence says "in the last 4 hours", which is true of a window that ends now and false of a pinned one. With a
+ * pinned window the phrase names where the window ends ("in the 4 hours ending 11/9/26, 5:33 PM"). Text with no such phrase is
+ * returned as it came.
+ */
+export function pinnedWindowText(text, win) {
+  if (typeof text !== "string" || !win) return text;
+  const end = new Date(win.windowEnd).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+  return text.replace(/\b(in|over|during|for) the last (\d+(?:\.\d+)? hours?(?:\(s\))?)/gi, (m, prep, span) => prep + " the " + span + " ending " + end);
 }
 
 /* #7386: the shortest axis a data start may produce (two points of the slowest, 15 minute, collector cadence), and the run-in
