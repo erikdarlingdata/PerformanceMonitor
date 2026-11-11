@@ -203,6 +203,27 @@ public sealed class WebRouteChangeAbortBehaviourTests
         Assert.False(r.GetProperty("anyAborted").GetBoolean());
     }
 
+    /// <summary>
+    /// #8554: the Overview sends its five heavy reads through the page's heavy-read gate (two in flight). Leaving the page aborts the two
+    /// in flight and drops the three still waiting for a slot: none of them is sent after the leave, and the slots are free so the next
+    /// visit sends all five again.
+    /// </summary>
+    [Fact]
+    public void LeavingTheOverview_WithHeavyReadsStillQueuedAtTheGate_NeverSendsThem_AndFreesTheSlots()
+    {
+        var r = Run("leaveOverviewWithHeavyReadsQueued");
+        // The gate let two through and held the rest, so the leave finds reads queued.
+        Assert.Equal(2, r.GetProperty("before").GetProperty("sent").GetInt32());
+        Assert.False(r.GetProperty("before").GetProperty("aborted").GetBoolean());
+        Assert.True(r.GetProperty("afterLeave").GetProperty("allAborted").GetBoolean());
+        Assert.Equal(2, r.GetProperty("afterLeave").GetProperty("sent").GetInt32());
+        // Ten more seconds pass on another page: no queued read was sent.
+        Assert.Equal(2, r.GetProperty("afterWait").GetProperty("sent").GetInt32());
+        // The next visit gets every slot back: all five heavy reads are sent, none aborted.
+        Assert.Equal(5, r.GetProperty("sentOnReturn").GetInt32());
+        Assert.False(r.GetProperty("abortedOnReturn").GetBoolean());
+    }
+
     [Fact]
     public void LeavingFinops_AbortsTheDatabaseBoxNameRead()
     {

@@ -90,10 +90,7 @@ public partial class IdentityCapacityTab : UserControl
             var read = await _dataService.ReadIdentityCapacityAsync(server, DateTime.UtcNow);
             if (_loads.Superseded(nameof(LoadCapacityAsync), gen)) return;
 
-            var clock = await _dataService.GetServerClockOrMachineAsync(server.ServerId, System.Threading.CancellationToken.None);
-            if (_loads.Superseded(nameof(LoadCapacityAsync), gen)) return;
-
-            Show(read, clock);
+            Show(read);
             LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.RefreshedStamp();
             StatusChanged?.Invoke($"identity capacity — refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
@@ -105,7 +102,7 @@ public partial class IdentityCapacityTab : UserControl
         }
     }
 
-    private void Show(ViewerIdentityCapacityRead? read, ServerClock? clock = null)
+    private void Show(ViewerIdentityCapacityRead? read)
     {
         if (read is null)
         {
@@ -118,7 +115,7 @@ public partial class IdentityCapacityTab : UserControl
 
         StatusLine.Text = ViewerIdentityCapacityText.StatusLine(read);
         var columns = ViewerIdentityCapacityText.ColumnRows(read);
-        var scans = ViewerIdentityCapacityText.ScanRows(read, clock ?? ViewerTimeHelper.ActiveServerClock);
+        var scans = ViewerIdentityCapacityText.ScanRows(read);
         ColumnsDataGrid.ItemsSource = columns;
         ScanDataGrid.ItemsSource = scans;
         ColumnsEmptyMessage.Text = ViewerIdentityCapacityText.ColumnsEmptyText(read);

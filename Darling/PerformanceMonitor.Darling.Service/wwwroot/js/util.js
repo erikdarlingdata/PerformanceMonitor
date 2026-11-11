@@ -1640,7 +1640,15 @@ const joinedReads = new Map();
    every visitor; this one is the page's share of it.
    The connection hold is an HTTP/1.1 matter: the plain-HTTP listeners (loopback, and the network listener without a certificate)
    and a front door reached over plain HTTP. Over TLS the browser negotiates HTTP/2, one connection carries every request as its
-   own stream, and the gate changes nothing there but how many of the four heavy reads run side by side. */
+   own stream, and the gate changes nothing there but how many of the four heavy reads run side by side.
+
+   #8554: a caller can send a read through the same gate with `options.heavy` (readTool). The Overview does for the reads that took
+   4 to 10 s each on a server's first visit, all four ending within 300 ms of one another: the daily summary range, the baseline
+   read and the three 24 h trends. The service's read path gives them nothing to wait on together but the store itself (no per-server
+   lock, no shared connection, and its own long-read limit is per process, not per page), so four cold scans at once share the store's
+   disk and CPU and the slowest read holds the others back. Sent two at a time, in the order asked (the trends the strips draw from
+   first, the baseline and the daily summary last), the strips paint after the first rounds and the slow reads no longer sit on the
+   browser's connections beside the page's own. */
 const HEAVY_PAGE_READS = new Set(["get_query_store_clutter", "get_query_store_regressions", "get_query_heatmap", "get_plan_corrections"]);
 const HEAVY_READ_CAP = 2;
 let heavyInFlight = 0;
@@ -2135,7 +2143,8 @@ export function alertDeliveryState(a) {
   return ALERT_STATE_LABELS[a.notification_type] || null;
 }
 
-/** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). `options.wholeWindow` (#6359): under
+/** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). `options.heavy` (#8554) sends the
+ *  read through the heavy-read gate, as the Queries tab's four Query Store reads always go. `options.wholeWindow` (#6359): under
  *  a custom range the read is still anchored at the range's end, but its rows are NOT cut to the exact picked pair, so a read
  *  that answers over the whole hours the grid ranked over (a row's History) shows all of that window. */
 export function readTool(tool, params, signal, options) {
@@ -2147,7 +2156,7 @@ export function readTool(tool, params, signal, options) {
      a table, a stat or any other caller passes none and its read keeps the old budget, and so does a read of a level (withPlotPoints). */
   const plotPx = options && options.plotPx > 0 ? options.plotPx : 0;
   const sized = withPlotPoints(tool, plan.params, plotPx);
-  return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, sized)), signal, isHeavyPageRead(tool))
+  return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, sized)), signal, isHeavyPageRead(tool) || !!(options && options.heavy))
     .then(localizeWindowNote)
     .then((res) => finishCustomRange(res, plan, bucketStarts))
     .then((res) => (selection && res && res.kind === "data" ? { ...res, data: trimToRange(res.data, selection.startMs, selection.endMs, 0, bucketStarts) } : res));

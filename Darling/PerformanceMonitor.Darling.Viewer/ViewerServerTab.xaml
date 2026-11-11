@@ -721,7 +721,7 @@
                                        Foreground="{DynamicResource ForegroundBrush}" TextWrapping="Wrap"
                                        Background="#22FFAA00"/>
                             <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,8">
-                                <TextBlock Text="Currently Running Queries" Style="{StaticResource SectionHeader}" VerticalAlignment="Center" Margin="0"/>
+                                <TextBlock Text="{x:Static local:ViewerActiveQueriesText.SectionHeader}" Style="{StaticResource SectionHeader}" VerticalAlignment="Center" Margin="0"/>
                                 <Button x:Name="LatestSnapshotButton" Content="Latest Snapshot"
                                         Click="LatestSnapshot_Click" Padding="12,4" Margin="16,0,8,0"
                                         VerticalAlignment="Center"/>

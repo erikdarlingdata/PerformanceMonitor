@@ -1385,6 +1385,15 @@ public partial class ServerTab : UserControl
             ShowEngineGap(ServerConfigNoDataMessage, "server_config", serverConfigTask.Result.Count);
             _databaseConfigFilterMgr!.UpdateData(databaseConfigTask.Result);
             _dbScopedConfigFilterMgr!.UpdateData(databaseScopedConfigTask.Result);
+            /* #8576: each Query Store row says how old it is once it is older than its collector's cadence. */
+            var healthInterval = _queryStoreHealthSchedule()?.FrequencyMinutes is int healthMinutes and > 0
+                ? healthMinutes
+                : PerformanceMonitor.Collectors.CollectorScheduleDefaults.All["query_store_health"].FrequencyMinutes;
+            foreach (var healthRow in queryStoreHealthTask.Result)
+            {
+                healthRow.CollectorIntervalMinutes = healthInterval;
+            }
+
             _queryStoreHealthFilterMgr!.UpdateData(queryStoreHealthTask.Result);
             _automaticTuningFilterMgr!.UpdateData(automaticTuningTask.Result);
             _traceFlagsFilterMgr!.UpdateData(traceFlagsTask.Result);

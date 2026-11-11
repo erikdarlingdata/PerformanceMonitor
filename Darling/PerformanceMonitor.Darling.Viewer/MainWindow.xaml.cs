@@ -488,8 +488,9 @@ public partial class MainWindow : Window
            else when it fails. */
         _ = _dataService.WarmRollupCoverageAsync();
 
-        /* A read-only seat cannot command the service, so "Generate now" (analyze_now) is disabled. */
-        RecommendationsGenerateButton.IsEnabled = !_dataService.IsReadOnly;
+        /* A read-only seat cannot command the service, so "Generate now" (analyze_now) is disabled, with the read-only reason as its
+           tooltip (#8576), as Collection Health's run buttons have it (#8103). */
+        ApplyGenerateNowState(analyzing: false);
 
         /* The Alerts tab is a self-loading control (all-servers by default); give it the store and let
            it surface load/dismiss/mute outcomes on the shared status bar. */
@@ -2145,7 +2146,7 @@ public partial class MainWindow : Window
            last server tab set, which may be another server's. */
         RecommendationsStatusText.Text = rows.Count > 0
             ? RecommendationsViewModel.FormatLastAnalyzed(
-                rows[0].Finding.AnalysisTime, ViewerTimeHelper.CurrentDisplayMode, serverClock)
+                rows[0].Finding.AnalysisTime, ViewerTimeHelper.CurrentDisplayMode)
             : string.Empty;
         /* #6135: an offline server's findings are the last it collected; say so beside the time they came from. */
         RecommendationsStatusText.Text = RecommendationsViewModel.WithOfflineNote(
@@ -2244,7 +2245,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        RecommendationsGenerateButton.IsEnabled = false;
+        ApplyGenerateNowState(analyzing: true);
         RecommendationsStatusText.Text = $"Analyzing {server.DisplayName}...";
         try
         {
@@ -2274,8 +2275,17 @@ public partial class MainWindow : Window
         }
         finally
         {
-            RecommendationsGenerateButton.IsEnabled = _dataService?.IsReadOnly == false;
+            ApplyGenerateNowState(analyzing: false);
         }
+    }
+
+    /// <summary>#8576: "Generate now"'s enabled state and tooltip from the seat and whether its own analysis is in flight (<see cref="ViewerCollectorRun.GenerateNowState"/>).
+    /// No store yet reads as read-only, as the button's old enabled check did.</summary>
+    private void ApplyGenerateNowState(bool analyzing)
+    {
+        var (isEnabled, toolTip) = ViewerCollectorRun.GenerateNowState(_dataService?.IsReadOnly != false, analyzing);
+        RecommendationsGenerateButton.IsEnabled = isEnabled;
+        RecommendationsGenerateButton.ToolTip = toolTip;
     }
 
     /// <summary>

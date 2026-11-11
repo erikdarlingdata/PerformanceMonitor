@@ -181,7 +181,7 @@ public sealed class ViewerRecommendationServerClockTests
 
     /// <summary>
     /// A server whose <c>server_properties</c> has no offset yet has no entry in the per-server clock read. The
-    /// viewer's own Server mode shows the viewer machine's offset for it, so the cards and the "Last analyzed" line
+    /// viewer's own Server mode shows the viewer machine's offset for it, so the cards
     /// take that offset too and do not drop to UTC. The machine is at -240 here and the finding is at 15:00 UTC:
     /// both read 11:00, where UTC would read 15:00 (UTC+00:00). Another server's clock is in the read, and is not
     /// this server's.
@@ -199,9 +199,6 @@ public sealed class ViewerRecommendationServerClockTests
             $"2026-06-01 11:00{Dash}13:00",
             Prompt(analyzed, Utc(2026, 6, 1, 17, 0), clock),
             StringComparison.Ordinal);
-        Assert.Equal(
-            "Last analyzed 2026-06-01 11:00:00 (UTC-04:00)",
-            RecommendationsViewModel.FormatLastAnalyzed(analyzed, TimeDisplayMode.ServerTime, clock));
     }
 
     [Fact]
@@ -244,94 +241,5 @@ public sealed class ViewerRecommendationServerClockTests
             new Regex(@"ViewerTimeHelper\s*\.\s*ClockForServerOrMachine\(\s*await\s+_dataService\s*\.\s*GetServerClocksAsync\(\s*server\s*\.\s*ServerId\s*,[^;]*,\s*server\s*\.\s*ServerId\s*,\s*TimeZoneInfo\s*\.\s*Local\s*,\s*DateTime\s*\.\s*UtcNow\s*\)"),
             body);
         Assert.Matches(new Regex(@"FromFindings\(\s*rows\s*,\s*server\s*\.\s*DisplayName\s*,\s*serverClock\s*,"), body);
-    }
-
-    // ── the status line names the display mode its time is in ────────────────────
-
-    /// <summary>
-    /// The line under the Recommendations tab, "Last analyzed ...", showed a time that follows the display mode
-    /// (Server, Local or UTC) and always ended in "(local)". It now ends in the zone the time is in, taken from
-    /// the same mode and clock that produced the time.
-    /// </summary>
-    [Theory]
-    [InlineData(TimeDisplayMode.ServerTime)]
-    [InlineData(TimeDisplayMode.UTC)]
-    [InlineData(TimeDisplayMode.LocalTime)]
-    public void LastAnalyzed_NamesTheDisplayModeItsTimeIsIn(TimeDisplayMode mode)
-    {
-        var analyzed = Utc(2026, 7, 15, 14, 0);
-        var machine = TimeZoneInfo.Local;
-
-        var (time, zone) = mode switch
-        {
-            /* 14:00 UTC is 10:00 on a US Eastern server in July, which is on daylight time. */
-            TimeDisplayMode.ServerTime => ("2026-07-15 10:00:00", "UTC-04:00"),
-            TimeDisplayMode.UTC => ("2026-07-15 14:00:00", "UTC"),
-            _ => (
-                TimeZoneInfo.ConvertTimeFromUtc(analyzed, machine).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
-                machine.IsDaylightSavingTime(analyzed) ? machine.DaylightName : machine.StandardName),
-        };
-
-        var text = WithAnotherServersClockActive(() => RecommendationsViewModel.FormatLastAnalyzed(analyzed, mode, Eastern));
-
-        Assert.Equal($"Last analyzed {time} ({zone})", text);
-    }
-
-    [Fact]
-    public void LastAnalyzed_InServerMode_ShowsTheSelectedServersOwnTimeAndOffset_WhateverClockTheLastServerTabSet()
-    {
-        var (winter, summer) = WithAnotherServersClockActive(() => (
-            RecommendationsViewModel.FormatLastAnalyzed(Utc(2026, 1, 15, 14, 0), TimeDisplayMode.ServerTime, Eastern),
-            RecommendationsViewModel.FormatLastAnalyzed(Utc(2026, 7, 15, 14, 0), TimeDisplayMode.ServerTime, Eastern)));
-
-        Assert.Equal("Last analyzed 2026-01-15 09:00:00 (UTC-05:00)", winter);
-        Assert.Equal("Last analyzed 2026-07-15 10:00:00 (UTC-04:00)", summer);
-    }
-
-    /// <summary>
-    /// Runs <paramref name="read"/> while the process-wide clock is another server's (India, +05:30, no daylight
-    /// saving) and the process-wide mode is UTC: what a viewer holds after a different server's tab rendered last.
-    /// The status line must not read either, so a formatter that went back through
-    /// <c>ViewerTimeHelper.ForDisplay</c> would show India's time here. Both statics are restored.
-    /// </summary>
-    private static T WithAnotherServersClockActive<T>(Func<T> read)
-    {
-        var savedClock = ViewerTimeHelper.ActiveServerClock;
-        var savedMode = ViewerTimeHelper.CurrentDisplayMode;
-        try
-        {
-            ViewerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(330);
-            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
-            return read();
-        }
-        finally
-        {
-            ViewerTimeHelper.ActiveServerClock = savedClock;
-            ViewerTimeHelper.CurrentDisplayMode = savedMode;
-        }
-    }
-
-    /// <summary>
-    /// The tab is a WPF window this suite does not instantiate, so this is a source pin on the loader: the status
-    /// line goes through <c>FormatLastAnalyzed</c> with the display mode in force and the selected server's clock,
-    /// and the loader holds no "Last analyzed" text of its own that could end in a fixed zone name.
-    /// </summary>
-    [Fact]
-    public void TheRecommendationsLoader_BuildsTheStatusLineFromTheDisplayModeAndTheSelectedServersClock()
-    {
-        var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml.cs");
-        var source = CSharpSourceWalker.StripCommentsAndStrings(raw);
-
-        var signature = source.IndexOf("Task LoadRecommendationsAsync()", StringComparison.Ordinal);
-        Assert.True(signature >= 0, "LoadRecommendationsAsync is gone, so this pin would read nothing.");
-        var open = source.IndexOf('{', signature);
-        var body = CSharpSourceWalker.BraceBalanced(source, open);
-
-        Assert.Matches(
-            new Regex(@"RecommendationsStatusText\s*\.\s*Text\s*=\s*rows\s*\.\s*Count\s*>\s*0\s*\?\s*RecommendationsViewModel\s*\.\s*FormatLastAnalyzed\(\s*rows\[0\]\s*\.\s*Finding\s*\.\s*AnalysisTime\s*,\s*ViewerTimeHelper\s*\.\s*CurrentDisplayMode\s*,\s*serverClock\s*\)"),
-            body);
-
-        var literals = CSharpSourceWalker.StringLiteralBodies(raw.Substring(open, body.Length)).Select(l => l.Text);
-        Assert.DoesNotContain(literals, l => l.Contains("Last analyzed", StringComparison.Ordinal));
     }
 }

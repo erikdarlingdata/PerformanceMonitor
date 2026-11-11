@@ -56,7 +56,9 @@ export function dailySummaryPanels(server) {
   const signal = getPanelSignal();
   (async () => {
     /* 31 days, not 30 (#6294): the month calendar's current month starts on the 1st, which is up to 30 days before today. */
-    const res = await readTool("get_daily_summary_range", { server, days_back: 31 }, signal);
+    /* #8554: the slowest read on the tab (2 to 10 s on a server's first visit), sent through the heavy-read gate and asked for after the strips' reads, so it
+       does not hold the browser's connections or the store against the panels that draw first. */
+    const res = await readTool("get_daily_summary_range", { server, days_back: 31 }, signal, { heavy: true });
     if (res.kind === "aborted") return;
     if (res.kind === "error") {
       mount(tile.body, readErrorStrip(res.message));

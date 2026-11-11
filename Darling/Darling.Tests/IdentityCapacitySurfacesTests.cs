@@ -41,29 +41,44 @@ public sealed class ViewerIdentityCapacityTextTests : IDisposable
 
     public void Dispose() => ViewerTimeHelper.CurrentDisplayMode = _savedMode;
 
-    /// <summary>#7343: the picked server's clock (UTC+05:30, no daylight change), so Server mode differs from UTC and from Local on any machine outside India.</summary>
-    private static readonly ServerClock s_india = ServerClock.FixedOffset(330);
-
     public static TheoryData<TimeDisplayMode> Modes => new() { TimeDisplayMode.ServerTime, TimeDisplayMode.UTC, TimeDisplayMode.LocalTime };
 
-    /// <summary>The time of <paramref name="utc"/> as each display mode words it for the picked server: Server on its clock, UTC as is, Local on this machine.</summary>
+    /// <summary>The time of <paramref name="utc"/> as each display mode words it on the page's clock (#8576), to the second with its zone: UTC in
+    /// Server and UTC modes, as the refresh stamp beside it reads, and this machine's time with this machine's zone name in Local mode.</summary>
     private static string Worded(DateTime utc, TimeDisplayMode mode) => mode switch
     {
-        TimeDisplayMode.ServerTime => utc.AddMinutes(330).ToString("g", CultureInfo.CurrentCulture),
-        TimeDisplayMode.UTC => utc.ToString("g", CultureInfo.CurrentCulture),
-        _ => TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.Local).ToString("g", CultureInfo.CurrentCulture),
+        TimeDisplayMode.ServerTime or TimeDisplayMode.UTC => utc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture) + " UTC",
+        _ => LocalWorded(utc),
     };
+
+    private static string LocalWorded(DateTime utc) =>
+        TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.Local).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture)
+        + " " + (TimeZoneInfo.Local.IsDaylightSavingTime(utc) ? TimeZoneInfo.Local.DaylightName : TimeZoneInfo.Local.StandardName);
 
     [Theory]
     [MemberData(nameof(Modes))]
-    public void TheScanTimes_FollowTheDisplayMode_OnTheServersClock(TimeDisplayMode mode)
+    public void TheScanTimes_FollowTheDisplayMode_OnTheRefreshStampsClock(TimeDisplayMode mode)
     {
         ViewerTimeHelper.CurrentDisplayMode = mode;
         var read = ReadWithUnscanned([], [new IdentityNotYetScannedDatabase("Stale", Captured)], ("Clean", Captured));
 
-        var rows = ViewerIdentityCapacityText.ScanRows(read, s_india);
+        var rows = ViewerIdentityCapacityText.ScanRows(read);
 
         Assert.Equal([Worded(Captured, mode), Worded(Captured, mode)], rows.Select(r => r.LastScanned).ToArray());
+    }
+
+    /// <summary>#8576: a scan time is stamped to the second and names its zone, on the same clock as the tab's "Last refreshed" stamp. Server Time
+    /// has no server clock to apply to this page's stamps, so it reads UTC and says so, whatever the picked server's offset.</summary>
+    [Fact]
+    public void TheScanTimes_NameTheirZone_AndServerModeReadsUtcAsTheRefreshStampDoes()
+    {
+        var read = Read([], ("Clean", Captured));
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.Equal("2026-10-28 12:00:00 UTC", ViewerIdentityCapacityText.ScanRows(read).Single().LastScanned);
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+        Assert.Equal(LocalWorded(Captured), ViewerIdentityCapacityText.ScanRows(read).Single().LastScanned);
     }
 
 
@@ -140,7 +155,7 @@ public sealed class ViewerIdentityCapacityTextTests : IDisposable
     {
         var read = Read([Int("Sales", "Audit", 2_000_000_000, 93.1), Int("Sales", "Warm", 1_600_000_000, 74.5)], ("Clean", Captured), ("Sales", Captured));
 
-        var rows = ViewerIdentityCapacityText.ScanRows(read, ServerClock.Utc);
+        var rows = ViewerIdentityCapacityText.ScanRows(read);
 
         Assert.Equal(["Clean", "Sales"], rows.Select(r => r.Database).ToArray());
         Assert.Equal(["Scanned, clean", "Scanned, 2 columns above 10 percent"], rows.Select(r => r.State).ToArray());
@@ -154,12 +169,12 @@ public sealed class ViewerIdentityCapacityTextTests : IDisposable
         var read = ReadWithUnscanned(
             [], [new IdentityNotYetScannedDatabase("Fresh", null), new IdentityNotYetScannedDatabase("Stale", earlier)], ("Clean", Captured));
 
-        var rows = ViewerIdentityCapacityText.ScanRows(read, ServerClock.Utc);
+        var rows = ViewerIdentityCapacityText.ScanRows(read);
 
         Assert.Equal(["Clean", "Fresh", "Stale"], rows.Select(r => r.Database).ToArray());
         Assert.Equal(["Scanned, clean", "Not yet scanned", "Not yet scanned"], rows.Select(r => r.State).ToArray());
         Assert.Equal("-", rows[1].LastScanned);
-        Assert.Equal(earlier.ToLocalTime().ToString("g", CultureInfo.CurrentCulture), rows[2].LastScanned);
+        Assert.Equal(LocalWorded(earlier), rows[2].LastScanned);
         Assert.Equal("Critical: 0   Warning: 0   Columns above 10 percent: 0   Databases scanned: 1   Not yet scanned: 2   Skipped: 0   " + ViewerIdentityCapacityText.BandsNote, ViewerIdentityCapacityText.StatusLine(read));
         Assert.Equal(ViewerIdentityCapacityRead.Data, read.Status);
     }
@@ -177,7 +192,7 @@ public sealed class ViewerIdentityCapacityTextTests : IDisposable
             ViewerIdentityCapacityRead.Data, null,
             new IdentityCapacityRead([], [new IdentityScannedDatabase("Clean", Captured)], [new IdentityNotYetScannedDatabase("Fresh", null)], skipped));
 
-        var rows = ViewerIdentityCapacityText.ScanRows(read, ServerClock.Utc);
+        var rows = ViewerIdentityCapacityText.ScanRows(read);
 
         Assert.Equal(["Clean", "Fresh", "Mirror", "Snap", "Locked"], rows.Select(r => r.Database).ToArray());
         Assert.Equal(
@@ -197,7 +212,7 @@ public sealed class ViewerIdentityCapacityTextTests : IDisposable
 
         Assert.Empty(ViewerIdentityCapacityText.ColumnRows(read));
         Assert.Equal("No identity column is above 10 percent used.", ViewerIdentityCapacityText.ColumnsEmptyText(read));
-        Assert.Equal("Scanned, clean", ViewerIdentityCapacityText.ScanRows(read, ServerClock.Utc).Single().State);
+        Assert.Equal("Scanned, clean", ViewerIdentityCapacityText.ScanRows(read).Single().State);
         /* #6907: a scanned database always has a scan row, so the scan note never shows a scan sentence over a filled grid. */
         Assert.Equal(ViewerIdentityCapacityText.NoData, ViewerIdentityCapacityText.ScanEmptyText(read));
     }
@@ -215,7 +230,7 @@ public sealed class ViewerIdentityCapacityTextTests : IDisposable
         Assert.Equal(ViewerIdentityCapacityText.NoData, ViewerIdentityCapacityText.ColumnsEmptyText(read));
         Assert.Equal(ViewerIdentityCapacityText.NoData, ViewerIdentityCapacityText.ScanEmptyText(read));
         Assert.Empty(ViewerIdentityCapacityText.ColumnRows(read));
-        Assert.Empty(ViewerIdentityCapacityText.ScanRows(read, ServerClock.Utc));
+        Assert.Empty(ViewerIdentityCapacityText.ScanRows(read));
     }
 }
 
@@ -333,7 +348,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id','int',10,$7::numeric,1,1,$8)",
             Assert.Equal(1, web.GetProperty("summary").GetProperty("databases_not_yet_scanned").GetInt32());
             Assert.Equal(
                 ["Scanned, clean", "Scanned, 2 columns above 10 percent", "Not yet scanned"],
-                ViewerIdentityCapacityText.ScanRows(read, ServerClock.Utc).Select(r => r.State).ToArray());
+                ViewerIdentityCapacityText.ScanRows(read).Select(r => r.State).ToArray());
             return 0;
         });
     }
