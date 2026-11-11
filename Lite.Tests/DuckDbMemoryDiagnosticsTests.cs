@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using Microsoft.Extensions.Logging;
@@ -138,7 +139,7 @@ public sealed class DuckDbMemoryDiagnosticsTests : IDisposable
     }
 
     [Fact]
-    public async Task RunMemoryTrimCycle_UnderTheThreshold_WritesOneTickLineAndDoesNotTrim()
+    public async Task RunMemoryTrimCycle_UnderTheThreshold_WritesNothingAndDoesNotTrim()
     {
         var (initializer, log) = await OpenStoreAsync();
         var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
@@ -148,17 +149,200 @@ public sealed class DuckDbMemoryDiagnosticsTests : IDisposable
             var before = log.Entries.Count;
             initializer.RunMemoryTrimCycle();
 
-            var tick = Assert.Single(log.Entries.Skip(before), e => e.Message.StartsWith("Memory trim tick:", StringComparison.Ordinal));
-            Assert.Equal(LogLevel.Information, tick.Level);
-            Assert.Contains("DuckDB holds ", tick.Message, StringComparison.Ordinal);
-            Assert.Contains("Process private bytes ", tick.Message, StringComparison.Ordinal);
-            Assert.Contains("so no trim.", tick.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain(log.Entries.Skip(before), e => e.Message.StartsWith("Memory trim tick:", StringComparison.Ordinal));
             Assert.Equal(0, initializer.CompletedTrimCycleCount);
         }
         finally
         {
             DuckDbInitializer.TrimThresholdBytes = originalThreshold;
         }
+    }
+
+    [Fact]
+    public async Task RunMemoryTrimCycle_WhenTheLocalDatabaseIsBusy_WritesOneTickLineAndSkips()
+    {
+        var (initializer, log) = await OpenStoreAsync();
+        initializer.TrimLockWaitForTests = TimeSpan.Zero;
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = 0;
+        var readerReady = new ManualResetEventSlim();
+        var releaseReader = new ManualResetEventSlim();
+        try
+        {
+            var readerTask = Task.Run(() =>
+            {
+                using var readLock = initializer.AcquireReadLock();
+                readerReady.Set();
+                releaseReader.Wait(LockHangGuard);
+            });
+            Assert.True(readerReady.Wait(LockHangGuard));
+
+            var before = log.Entries.Count;
+            initializer.RunMemoryTrimCycle();
+
+            var tick = Assert.Single(log.Entries.Skip(before), e => e.Message.StartsWith("Memory trim tick:", StringComparison.Ordinal));
+            Assert.Equal(LogLevel.Information, tick.Level);
+            Assert.Contains("the local database was busy, so the trim was skipped.", tick.Message, StringComparison.Ordinal);
+            Assert.Equal(0, initializer.CompletedTrimCycleCount);
+
+            releaseReader.Set();
+            await readerTask;
+        }
+        finally
+        {
+            releaseReader.Set();
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+        }
+    }
+
+    /// <summary>
+    /// A lowering DuckDB refuses writes one tick line with the reason and leaves the configured limit in place. The real target is
+    /// built to be accepted, so the test puts the old fixed 64 MB target back through the seam, over a store whose indexes hold more.
+    /// </summary>
+    [Fact]
+    public async Task RunMemoryTrimCycle_WhenDuckDbRefusesTheLowering_WritesOneTickLineAndRestoresTheLimit()
+    {
+        var (initializer, log) = await OpenStoreAsync();
+        await FillIndexedTableAsync(initializer);
+        var limitBefore = await ReadMemoryLimitAsync(initializer);
+
+        initializer.TrimTargetOverrideForTests = "64MB";
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = 0;
+        try
+        {
+            var before = log.Entries.Count;
+            initializer.RunMemoryTrimCycle();
+
+            var tick = Assert.Single(log.Entries.Skip(before), e => e.Message.StartsWith("Memory trim tick:", StringComparison.Ordinal));
+            Assert.Equal(LogLevel.Information, tick.Level);
+            Assert.Contains("DuckDB would not lower memory_limit to 64MB", tick.Message, StringComparison.Ordinal);
+            Assert.Equal(0, initializer.CompletedTrimCycleCount);
+        }
+        finally
+        {
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+        }
+
+        Assert.Equal(limitBefore, await ReadMemoryLimitAsync(initializer));
+    }
+
+    /// <summary>
+    /// The threshold counts only what a trim can free. A store whose pinned tags (ART indexes) alone pass the threshold, with a
+    /// small cache, used to trip the trim every minute and empty the caches for nothing. The threshold here sits between the
+    /// store's reclaimable bytes and its total, which is where a store with 7 million rows sits against the real 256 MB: the old
+    /// comparison trimmed, the new one does not and writes no line.
+    /// </summary>
+    [Fact]
+    public async Task RunMemoryTrimCycle_WhenOnlyPinnedTagsPassTheThreshold_DoesNotTrim()
+    {
+        var (initializer, log) = await OpenStoreAsync();
+        await FillIndexedTableAsync(initializer);
+
+        IReadOnlyList<DuckDbInitializer.MemoryTag> tags;
+        using (var connection = initializer.CreateConnection())
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            tags = DuckDbInitializer.ReadMemoryTags(connection);
+        }
+
+        var total = tags.Sum(t => t.MemoryBytes);
+        var pinned = tags.Where(t => t.Tag is not ("BASE_TABLE" or "EXTERNAL_FILE_CACHE")).Sum(t => t.MemoryBytes);
+        Assert.True(pinned > 64L * 1024 * 1024, $"pinned {pinned / (1024 * 1024)} MB, not over the 64 MB floor");
+
+        /* Half the pinned memory of margin each way, so the store's drift between this read and the cycle cannot flip it. */
+        var threshold = total - pinned / 2;
+        Assert.True(total - pinned < threshold, "the reclaimable bytes must be under the threshold for this test to mean anything");
+
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = threshold;
+        try
+        {
+            var before = log.Entries.Count;
+            initializer.RunMemoryTrimCycle();
+
+            Assert.Equal(0, initializer.CompletedTrimCycleCount);
+            Assert.DoesNotContain(log.Entries.Skip(before), e => e.Message.StartsWith("Memory trim tick:", StringComparison.Ordinal));
+        }
+        finally
+        {
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+        }
+    }
+
+    [Fact]
+    public void ReclaimableBytes_AgainstTheRealThreshold_IgnoresPinnedTagsAndCountsTheCaches()
+    {
+        var threshold = DuckDbInitializer.TrimThresholdBytes;
+
+        /* 7 million rows of ART_INDEX is about 250 MB: pinned alone passes 256 MB, and there is nothing to trim. */
+        var pinnedOnly = new[] { Tag("BASE_TABLE", 20), Tag("EXTERNAL_FILE_CACHE", 5), Tag("ART_INDEX", 300), Tag("OBJECT_CACHE", 9) };
+        var pinnedOnlyTotal = pinnedOnly.Sum(t => t.MemoryBytes);
+        Assert.True(pinnedOnlyTotal >= threshold);
+        Assert.True(DuckDbInitializer.ReclaimableBytes(pinnedOnlyTotal, pinnedOnly) < threshold);
+
+        /* A cache over 256 MB still trims, with or without indexes beside it. */
+        var bigCache = new[] { Tag("BASE_TABLE", 280), Tag("EXTERNAL_FILE_CACHE", 40), Tag("ART_INDEX", 71) };
+        Assert.True(DuckDbInitializer.ReclaimableBytes(bigCache.Sum(t => t.MemoryBytes), bigCache) >= threshold);
+
+        /* A store with nothing pinned, or with no tags read, compares its total as before. */
+        var cachesOnly = new[] { Tag("BASE_TABLE", 300) };
+        Assert.Equal(300d * 1024 * 1024, DuckDbInitializer.ReclaimableBytes(cachesOnly.Sum(t => t.MemoryBytes), cachesOnly));
+        Assert.Equal(300d * 1024 * 1024, DuckDbInitializer.ReclaimableBytes(300d * 1024 * 1024, null));
+    }
+
+    /// <summary>A store whose cache holds more than the threshold still trims, even with indexes pinned beside it.</summary>
+    [Fact]
+    public async Task RunMemoryTrimCycle_WhenTheCacheIsOverTheThreshold_StillTrims()
+    {
+        var (initializer, log) = await OpenStoreAsync();
+        await FillIndexedTableAsync(initializer);
+
+        IReadOnlyList<DuckDbInitializer.MemoryTag> tags;
+        using (var connection = initializer.CreateConnection())
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            tags = DuckDbInitializer.ReadMemoryTags(connection);
+        }
+
+        var reclaimable = DuckDbInitializer.ReclaimableBytes(tags.Sum(t => t.MemoryBytes), tags);
+        Assert.True(reclaimable > 1, "the store holds no cache to trim");
+
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = (long)(reclaimable / 2);
+        try
+        {
+            var before = log.Entries.Count;
+            initializer.RunMemoryTrimCycle();
+
+            Assert.Equal(1, initializer.CompletedTrimCycleCount);
+            var tick = Assert.Single(log.Entries.Skip(before), e => e.Message.StartsWith("Memory trim tick:", StringComparison.Ordinal));
+            Assert.Contains("Trimmed from ", tick.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+        }
+    }
+
+    private async Task FillIndexedTableAsync(DuckDbInitializer initializer)
+    {
+        using var connection = initializer.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var create = connection.CreateCommand();
+        create.CommandText = "CREATE TABLE pinned_8535 (id BIGINT PRIMARY KEY, v INTEGER)";
+        await create.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        using var fill = connection.CreateCommand();
+        fill.CommandText = "INSERT INTO pinned_8535 SELECT (hash(i) >> 1)::BIGINT, i::INTEGER FROM range(0, 3000000) t(i)";
+        fill.CommandTimeout = 300;
+        await fill.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    private async Task<string> ReadMemoryLimitAsync(DuckDbInitializer initializer)
+    {
+        using var connection = initializer.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        return await ScalarTextAsync(connection, "SELECT current_setting('memory_limit')");
     }
 
     /// <summary>
@@ -172,17 +356,7 @@ public sealed class DuckDbMemoryDiagnosticsTests : IDisposable
     {
         var (initializer, log) = await OpenStoreAsync();
 
-        using (var connection = initializer.CreateConnection())
-        {
-            await connection.OpenAsync(TestContext.Current.CancellationToken);
-            using var create = connection.CreateCommand();
-            create.CommandText = "CREATE TABLE pinned_8535 (id BIGINT PRIMARY KEY, v INTEGER)";
-            await create.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
-            using var fill = connection.CreateCommand();
-            fill.CommandText = "INSERT INTO pinned_8535 SELECT (hash(i) >> 1)::BIGINT, i::INTEGER FROM range(0, 3000000) t(i)";
-            fill.CommandTimeout = 300;
-            await fill.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
-        }
+        await FillIndexedTableAsync(initializer);
 
         string limitBefore;
         using (var connection = initializer.CreateConnection())

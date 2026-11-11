@@ -180,6 +180,14 @@ public sealed class ServerTabOpenNativeMemoryTests : IDisposable
         return (tags, process.PrivateMemorySize64, GC.GetTotalMemory(forceFullCollection: false));
     }
 
+    private static async Task<long> TimeOpenAsync(DuckDbInitializer initializer, int serverId)
+    {
+        var data = new LocalDataService(initializer);
+        var stopwatch = Stopwatch.StartNew();
+        await RunTabOpenReadsAsync(data, serverId);
+        return stopwatch.ElapsedMilliseconds;
+    }
+
     private static string Mb(long bytes) => (bytes / (1024.0 * 1024.0)).ToString("F1", CultureInfo.InvariantCulture);
 
     [Fact]
@@ -242,6 +250,31 @@ public sealed class ServerTabOpenNativeMemoryTests : IDisposable
         await Record("trim", "after one trim cycle");
         GC.Collect();
         await Record("trim", "after the trim and GC.Collect");
+
+        /* What a trim costs the next open (measurement only, nothing asserts a time): the Overview's reads right after a trim,
+           when the pages come from the file again, against the same reads warm. Each run trims first, then times a cold open, then
+           times the same open twice more with the pages cached. */
+        table.AppendLine();
+        table.AppendLine("| run | Overview open right after a trim (ms) | same open, warm (ms) | same open, warm again (ms) |");
+        table.AppendLine("|---|---|---|---|");
+        for (var run = 1; run <= 3; run++)
+        {
+            DuckDbInitializer.TrimThresholdBytes = 0;
+            try
+            {
+                initializer.RunMemoryTrimCycle();
+            }
+            finally
+            {
+                DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+            }
+
+            var serverId = (run - 1) % ServerCount + 1;
+            var cold = await TimeOpenAsync(initializer, serverId);
+            var warm1 = await TimeOpenAsync(initializer, serverId);
+            var warm2 = await TimeOpenAsync(initializer, serverId);
+            table.AppendLine($"| {run} | {cold} | {warm1} | {warm2} |");
+        }
 
         var outPath = Environment.GetEnvironmentVariable("LITE_8535_OUT");
         if (!string.IsNullOrWhiteSpace(outPath))

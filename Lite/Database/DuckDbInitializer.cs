@@ -88,6 +88,12 @@ public partial class DuckDbInitializer : IDisposable
     /// </summary>
     internal TimeSpan TrimLockWaitForTests = TimeSpan.Zero;
 
+    /// <summary>
+    /// #8535: a test's way to make the lowering fail, since the real target is built to be accepted. When set, the trim lowers
+    /// <c>memory_limit</c> to this instead of <see cref="TrimTargetFor"/>. Null outside tests.
+    /// </summary>
+    internal string? TrimTargetOverrideForTests;
+
     /* #5650: a busy-skipped trim cycle used to log only at Debug. RecordTrimSkip counts both skip paths and writes
        one Information line at most an hour, counted from the first skip; the line resets the count and the hour. */
     private static readonly TimeSpan TrimSkipLogInterval = TimeSpan.FromHours(1);
@@ -691,7 +697,7 @@ public partial class DuckDbInitializer : IDisposable
     }
 
     /// <summary>
-    /// Checks the sentinel's current memory usage and, if it is over <see cref="TrimThresholdBytes"/>,
+    /// Checks the sentinel's current memory usage less the memory a trim cannot free (#8535) and, if that is over <see cref="TrimThresholdBytes"/>,
     /// cycles <c>memory_limit</c> down to <see cref="TrimTargetMemoryLimit"/> and back up to force DuckDB's
     /// buffer manager to release cached pages (#4262 round 1 finding 1). Internal so a test can call this
     /// directly instead of waiting on <see cref="_trimTimer"/>'s real interval.
@@ -739,14 +745,12 @@ public partial class DuckDbInitializer : IDisposable
             StoreLockHolders.Unregister(readHoldId);
         }
 
-        if (beforeBytes is null || beforeBytes < TrimThresholdBytes)
-        {
-            /* #8535: the tick says what DuckDB held even when it does nothing, so a log with no trim in it still shows the number
-               the 256 MB test ran against. */
-            if (beforeBytes is not null)
-                LogTrimTick(beforeTags, $"Under the {Mb(TrimThresholdBytes)} MB trim threshold, so no trim.");
+        /* #8535: the threshold counts only what a trim can free. The pinned tags (ART indexes and the rest) stay resident through a
+           limit change, so a store whose indexes alone pass the threshold would trip the trim every minute, and each trim empties the
+           two caches the tabs then read again, for no memory gained. A tick under the threshold writes no line: the open and close
+           lines carry the numbers, and a line a minute that says "nothing" only buries the ticks that did something. */
+        if (beforeBytes is null || ReclaimableBytes(beforeBytes.Value, beforeTags) < TrimThresholdBytes)
             return;
-        }
 
         /* Never wait — a reader must never block behind the trim (#4262 round 1 finding 1). If the write
            lock is busy, skip this cycle; the next one TrimInterval later gets another try. The wait is
@@ -787,7 +791,7 @@ public partial class DuckDbInitializer : IDisposable
                other tags that are not a cache of the database file), because DuckDB refuses a limit below what it holds
                that cannot be evicted. A 64 MB target failed every minute once the indexes alone held more than that, and the
                failure only reached a Debug line, so the trim never ran and nothing said so. */
-            var target = TrimTargetFor(TryReadMemoryTags(lockedSentinel));
+            var target = TrimTargetOverrideForTests ?? TrimTargetFor(TryReadMemoryTags(lockedSentinel));
             string? lowerFailure = null;
             try
             {

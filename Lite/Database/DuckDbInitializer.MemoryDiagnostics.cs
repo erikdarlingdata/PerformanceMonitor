@@ -22,7 +22,7 @@ namespace PerformanceMonitorLite.Database;
 /// while the gc heap grew by 85 MB, and the log said nothing about how much of the rest was DuckDB's. These members read
 /// <c>duckdb_memory()</c> on Lite's OWN instance (a connection opened here attaches to the sentinel's native handle, so it
 /// is the instance the collectors and the tabs use, never a second one) and put its total by tag in one Information line
-/// beside the process's private bytes and the gc heap. The server tab's open and close and every trim tick write it.
+/// beside the process's private bytes and the gc heap. The server tab's open and close write it, and so does a trim tick that trimmed, was skipped as busy or was refused.
 /// </summary>
 public partial class DuckDbInitializer
 {
@@ -92,10 +92,21 @@ public partial class DuckDbInitializer
     {
         const long megabyte = 1024L * 1024;
         var floorMb = long.Parse(TrimTargetMemoryLimit[..^2], CultureInfo.InvariantCulture);
-        var pinned = tags?.Where(t => !EvictableTags.Contains(t.Tag, StringComparer.Ordinal)).Sum(t => t.MemoryBytes) ?? 0;
-        var pinnedMb = (pinned + megabyte - 1) / megabyte;
+        var pinnedMb = (PinnedBytes(tags) + megabyte - 1) / megabyte;
         return (pinnedMb + floorMb).ToString(CultureInfo.InvariantCulture) + "MB";
     }
+
+    /// <summary>What a limit change cannot evict: every tag except the two caches. Zero with no tags read.</summary>
+    private static long PinnedBytes(IReadOnlyList<MemoryTag>? tags) =>
+        tags?.Where(t => !EvictableTags.Contains(t.Tag, StringComparer.Ordinal)).Sum(t => t.MemoryBytes) ?? 0;
+
+    /// <summary>
+    /// The bytes a trim can free (#8535): DuckDB's total less the pinned tags, the same sum <see cref="TrimTargetFor"/> keeps
+    /// above the limit. The trim threshold is compared to this, so indexes the trim cannot touch never start a trim that would
+    /// only empty the caches. With no tag read it is the plain total, as before.
+    /// </summary>
+    internal static double ReclaimableBytes(double totalBytes, IReadOnlyList<MemoryTag>? tags) =>
+        Math.Max(0, totalBytes - PinnedBytes(tags));
 
     /// <summary>Reads the tags on a connection the caller already holds under the store lock, or null (and a Debug line) when the read fails.</summary>
     private IReadOnlyList<MemoryTag>? TryReadMemoryTags(DuckDBConnection connection)
@@ -111,7 +122,7 @@ public partial class DuckDbInitializer
         }
     }
 
-    /// <summary>The trim timer's one line per tick (#8535): the memory text, then what the tick did. Nothing when the tags could not be read.</summary>
+    /// <summary>The trim timer's one line for a tick that did something (#8535): the memory text, then what the tick did. Nothing when the tags could not be read.</summary>
     private void LogTrimTick(IReadOnlyList<MemoryTag>? tags, string outcome)
     {
         if (tags is null)
