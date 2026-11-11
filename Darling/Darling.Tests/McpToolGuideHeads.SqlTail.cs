@@ -40,7 +40,7 @@ public sealed class McpToolGuideHeadsSqlTailTests
         ("get_oversized_plan_backlog", "524288 bytes"),
         ("get_oversized_plan_backlog", "No time window: a worklist updated in place, not a series"),
         ("get_oversized_plan_backlog", "Read last_captured_at/last_expired_at FIRST"),
-        ("get_oversized_plan_backlog", "pending+captured+expired=total_rows"),
+        ("get_oversized_plan_backlog", "pending+captured+expired+dropped=total_rows"),
         ("get_oversized_plan_backlog", "include_rows requires server_name"),
         ("get_oversized_plan_backlog", "Permanently empty below schema V121"),
     ];
