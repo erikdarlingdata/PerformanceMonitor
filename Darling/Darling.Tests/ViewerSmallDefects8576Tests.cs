@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Ui;
@@ -107,9 +106,6 @@ public sealed class ViewerSmallDefects8576Tests : IDisposable
 
     // ── 5: the capture and analysis stamps follow the page's clock ──────────────
 
-    /// <summary>The picked server's clock (UTC+05:30), which is not UTC and not this machine's.</summary>
-    private static readonly ServerClock s_india = ServerClock.FixedOffset(330);
-
     private static ViewerDatabaseProtectionRead ProtectionRead()
     {
         var fact = new DatabaseProtectionFact(
@@ -134,7 +130,7 @@ public sealed class ViewerSmallDefects8576Tests : IDisposable
     {
         ViewerTimeHelper.CurrentDisplayMode = mode;
 
-        var line = ViewerDatabaseProtectionText.StatusLine(ProtectionRead(), s_india);
+        var line = ViewerDatabaseProtectionText.StatusLine(ProtectionRead());
 
         var expected = ViewerTimeHelper.FormatFleetWide(Captured, "yyyy-MM-dd HH:mm:ss", mode);
         Assert.EndsWith("Captured: " + expected, line, StringComparison.Ordinal);
@@ -146,7 +142,7 @@ public sealed class ViewerSmallDefects8576Tests : IDisposable
     {
         ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
 
-        Assert.EndsWith("Captured: 2026-10-28 12:00:00 UTC", ViewerDatabaseProtectionText.StatusLine(ProtectionRead(), s_india), StringComparison.Ordinal);
+        Assert.EndsWith("Captured: 2026-10-28 12:00:00 UTC", ViewerDatabaseProtectionText.StatusLine(ProtectionRead()), StringComparison.Ordinal);
     }
 
     [Theory]
@@ -156,9 +152,8 @@ public sealed class ViewerSmallDefects8576Tests : IDisposable
     public void TheLastAnalyzedLine_IsOnTheClockOfTheRefreshStamp(TimeDisplayMode mode)
     {
         var analyzed = new DateTime(2026, 7, 15, 14, 0, 0, DateTimeKind.Utc);
-        var eastern = ServerClock.FixedOffset(-240);
 
-        var line = RecommendationsViewModel.FormatLastAnalyzed(analyzed, mode, eastern);
+        var line = RecommendationsViewModel.FormatLastAnalyzed(analyzed, mode);
 
         Assert.Equal("Last analyzed " + ViewerTimeHelper.FormatFleetWide(analyzed, "yyyy-MM-dd HH:mm:ss", mode), line);
     }
@@ -170,6 +165,6 @@ public sealed class ViewerSmallDefects8576Tests : IDisposable
 
         Assert.Equal(
             "Last analyzed 2026-07-15 14:00:00 UTC",
-            RecommendationsViewModel.FormatLastAnalyzed(analyzed, TimeDisplayMode.ServerTime, ServerClock.FixedOffset(-240)));
+            RecommendationsViewModel.FormatLastAnalyzed(analyzed, TimeDisplayMode.ServerTime));
     }
 }
