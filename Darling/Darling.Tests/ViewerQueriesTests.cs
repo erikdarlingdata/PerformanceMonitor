@@ -51,7 +51,10 @@ public sealed class ViewerQueriesSqlTests
         Assert.True(rankedRead >= 0, "the ranked CTE must aggregate the base query_stats table");
         /* #5309: the text is ONE lookup for every ranked group; it resolves the dimension itself (what
            v_query_stats' COALESCE does) for the newest row of each group only. */
-        Assert.DoesNotContain("LATERAL", sql, StringComparison.Ordinal);
+        var textSql = sql.Replace(ViewerDataService.TopQueriesModuleCte, string.Empty, StringComparison.Ordinal);
+        /* The module CTE (#8549) probes idx_procedure_stats_time with a LATERAL ... LIMIT 1 once per ranked handle, an index probe and
+           never a scan. It is the module lookup, not the text lookup #5309 is about, so it is cut out before the text checks below. */
+        Assert.DoesNotContain("LATERAL", textSql, StringComparison.Ordinal);
         Assert.DoesNotContain("FROM v_query_stats", sql, StringComparison.Ordinal);
         Assert.True(dimRead > lookupAt && lookupAt > rankedRead,
             "the base-table aggregate comes first; the dimension is read by the one latest-text lookup");
@@ -87,9 +90,11 @@ public sealed class ViewerQueriesSqlTests
     public void TopQueriesSql_FetchesTheLatestNonNullQueryText_ViaLateralJoin_WithPlanPresenceFlag()
     {
         var sql = ViewerDataService.TopQueriesSql;
-        Assert.DoesNotContain("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);   /* #5309: one lookup, not one per row */
+        /* The module CTE's per-handle LATERAL ... LIMIT 1 index probe (#8549) is cut out: these pins are about the text lookup. */
+        var textSql = sql.Replace(ViewerDataService.TopQueriesModuleCte, string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain("LEFT JOIN LATERAL", textSql, StringComparison.Ordinal);   /* #5309: one lookup, not one per row */
         Assert.Contains("q.query_text IS NOT NULL", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("LIMIT 1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 1", textSql, StringComparison.Ordinal);
         /* #8136: which row's text is picked (the newest that carries one, the row collected last on a tie, inline before
            digest) and that it resolves through the #1767 dimension are pinned by TopQueriesTextOneScanLiveTests through the
            rows both readers return. The lookup still fetches only query_text (never the multi-KB plan); the plan is surfaced
