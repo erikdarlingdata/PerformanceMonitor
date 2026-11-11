@@ -181,12 +181,12 @@ SELECT
     CASE WHEN s.heap_pages > 0 AND s.heap_pages > s.estimated_heap_pages
          THEN round(100 * (s.heap_pages - s.estimated_heap_pages) / s.heap_pages::numeric, 2)
          ELSE 0::numeric END                                             AS bloat_pct_estimate,
-    /* A FOURTH way the estimate has no basis, and it has to be OR-ed in HERE rather than in the inner
+    " + /* A FOURTH way the estimate has no basis, and it has to be OR-ed in HERE rather than in the inner
        query because that is where estimated_heap_pages first exists. When every column of a table has a
        zero avg_width the tuple size computes to 0, the NULLIF guards fire, estimated_heap_pages comes back
        NULL, and the two CASE expressions above resolve to a confident 0%% bloat - an estimate presented
        as a measurement, which is the one thing this collector must never do. Probably unreachable behind
-       the 1 MB size floor, but probably-unreachable is not the standard the flag is held to. */
+       the 1 MB size floor, but probably-unreachable is not the standard the flag is held to. */ @"
     (s.estimate_unavailable OR s.estimated_heap_pages IS NULL)      AS estimate_unavailable,
     s.alignment_bytes,
     s.pgstattuple_available
@@ -209,9 +209,9 @@ FROM
         a.estimate_unavailable,
         a.pgstattuple_available,
         a.estimated_tuple_bytes,
-        /* Expected pages if every live tuple were packed to the table's own fillfactor. NULLIF guards a
+        " + /* Expected pages if every live tuple were packed to the table's own fillfactor. NULLIF guards a
            zero tuple size, which a table whose columns all have zero avg_width really can produce - and
-           a division by zero would fail the entire collection for the whole database, not just this row. */
+           a division by zero would fail the entire collection for the whole database, not just this row. */ @"
         ceil(
             GREATEST(a.live_tuples, 0)::numeric
             / NULLIF((a.block_size - 24) * a.fillfactor
@@ -235,8 +235,8 @@ FROM
             b.alignment_bytes,
             b.estimate_unavailable,
             b.pgstattuple_available,
-            /* The tuple the server would write: header, then the data, each padded up to MAXALIGN, plus
-               the 4-byte item pointer in the page's line pointer array. */
+            " + /* The tuple the server would write: header, then the data, each padded up to MAXALIGN, plus
+               the 4-byte item pointer in the page's line pointer array. */ @"
             ( 4 + b.tuple_header_bytes + b.tuple_data_bytes + (2 * b.alignment_bytes)
               - CASE WHEN b.tuple_header_bytes % b.alignment_bytes = 0
                      THEN b.alignment_bytes ELSE b.tuple_header_bytes % b.alignment_bytes END
@@ -255,9 +255,9 @@ FROM
                 MAX(tbl.reltuples)::bigint                               AS live_tuples,
                 coalesce(MAX(st.n_dead_tup), 0)::bigint                  AS dead_tuples,
                 coalesce(MAX(st.n_mod_since_analyze), 0)::bigint         AS mods_since_analyze,
-                /* GREATEST ignores NULLs, which is what is wanted here rather than a hazard: whichever of
+                " + /* GREATEST ignores NULLs, which is what is wanted here rather than a hazard: whichever of
                    the manual and the automatic analyze actually happened is the later non-NULL one, and a
-                   table that has only ever been autoanalyzed must not report ""never analyzed"". */
+                   table that has only ever been autoanalyzed must not report "never analyzed". */ @"
                 (GREATEST(MAX(st.last_analyze), MAX(st.last_autoanalyze)) AT TIME ZONE 'UTC') AS last_analyzed,
                 coalesce(substring(array_to_string(tbl.reloptions, ' ')
                                    FROM 'fillfactor=([0-9]+)')::smallint, 100)::int AS fillfactor,
@@ -267,16 +267,16 @@ FROM
                 (23 + CASE WHEN MAX(coalesce(sts.null_frac, 0)) > 0
                            THEN (7 + count(sts.attname)) / 8 ELSE 0 END)::int AS tuple_header_bytes,
                 sum((1 - coalesce(sts.null_frac, 0)) * coalesce(sts.avg_width, 0))::numeric AS tuple_data_bytes,
-                /* Three separate ways the estimate has no basis, collapsed into one flag the read must
+                " + /* Three separate ways the estimate has no basis, collapsed into one flag the read must
                    honour: a name-typed column (pg_stats reports its width as the padded 64 bytes rather
                    than the stored text), any column with no pg_stats row at all (never analyzed, or - far
                    more likely in production - the login lacks SELECT and pg_stats filtered every row out),
-                   and reltuples < 0, PG14's explicit ""never analyzed"" marker. */
+                   and reltuples < 0, PG14's explicit "never analyzed" marker. */ @"
                 (   bool_or(att.atttypid = 'pg_catalog.name'::regtype)
                  OR count(sts.attname) <> count(att.attname)
                  OR MAX(tbl.reltuples) < 0 )                             AS estimate_unavailable,
-                /* A fourth condition - estimated_heap_pages IS NULL - is OR-ed into this column in the
-                   OUTERMOST select, where that value first exists. */
+                " + /* A fourth condition - estimated_heap_pages IS NULL - is OR-ed into this column in the
+                   OUTERMOST select, where that value first exists. */ @"
                 EXISTS (SELECT 1 FROM pg_catalog.pg_extension AS e
                         WHERE e.extname = 'pgstattuple')                 AS pgstattuple_available
             FROM pg_catalog.pg_attribute AS att
