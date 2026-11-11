@@ -1016,8 +1016,13 @@ public static class FactRemediation
         var apcState = state.ApcState ?? string.Empty;
         var apcReason = state.ApcStateReason;
 
-        /* apc_owns_it — three shapes, one blocker: the engine is doing this, on this plan or on this query. */
-        if (planForcedAuto)
+        /* apc_owns_it — three shapes, one blocker: the engine is doing this, on this plan or on this query.
+           #8628: the two AUTO-forced-row shapes rest on a query_store_stats observation, and the plan_correction
+           state beside it is its own, separate observation. When the plan_correction state is the NEWER one and says
+           the engine has backed out (Reverted or Expired) or that the plan it named is not forced, the older AUTO row
+           is stale and does not raise the blocker. When the forced-plan row is the newer (or the same age), it decides
+           as before. The same predicate serves every reader of this gate, so get_plan_force_precheck cannot differ. */
+        if (planForcedAuto && !ApcSupersedesForcedRow(state, state.PlanObservedAtUtc, target.PlanId))
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ApcOwnsIt,
@@ -1030,7 +1035,8 @@ public static class FactRemediation
                 $"plan_correction: recommendation state {apcState}{Reason(apcReason)} with last_good_plan_id = {target.PlanId}" +
                 $"{ForcedClause(state.ApcLastGoodPlanIsForced, state.ApcLastGoodPlanForcingType)} at {Stamp(state.ApcObservedAtUtc)}, the engine is already forcing exactly this plan"));
         }
-        else if (state.OtherForcedPlanId is long otherAuto && IsAutoForcing(state.OtherForcedPlanForcingType))
+        else if (state.OtherForcedPlanId is long otherAuto && IsAutoForcing(state.OtherForcedPlanForcingType)
+            && !ApcSupersedesForcedRow(state, state.OtherForcedPlanObservedAtUtc, otherAuto))
         {
             blockers.Add(new ForcePlanBlocker(
                 ForcePlanBlockerNames.ApcOwnsIt,
@@ -1107,6 +1113,31 @@ public static class FactRemediation
 
     private static bool IsAutoForcing(string? forcingType) =>
         string.Equals(forcingType, ForcePlanTargetState.ForcingTypeAuto, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// #8628: whether the automatic-plan-correction (<c>plan_correction</c>) observation is NEWER than the
+    /// forced-plan (<c>query_store_stats</c>) row and says that row no longer holds: the recommendation is
+    /// <c>Reverted</c> or <c>Expired</c> (the engine has backed out), or the plan it named
+    /// (<c>last_good_plan_id</c>, the forced plan in question) is not forced. Only a strictly newer
+    /// observation supersedes; the same age or an older one leaves the forced-plan row to decide, and a forced
+    /// row with no snapshot time is never superseded. One predicate for every reader of the gate, so the
+    /// analyze_server blocker, the guidance and <c>get_plan_force_precheck</c> read it the same way.
+    /// </summary>
+    internal static bool ApcSupersedesForcedRow(ForcePlanTargetState state, DateTime? forcedObservedAtUtc, long forcedPlanId)
+    {
+        if (state.ApcObservedAtUtc is not DateTime apcAt || forcedObservedAtUtc is not DateTime forcedAt || apcAt <= forcedAt)
+        {
+            return false;
+        }
+
+        return IsApcBackedOut(state.ApcState)
+            || (state.ApcLastGoodPlanIsForced == false && state.ApcLastGoodPlanId == forcedPlanId);
+    }
+
+    /// <summary>The engine's recommendation states in which it has stopped managing the plan: <c>Reverted</c> (no gain) and <c>Expired</c> (the situation changed). The others are <c>Active</c>, <c>Verifying</c> and <c>Success</c>.</summary>
+    internal static bool IsApcBackedOut(string? apcState) =>
+        string.Equals(apcState, "Reverted", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(apcState, "Expired", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// #4736: the engine's own OPEN (<c>Active</c>) recommendation names the proposed plan as the regressed,
@@ -1236,7 +1267,7 @@ public static class FactRemediation
                 ForcingState: state,
                 StateNote: note,
                 ApcMode: apcMode,
-                Guidance: BuildForcePlanGuidance(t, state)));
+                Guidance: BuildForcePlanGuidance(t, state, detailed)));
         }
 
         var guidance = anyApcOn
@@ -1249,12 +1280,14 @@ public static class FactRemediation
     /// <summary>
     /// The per-target verb (#3652): when FORCE_LAST_GOOD_PLAN is ON for the database the remediation is no
     /// longer "run this" but "the engine is doing X for this query; intervene only if it reverts or
-    /// expires" — stated with the engine's own state and reason. When the enablement is OFF or unknown,
+    /// expires" — stated with the engine's own state and reason. #8628: once the state IS Reverted or
+    /// Expired the engine has backed out, and the sentence says that (with the state, its reason and any
+    /// standing blocker's reason) instead of telling the reader to wait for what already happened. When the enablement is OFF or unknown,
     /// the only guidance is the non-blocking disagreement cases (an <c>Active</c> recommendation naming a
     /// different plan, or naming this plan as the regressed one — #4736). Null when there is nothing to add
     /// to the blockers.
     /// </summary>
-    private static string? BuildForcePlanGuidance(ForcePlanTarget t, ForcePlanTargetState? state)
+    private static string? BuildForcePlanGuidance(ForcePlanTarget t, ForcePlanTargetState? state, IReadOnlyList<ForcePlanBlocker> blockers)
     {
         if (state is null)
         {
@@ -1278,7 +1311,29 @@ public static class FactRemediation
                 var via = state.ApcLastGoodPlanId is long lg
                     ? (lg == t.PlanId ? $" via plan {lg} (the plan proposed here)" : $" via plan {lg} (not the plan proposed here, {t.PlanId})")
                     : string.Empty;
-                sb.Append($" and is currently {apcState}{reason} for query {t.QueryId}{via} as of {Stamp(state.ApcObservedAtUtc)}; intervene only if it reverts or expires.");
+                sb.Append($" and is currently {apcState}{reason} for query {t.QueryId}{via} as of {Stamp(state.ApcObservedAtUtc)}; ");
+                if (IsApcBackedOut(apcState))
+                {
+                    /* #8628: Reverted and Expired are the engine withdrawing, so "intervene only if it reverts or
+                       expires" would tell the reader to wait for what already happened. The engine has let go; a
+                       manual force is the reader's call, and a blocker that still stands is named beside it. */
+                    sb.Append("the engine has backed out of it, so a manual force here is yours to decide.");
+                    if (blockers.Count > 0)
+                    {
+                        sb.Append(" This target is not eligible:");
+                        foreach (var blocker in blockers)
+                        {
+                            sb.Append($" {blocker.Name} ({OneLine(blocker.Evidence)});");
+                        }
+
+                        sb.Length--;
+                        sb.Append('.');
+                    }
+                }
+                else
+                {
+                    sb.Append("intervene only if it reverts or expires.");
+                }
             }
 
             if (namedAsRegressed)

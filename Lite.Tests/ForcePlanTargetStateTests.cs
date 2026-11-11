@@ -137,6 +137,40 @@ public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixtur
     }
 
     [Fact]
+    public void ANewerExpiredState_MakesTheOlderAutoForcedSiblingStale_AndTheGuidanceSaysTheEngineHasBackedOut()
+    {
+        /* #8628, the Lite twin of the Darling gate tests: plan 55 of the query was seen AUTO-forced at the snapshot, and the
+           correction state two minutes later says Expired and that plan 55 is not forced. The older row must not raise
+           apc_owns_it, and "intervene only if it reverts or expires" must not be said about a state that already is. */
+        var t = Target();
+        var projected = Project(t, State(
+            otherForcedPlan: 55, otherForcingType: "AUTO",
+            apcState: "Expired", apcReason: "StatisticsChanged", apcLastGood: 55, apcLastGoodForced: false, flgp: "ON"));
+
+        Assert.True(projected.Eligible);
+        Assert.Empty(projected.Blockers);
+        Assert.Contains("is currently Expired (StatisticsChanged) for query 123 via plan 55 (not the plan proposed here, 99)", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("the engine has backed out of it, so a manual force here is yours to decide", projected.Guidance, StringComparison.Ordinal);
+        Assert.DoesNotContain("intervene only if", projected.Guidance, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARevertedTarget_StaysBlocked_AndItsGuidanceNamesTheBlockerAndTheBackedOutEngine()
+    {
+        var t = Target();
+        var projected = Project(t, State(
+            planForced: true, forcingType: "AUTO",
+            apcState: "Reverted", apcReason: "VerificationForcedQueryRecompile", apcLastGood: 99, apcLastGoodForced: false, flgp: "ON"));
+
+        Assert.False(projected.Eligible);
+        Assert.DoesNotContain(ForcePlanBlockerNames.ApcOwnsIt, projected.Blockers);
+        Assert.Contains(ForcePlanBlockerNames.ForcingFailedOnThisPlan, projected.Blockers);
+        Assert.Contains("the engine has backed out of it, so a manual force here is yours to decide", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("This target is not eligible: forcing_failed_on_this_plan (", projected.Guidance, StringComparison.Ordinal);
+        Assert.DoesNotContain("intervene only if", projected.Guidance, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ApcVerifying_WithoutAQueryStoreRowForThePlan_StillOwnsIt_FromThePlanCorrectionHalf()
     {
         /* The best plan is not executing, so query_store_stats has no recent row for it (null, not false):

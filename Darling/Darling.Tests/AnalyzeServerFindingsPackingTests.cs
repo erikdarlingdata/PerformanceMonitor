@@ -212,4 +212,52 @@ public sealed class AnalyzeServerFindingsPackingTests
         Assert.Null(root["findings_left_out"]);
         Assert.Null(root["findings"]![0]!["trimmed"]);
     }
+
+    [Fact]
+    public void TwoLeftOutFindingsWithTheSameHeadline_AreToldApartByTheirStoryPath_TheKeyTheReturnedFindingsCarry()
+    {
+        /* #8628: two expensive queries read the same ("One expensive query dominated the server's work this
+           window"). Left out by category and headline alone they were two identical lines. The labels come from the
+           same helper both analyze_server tools use, built from the findings themselves. */
+        AnalysisFinding BadActor(string hash) => new()
+        {
+            Category = "bad_actor",
+            RootFactKey = "BAD_ACTOR_" + hash,
+            StoryPath = "BAD_ACTOR_" + hash,
+            StoryPathHash = "hash-" + hash,
+        };
+
+        var first = BadActor("0xAAAA");
+        var second = BadActor("0xBBBB");
+        var labelOne = AnalysisFindingsBudget.LabelFor(first);
+        var labelTwo = AnalysisFindingsBudget.LabelFor(second);
+        Assert.Equal(labelOne.Headline, labelTwo.Headline);
+
+        JsonObject Node(AnalysisFinding f, double severity) => new()
+        {
+            ["severity"] = severity,
+            ["category"] = f.Category,
+            ["story_path"] = f.StoryPath,
+            ["story_path_hash"] = f.StoryPathHash,
+            ["story_text"] = new string('s', 40_000),
+            ["advice"] = new JsonObject { ["headline"] = labelOne.Headline },
+        };
+
+        JsonNode[] nodes = [Node(first, 0.9), Node(second, 0.8)];
+        var (packed, json) = AnalysisFindingsBudget.Pack(nodes, [labelOne, labelTwo], p => JsonSerializer.Serialize(p.Annotate(new JsonObject
+        {
+            ["findings_returned"] = p.KeptCount,
+            ["findings"] = p.FindingsArray(),
+        })));
+
+        var root = JsonNode.Parse(json)!.AsObject();
+        Assert.True(Encoding.UTF8.GetByteCount(json) <= McpResponseBudget.DefaultBytes);
+        Assert.Equal(2, packed.LeftOut.Count);
+        var entries = root["findings_left_out"]!.AsArray();
+        Assert.Equal(2, entries.Count);
+        Assert.Equal(first.StoryPath, entries[0]!["story_path"]!.GetValue<string>());
+        Assert.Equal(second.StoryPath, entries[1]!["story_path"]!.GetValue<string>());
+        Assert.Equal(first.StoryPathHash, entries[0]!["story_path_hash"]!.GetValue<string>());
+        Assert.NotEqual(entries[0]!.ToJsonString(), entries[1]!.ToJsonString());
+    }
 }
