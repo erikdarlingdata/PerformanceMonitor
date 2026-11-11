@@ -726,4 +726,118 @@ public sealed class ForcePlanBotPolicyTests
 
         Assert.All(structured!.ForcePlanTargets, t => Assert.Empty(t.Blockers));
     }
+
+    /* ---------------- #8628: the newer observation decides, and the guidance follows the engine's state ---------------- */
+
+    /// <summary>Plan 9 of the query is AUTO-forced as of <see cref="Observed"/>; the correction state, seen
+    /// <paramref name="apcAfter"/> later, names plan 9 as its last good plan.</summary>
+    private static ForcePlanTargetState OtherPlanAutoForced(string apcState, TimeSpan apcAfter, bool? lastGoodIsForced, string flgp = "OFF") => Clean(flgp: flgp) with
+    {
+        OtherForcedPlanId = 9, OtherForcedPlanForcingType = "AUTO", OtherForcedPlanObservedAtUtc = Observed,
+        ApcState = apcState, ApcStateReason = "StatisticsChanged", ApcRegressedPlanId = 7, ApcLastGoodPlanId = 9,
+        ApcLastGoodPlanIsForced = lastGoodIsForced, ApcObservedAtUtc = Observed + apcAfter,
+    };
+
+    [Theory]
+    [InlineData("Expired")]
+    [InlineData("Reverted")]
+    public void Blockers_ANewerBackedOutState_MakesTheOlderAutoForcedRowStale_SoItDoesNotRaiseApcOwnsIt(string apcState)
+    {
+        var state = OtherPlanAutoForced(apcState, TimeSpan.FromHours(1), lastGoodIsForced: false);
+
+        /* The precheck reads the gate through ForcePlanBotPolicy.Blockers, the analyze_server targets through
+           FactRemediation.ForcePlanBlockers; both must agree. */
+        Assert.DoesNotContain(ForcePlanBlockerNames.ApcOwnsIt, ForcePlanBotPolicy.Names(ForcePlanBotPolicy.Blockers(Target(), state, stateUnavailableReason: null)));
+        Assert.DoesNotContain(FactRemediation.ForcePlanBlockers(Target(), state), b => b.Name == ForcePlanBlockerNames.ApcOwnsIt);
+    }
+
+    [Fact]
+    public void Blockers_ANewerStateThatSaysTheLastGoodPlanIsNotForced_MakesTheOlderAutoForcedRowStale()
+    {
+        /* Not Reverted or Expired: the engine still holds the recommendation, but its own newer row says the plan is not forced. */
+        var state = OtherPlanAutoForced("Success", TimeSpan.FromHours(1), lastGoodIsForced: false);
+
+        Assert.DoesNotContain(FactRemediation.ForcePlanBlockers(Target(), state), b => b.Name == ForcePlanBlockerNames.ApcOwnsIt);
+    }
+
+    [Fact]
+    public void Blockers_ANewerStateThatStillHoldsTheForcedPlan_LeavesTheAutoForcedRowToDecide()
+    {
+        var state = OtherPlanAutoForced("Success", TimeSpan.FromHours(1), lastGoodIsForced: true);
+
+        var blocker = Assert.Single(FactRemediation.ForcePlanBlockers(Target(), state), b => b.Name == ForcePlanBlockerNames.ApcOwnsIt);
+        Assert.Contains("2026-09-18T12:00:00Z", blocker.Evidence, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Blockers_ANewerForcedRow_DecidesAsBefore_AndTheEvidenceNamesItsTime()
+    {
+        var state = OtherPlanAutoForced("Expired", TimeSpan.FromHours(-1), lastGoodIsForced: false);
+
+        var blocker = Assert.Single(FactRemediation.ForcePlanBlockers(Target(), state), b => b.Name == ForcePlanBlockerNames.ApcOwnsIt);
+        Assert.Contains("plan_forcing_type = AUTO at 2026-09-18T12:00:00Z", blocker.Evidence, StringComparison.Ordinal);
+        Assert.Contains(ForcePlanBlockerNames.ApcOwnsIt, ForcePlanBotPolicy.Names(ForcePlanBotPolicy.Blockers(Target(), state, stateUnavailableReason: null)));
+    }
+
+    [Fact]
+    public void Blockers_ANewerRevertedState_MakesTheTargetPlansOwnOlderAutoForcedRowStale()
+    {
+        var state = Clean(flgp: "OFF") with
+        {
+            PlanIsForced = true, PlanForcingType = "AUTO", PlanObservedAtUtc = Observed,
+            ApcState = "Reverted", ApcStateReason = "VerificationForcedQueryRecompile", ApcLastGoodPlanId = 7,
+            ApcLastGoodPlanIsForced = false, ApcObservedAtUtc = Observed + TimeSpan.FromHours(1),
+        };
+
+        var names = FactRemediation.ForcePlanBlockers(Target(), state).Select(b => b.Name).ToArray();
+
+        Assert.DoesNotContain(ForcePlanBlockerNames.ApcOwnsIt, names);
+        Assert.Contains(ForcePlanBlockerNames.ForcingFailedOnThisPlan, names);
+    }
+
+    [Fact]
+    public void TheGuidance_OnARevertedTarget_SaysTheEngineHasBackedOut_AndNamesTheBlocker_NotWaitForARevert()
+    {
+        var state = Clean(flgp: "ON") with
+        {
+            ApcState = "Reverted", ApcStateReason = "VerificationForcedQueryRecompile", ApcLastGoodPlanId = 7,
+            ApcLastGoodPlanIsForced = false, ApcObservedAtUtc = Observed,
+        };
+
+        var projected = Project(Target(), state);
+
+        Assert.False(projected.Eligible);
+        var guidance = projected.Guidance!;
+        Assert.Contains("is currently Reverted (VerificationForcedQueryRecompile) for query 42 via plan 7 (the plan proposed here)", guidance, StringComparison.Ordinal);
+        Assert.Contains("the engine has backed out of it, but this target is not eligible: forcing_failed_on_this_plan (", guidance, StringComparison.Ordinal);
+        Assert.DoesNotContain("yours to decide", guidance, StringComparison.Ordinal);
+        Assert.DoesNotContain("intervene only if", guidance, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheGuidance_OnAnExpiredTargetWithAStaleForcedRow_IsEligible_AndSaysTheEngineHasBackedOut()
+    {
+        var projected = Project(Target(), OtherPlanAutoForced("Expired", TimeSpan.FromHours(1), lastGoodIsForced: false, flgp: "ON"));
+
+        Assert.True(projected.Eligible);
+        var guidance = projected.Guidance!;
+        Assert.Contains("is currently Expired (StatisticsChanged) for query 42 via plan 9 (not the plan proposed here, 7)", guidance, StringComparison.Ordinal);
+        Assert.Contains("the engine has backed out of it, so a manual force here is yours to decide.", guidance, StringComparison.Ordinal);
+        Assert.DoesNotContain("not eligible", guidance, StringComparison.Ordinal);
+        Assert.DoesNotContain("intervene only if", guidance, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Verifying")]
+    [InlineData("Success")]
+    public void TheGuidance_WhereTheEngineStillHoldsTheRecommendation_KeepsTheWaitSentence(string apcState)
+    {
+        var state = Clean(flgp: "ON") with
+        {
+            ApcState = apcState, ApcLastGoodPlanId = 7, ApcLastGoodPlanIsForced = true, ApcLastGoodPlanForcingType = "AUTO",
+            ApcObservedAtUtc = Observed,
+        };
+
+        Assert.Contains("intervene only if it reverts or expires.", Project(Target(), state).Guidance, StringComparison.Ordinal);
+    }
 }
