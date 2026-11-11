@@ -1219,16 +1219,34 @@ internal static class DarlingDataReader
                     FILTER (WHERE q.query_text IS NOT NULL OR q.query_text_digest IS NOT NULL) AS latest_text_key,
                 MAX(w.rank_metric) AS rank_metric,
                 MAX(w.rank_cpu) AS rank_cpu
-            FROM query_stats AS q
+            FROM (
+                /* #8570: the window's rows of the winners' query hashes only, through idx_query_stats_server_hash_time
+                   (server_id, query_hash, collection_time) where a store has it. The join below used to be the only thing that
+                   narrowed this pass to the winners, so a 24-hour window scanned every row it had a second time (360,000 rows
+                   and 36,700 pages to build 25 wide rows; 37,700 pages in all against 73,100 here). The equality is plain (an
+                   IN semi-join, so a hash shared by two winners is read once, not once a winner) and cannot match a NULL
+                   hash, so the second arm reads the NULL-hash rows, and only when a winner has a NULL hash. The join below stays
+                   the exact NULL-safe match, so the groups and every figure are unchanged. */
+                SELECT q0.* FROM query_stats AS q0
+                WHERE q0.server_id = $1
+                AND   q0.collection_time >= $2
+                AND   q0.collection_time <= $3
+                AND   ($5::text[] IS NULL OR q0.database_name = ANY($5))
+                AND   q0.query_hash IN (SELECT win_query_hash FROM winners)
+                UNION ALL
+                SELECT q0.* FROM query_stats AS q0
+                WHERE q0.server_id = $1
+                AND   q0.collection_time >= $2
+                AND   q0.collection_time <= $3
+                AND   ($5::text[] IS NULL OR q0.database_name = ANY($5))
+                AND   q0.query_hash IS NULL
+                AND   EXISTS (SELECT 1 FROM winners WHERE win_query_hash IS NULL)
+            ) AS q
             JOIN winners AS w
                 ON  COALESCE(query_hash, '') = COALESCE(w.win_query_hash, '')
                 AND database_name IS NOT DISTINCT FROM w.win_database_name
                 AND query_hash IS NOT DISTINCT FROM w.win_query_hash
                 AND host_object_name IS NOT DISTINCT FROM w.win_host_object_name
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
             GROUP BY database_name, query_hash, host_object_name
         ),
         latest_text AS MATERIALIZED (

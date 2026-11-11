@@ -218,13 +218,24 @@ LIMIT {maxForces + 1}";
     /// <summary>
     /// How many forces each database's newest capture holds, over the whole set (no cap), so <c>captures[].forced_plan_count</c> stays the
     /// database's real count when the read was cut. Same parameters as <see cref="ForcesSql(DatabaseFilter, int)"/>.
+    /// <para>#8570: a force counts when its newest row of the window is at or after its database's newest marker, which is the same as
+    /// a row at or after that marker existing, so the count reads those rows only (the markers through their partial index, then the
+    /// rows from each marker on) and counts distinct plan ids. It used to build <c>BaseCtes</c>' newest-row-per-force step over the
+    /// whole window, which materialized every capture row of the window twice and sorted them to keep 300 (440,000 rows of 24 hours at one
+    /// capture a minute: 1,000 ms, against 120 ms). A database with no marker in the window has no count either way.</para>
     /// </summary>
     public static string CountsSql(DatabaseFilter databases) => $@"
-WITH {BaseCtes(databases)}
-SELECT l.database_name, COUNT(*)
-FROM latest AS l
-JOIN newest AS n ON n.database_name = l.database_name AND l.collection_time >= n.newest_capture
-GROUP BY l.database_name";
+WITH newest AS (
+    SELECT database_name, MAX(collection_time) AS newest_capture
+    FROM collect.query_store_forced_plans
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)} AND plan_id IS NULL
+    GROUP BY database_name)
+SELECT p.database_name, COUNT(DISTINCT p.plan_id)
+FROM collect.query_store_forced_plans AS p
+JOIN newest AS n ON n.database_name = p.database_name AND p.collection_time >= n.newest_capture
+WHERE p.server_id = $1 AND p.collection_time <= $3 AND p.plan_id IS NOT NULL
+AND   ($5::bigint IS NULL OR p.query_id = $5) AND ($6::bigint IS NULL OR p.plan_id = $6){databases.Clause("p.database_name", 4)}
+GROUP BY p.database_name";
 
     private static string BaseCtes(DatabaseFilter databases) => $@"win AS (
     SELECT database_name, collection_time, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason,
