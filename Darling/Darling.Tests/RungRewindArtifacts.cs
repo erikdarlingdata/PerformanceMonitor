@@ -770,6 +770,21 @@ DROP TABLE IF EXISTS collect.schema_capture_passes;"),
         // V260 (#8570): the oversized-plan backlog's two median indexes. The probe's sentinel is the first of them, so the rewind drops both and
         // a re-run of V260 makes them again. Safe on a store that never had them.
         new(260, "hasOversizedPlanBacklogMedianIndexes", "DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_server_bytes; DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_collector_bytes;"),
+        new(261, "hasWebAccessGroups", """
+            DROP TRIGGER IF EXISTS web_access_tag_deleted ON config.server_tags;
+            DROP TABLE IF EXISTS config.web_access_group_tags, config.web_access_group_events, config.web_access_groups CASCADE;
+            DROP FUNCTION IF EXISTS config.manage_web_access_group(text,uuid,bigint,text,text,integer[],uuid,text,boolean,text);
+            DROP FUNCTION IF EXISTS config.activate_web_access_group(uuid,bigint,uuid,text);
+            DROP FUNCTION IF EXISTS config.web_access_snapshot(uuid);
+            DROP FUNCTION IF EXISTS config.web_access_tag_deleted();
+            DROP FUNCTION IF EXISTS config.web_access_owner_guard();
+            DROP FUNCTION IF EXISTS config.harden_web_access_groups();
+            """),
+        new(262, "hasAdvancedWebAccess", """
+            DROP FUNCTION IF EXISTS config.set_web_access_advanced(boolean);
+            DROP FUNCTION IF EXISTS config.harden_web_access_advanced();
+            DROP TABLE IF EXISTS config.web_access_advanced;
+            """),
     ];
 
     /// <summary>

@@ -453,6 +453,7 @@ public partial class MainWindow : Window
                dialog at a time. Same probe, same fail-safe — this only makes the answer visible before a
                write is attempted, which is the whole of #2400. */
             ApplySeatState(_dataService.IsReadOnly ? ViewerSeatState.ReadOnly : ViewerSeatState.ReadWrite);
+            await LoadAdvancedWebAccessAsync();
         }
         catch (ViewerStoreUnreachableException ex)
         {
@@ -2648,7 +2649,7 @@ public partial class MainWindow : Window
         foreach (UIElement entry in new UIElement[]
                  {
                      AddServerSidebarButton, AddMultipleServersSidebarButton, ManageServersSidebarButton,
-                     ManageTagsSidebarButton, ImportSettingsSidebarButton, SettingsSidebarButton,
+                     ManageTagsSidebarButton, WebAccessGroupsSidebarButton, AdvancedWebAccessCheckBox, ImportSettingsSidebarButton, SettingsSidebarButton,
                      ServerSearchRow, ServerList,
                  })
         {
