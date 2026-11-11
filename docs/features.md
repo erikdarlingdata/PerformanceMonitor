@@ -16,7 +16,7 @@ Part of the [Performance Monitor documentation](../README.md#documentation).
 
 💡 **Recommendations engine (advise-and-act)** — a dedicated Recommendations tab surfaces prioritized findings from your own monitoring data with the reasoning behind each one, and can apply selected fixes directly. Destructive changes (like enabling Read Committed Snapshot Isolation) are gated behind an informed-consent dialog that spells out both the risk of acting and the risk of doing nothing.
 
-🤖 **Built-in MCP server** with read-only tools for AI analysis — ask Claude Code or Cursor "what are the top wait types on my server?" and get answers from your actual monitoring data
+🤖 **Built-in MCP server** with read tools for AI analysis (and, only when you turn them on, twelve write tools for mutes, notification routes and query tags) — ask Claude Code or Cursor "what are the top wait types on my server?" and get answers from your actual monitoring data
 
 🔒 **Your data never leaves** — no telemetry, no cloud dependency, no phoning home. Credentials stored in Windows Credential Manager with OS-level encryption. Statement text that can carry a credential, such as `CREATE LOGIN` or a `PASSWORD =` literal, reads `-- statement text withheld (#4348)` in alerts and plan analysis. Darling also withholds it from collected data, MCP answers and web pages.
 

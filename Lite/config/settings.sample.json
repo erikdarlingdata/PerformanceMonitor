@@ -298,9 +298,11 @@
   // Set this to true to serve local clients with no token, as earlier builds did: only the read tools are served then, and the
   // write and investigation tools stay off. Import Settings never brings this value in. Change it, then restart Lite.
   "mcp_allow_tokenless_loopback": false,
-  // NO UI. Off by default. The MCP write tools (mute_analysis_finding and unmute_analysis_finding) are served only
-  // when this is true; with it off a call to one fails as an unknown tool. Change it, then restart Lite. Mutes that
-  // already exist stay in force while it is off; turn it on to remove one with unmute_analysis_finding.
+  // NO UI. Off by default. The twelve MCP write tools are served only when this is true: mute_analysis_finding,
+  // unmute_analysis_finding, set_notification_route_enabled, delete_notification_route, and the eight query tag tools
+  // (create, update, delete, assign and unassign for a tag, and create, update and delete for a tag rule). With it off a
+  // call to one fails as an unknown tool. Change it, then restart Lite. Mutes that already exist stay in force while it
+  // is off; turn it on to remove one with unmute_analysis_finding.
   // The write tools also need the MCP token: with mcp_allow_tokenless_loopback on they stay off whatever this says, and Lite
   // logs one Critical line. Import Settings never brings this value in.
   "mcp_allow_writes": false,

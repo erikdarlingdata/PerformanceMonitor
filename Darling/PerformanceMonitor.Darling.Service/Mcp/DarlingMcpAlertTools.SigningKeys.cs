@@ -42,7 +42,7 @@ public sealed partial class DarlingMcpAlertTools
     private const string SigningKeyScopeHelp = "Omit for the default destination's key (Settings > Notifications); a route_id (from get_notification_routes) for that route's own generic webhook.";
 
     [McpServerTool(Name = "generate_webhook_signing_key"), Description(
-        "Makes (or rotates) the signing key of a generic webhook destination, the default one or one route's, and returns the new key ONCE. Needs mcp.allowWrites and a token. " +
+        "Makes (or rotates) the signing key of a generic webhook destination, the default one or one route's, and returns the new key ONCE. Needs a named operator token, or a token with mcp.allowWrites. " +
         "<<GUIDE>>" +
         "Signs the service's posts to that generic webhook with a Standard Webhooks signature, which the receiver checks with this key. " + SigningKeyScopeHelp + " " +
         "The destination needs a saved generic webhook URL first (a route with none, or a route_id that does not exist, is refused and nothing is written). " +
@@ -66,7 +66,7 @@ public sealed partial class DarlingMcpAlertTools
             StoreRolesAreRunByOperator(postgresConfig));
 
     [McpServerTool(Name = "remove_webhook_signing_key"), Description(
-        "Removes the signing key of a generic webhook destination, the default one or one route's, with its previous key. Needs mcp.allowWrites and a token. " +
+        "Removes the signing key of a generic webhook destination, the default one or one route's, with its previous key. Needs a named operator token, or a token with mcp.allowWrites. " +
         "<<GUIDE>>" +
         "Stops the service signing that destination's posts and clears the key, the previous key and the rotation window, as the Viewer's Remove does. " + SigningKeyScopeHelp + " " +
         "A route_id that does not exist, or a destination with no generic webhook and no key, is refused and nothing is written. Remove first when the generic URL or proxy of a destination with a key has to change. " +
