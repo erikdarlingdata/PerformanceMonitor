@@ -10,6 +10,7 @@ using System;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Documents;
 using System.Windows.Media;
 
@@ -182,20 +183,39 @@ public static class EmptyState
             return false;
         }
 
-        var descriptor = System.ComponentModel.DependencyPropertyDescriptor.FromProperty(ItemsControl.ItemsSourceProperty, typeof(DataGrid));
-        EventHandler? handler = null;
-        handler = (_, _) =>
+        /* #8535: the grid's own binding watches its ItemsSource, not DependencyPropertyDescriptor.AddValueChanged. That one records the
+           grid in a table that lives as long as the process until RemoveValueChanged runs, and it ran only when rows arrived. A grid
+           whose read never assigned any (a sub-tab never picked, a read that failed, a tab closed first) stayed in that table, and
+           through the grid's column templates the whole closed server tab stayed with it: every chart's device-pixel bitmap, 600 to
+           700 MB a tab at 250% display scaling. A binding keeps its listener on the grid itself, so it is collected with the grid. */
+        BindingOperations.SetBinding(grid, RowsArrivedWatchProperty, new Binding
         {
-            if (grid.ItemsSource is null)
-            {
-                return;
-            }
-
-            descriptor.RemoveValueChanged(grid, handler!);
-            ShowLoading(grid, false);
-        };
-        descriptor.AddValueChanged(grid, handler);
+            Source = grid,
+            Path = new PropertyPath(ItemsControl.ItemsSourceProperty),
+            Mode = BindingMode.OneWay,
+        });
         return true;
+    }
+
+    /// <summary>
+    /// Bound to a grid's own <see cref="ItemsControl.ItemsSource"/> by <see cref="ShowLoadingUntilRead"/> while its "Loading..." text
+    /// is up: the first non-null value takes the text away and ends the binding.
+    /// </summary>
+    private static readonly DependencyProperty RowsArrivedWatchProperty = DependencyProperty.RegisterAttached(
+        "RowsArrivedWatch",
+        typeof(object),
+        typeof(EmptyState),
+        new PropertyMetadata(null, OnRowsArrived));
+
+    private static void OnRowsArrived(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (e.NewValue is null || d is not DataGrid grid)
+        {
+            return;
+        }
+
+        BindingOperations.ClearBinding(grid, RowsArrivedWatchProperty);
+        ShowLoading(grid, false);
     }
 
     /// <summary>The name given to the filtered-out element, so it is found again and never doubled.</summary>

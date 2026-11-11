@@ -9,8 +9,10 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -241,6 +243,152 @@ public sealed class WaitStatsDailyRollupLiveTests
             $"SELECT count(*) FROM timescaledb_information.jobs WHERE hypertable_schema = 'collect' AND hypertable_name = '{TimescaleSupport.WaitStatsDailyView}' AND proc_name = 'policy_refresh_continuous_aggregate'", ct));
         Assert.True(await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, null, LiveClock.Now(), ct));
         Assert.True(await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.WaitStatsDailyView}", ct) > 0);
+    }
+
+    /// <summary>
+    /// #8549: the aggregate's own refresh policy runs at once after V259 and a refresh holds the aggregate, so the start-up backfill's
+    /// first refresh can raise <c>55P03</c> "due to a concurrent refresh". The policy covers four days and the backfill needs the whole
+    /// horizon, so the backfill must wait and retry the slice, not give up (it gave up, and 30 of 35 days stayed out of the rollup until
+    /// the next restart). The concurrent refresh is a real one: a connection holds EXCLUSIVE on the materialization hypertable (readers
+    /// still pass, refreshes do not), a refresh over four days blocks behind it, and the backfill runs while that refresh is in flight.
+    /// </summary>
+    [Fact]
+    public async Task TheBackfill_WaitsOutAConcurrentRefresh_AndFillsTheRollup_NotGivingUpOn55P03()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = await BuildTimescaleStoreAsync(scratch, ct);
+        await SeedThirtyDaysAsync(connection, ct, minutes: 60);
+        Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.WaitStatsDailyView}", ct));
+
+        var logger = new CapturingTestLogger();
+        var today = LiveClock.Now().Date;
+        await using var concurrent = await StartBlockedRefreshAsync(scratch.ConnectionString, connection, today, ct);
+
+        var backfill = TimescaleSupport.BackfillWaitStatsDailyAsync(
+            connection, logger, LiveClock.Now(), TimeSpan.FromMilliseconds(200), TimeSpan.FromMinutes(2), ct);
+        await WaitUntilAsync(() => Task.FromResult(logger.Lines.Any(line => line.Contains("being refreshed by its refresh policy", StringComparison.Ordinal))),
+            () => "the backfill never logged that it waits on the concurrent refresh: " + logger.Joined, ct);
+        Assert.False(backfill.IsCompleted, "the backfill waits while the other refresh holds the aggregate");
+
+        await concurrent.ReleaseAsync(ct);
+        Assert.True(await backfill.WaitAsync(TimeSpan.FromMinutes(2), ct), "the backfill ran its refresh once the other refresh ended: " + logger.Joined);
+        await concurrent.RefreshTask.WaitAsync(TimeSpan.FromMinutes(2), ct);
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(1, logger.Lines.Count(line => line.Contains("being refreshed by its refresh policy", StringComparison.Ordinal)));
+
+        Assert.False(await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, null, LiveClock.Now(), ct), "the rollup now reaches the need: a second pass has nothing to do");
+        var oldest = await ScalarAsync<DateTime>(connection, $"SELECT min(bucket) FROM collect.{TimescaleSupport.WaitStatsDailyView}", ct);
+        Assert.True(oldest <= today.AddDays(-29), $"the rollup reaches back to the oldest raw day, got {oldest:O}");
+        Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.WaitStatsDailyView} WHERE bucket >= '{Ts(today)}'", ct));
+    }
+
+    /// <summary>The wait is bounded: a refresh that never ends makes the backfill log the same warning it always did and return false.</summary>
+    [Fact]
+    public async Task TheBackfill_GivesUpWithTheWarning_WhenTheConcurrentRefreshOutlastsTheBound()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = await BuildTimescaleStoreAsync(scratch, ct);
+        await SeedThirtyDaysAsync(connection, ct, minutes: 60);
+
+        var logger = new CapturingTestLogger();
+        await using var concurrent = await StartBlockedRefreshAsync(scratch.ConnectionString, connection, LiveClock.Now().Date, ct);
+
+        Assert.False(await TimescaleSupport.BackfillWaitStatsDailyAsync(
+            connection, logger, LiveClock.Now(), TimeSpan.FromMilliseconds(200), TimeSpan.FromSeconds(2), ct));
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Contains("concurrent refresh", logger.Joined, StringComparison.Ordinal);
+        Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.WaitStatsDailyView}", ct));
+        await concurrent.ReleaseAsync(ct);
+        await concurrent.RefreshTask.WaitAsync(TimeSpan.FromMinutes(2), ct);
+    }
+
+    /// <summary>A refresh of the four days before yesterday (polled from <paramref name="observer"/>, whose own session is not inside a transaction,
+    /// so it sees current pg_stat_activity rows), blocked on a held EXCLUSIVE lock of the materialization hypertable, so it is
+    /// in flight (its window registered) until <see cref="BlockedRefresh.ReleaseAsync"/> commits the lock.</summary>
+    private static async Task<BlockedRefresh> StartBlockedRefreshAsync(string connectionString, NpgsqlConnection observer, DateTime today, CancellationToken ct)
+    {
+        var holder = new NpgsqlConnection(connectionString);
+        await holder.OpenAsync(ct);
+        var materialization = await TimescaleSupport.ResolveMaterializationAsync(holder, TimescaleSupport.WaitStatsDailyView, ct);
+        Assert.NotNull(materialization);
+        await ExecuteAsync(holder, $"BEGIN; LOCK TABLE \"{materialization!.Value.Schema}\".\"{materialization.Value.Name}\" IN EXCLUSIVE MODE", ct);
+
+        var refreshTask = RunRefreshAsync();
+        async Task RunRefreshAsync()
+        {
+            await using var refreshConnection = new NpgsqlConnection(connectionString);
+            await refreshConnection.OpenAsync(ct);
+            await using var refresh = new NpgsqlCommand(
+                $"CALL refresh_continuous_aggregate('collect.{TimescaleSupport.WaitStatsDailyView}'::regclass, $1::timestamp, $2::timestamp)", refreshConnection)
+            {
+                CommandTimeout = 300,
+            };
+            refresh.Parameters.AddWithValue(DateTime.SpecifyKind(today.AddDays(-5), DateTimeKind.Unspecified));
+            refresh.Parameters.AddWithValue(DateTime.SpecifyKind(today.AddDays(-1), DateTimeKind.Unspecified));
+            await refresh.ExecuteNonQueryAsync(ct);
+        }
+
+        await WaitUntilAsync(
+            async () => await ScalarAsync<long>(observer,
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'CALL refresh_continuous_aggregate%'", ct) > 0,
+            () => "the background refresh never blocked behind the held lock: " + (refreshTask.IsCompleted ? refreshTask.Status + " " + refreshTask.Exception?.GetBaseException().Message : "still running"), ct);
+        return new BlockedRefresh(holder, refreshTask);
+    }
+
+    private static async Task WaitUntilAsync(Func<Task<bool>> condition, Func<string> failure, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (!await condition())
+        {
+            Assert.True(DateTime.UtcNow < deadline, failure());
+            await Task.Delay(100, ct);
+        }
+    }
+
+    private sealed class BlockedRefresh : IAsyncDisposable
+    {
+        private readonly NpgsqlConnection _holder;
+        private bool _released;
+
+        public BlockedRefresh(NpgsqlConnection holder, Task refreshTask)
+        {
+            _holder = holder;
+            RefreshTask = refreshTask;
+        }
+
+        public Task RefreshTask { get; }
+
+        public async Task ReleaseAsync(CancellationToken ct)
+        {
+            if (!_released)
+            {
+                _released = true;
+                await ExecuteAsync(_holder, "COMMIT", ct);
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await ReleaseAsync(CancellationToken.None);
+            try
+            {
+                await RefreshTask;
+            }
+            catch (Exception)
+            {
+                /* the test body has already reported what it needs to */
+            }
+
+            await _holder.DisposeAsync();
+        }
     }
 
     [Fact]
