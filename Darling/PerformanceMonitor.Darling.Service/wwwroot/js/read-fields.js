@@ -164,7 +164,7 @@ export const READ_FIELDS = {
       rowsKey: "trend",
       xKey: "time",
       format: "int",
-      emptyText: "No deadlocks in this window — an empty trend here means none happened, not that nothing was collected.",
+      emptyText: "No deadlocks in this window: an empty trend here means none happened, not that nothing was collected.",
       series: [{ key: "count", label: "Deadlocks" }],
     },
   },

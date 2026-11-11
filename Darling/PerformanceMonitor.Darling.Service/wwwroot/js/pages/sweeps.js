@@ -198,7 +198,7 @@ function sweepDocument(d) {
 
   if (report.post_restart_window) {
     nodes.push(el("div", { class: "strip notice", role: "status" },
-      ["This sweep ran inside the post-restart settle window — fleet staleness here is classified startup-transient, not an outage, except for a server that was already offline before the restart, which stays offline."]));
+      ["This sweep ran inside the post-restart settle window. Fleet staleness here is classified startup-transient, not an outage, except for a server that was already offline before the restart, which stays offline."]));
   }
 
   /* The header tiles: counts the document already carries. Built through ONE closure with the number

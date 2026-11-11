@@ -223,7 +223,7 @@ export function renderFinops(main, server, tabId, opts) {
     mount(body, [
       onlyPostgres ? noticeStrip(ONLY_POSTGRES_LINE) : null,
       tabBar(chosen, active),
-      el("div", { class: "finops-panel" }, [active.build(chosen, { signal: controller.signal, postgres: isPostgresRow(row) })]),
+      el("div", { class: "finops-panel" }, [active.build(chosen, { signal: controller.signal, postgres: isPostgresRow(row), onlyPostgres })]),
     ]);
     /* #7393: the tab's panels read as they build. A poll over the same server and tab leaves the page on screen and swaps the new one
        in once its reads have drawn, so a grid the reader scrolled down keeps its place. Anything else paints at once. The page on screen
