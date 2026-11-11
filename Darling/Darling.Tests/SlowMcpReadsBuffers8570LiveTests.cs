@@ -75,7 +75,7 @@ public sealed class SlowMcpReadsBuffers8570LiveTests
 
         /* 120 collections over the last 24 hours, 400 rows each: 3,000 ordinary hashes, one NULL-hash group, and one hash that two host
            objects share. The three big groups are the winners; every ordinary row is under them. */
-        var end = DateTime.UtcNow;
+        var end = LiveClock.AnchoredEnd();
         var start = end.AddHours(-24);
         await ExecuteAsync(connection, @"
 INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, creation_time, last_execution_time,
@@ -89,7 +89,7 @@ SELECT 880000000 + row_number() OVER (), c.ts::timestamp, " + ServerId + @", 'to
   1000, 1000000, 2000000, 5000, 10, 20, 100, 0, 10, 100000, 20, 200000, 1, 4, '0x' || md5('s' || r), '0x' || md5('pl' || r),
   5, CASE WHEN r = 0 THEN 9000000 WHEN r = 1 THEN 8000000 WHEN r = 2 THEN 7000000 ELSE 100 + r END, 1000, 10, 1, 1, 10, 0,
   120, CASE WHEN r = 1 THEN 'dbo.a' WHEN r = 2 THEN 'dbo.b' END
-FROM generate_series(now() at time zone 'utc' - interval '23 hours', now() at time zone 'utc' - interval '1 minute', interval '11 minutes 30 seconds') AS c(ts)
+FROM generate_series('" + end.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + @"'::timestamp - interval '23 hours', '" + end.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + @"'::timestamp - interval '1 minute', interval '11 minutes 30 seconds') AS c(ts)
 CROSS JOIN generate_series(0, 399) AS r", ct);
         var collections = await ScalarLongAsync(connection, $"SELECT count(DISTINCT collection_time) FROM query_stats WHERE server_id = {ServerId}", ct);
         await ExecuteAsync(connection, "VACUUM (ANALYZE) query_stats", ct);
@@ -142,17 +142,17 @@ CROSS JOIN generate_series(0, 399) AS r", ct);
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
         await using var connection = await OpenStoreAsync(scratch, ct);
 
+        var end = LiveClock.AnchoredEnd();
         /* Three databases of 20 forces each, captured every 6 minutes for 24 hours (240 captures: 15,000 rows). Force 99 of db1 was
            forced for the first 120 captures and then removed, so it is in the window but not in the newest capture and is not counted. */
         await ExecuteAsync(connection, @"
 INSERT INTO query_store_forced_plans (collection_id, collection_time, server_id, server_name, database_name, plan_id, query_id, query_plan_hash, plan_forcing_type, force_failure_count)
 SELECT 770000000 + row_number() OVER (), c.ts::timestamp, " + ServerId + @", 'forced-8570', 'db' || d, f, d * 1000 + f, '0x' || md5('p' || f), 'MANUAL', 0
-FROM generate_series(now() at time zone 'utc' - interval '24 hours', now() at time zone 'utc' - interval '1 minute', interval '6 minutes') WITH ORDINALITY AS c(ts, n)
+FROM generate_series('" + end.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + @"'::timestamp - interval '24 hours', '" + end.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + @"'::timestamp - interval '1 minute', interval '6 minutes') WITH ORDINALITY AS c(ts, n)
 CROSS JOIN generate_series(1, 3) AS d
 CROSS JOIN LATERAL (SELECT f FROM generate_series(1, 20) AS f UNION ALL SELECT NULL UNION ALL SELECT 99 WHERE d = 1 AND c.n <= 120) AS x(f)", ct);
         await ExecuteAsync(connection, "VACUUM (ANALYZE) query_store_forced_plans", ct);
 
-        var end = DateTime.UtcNow;
         var start = end.AddHours(-24);
         var sql = DarlingForcedPlanStateReader.CountsSql(DatabaseFilter.All);
 
