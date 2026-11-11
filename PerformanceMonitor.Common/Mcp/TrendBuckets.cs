@@ -442,8 +442,8 @@ internal static class TrendBuckets
     /// <summary>The closing sentence the notes share: where the width came from, and how to ask for another.</summary>
     public static string Sizing(bool requested, int budgetPoints, int? pointsOverTarget = null) =>
         pointsOverTarget is int served
-            ? $"The width is the widest bucket ({MaxBucketMinutes} minutes), and even that could not bring this answer near {budgetPoints.ToString(CultureInfo.InvariantCulture)} points: it serves {served.ToString(CultureInfo.InvariantCulture)}. Narrow hours_back for fewer points."
+            ? $"The width is the widest bucket ({MaxBucketMinutes} minutes), and even that could not bring this answer near {budgetPoints.ToString("N0", CultureInfo.InvariantCulture)} points: it serves {served.ToString("N0", CultureInfo.InvariantCulture)}. Narrow hours_back for fewer points."
         : requested
             ? "The width is the bucket_minutes you passed."
-            : $"The width was chosen to keep this answer near {budgetPoints.ToString(CultureInfo.InvariantCulture)} points; pass bucket_minutes (1-{MaxBucketMinutes}) for another width, or narrow hours_back for finer points.";
+            : $"The width was chosen to keep this answer near {budgetPoints.ToString("N0", CultureInfo.InvariantCulture)} points; pass bucket_minutes (1-{MaxBucketMinutes}) for another width, or narrow hours_back for finer points.";
 }

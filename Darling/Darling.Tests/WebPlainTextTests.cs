@@ -250,7 +250,7 @@ public sealed class WebPlainTextTests
     {
         var o = Run(
         [
-            "Each point averages the samples in one 5-minute bucket and is stamped at the bucket's start. A level is averaged, never summed, so a spike inside a bucket is smoothed into its average; narrow the bucket to see it. The width was chosen to keep this answer near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.",
+            "Each point averages the samples in one 5-minute bucket and is stamped at the bucket's start. A level is averaged, never summed, so a spike inside a bucket is smoothed into its average; narrow the bucket to see it. The width was chosen to keep this answer near 1,500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.",
             "wait_time_ms_per_second is recomputed from the summed wait time over the seconds the collections covered.",
             "collisions_per_second is recomputed from the summed delta.",
             "The session counts are levels, averaged, never summed; top_application_name, top_application_connections, top_host_name and top_host_connections are the newest collection's own values in the bucket.",
@@ -340,7 +340,7 @@ public sealed class WebPlainTextTests
     {
         var o = Run(
         [
-            "The width was chosen to keep this answer near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.",
+            "The width was chosen to keep this answer near 1,500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer points.",
             "TRUNCATED: 300 indexes match and 200 were returned. Rows are ordered by total wait time descending; raise limit to see more.",
             "TRUNCATED: 9 indexes match database 'x' and 5 were returned. This says nothing about databases outside the filter: raise limit to see more.",
             "TRUNCATED: 9 indexes match and 5 were returned. This is not evidence that a database was not collected: pass database_name to ask about one, or raise limit.",
@@ -354,7 +354,7 @@ public sealed class WebPlainTextTests
             "No long-running query completions found in the specified time range. The monitor's own statements are left out. Pass include_monitor=true to include them.",
         ], out _);
 
-        Assert.Equal("The width was chosen to keep this answer near 1500 points; narrow the time range for finer points.", o[0]);
+        Assert.Equal("The width was chosen to keep this answer near 1,500 points; narrow the time range for finer points.", o[0]);
         Assert.Equal("TRUNCATED: 300 indexes match and 200 were returned. Rows are ordered by total wait time descending.", o[1]);
         Assert.EndsWith("outside the filter.", o[2]);
         Assert.EndsWith("filter by database to ask about one.", o[3]);

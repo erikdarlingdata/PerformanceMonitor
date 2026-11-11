@@ -359,7 +359,7 @@ LIMIT $2";
         {
             return state.ReaderExists
                 ? "pg_stat_statements is no longer installed in this database: it was dropped after the service built its reader. The service creates it again on its next pass when it connects as a superuser; otherwise run CREATE EXTENSION pg_stat_statements as a superuser in this database. " + Cadence
-                : "Statement statistics are not set up on this store: pg_stat_statements is not installed in this database. A managed store installs it itself once its conf preloads it (from its first service-owned start of a build carrying #3899). " + ByoSetup + " " + Cadence;
+                : "Statement statistics are not set up on this store: pg_stat_statements is not installed in this database. A managed store installs it itself once its conf preloads it (from its first service-owned start of a build that has this read). " + ByoSetup + " " + Cadence;
         }
 
         if (!StoreStatementStats.ExtensionVersionAtLeast(state.ExtensionVersion, StoreStatementStats.MinimumReaderVersion))

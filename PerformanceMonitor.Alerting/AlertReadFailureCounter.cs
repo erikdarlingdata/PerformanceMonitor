@@ -855,19 +855,19 @@ public sealed class AlertReadFailureCounter
     /// that the tuned bars were lost.</para>
     /// </summary>
     public const string FleetScopedReads =
-        "the collector-cost regression self-alert and its two #3443 companions (the collector-cost census "
+        "the collector-cost regression self-alert and its two companions (the collector-cost census "
         + "read that decides paging-versus-digest routing, and the collector-cost digest read behind the "
-        + "daily report), the mute-rule reload, the fleet-sweep rollup read behind the daily sweep report "
-        + "(#3466), the analysis singles digest read behind the daily copy of the findings the corroboration "
-        + "gate kept off the paging channels (#3712), the daily documents' delivery-stamp read that gates the "
-        + "digest, the rollup and the singles digest on delivered-today (#3580), the store background-job "
+        + "daily report), the mute-rule reload, the fleet-sweep rollup read behind the daily sweep report, "
+        + "the analysis singles digest read behind the daily copy of the findings the corroboration "
+        + "gate kept off the paging channels, the daily documents' delivery-stamp read that gates the "
+        + "digest, the rollup and the singles digest on delivered-today, the store background-job "
         + "health reads behind compression-job health, store-job cadence and retention holds, and the two "
-        + "informational store self-alerts #3826 added (the plan dimension's TOAST slack read and the "
+        + "informational store self-alerts (the plan dimension's TOAST slack read and the "
         + "store checkpointer pressure read behind the WAL levers), and the store settings self-alert's "
-        + "managed-conf verdicts read (#4215), the daily collection-history audit's rollup read (#5450), and the "
-        + "external-alert delivery self-alert's count of undelivered rows (#5654), and the threshold-override "
-        + "reload (#5916), daily report (#7041), store autovacuum (#7368), and the stale daily rollup self-alert's "
-        + "restart seed and ended-episode close reads of the alert history (#8302)";
+        + "managed-conf verdicts read, the daily collection-history audit's rollup read, and the "
+        + "external-alert delivery self-alert's count of undelivered rows, and the threshold-override "
+        + "reload, daily report, store autovacuum, and the stale daily rollup self-alert's "
+        + "restart seed and ended-episode close reads of the alert history";
 
     /// <summary>
     /// The window these figures cover, and the window they do NOT.
@@ -911,7 +911,7 @@ public sealed class AlertReadFailureCounter
         + "question, not this one. retried_reads is the SECOND population, and on the Darling service it is "
         + "where most of what this block used to count now lands: reads that crossed the 10 s deadline once "
         + "and succeeded on the single retry two seconds later - the write bands' cost, counted rather than "
-        + "blinding an alert. Every one of those was a swallowed failure before #3848, so read the two "
+        + "blinding an alert. Every one of those was a swallowed failure before the retry existed, so read the two "
         + "together: retries rising with failures at zero is a store under write pressure whose alerting is "
         + "intact, and both rising is a store where a second attempt twelve seconds later still found the "
         + "band on - which wants the store's write schedule looked at rather than the reader's. A read that "
