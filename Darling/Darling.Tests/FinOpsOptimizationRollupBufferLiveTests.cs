@@ -149,14 +149,17 @@ public sealed class FinOpsOptimizationRollupBufferLiveTests
                 buffers < tablePages * MaxShareOfTablePages,
                 $"The Optimization read touched {buffers:N0} buffers, {buffers / tablePages:P1} of the raw table's {tablePages:N0} pages: it must take the whole hours of the window from the hourly rollup (limit {MaxShareOfTablePages:P0}).");
 
-            /* The ranking and the CPU sums are the raw sums the read replaces: the same statements in the same order, to the millisecond. */
+            /* The ranking and the CPU sums are the raw sums the read replaces: the same statements in the same order, to the millisecond. The
+               grain and the tie-break are the read's own: statements that tie on CPU order by database, sql_handle, then hash. (#8552: this query
+               once broke ties on the hash alone, and the seed gave every statement of one parity the same sum, so the top 150 tied and the two
+               orders disagreed.) */
             var expected = new List<(string Hash, long CpuMs)>();
             await using (var raw = new NpgsqlCommand(@"
 SELECT query_hash, SUM(delta_worker_time) / 1000.0
 FROM collect.query_stats
 WHERE server_id = $1 AND collection_time >= $2 AND delta_worker_time > 0 AND sample_interval_seconds IS DISTINCT FROM 0
-GROUP BY query_hash
-ORDER BY SUM(delta_worker_time) DESC, query_hash
+GROUP BY database_name, sql_handle, query_hash
+ORDER BY SUM(delta_worker_time) DESC, database_name, sql_handle, query_hash
 LIMIT $3", counter))
             {
                 raw.Parameters.AddWithValue(ServerA);
@@ -192,7 +195,9 @@ LIMIT $3", counter))
     }
 
     /* Two servers, one sample every two minutes for 36 hours, 150 of each server's 300 statements per sample, in collection order so
-       the two servers' rows share every heap page, as they do on a store with many servers. Texts and plans sit in the dimensions by digest. */
+       the two servers' rows share every heap page, as they do on a store with many servers. Texts and plans sit in the dimensions by digest.
+       The random cost of a sample is correlated to its row (st.stmt * 0) so it is drawn per row: an uncorrelated lateral runs once per batch,
+       and every statement then sums to the same CPU, which leaves the ranking nothing to rank. */
     private static async Task SeedAsync(NpgsqlConnection connection, DateTime end, CancellationToken ct)
     {
         await Exec(connection, $@"
@@ -243,7 +248,7 @@ FROM (SELECT g AS i, $1::timestamp + g * interval '{SampleMinutes} minutes' AS c
 CROSS JOIN (VALUES ({ServerA}), ({ServerB})) AS srv(sid)
 CROSS JOIN generate_series(0, {StatementsPerSample - 1}) AS k
 JOIN seedstmt st ON st.server_id = srv.sid AND st.stmt = ((k * 2) + (EXTRACT(EPOCH FROM m.ct)::bigint / {SampleMinutes * 60})::int) % {StatementsPerServer}
-CROSS JOIN LATERAL (SELECT random() AS v) AS r
+CROSS JOIN LATERAL (SELECT random() + st.stmt * 0 AS v) AS r
 WHERE m.ct < $2::timestamp
 ORDER BY m.ct, srv.sid, k", connection);
             batch.Parameters.AddWithValue(hour);
