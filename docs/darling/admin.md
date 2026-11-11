@@ -11,7 +11,7 @@ The service reads the `servers` array in `darling.json` on the first start only.
 To change the list, use one of these:
 
 - The Viewer: **Manage Servers**.
-- The `add_servers`, `edit_server` and `remove_server` MCP tools. They need `mcp.allowWrites` and `mcp.allowServerAdmin`.
+- The `add_servers`, `edit_server`, `remove_server` and `set_server_action` MCP tools. They need `mcp.allowWrites` and `mcp.allowServerAdmin`.
 - The `--add-server` command line verb. It can add a server. It cannot remove one.
 
 The web Admin page can edit a server that already exists. It cannot add, remove, enable or disable one. The page says so itself. For the full list of what the file still controls, see [`darling.json` is only a seed](install.md#darlingjson-is-only-a-seed).
