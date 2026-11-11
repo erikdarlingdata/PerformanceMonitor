@@ -552,6 +552,18 @@ public static class DailySummarySql
 
         var width = (long)target.BucketWidth.TotalSeconds;
 
+        /* #8549: a daily whose source is itself a rollup (the hourly it is hierarchical from) reads the days it lacks from that
+           hourly for the hours the hourly holds, and from raw only for the rest. The hourly tier's relations read raw as their
+           source, so there is nothing between them and raw and their text is unchanged. */
+        var hourlySource = IsRollup(target.Source) ? target.Source : null;
+        var closedHours = hourlySource is null
+            ? string.Empty
+            : ClosedHoursMember(
+                "(SELECT raw_from FROM queries_ceiling)",
+                $"EXISTS (SELECT 1 FROM collect.{hourlySource} AS s WHERE s.server_id = $1 AND s.bucket = g.h OFFSET 0)",
+                (hourlySource, string.Empty)) + "\n            UNION ALL\n            ";
+        var rawTailGate = hourlySource is null ? string.Empty : "\n                  AND (SELECT raw_from FROM queries_ceiling) IS NULL";
+
         /* #7505: the partial ceiling day's raw rows are counted with the rollup's own source filter, so that day
            is not read higher than the rollup would have read it once it catches up (a restart row's hash counts in
            raw and not in the interval-honest successor). Days past the ceiling keep reading raw unfiltered, as they
@@ -592,11 +604,11 @@ public static class DailySummarySql
                 SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
                 FROM v_query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-                  AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling), $2){partialDayFilter}
+                  AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling), $2){partialDayFilter}{rawTailGate}
             ) AS x
             GROUP BY x.d
             UNION ALL
-            /* #3653 A6: the days at or below this server's ceiling that the rollup holds NO row for while its
+            {closedHours}/* #3653 A6: the days at or below this server's ceiling that the rollup holds NO row for while its
                source still holds rows the rollup's own WHERE admits -- "not carried at this tier". One row per
                such day with a NULL count; the outer select passes it through as unique_queries = NULL and the
                readers list the day in days_missing[]. The two probes are the hole scan's
@@ -625,6 +637,71 @@ public static class DailySummarySql
             GROUP BY u.d
         ),
         """;
+    }
+
+    /// <summary>Whether <paramref name="view"/> is a registered rollup, so a daily whose source is that name is hierarchical from it (#8549).</summary>
+    private static bool IsRollup(string view)
+        => TimescaleSupport.RollupCoverageProbeTargets.Any(t => string.Equals(t.View, view, StringComparison.Ordinal));
+
+    /// <summary>
+    /// The member of the daily <c>queries</c> CTE that counts the days at and after the daily rollup's ceiling (#8549). The daily's refresh
+    /// leaves yesterday out until the next UTC midnight, so for a day it lacks, a closed day, the old raw tail read every raw row of
+    /// the day: 381 of the 482 buffers of a 30-day read on a test store. This member reads the HOURLY rollup for the hours it holds and raw
+    /// only for the hours neither rollup holds, plus the open day's last hours (the hourly stops an hour short of now).
+    ///
+    /// <para><b>The grid and the held test.</b> One row per hour from <paramref name="rawFrom"/>, the first day the daily does not hold whole,
+    /// to the end of the window. An hour is held when it lies wholly inside <c>[$2, $3)</c> and <paramref name="heldProbe"/> finds an
+    /// hourly bucket for the server at that hour. A window edge that cuts an hour reads that hour from raw, clamped to the window, because
+    /// the rollup cannot split an hour. Every other hour with a bucket is read from the hourly by one range, so the hourly is never
+    /// probed per row. The probe carries <c>OFFSET 0</c> so each hour is one index probe and the grid is not joined into the hourly's
+    /// history, the same fence as the not-carried probes (#3905).</para>
+    ///
+    /// <para><b>One count per day over both halves.</b> A day can hold held hours and raw hours, and two counts of distinct hashes cannot
+    /// be added, so the two halves are combined with <c>UNION</c> (which removes a hash seen in both) before the one <c>COUNT</c> per day.
+    /// Days past the ceiling never meet the daily half, which ends at the ceiling, or the not-carried member, which stops there too.</para>
+    ///
+    /// <para><b>Restart rows.</b> The interval-honest hourly skips <c>sample_interval_seconds = 0</c>, so a hash seen only in a restart
+    /// row is counted by the raw hours and not by the held ones. Raw hours stay unfiltered, as the days past the ceiling always were, and a
+    /// held hour counts what the daily will hold for it tomorrow.</para>
+    ///
+    /// <para>With no ceiling (<paramref name="rawFrom"/> NULL, an empty daily) the grid is empty and the raw tail reads the window as before:
+    /// reading a month of the hourly for a daily that holds nothing is the read this member avoids.</para>
+    /// </summary>
+    private static string ClosedHoursMember(string rawFrom, string heldProbe, params (string Relation, string Predicate)[] hourlyReads)
+    {
+        var hourly = string.Concat(hourlyReads.Select(read => $"""
+                SELECT date_trunc('day', s.bucket) AS d, s.query_hash
+                FROM collect.{read.Relation} AS s
+                WHERE s.server_id = $1 AND s.bucket >= $2 AND s.bucket + INTERVAL '1 hour' <= $3
+                  AND s.bucket >= {rawFrom}{read.Predicate}
+                UNION
+
+            """));
+
+        return $"""
+            /* #8549: the hours at and after the daily's ceiling. A held hour is read from the hourly rollup, every other hour from raw,
+               and the two are UNIONed before the one count per day. See ClosedHoursMember. */
+            SELECT x.d, COUNT(x.query_hash) AS c
+            FROM (
+            {hourly}                SELECT date_trunc('day', q.h) AS d, r.query_hash
+                FROM (
+                    SELECT g.h,
+                           (g.h >= $2 AND g.h + INTERVAL '1 hour' <= $3 AND {heldProbe}) AS held
+                    FROM generate_series(date_trunc('hour', GREATEST($2::timestamp, {rawFrom})), $3::timestamp - INTERVAL '1 microsecond', INTERVAL '1 hour') AS g(h)
+                    WHERE {rawFrom} IS NOT NULL
+                    OFFSET 0
+                ) AS q
+                CROSS JOIN LATERAL (
+                    SELECT DISTINCT c.query_hash
+                    FROM collect.query_stats AS c
+                    WHERE c.server_id = $1
+                      AND c.collection_time >= GREATEST(q.h, $2)
+                      AND c.collection_time < LEAST(q.h + INTERVAL '1 hour', $3)
+                ) AS r
+                WHERE NOT q.held
+            ) AS x
+            GROUP BY x.d
+            """;
     }
 
     /// <summary>
@@ -686,6 +763,20 @@ public static class DailySummarySql
         var legacyWidth = (long)legacyTarget.BucketWidth.TotalSeconds;
         var successorWidth = (long)successorTarget.BucketWidth.TotalSeconds;
 
+        /* #8549: the closed-hours member, when both dailies read an hourly rollup. Hours before the boundary day read the legacy
+           hourly and hours from it the successor's, the split the daily halves already make. See QueriesCteForCagg. */
+        const string stitchedRawFrom = "COALESCE((SELECT raw_from FROM queries_ceiling_successor), (SELECT raw_from FROM queries_ceiling_legacy))";
+        var hierarchical = IsRollup(legacyTarget.Source) && IsRollup(successorTarget.Source);
+        var closedHours = hierarchical
+            ? ClosedHoursMember(
+                stitchedRawFrom,
+                $"CASE WHEN g.h < {boundary} THEN EXISTS (SELECT 1 FROM collect.{legacyTarget.Source} AS s WHERE s.server_id = $1 AND s.bucket = g.h OFFSET 0) "
+                + $"ELSE EXISTS (SELECT 1 FROM collect.{successorTarget.Source} AS s WHERE s.server_id = $1 AND s.bucket = g.h OFFSET 0) END",
+                (legacyTarget.Source, $" AND s.bucket < {boundary}"),
+                (successorTarget.Source, $" AND s.bucket >= {boundary}")) + "\n            UNION ALL\n            "
+            : string.Empty;
+        var rawTailGate = hierarchical ? $"\n                  AND {stitchedRawFrom} IS NULL" : string.Empty;
+
         return $"""
         /* #7505: raw_from is the day in which each side's newest bucket ends, the first day that side does not
            hold whole. See QueriesCteForCagg. */
@@ -730,11 +821,11 @@ public static class DailySummarySql
                   AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling_successor), (SELECT raw_from FROM queries_ceiling_legacy), $2)
                   AND (collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_successor), (SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_legacy), $2)
                        OR ((SELECT last_day FROM queries_ceiling_successor) IS NOT NULL AND {partialDaySuccessor})
-                       OR ((SELECT last_day FROM queries_ceiling_successor) IS NULL AND {partialDayLegacy}))
+                       OR ((SELECT last_day FROM queries_ceiling_successor) IS NULL AND {partialDayLegacy})){rawTailGate}
             ) AS x
             GROUP BY x.d
             UNION ALL
-            SELECT b.d, NULL::bigint AS c
+            {closedHours}SELECT b.d, NULL::bigint AS c
             FROM (
                 SELECT g.d
                 FROM generate_series(date_trunc('day', $2::timestamp), date_trunc('day', $3::timestamp), INTERVAL '1 day') AS g(d)
