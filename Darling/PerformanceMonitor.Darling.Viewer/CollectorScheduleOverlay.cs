@@ -481,8 +481,8 @@ public static class CollectorScheduleOverlay
         }
 
         return parts.Count == 0
-            ? "No per-server overrides to reset — every server already follows the fleet default."
-            : $"Reset {string.Join(" and ", parts)} — every server now follows the fleet default.";
+            ? "No per-server overrides to reset: every server already follows the fleet default."
+            : $"Reset {string.Join(" and ", parts)}: every server now follows the fleet default.";
     }
 }
 

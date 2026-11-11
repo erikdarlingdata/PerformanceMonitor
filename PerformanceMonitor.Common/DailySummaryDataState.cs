@@ -148,11 +148,11 @@ namespace PerformanceMonitor.Common
             DailySummaryDataState.Purged =>
                 "PURGED: this day is before the store's retention_horizon (" + retentionHorizon.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
                 + ") and none of the per-signal tables the band reads (waits, queries, deadlocks, blocking, CPU, memory) holds a row for it; their zeros are absences, not measurements. "
-                + "The day is listed because a longer-lived source (the collection log or the alert log) still records it — collection_runs and alert_count are real where non-zero. No health verdict is possible.",
+                + "The day is listed because a longer-lived source (the collection log or the alert log) still records it. collection_runs and alert_count are real where non-zero. No health verdict is possible.",
             DailySummaryDataState.PastHorizon =>
                 "PAST HORIZON: this day is before the store's retention_horizon (" + retentionHorizon.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
                 + ") but " + signalSourcesPresent.ToString(CultureInfo.InvariantCulture) + " of " + SignalSourceCount.ToString(CultureInfo.InvariantCulture)
-                + " signal sources still hold rows for it — the purge has not reached it, or the sources' retentions differ. Non-zero counts are real; a zero may be a measurement or an absence, and the band cannot tell which, so no health verdict is given.",
+                + " signal sources still hold rows for it. The purge has not reached it, or the sources' retentions differ. Non-zero counts are real; a zero may be a measurement or an absence, and the band cannot tell which, so no health verdict is given.",
             DailySummaryDataState.NoRunRecord =>
                 "NO RUN RECORD: no collector run is recorded for this day, so the collection-error share has no denominator and nothing records that the day was fully collected; the day appears because a signal table or the alert log holds rows for it. Inside retention its zeros are measurements, so the band stands on the counts as read.",
             _ => null,

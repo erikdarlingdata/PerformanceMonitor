@@ -91,7 +91,7 @@ public sealed class ViewerPostgresPlainNoteTests
     public void AutovacuumIoAndWaitTrend_ShowOneShortSentence_WithTheReplicaOrVersionNoteOnHover()
     {
         const string AutovacuumShort = "No table reported an autovacuum backlog in this window.";
-        const string AutovacuumFull = AutovacuumShort + " This collector runs on the WRITER only — pg_stat_user_tables reports zeros on a replica — so an empty grid on a reader is expected rather than informative.";
+        const string AutovacuumFull = AutovacuumShort + " This collector runs on the WRITER only (pg_stat_user_tables reports zeros on a replica), so an empty grid on a reader is expected rather than informative.";
         var autovacuum = ViewerServerTab.EmptyNoteParts(null, offline: false, rowCount: 0, AutovacuumShort, AutovacuumFull);
         Assert.Equal(AutovacuumShort, autovacuum.Text);
         Assert.Contains("replica", autovacuum.Detail, StringComparison.Ordinal);

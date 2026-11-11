@@ -111,7 +111,7 @@ public sealed partial class ViewerDataService
         if (result is null)
         {
             return new LivePlanFetchResult(LivePlanFetchStatus.TimedOut, null,
-                "The service did not return the plan in time. It may still be fetching — try again.");
+                "The service did not return the plan in time. It may still be fetching. Try again.");
         }
 
         if (result.Status == StatusSucceeded)

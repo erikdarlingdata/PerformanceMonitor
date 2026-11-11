@@ -84,7 +84,7 @@ public sealed class ViewerFleetTabStatusLinesTests
                     findings.Add($"with {tabName} on screen after its read failed the status bar reads \"{status.Text}\", not \"{failurePrefix}…\"");
                 }
 
-                if (status.Text.Contains("— refreshed", StringComparison.Ordinal))
+                if (status.Text.Contains(": refreshed", StringComparison.Ordinal))
                 {
                     findings.Add($"with {tabName} on screen after its read failed the status bar says the tab is refreshed: \"{status.Text}\"");
                 }

@@ -504,7 +504,7 @@ public sealed class ViewerFleetRollupBuilderTests
     [Fact]
     public void BuildReason_Offline_SaysSo()
     {
-        Assert.Equal("Offline — no recent collection", FleetRollup.BuildReason(Offline("s", 1)));
+        Assert.Equal("Offline: no recent collection", FleetRollup.BuildReason(Offline("s", 1)));
     }
 
     [Fact]

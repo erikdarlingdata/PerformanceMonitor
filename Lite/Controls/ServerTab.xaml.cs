@@ -163,11 +163,11 @@ public partial class ServerTab : UserControl
     public int UtcOffsetMinutes => _serverClock.OffsetMinutesAt(DateTime.UtcNow);
 
     /// <summary>
-    /// The header's status line from the moment the tab opens until its server's first collection has run. It says where the
-    /// data comes from, so an Overview chart that finds no rows in the window meanwhile reads as loading, not as an empty
-    /// server. The refresh passes that show stored data in that time keep this line; an error replaces it.
+    /// The header's status line from the moment the tab opens until its server's first collection has run. It says the first
+    /// collection is still pending, so an Overview chart that finds no rows in the window meanwhile reads as loading, not as an empty
+    /// server. It does not say the charts are empty: they may already show the data the store holds (#8621). The refresh passes that show stored data in that time keep this line; an error replaces it.
     /// </summary>
-    internal const string ConnectingStatusText = "Connecting... the charts fill after the first collection";
+    internal const string ConnectingStatusText = "Connecting... waiting for the first collection";
 
     private bool _awaitingFirstCollection = true;
 

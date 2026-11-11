@@ -332,7 +332,7 @@ public partial class RecommendationsTab : UserControl
         catch (Exception ex)
         {
             AppLogger.Error("Recommendations", $"Failed to generate recommendations: {ex.Message}", ex);
-            StatusText.Text = "Generate failed — see log.";
+            StatusText.Text = "Generate failed. See log.";
             ApplyViewModel(LiteRecommendationsViewModel.FromItems(Array.Empty<LiteRecommendationItem>()));
         }
         finally

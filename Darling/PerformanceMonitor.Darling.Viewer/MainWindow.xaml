@@ -405,7 +405,7 @@
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 Margin="0,8,0,0"
-                                ToolTip="Viewer settings — defaults for newly-opened server tabs">
+                                ToolTip="Viewer settings: defaults for newly-opened server tabs">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="12"
                                            VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -428,7 +428,7 @@
 
                 <TextBlock x:Name="ServersHintText"
                            DockPanel.Dock="Bottom"
-                           Text="no servers registered — is the Darling service running?"
+                           Text="no servers registered: is the Darling service running?"
                            Foreground="{DynamicResource ForegroundMutedBrush}"
                            TextWrapping="Wrap"
                            Margin="2,8,2,0"
@@ -591,7 +591,7 @@
                                         <!-- A greyed vector bell with a slash (never an emoji), shown only while a
                                              whole-server alert silence is active. -->
                                         <Viewbox Width="11" Height="11" Margin="0,0,6,0" VerticalAlignment="Center"
-                                                 ToolTip="Alerts silenced for this server — right-click → Unsilence to restore">
+                                                 ToolTip="Alerts silenced for this server: right-click → Unsilence to restore">
                                             <Viewbox.Style>
                                                 <Style TargetType="Viewbox">
                                                     <Setter Property="Visibility" Value="Collapsed"/>
@@ -814,7 +814,7 @@
                                              is what stops a filtered grid reading as an unfiltered one. -->
                                         <CheckBox x:Name="OverviewAttentionOnlyCheck" Content="Needs attention only"
                                                   FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"
-                                                  ToolTip="Show only the cards that are not Healthy — Critical, Warning, Offline, or awaiting a first collection. Uncheck to show the whole fleet again."
+                                                  ToolTip="Show only the cards that are not Healthy: Critical, Warning, Offline, or awaiting a first collection. Uncheck to show the whole fleet again."
                                                   Checked="OverviewAttentionOnlyCheck_Changed"
                                                   Unchecked="OverviewAttentionOnlyCheck_Changed"/>
                                         <TextBlock x:Name="OverviewAttentionCountText" FontSize="11" VerticalAlignment="Center"
@@ -1478,7 +1478,7 @@
 
                             <TextBlock x:Name="RecommendationsEmptyText"
                                        Style="{StaticResource EmptyHint}"
-                                       Text="All clear — no current recommendations."/>
+                                       Text="All clear. No current recommendations."/>
 
                             <!-- Insufficient data: the analysis pass has not cleared its 24h data-span
                                  gate yet (the persisted V19 marker). Text is set from the view-model. -->

@@ -118,7 +118,7 @@
                         <TextBlock x:Name="WouldHavePagedEmpty" TextWrapping="Wrap" TextAlignment="Center"
                                    HorizontalAlignment="Center" VerticalAlignment="Center" Margin="20"
                                    Foreground="{DynamicResource ForegroundMutedBrush}"
-                                   Text="Muted, and nothing crossed a critical trigger in this span — the mute cost nothing this sweep."/>
+                                   Text="Muted, and nothing crossed a critical trigger in this span. The mute cost nothing this sweep."/>
                     </Grid>
                 </TabItem>
                 <TabItem Header="Per-server verdicts">

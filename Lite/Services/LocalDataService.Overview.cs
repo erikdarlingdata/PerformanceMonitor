@@ -483,10 +483,10 @@ public static class ServerCardStatusRules
     /// word and a colour left the reader guessing which axis they were about.</summary>
     public static string Headline(this ServerCardStatus status) => status switch
     {
-        ServerCardStatus.CollectorErrors => "Warning — one or more collectors are failing on this server",
-        ServerCardStatus.Online => "Online — the last connection check succeeded",
-        ServerCardStatus.Offline => "Offline — the last connection check failed",
-        _ => "Connecting — the first connection check has not finished yet",
+        ServerCardStatus.CollectorErrors => "Warning: one or more collectors are failing on this server",
+        ServerCardStatus.Online => "Online: the last connection check succeeded",
+        ServerCardStatus.Offline => "Offline: the last connection check failed",
+        _ => "Connecting: the first connection check has not finished yet",
     };
 }
 
@@ -775,13 +775,13 @@ public class ServerSummaryItem
     public string? CollectionFreshnessTooltip => CollectionFreshness switch
     {
         ServerFreshness.Fresh =>
-            $"Collection is current — something landed within the last {Minutes(ServerHealthThresholds.StaleThreshold)}.",
+            $"Collection is current: something landed within the last {Minutes(ServerHealthThresholds.StaleThreshold)}.",
         ServerFreshness.Stale =>
-            $"Collection is stale — nothing has landed for over {Minutes(ServerHealthThresholds.StaleThreshold)}.\n" +
+            $"Collection is stale: nothing has landed for over {Minutes(ServerHealthThresholds.StaleThreshold)}.\n" +
             "This is about collection stopping, not about the server's metrics: the connection check can " +
             "still be passing and no collector reporting an error.",
         ServerFreshness.Offline =>
-            $"Collection has stopped — nothing has landed for over {Minutes(ServerHealthThresholds.OfflineThreshold)}.\n" +
+            $"Collection has stopped: nothing has landed for over {Minutes(ServerHealthThresholds.OfflineThreshold)}.\n" +
             "This is about collection stopping, not about the server's metrics: the connection check can " +
             "still be passing and no collector reporting an error.",
         ServerFreshness.NeverCollected =>

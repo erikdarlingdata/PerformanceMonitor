@@ -78,7 +78,7 @@ public sealed class LiveScreenTextAndLayoutTests
         var lines = connection.DotTooltip.Split('\n');
 
         Assert.Equal("Orders", lines[0]);
-        Assert.StartsWith("Online — the last connection check succeeded", lines[1], StringComparison.Ordinal);
+        Assert.StartsWith("Online: the last connection check succeeded", lines[1], StringComparison.Ordinal);
         Assert.Equal("Double-click to open this server's tab", lines[^1]);
         Assert.DoesNotContain(lines, line => line.Contains("the row", StringComparison.Ordinal));
     }

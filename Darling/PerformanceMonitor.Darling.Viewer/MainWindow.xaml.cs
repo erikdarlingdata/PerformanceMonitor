@@ -295,11 +295,11 @@ public partial class MainWindow : Window
 
         if (members.Count > 0)
         {
-            _unreadableSettingsValues.Add($"{fileName} — {string.Join(", ", members)}");
+            _unreadableSettingsValues.Add($"{fileName}: {string.Join(", ", members)}");
             return;
         }
 
-        _unreadableSettingsFiles.Add($"{fileName} — {problem}");
+        _unreadableSettingsFiles.Add($"{fileName}: {problem}");
     }
 
     /// <summary>
@@ -352,7 +352,7 @@ public partial class MainWindow : Window
 
         message
             .Append("The files have been left exactly as they are. Fix the JSON and restart to get those ")
-            .Append("settings back — or save from the Settings window, which copies an unreadable file ")
+            .Append("settings back, or save from the Settings window, which copies an unreadable file ")
             .Append("aside as '.unreadable-<timestamp>' before replacing it.");
 
         MessageBox.Show(message.ToString(), "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -930,14 +930,14 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             ViewerLogger.Warn("AlertToasts", $"Snooze of {metricName} on {serverName} was not saved: {ex.Message}");
-            StatusText.Text = $"Snooze not saved — {metricName} on {serverName} will keep alerting: {ex.Message}";
+            StatusText.Text = $"Snooze not saved: {metricName} on {serverName} will keep alerting ({ex.Message})";
             return;
         }
 
         _viewerMuteRules.Add(rule);
         StatusText.Text =
-            $"Snoozed {metricName} on {serverName} for {label} — tray toasts stop now; the service applies it within "
-            + $"{ViewerDataService.ServiceReloadTickSeconds} s — {ViewerTimeHelper.RefreshedStamp()}";
+            $"Snoozed {metricName} on {serverName} for {label}: tray toasts stop now; the service applies it within "
+            + $"{ViewerDataService.ServiceReloadTickSeconds} s ({ViewerTimeHelper.RefreshedStamp()})";
     }
 
     /// <summary>
@@ -1253,7 +1253,7 @@ public partial class MainWindow : Window
             }
             else
             {
-                StatusText.Text = $"connected — no servers registered yet ({ViewerTimeHelper.RefreshedStamp()})";
+                StatusText.Text = $"connected: no servers registered yet ({ViewerTimeHelper.RefreshedStamp()})";
             }
 
             /* Seed the sidebar status dots + the status bar's collector-health / collection / database-size
@@ -1871,7 +1871,7 @@ public partial class MainWindow : Window
         _overviewRegisteredCount = list.Count;
         ApplyFleetRollup(OverviewCardView.BuildRollup(cards, totals, list.Count, OverviewSearchBox?.Text));
 
-        SetTabStatus(OverviewTab, $"overview — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+        SetTabStatus(OverviewTab, $"overview: refreshed {ViewerTimeHelper.RefreshedStamp()}");
     }
 
     /// <summary>
@@ -2151,7 +2151,7 @@ public partial class MainWindow : Window
         /* #6135: an offline server's findings are the last it collected; say so beside the time they came from. */
         RecommendationsStatusText.Text = RecommendationsViewModel.WithOfflineNote(
             RecommendationsStatusText.Text, server.CardStatus == ServerCollectionStatus.Offline);
-        SetTabStatus(RecommendationsTab, $"{server.DisplayName} — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+        SetTabStatus(RecommendationsTab, $"{server.DisplayName}: refreshed {ViewerTimeHelper.RefreshedStamp()}");
     }
 
     /// <summary>Swaps the visible content region to match the view-model's state (mirrors Lite's ApplyViewModel).</summary>
@@ -2252,7 +2252,7 @@ public partial class MainWindow : Window
             var result = await _dataService.RequestAnalyzeNowAsync(server.ServerId);
             if (result is null)
             {
-                RecommendationsStatusText.Text = "Analysis is still running — refresh in a moment.";
+                RecommendationsStatusText.Text = "Analysis is still running: refresh in a moment.";
             }
             else if (result.Status != ViewerDataService.StatusSucceeded)
             {
@@ -2355,7 +2355,7 @@ public partial class MainWindow : Window
         var server = FindManagedServerById(card.ServerId);
         if (server is null)
         {
-            RecommendationsStatusText.Text = "Cannot open Active Queries — the finding's server is no longer registered.";
+            RecommendationsStatusText.Text = "Cannot open Active Queries: the finding's server is no longer registered.";
             return;
         }
 
@@ -2691,7 +2691,7 @@ public partial class MainWindow : Window
             /* No connection string means config never resolved (e.g. darling.json missing) — there
                is nothing to probe, and the overlay message already says what to fix. */
             ViewerLogger.Warn(ViewerConfigDiagnostics.LogSource,
-                "Self-test requested, but no store connection string resolved — fix the configuration first.");
+                "Self-test requested, but no store connection string resolved. Fix the configuration first.");
             return;
         }
 

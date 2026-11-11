@@ -454,7 +454,7 @@
                         </Border>
                         <TextBlock x:Name="ServerFreshnessText" FontSize="12" VerticalAlignment="Center" Margin="8,0,0,0"
                                    Foreground="{DynamicResource ForegroundMutedBrush}"
-                                   ToolTip="Newest collection time across all collectors — the service collects, the viewer reads"/>
+                                   ToolTip="Newest collection time across all collectors: the service collects, the viewer reads"/>
                     </StackPanel>
                     <Button Style="{DynamicResource {x:Type Button}}" ToolBar.OverflowMode="Never" x:Name="RefreshDataButton" Content="Refresh" Click="RefreshDataButton_Click"
                             Padding="12,4" Margin="0,0,8,0"/>
@@ -1795,7 +1795,7 @@
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Margin="8,4,8,4" FontSize="11" TextWrapping="Wrap"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"
-                                       Text="Queries whose Query Store performance regressed — recent-window averages vs. the baseline captured before the window, kept when Regular CPU regressed more than 25% and the query added at least 1 s of CPU over the window (cost compares Regular runs only), or when timeouts (Aborted runs) or errors (Exception runs) per hour at least doubled (Why). The Aborted and Exception counts, CPU and duration per execution sit beside the Regular figures, ranked by total added duration. Double-click a row for its execution history."/>
+                                       Text="Queries whose Query Store performance regressed: recent-window averages vs. the baseline captured before the window, kept when Regular CPU regressed more than 25% and the query added at least 1 s of CPU over the window (cost compares Regular runs only), or when timeouts (Aborted runs) or errors (Exception runs) per hour at least doubled (Why). The Aborted and Exception counts, CPU and duration per execution sit beside the Regular figures, ranked by total added duration. Double-click a row for its execution history."/>
                             <!-- "Showing since <start>" when this server's Query Store history starts after the BASELINE window does: the read
                                  compares the range with the 7 days before it, so the notice keys on that earlier window (#4966). -->
                             <TextBlock Grid.Row="1" x:Name="QueryStoreRegressionsTruncationBanner" Visibility="Collapsed"
@@ -1948,7 +1948,7 @@
                             <TextBlock Grid.Row="0" Margin="8,4,8,4" FontSize="11"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"
                                        TextWrapping="Wrap"
-                                       Text="Which databases make this server's Query Store expensive, composed from rows already collected — no new query runs against the server. Per database: the query_store collector's read cost (how often and by how much this database was the slowest fan-out item), plan churn off the stored plan identities, and the newest options row. Verdict is the band the arms raised, with the reasons beside it; Unknown means unmeasured, never quietly healthy. Select a row for its recommendation."/>
+                                       Text="Which databases make this server's Query Store expensive, composed from rows already collected: no new query runs against the server. Per database: the query_store collector's read cost (how often and by how much this database was the slowest fan-out item), plan churn off the stored plan identities, and the newest options row. Verdict is the band the arms raised, with the reasons beside it; Unknown means unmeasured, never quietly healthy. Select a row for its recommendation."/>
                             <!-- Shown only when every Query-Store-bearing database here is a readable secondary:
                                  no per-database verdict is issued on such a server, and an empty-looking grid
                                  without this sentence reads as a defect rather than as the architecture. -->
@@ -2055,7 +2055,7 @@
                             <TextBlock Grid.Row="0" Margin="8,4,0,4" FontSize="11"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"
                                        TextWrapping="Wrap"
-                                       Text="The engine's own automatic plan correction findings — sys.dm_db_tuning_recommendations, with the regressed query's text resolved through Query Store at collection time. The engine keeps recommendations only until it restarts, so a captured row can be the only surviving record that a regression happened. Per-database enablement state is on the Configuration tab's Automatic Tuning sub-tab."/>
+                                       Text="The engine's own automatic plan correction findings, from sys.dm_db_tuning_recommendations, with the regressed query's text resolved through Query Store at collection time. The engine keeps recommendations only until it restarts, so a captured row can be the only surviving record that a regression happened. Per-database enablement state is on the Configuration tab's Automatic Tuning sub-tab."/>
                             <!-- "Showing since <start>" when this server's plan corrections start after the range does, or the newest
                                  200 rows (the read's cap) reach back no further than the row named: the earlier of the collector's
                                  coverage (DataWindowFloor) and the earliest row shown, or the oldest row of a full page (#4966). -->
@@ -3602,7 +3602,7 @@
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Margin="2,0,2,8" TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="12"
-                           Text="Configuration is captured on connect/restart (the config collectors run on connect, not on a timer), so these histories reflect that cadence — a setting appears here only when at least two captures bracket the change within the selected time window."/>
+                           Text="Configuration is captured on connect/restart (the config collectors run on connect, not on a timer), so these histories reflect that cadence: a setting appears here only when at least two captures bracket the change within the selected time window."/>
                 <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <TabItem Header="Server Config Changes">
                         <Grid>

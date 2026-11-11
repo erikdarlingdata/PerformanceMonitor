@@ -58,7 +58,7 @@ public sealed class CollectionConnectionFailureLineTests
 
         Assert.NotNull(line);
         Assert.Contains("reached 3 collectors", line);
-        Assert.Contains("1 of them have other errors in the last 7 days as well", line);
+        Assert.Contains("1 of them has other errors in the last 7 days as well", line);
         Assert.DoesNotContain("each missed that one run", line);
         Assert.DoesNotContain("Nothing to do", line);
     }
@@ -78,8 +78,8 @@ public sealed class CollectionConnectionFailureLineTests
 
         Assert.NotNull(line);
         Assert.Contains("reached 15 collectors", line);
-        Assert.Contains("15 of them have other errors in the last 7 days as well", line);
-        Assert.Contains("It has repeated, or those collectors fail for other reasons too", line);
+        Assert.Contains("all 15 have other errors in the last 7 days as well", line);
+        Assert.Contains("It may have repeated, or those collectors may fail for other reasons too", line);
         Assert.DoesNotContain("Nothing to do", line);
     }
 
@@ -97,7 +97,7 @@ public sealed class CollectionConnectionFailureLineTests
         var line = SummaryLine(rows);
 
         Assert.NotNull(line);
-        Assert.EndsWith("the Collection Log says which once its time range reaches back to those runs.", line);
+        Assert.EndsWith("open the Collection Log tab and set its time range to reach back to those runs.", line);
     }
 
     [Fact]

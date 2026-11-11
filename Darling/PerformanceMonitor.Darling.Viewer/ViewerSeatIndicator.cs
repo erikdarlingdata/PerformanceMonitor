@@ -87,7 +87,7 @@ internal static class ViewerSeatIndicator
         "A viewer on the service host, on the bundled store, connects as postgres.connectAs. It defaults to \"admin\", which is read-write.";
 
     internal const string NetworkDefaultSentence =
-        "A viewer reached over the LAN connects as postgres.network.role, which defaults to \"viewer\" — read-only.";
+        "A viewer reached over the LAN connects as postgres.network.role, which defaults to \"viewer\", read-only.";
 
     /* Said in full on the read-only tooltip because it is the actual #2400 question. The refusals say it
        per-dialog already; a reader who has not tripped one yet has no way to know a "write" here is a row
@@ -113,8 +113,8 @@ internal static class ViewerSeatIndicator
         return "This viewer is connected with a read-only role, so write affordances are hidden or disabled."
             + Environment.NewLine + Environment.NewLine
             + where + " " + defaults
-            + " The two defaults are deliberately opposite — the local viewer is the operator's, the remote "
-            + "viewer is a laptop — so a remote viewer being read-only is the expected default, not a fault."
+            + " The two defaults are deliberately opposite: the local viewer is the operator's, the remote "
+            + "viewer is a laptop, so a remote viewer being read-only is the expected default, not a fault."
             + Environment.NewLine + Environment.NewLine
             + NothingIsWrittenSentence
             + Environment.NewLine + Environment.NewLine
@@ -138,7 +138,7 @@ internal static class ViewerSeatIndicator
        and the full-window message already carries the diagnosis and the connection details. */
     internal const string UnreachableToolTip =
         "The Darling store could not be reached, so this viewer has not probed what access it has. This is "
-        + "NOT read-only access — it is no connection at all. See the message on the main panel for the "
+        + "NOT read-only access: it is no connection at all. See the message on the main panel for the "
         + "store address it tried and why it failed.";
 
     internal const string UnknownToolTip =

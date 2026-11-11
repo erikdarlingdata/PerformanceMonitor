@@ -225,7 +225,7 @@ public partial class AlertsHistoryTab : UserControl
             UpdateStaleDataIndicator();
 
             ViewerServerTab.ClientStep(timer, "server filter build", () => PopulateServerFilter(alerts));
-            StatusChanged?.Invoke($"alert history — refreshed {ViewerTimeHelper.RefreshedStamp()}");
+            StatusChanged?.Invoke($"alert history: refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
@@ -457,7 +457,7 @@ public partial class AlertsHistoryTab : UserControl
                     : $"Dismissed {CountText.Plural(affected, "selected alert")}");
             }
             await LoadAlertsAsync();
-            StatusChanged?.Invoke($"dismissed {CountText.Plural(affected, "alert")} — {ViewerTimeHelper.RefreshedStamp()}");
+            StatusChanged?.Invoke($"dismissed {CountText.Plural(affected, "alert")} at {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
@@ -508,7 +508,7 @@ public partial class AlertsHistoryTab : UserControl
                 ViewerLogger.Info("AlertsHistory", $"Dismissed all {affected} visible alert(s) ({scope}, last {hoursBack}h)");
             }
             await LoadAlertsAsync();
-            StatusChanged?.Invoke($"dismissed {CountText.Plural(affected, "alert")} — {ViewerTimeHelper.RefreshedStamp()}");
+            StatusChanged?.Invoke($"dismissed {CountText.Plural(affected, "alert")} at {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {
@@ -677,7 +677,7 @@ public partial class AlertsHistoryTab : UserControl
                     $"Created mute rule (server={dialog.Rule.ServerName ?? "any"}, metric={dialog.Rule.MetricName ?? "any"}, expires={expiry})");
             }
             await LoadAlertsAsync();
-            StatusChanged?.Invoke($"mute rule created — {ViewerTimeHelper.RefreshedStamp()}");
+            StatusChanged?.Invoke($"mute rule created at {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
         {

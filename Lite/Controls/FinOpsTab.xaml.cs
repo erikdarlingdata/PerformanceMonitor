@@ -229,14 +229,18 @@ public partial class FinOpsTab : UserControl
         server == null || server.ViewFilterDatabases.Count == 0 ? null : server.ViewFilterDatabases.ToList();
 
     /// <summary>
-    /// The two Index Analysis grids are wider than the page, so a horizontal scroll bar is right only while they hold rows: on an empty
-    /// grid it would scroll a header row and nothing else.
+    /// The two Index Analysis grids show only while a run has rows. Before a run, or after one that finds nothing, both stay collapsed
+    /// and the one message over them (Grid.RowSpan 2) is the whole empty state, instead of a message under a bare summary grid (#8621).
+    /// The horizontal scroll bar follows the same rule: the grids are wider than the page, so it is right only while they hold rows.
     /// </summary>
     private void IndexAnalysisGridsHoldRows(bool hasRows)
     {
-        var visibility = hasRows ? ScrollBarVisibility.Auto : ScrollBarVisibility.Hidden;
-        IndexAnalysisSummaryGrid.HorizontalScrollBarVisibility = visibility;
-        IndexAnalysisDetailGrid.HorizontalScrollBarVisibility = visibility;
+        var scroll = hasRows ? ScrollBarVisibility.Auto : ScrollBarVisibility.Hidden;
+        var visibility = hasRows ? Visibility.Visible : Visibility.Collapsed;
+        IndexAnalysisSummaryGrid.HorizontalScrollBarVisibility = scroll;
+        IndexAnalysisDetailGrid.HorizontalScrollBarVisibility = scroll;
+        IndexAnalysisSummaryGrid.Visibility = visibility;
+        IndexAnalysisDetailGrid.Visibility = visibility;
     }
 
     /// <summary>

@@ -19,10 +19,10 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class CollectorScheduleResetStatusTests
 {
-    private const string ResetTail = " — every server now follows the fleet default.";
+    private const string ResetTail = ": every server now follows the fleet default.";
 
     [Theory]
-    [InlineData(0, 0, "No per-server overrides to reset — every server already follows the fleet default.")]
+    [InlineData(0, 0, "No per-server overrides to reset: every server already follows the fleet default.")]
     [InlineData(1, 0, "Reset 1 per-server schedule override" + ResetTail)]
     [InlineData(3, 0, "Reset 3 per-server schedule overrides" + ResetTail)]
     [InlineData(0, 1, "Reset 1 per-server run time" + ResetTail)]

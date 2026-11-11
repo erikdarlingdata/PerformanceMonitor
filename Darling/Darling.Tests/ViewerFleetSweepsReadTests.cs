@@ -193,7 +193,7 @@ public sealed class ViewerFleetSweepsReadTests
         var at = new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc);
         var first = FleetSweepPresentation.BuildSweepDetailNode(
             Run(1, at, true, true, null, """{"no_previous_sweep":true}"""), Array.Empty<FleetSweepServerVerdict>(), Array.Empty<FleetSweepWouldHavePagedEntry>());
-        Assert.Equal("First sweep — there is no previous sweep to diff against, so this document states absolutes.", FleetSweepsRows.ChangesNote(first));
+        Assert.Equal("First sweep: there is no previous sweep to diff against, so this document states absolutes.", FleetSweepsRows.ChangesNote(first));
         Assert.Null(FleetSweepsRows.WouldHavePaged(first));
         Assert.Empty(FleetSweepsRows.Verdicts(first));
 
