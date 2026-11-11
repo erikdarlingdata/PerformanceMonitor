@@ -142,6 +142,32 @@ VALUES (860000001, (now() AT TIME ZONE 'utc'), 8002, 'jh-oldest', 1, 'j', 'late 
         }
     }
 
+    /// <summary>
+    /// #8549: with no raw rows the coverage probe's need_from fell back to the horizon (GREATEST ignores the NULL oldest row), so the job
+    /// history backfill ran about 5,200 seven-day refreshes from 36,500 days back on every start of a store with no job_history rows, and
+    /// reported a refresh that filled nothing. It must return false at once and leave both rollups empty, wait_stats' as well.
+    /// </summary>
+    [Fact]
+    public async Task TheBackfill_DoesNothing_WhenRawHoldsNoRows()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = await BuildTimescaleStoreAsync(scratch, ct);
+        Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_history", ct));
+        Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.wait_stats", ct));
+        Assert.True(await ScalarAsync<bool>(connection, ViewerDataService.JobHistoryOldestDailyIsAggregateSql, ct), "a hypertable store holds the aggregate");
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        Assert.False(await TimescaleSupport.BackfillJobHistoryOldestDailyAsync(connection, null, LiveClock.Now(), ct), "raw job_history holds nothing, so there is nothing to refresh");
+        Assert.False(await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, null, LiveClock.Now(), ct), "raw wait_stats holds nothing either");
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), $"no refresh ran, so it returns at once, took {clock.Elapsed.TotalSeconds:F1} s");
+        Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.JobHistoryOldestDailyView}", ct));
+        Assert.Equal(0L, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.WaitStatsDailyView}", ct));
+    }
+
     private static async Task<NpgsqlConnection> BuildTimescaleStoreAsync(ScratchPostgres scratch, CancellationToken ct)
     {
         var connection = new NpgsqlConnection(scratch.ConnectionString);
