@@ -157,7 +157,7 @@ public sealed class LiteSidebarDotRendersTheCardStatusTests
     public void TheDot_CannotBandFreshnessEvenByAccident()
     {
         const string disclaimer =
-            "It reports the connection check only, not collection freshness — the Overview card's Last Collect row bands that.";
+            "It reports the connection check only, not collection freshness. The Overview card's Last Collect row bands that.";
 
         foreach (var isOnline in new bool?[] { true, false, null })
         {

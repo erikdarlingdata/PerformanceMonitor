@@ -190,7 +190,7 @@ public sealed class LiteOverviewCardExplainsItselfTests
             var tooltip = card.StatusTooltip;
 
             Assert.NotEqual(card.StatusDisplay, tooltip);
-            Assert.Contains(card.StatusDisplay + " — ", tooltip, StringComparison.Ordinal);
+            Assert.Contains(card.StatusDisplay + ": ", tooltip, StringComparison.Ordinal);
             Assert.EndsWith("Double-click the card to open this server's tab", tooltip, StringComparison.Ordinal);
         }
     }
