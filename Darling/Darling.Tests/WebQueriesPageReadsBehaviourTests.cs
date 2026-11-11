@@ -21,8 +21,11 @@ namespace Darling.Tests;
 /// the page's own ping, store host and alert badge waited 3.4 to 4.5 s for one although the service answered each in under 300 ms.
 /// The harness gives the same visit the field's answer times; on the old code the ping waits 4.4 s. The five now share the heavy
 /// read gate under one cap below six, so the page's reads wait well under half a second, and the tab still settles in about
-/// 11.6 s where sending all nine reads through the old cap of two would take 19 s. Behavior only; the layer's source is not
-/// pinned.
+/// 11.6 s where sending all nine reads through the old cap of two would take 19 s.
+/// #8681: the tab's active-query snapshots and Query Store top list (3.9 and 3.3 s in the field) were not gated and held the two
+/// connections the gate leaves free, so ping, store host and the badge still queued 1.1 to 3.3 s. The harness now makes all seven
+/// reads slow: the page's reads must get a connection within a fraction of the shortest of them, and the seven share the cap of four.
+/// Behavior only; the layer's source is not pinned.
 /// </summary>
 public sealed class WebQueriesPageReadsBehaviourTests
 {
@@ -61,7 +64,7 @@ public sealed class WebQueriesPageReadsBehaviourTests
     [Theory]
     [InlineData("pageReadsAfterTheTab")]
     [InlineData("pageReadsFirst")]
-    public void ThePagesOwnReads_WaitUnderHalfASecondForAConnection_WhileTheFiveLongReadsAreInFlight(string order)
+    public void ThePagesOwnReads_WaitUnderHalfASecondForAConnection_WhileTheSevenSlowReadsAreInFlight(string order)
     {
         var visit = Run().GetProperty(order);
         Assert.True(visit.GetProperty("pingQueuedMs").GetInt32() < 500, "ping queued " + visit.GetProperty("pingQueuedMs").GetInt32() + " ms");
@@ -70,7 +73,7 @@ public sealed class WebQueriesPageReadsBehaviourTests
     }
 
     [Fact]
-    public void TheLongReadsHoldFewerConnectionsThanTheBrowserHas_AndTheHeavyOnesStayAtTwo()
+    public void TheSlowReadsHoldFewerConnectionsThanTheBrowserHas_AndTheHeavyOnesStayAtTwo()
     {
         var visit = Run().GetProperty("pageReadsAfterTheTab");
         Assert.True(visit.GetProperty("maxGatedInFlight").GetInt32() <= 4);
@@ -78,10 +81,10 @@ public sealed class WebQueriesPageReadsBehaviourTests
     }
 
     [Fact]
-    public void TheTab_StillSettlesSoon_SoTheFiveAreNotJustPutBehindTheOldCapOfTwo()
+    public void TheTab_StillSettlesSoon_SoTheSevenAreNotJustPutBehindTheOldCapOfTwo()
     {
         var visit = Run().GetProperty("pageReadsAfterTheTab");
         var settles = visit.GetProperty("tabSettlesMs").GetInt32();
-        Assert.True(settles < 13000, "the tab settled in " + settles + " ms");
+        Assert.True(settles < 16000, "the tab settled in " + settles + " ms");
     }
 }

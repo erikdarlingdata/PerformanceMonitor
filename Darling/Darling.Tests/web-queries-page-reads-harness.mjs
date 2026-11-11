@@ -32,6 +32,8 @@ const FIVE = {
   get_procedure_duration_trend: 4446,
   get_query_store_duration_trend: 4409,
 };
+/* #8681: the tab's other two slow reads, the active-query snapshots and the Query Store top list, 1.2 to 3.9 s on a first visit in the field. */
+const SLOW_TWO = { get_active_queries: 3892, get_query_store_top: 3274 };
 const QS = { get_query_store_clutter: 2329, get_query_store_regressions: 3154, get_query_heatmap: 3000, get_plan_corrections: 3000 };
 const SMALL = ["get_active_queries", "get_query_store_top", "get_long_query_completions", "get_query_store_aborts", "get_query_store_state",
   "get_query_store_health", "get_automatic_tuning", "get_plan_cache_summary", "get_query_pileups", "get_query_fleet_summary"];
@@ -42,7 +44,7 @@ let now = 0;
 const waiting = [];
 const active = [];
 const log = [];
-const durationOf = (tool) => (tool in FIVE ? FIVE[tool] : tool in QS ? QS[tool] : tool in PAGE ? PAGE[tool] : SMALL_MS);
+const durationOf = (tool) => (tool in FIVE ? FIVE[tool] : tool in SLOW_TWO ? SLOW_TWO[tool] : tool in QS ? QS[tool] : tool in PAGE ? PAGE[tool] : SMALL_MS);
 const toolOf = (url) => {
   const m = /\/api\/read\/([^?]+)/.exec(String(url));
   return m ? m[1] : String(url).split("?")[0];
@@ -124,7 +126,7 @@ const summarise = () => {
   };
   return {
     maxHeavyInFlight: peak(Object.keys(QS)),
-    maxGatedInFlight: peak([...Object.keys(FIVE), ...Object.keys(QS)]),
+    maxGatedInFlight: peak([...Object.keys(FIVE), ...Object.keys(SLOW_TWO), ...Object.keys(QS)]),
     pingQueuedMs: queue("/api/ping"),
     storeHostQueuedMs: queue("get_store_host"),
     badgeQueuedMs: queue("get_alert_badge_summary"),

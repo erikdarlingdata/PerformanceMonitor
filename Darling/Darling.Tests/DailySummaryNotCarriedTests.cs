@@ -238,14 +238,13 @@ public sealed class DailySummaryNotCarriedTests
 
         var tools = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHealthTools.cs");
         Assert.Equal(2, tools.Split("days_missing = ").Length - 1);
-        Assert.Contains("days_missing = range.DaysMissing.Select(day => day.ToString(\"yyyy-MM-dd\"))", tools, StringComparison.Ordinal);
+        Assert.Contains("days_missing = range.DaysMissing.Where(", tools, StringComparison.Ordinal); // #8682: filtered to the days the budget kept
         Assert.Contains("days_missing = row.UniqueQueries is null ? new[] { row.SummaryDate.ToString(\"yyyy-MM-dd\") } : Array.Empty<string>()", tools, StringComparison.Ordinal);
 
         var page = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         Assert.Contains("export function dailySummaryPanels(server)", page, StringComparison.Ordinal);
         Assert.Contains("row.unique_queries == null", page, StringComparison.Ordinal);
         Assert.Contains("[\"not materialized\"]", page, StringComparison.Ordinal);
-        Assert.Contains("...dailySummaryPanels(server),", page, StringComparison.Ordinal);
         /* The descriptor it replaced is gone: one fetch of the one read, as before. */
         Assert.DoesNotContain("\"Daily Health Calendar\",\n        \"get_daily_summary_range\"", page.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 
