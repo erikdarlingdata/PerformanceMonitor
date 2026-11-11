@@ -823,11 +823,12 @@ public sealed class RecommendationsViewModel
     /// the tab was for another server), and the label is taken from the same clock at the same instant, so it
     /// always names the zone the time beside it is in. Pure (no WPF, no statics) so the text is unit-testable.
     /// </summary>
-    internal static string FormatLastAnalyzed(DateTime analysisTimeUtc, TimeDisplayMode mode, ServerClock serverClock)
+    internal static string FormatLastAnalyzed(DateTime analysisTimeUtc, TimeDisplayMode mode)
     {
-        var shown = ViewerTimeHelper.ConvertToDisplay(analysisTimeUtc, mode, serverClock);
-        var zone = ViewerTimeHelper.GetTimezoneLabel(mode, serverClock, analysisTimeUtc);
-        return $"Last analyzed {shown:yyyy-MM-dd HH:mm:ss} ({zone})";
+        /* #8576: the page's own refresh stamp is fleet-wide (this machine's zone in Local mode, UTC otherwise), and this line used to
+           read the server's offset ("(UTC-05:00)") beside it, a second clock on one tab. It now takes the refresh stamp's clock and
+           names it in the same words, "2026-06-01 15:00:00 UTC". */
+        return $"Last analyzed {ViewerTimeHelper.FormatFleetWide(analysisTimeUtc, "yyyy-MM-dd HH:mm:ss", mode)}";
     }
 
     /// <summary>

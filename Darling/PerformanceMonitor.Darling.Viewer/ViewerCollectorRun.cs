@@ -78,6 +78,19 @@ internal static class ViewerCollectorRun
     public static (bool IsEnabled, string ToolTip) RunOneState(bool readOnly) =>
         readOnly ? (false, ReadOnlyRunTip) : (true, RunOneReadyTip);
 
+    /// <summary>The Recommendations tab's "Generate now" tooltip while the seat can write.</summary>
+    public const string GenerateNowReadyTip = "Ask the Darling service to run analysis for this server now, then refresh";
+
+    /// <summary>#8576: the tooltip of "Generate now" when it is off on a read-only seat, in the same sentence shape as the run buttons' tip.</summary>
+    public const string ReadOnlyGenerateTip = "This viewer is connected read-only, so it cannot run an analysis. " + ViewerReadOnlyException.HowToConnectAsAdmin;
+
+    /// <summary>
+    /// #8576: the Recommendations tab's "Generate now": off with the reason on a read-only seat, else on with its tip, and off with its ready
+    /// tip while its own analysis is in flight.
+    /// </summary>
+    public static (bool IsEnabled, string ToolTip) GenerateNowState(bool readOnly, bool analyzing = false) =>
+        readOnly ? (false, ReadOnlyGenerateTip) : (!analyzing, GenerateNowReadyTip);
+
     /// <summary>#8103: "Purge Now...": off with the reason on a read-only seat, else on with no tooltip.</summary>
     public static (bool IsEnabled, string? ToolTip) PurgeState(bool readOnly) =>
         readOnly ? (false, ReadOnlyPurgeTip) : (true, null);

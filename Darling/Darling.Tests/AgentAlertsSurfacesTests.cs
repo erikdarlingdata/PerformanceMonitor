@@ -40,27 +40,42 @@ public sealed class ViewerAgentAlertsTextTests : IDisposable
 
     public void Dispose() => ViewerTimeHelper.CurrentDisplayMode = _savedMode;
 
-    /// <summary>#7343: the picked server's clock (UTC+05:30, no daylight change), so Server mode differs from UTC and from Local on any machine outside India.</summary>
-    private static readonly ServerClock s_india = ServerClock.FixedOffset(330);
-
     public static TheoryData<TimeDisplayMode> Modes => new() { TimeDisplayMode.ServerTime, TimeDisplayMode.UTC, TimeDisplayMode.LocalTime };
 
-    /// <summary>The time of <paramref name="utc"/> as each display mode words it for the picked server: Server on its clock, UTC as is, Local on this machine.</summary>
+    /// <summary>The time of <paramref name="utc"/> as each display mode words it on the page's clock (#8576), to the second with its zone: UTC in
+    /// Server and UTC modes, as the refresh stamp beside it reads, and this machine's time with this machine's zone name in Local mode.</summary>
     private static string Worded(DateTime utc, TimeDisplayMode mode) => mode switch
     {
-        TimeDisplayMode.ServerTime => utc.AddMinutes(330).ToString("g", CultureInfo.CurrentCulture),
-        TimeDisplayMode.UTC => utc.ToString("g", CultureInfo.CurrentCulture),
-        _ => TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.Local).ToString("g", CultureInfo.CurrentCulture),
+        TimeDisplayMode.ServerTime or TimeDisplayMode.UTC => utc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture) + " UTC",
+        _ => LocalWorded(utc),
     };
+
+    private static string LocalWorded(DateTime utc) =>
+        TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.Local).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture)
+        + " " + (TimeZoneInfo.Local.IsDaylightSavingTime(utc) ? TimeZoneInfo.Local.DaylightName : TimeZoneInfo.Local.StandardName);
 
     [Theory]
     [MemberData(nameof(Modes))]
-    public void TheStatusLineCaptureTime_FollowsTheDisplayMode_OnTheServersClock(TimeDisplayMode mode)
+    public void TheStatusLineCaptureTime_FollowsTheDisplayMode_OnTheRefreshStampsClock(TimeDisplayMode mode)
     {
         ViewerTimeHelper.CurrentDisplayMode = mode;
         var captured = new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc);
 
-        Assert.EndsWith("Captured: " + Worded(captured, mode), ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray()), s_india), StringComparison.Ordinal);
+        Assert.EndsWith("Captured: " + Worded(captured, mode), ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray())), StringComparison.Ordinal);
+    }
+
+    /// <summary>#8576: the capture time is stamped to the second and names its zone, on the same clock as the tab's "Last refreshed" stamp. Server
+    /// Time has no server clock to apply to this page's stamps, so it reads UTC and says so, whatever the picked server's offset.</summary>
+    [Fact]
+    public void TheStatusLineCaptureTime_NamesItsZone_AndServerModeReadsUtcAsTheRefreshStampDoes()
+    {
+        var read = Read(Complete().ToArray());
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.EndsWith("Captured: 2026-10-28 12:00:00 UTC", ViewerAgentAlertsText.StatusLine(read), StringComparison.Ordinal);
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+        Assert.EndsWith("Captured: " + LocalWorded(new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc)), ViewerAgentAlertsText.StatusLine(read), StringComparison.Ordinal);
     }
 
 
@@ -107,10 +122,10 @@ public sealed class ViewerAgentAlertsTextTests : IDisposable
     public void TheStatusLine_NamesTheWord_TheCount_AndTheCaptureTime()
     {
         var read = Read(Complete().Where(a => a.Severity != 21).ToArray());
-        var captured = new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc).ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+        var captured = LocalWorded(new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc));
 
-        Assert.Equal($"Alert setup: 1 gap   Alerts defined: 9   Captured: {captured}", ViewerAgentAlertsText.StatusLine(read, ServerClock.Utc));
-        Assert.StartsWith("Alert setup: OK   Alerts defined: 10", ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray()), ServerClock.Utc), StringComparison.Ordinal);
+        Assert.Equal($"Alert setup: 1 gap   Alerts defined: 9   Captured: {captured}", ViewerAgentAlertsText.StatusLine(read));
+        Assert.StartsWith("Alert setup: OK   Alerts defined: 10", ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray())), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -158,7 +173,7 @@ public sealed class ViewerAgentAlertsTextTests : IDisposable
         var read = new ViewerAgentAlertsRead(ViewerAgentAlertsRead.NotCollected, "Azure SQL Database does not have this data.", null,
             new AgentAlertRead([], null, null, 0));
 
-        Assert.Equal("Azure SQL Database does not have this data.", ViewerAgentAlertsText.StatusLine(read, ServerClock.Utc));
+        Assert.Equal("Azure SQL Database does not have this data.", ViewerAgentAlertsText.StatusLine(read));
         /* #6907: the status line carries the sentence, so the grid notes must not repeat it. */
         Assert.Equal(ViewerAgentAlertsText.NoData, ViewerAgentAlertsText.GapsEmptyText(read));
         Assert.Equal(ViewerAgentAlertsText.NoData, ViewerAgentAlertsText.AlertsEmptyText(read));
@@ -263,7 +278,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
                 Assert.Equal("not_collected", web.GetProperty("status").GetString());
                 Assert.Equal(ViewerAgentAlertsRead.NotCollected, read.Status);
                 Assert.Contains("agent_alerts", read.Message, StringComparison.Ordinal);
-                Assert.Equal(read.Message, ViewerAgentAlertsText.StatusLine(read, ServerClock.Utc));
+                Assert.Equal(read.Message, ViewerAgentAlertsText.StatusLine(read));
                 return 0;
             });
     }

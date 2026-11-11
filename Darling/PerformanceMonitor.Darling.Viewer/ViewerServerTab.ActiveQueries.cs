@@ -281,7 +281,7 @@ public partial class ViewerServerTab
     /// </summary>
     private async Task OpenSnapshotPlanAsync(bool live, ViewerQuerySnapshotRow row)
     {
-        var label = $"{(live ? "Live" : "Estimated")} Plan — Session {row.SessionId}";
+        var label = ViewerActiveQueriesText.PlanTabLabel(live, row.SessionId);
         var planXml = live ? row.LiveQueryPlan : row.QueryPlan;
 
         if (string.IsNullOrEmpty(planXml))

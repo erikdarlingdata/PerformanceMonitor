@@ -42,6 +42,15 @@ internal static class DarlingWebStoreWrites
         internal static string ForStore(bool adminWritesOff) => adminWritesOff ? AdminWritesOff : StoreRefused;
     }
 
+    /// <summary>The changes the managed store's dashboard makes only through its admin pool, as the start lines name them: <c>web.allowAdminWrites</c>
+    /// off turns these off and nothing else. docs/darling/configuration-web.md carries the full list.</summary>
+    internal const string AdminArmWrites =
+        "notification routes, environment profiles, threshold overrides, alert settings, people, report feedback, practice requests, pending notes, server actions and agent changes";
+
+    /// <summary>The changes a sign-in that can edit makes through the web login's own grants, whatever <c>web.allowAdminWrites</c> says. It finishes
+    /// "can ..." in the start lines.</summary>
+    internal const string EditSeatWrites = "add and edit monitored servers and write mute rules, dismissals and custom alert rules";
+
     /// <summary>Whether this config describes the managed store. A host with no config (a test that maps the routes directly) is not managed.</summary>
     internal static bool IsManaged(PostgresConfig? postgres) => postgres?.Managed == true;
 
@@ -71,7 +80,7 @@ internal static class DarlingWebStoreWrites
 
 /// <summary>
 /// The web dashboard's second, small connection pool for its Admin writes on the managed store (#6600). The dashboard reads as the
-/// <c>viewer</c> role there, which holds no write grant. This arm signs in as the managed <c>admin</c> role (the Viewer's login, which every
+/// <c>web</c> role there, which holds no grant for those writes. This arm signs in as the managed <c>admin</c> role (the Viewer's login, which every
 /// managed start already provisions with a stored credential file) and is used only for a request whose seat is a signed-in admin
 /// (<see cref="DarlingWebSeat.IsSignedInAdmin"/>), for the write and for the access check that tells the page whether to show its controls.
 /// Reads stay on the dashboard's own pool. It is built only on the managed store with <c>web.allowAdminWrites</c> on; a store the operator
@@ -99,17 +108,20 @@ public sealed class WebAdminArm : IDisposable
 
         if (!allowAdminWrites)
         {
-            logger.LogInformation("Web dashboard Admin writes are off (web.allowAdminWrites is false): it lists only on the managed store");
+            logger.LogInformation("Web dashboard Admin writes are off (web.allowAdminWrites is false): on the managed store the dashboard makes no change to "
+                + DarlingWebStoreWrites.AdminArmWrites + ". A sign-in that can edit can still " + DarlingWebStoreWrites.EditSeatWrites + ".");
             return null;
         }
 
-        logger.LogInformation("Web dashboard Admin writes are on (web.allowAdminWrites): a signed-in admin's Admin writes use the managed admin login. Set it to false to keep the dashboard list-only.");
+        logger.LogInformation("Web dashboard Admin writes are on (web.allowAdminWrites): a signed-in admin's Admin writes use the managed admin login. Set it to false to turn those writes off. "
+            + "A sign-in that can edit can " + DarlingWebStoreWrites.EditSeatWrites + " either way.");
         return new WebAdminArm(() => DarlingManagedPostgres.TryBuildWebAdminConnectionStringFromStoredCredential(postgres));
     }
 
     /// <summary>The start-up warning for OIDC sign-in with no role mapping (<c>web.network.oidc.roleClaim</c> unset): every user who signs in at the
-    /// identity provider then holds the edit seat. What that reaches depends on the store: on the managed store it is the Admin writes while
-    /// <paramref name="adminArm"/> exists, and nothing while it does not; on a store you bring it is whatever the web login's own grants allow
+    /// identity provider then holds the edit seat. What that reaches depends on the store: on the managed store it is the web login's own writes
+    /// (<see cref="DarlingWebStoreWrites.EditSeatWrites"/>, adding a server among them), plus the Admin writes while
+    /// <paramref name="adminArm"/> exists; on a store you bring it is whatever the web login's own grants allow
     /// (<c>postgres.webConnectionString</c>), which the service cannot see from here. Logs nothing when there is no OIDC sign-in or a role mapping
     /// exists (viewer-only included). Returns whether it warned.</summary>
     internal static bool WarnWhenOidcHasNoRoleMapping(DarlingWebOidcClient? oidc, bool managedStore, WebAdminArm? adminArm, ILogger logger)
@@ -123,7 +135,8 @@ public sealed class WebAdminArm : IDisposable
             ? "On this store you brought, what they can change depends on the web login's grants (postgres.webConnectionString): with a login that can write, every one of them can change thresholds, routes, webhook URLs and the agent switch."
             : adminArm is not null
                 ? "web.allowAdminWrites is on, so every user who signs in can make the dashboard's Admin writes."
-                : "web.allowAdminWrites is off, so the dashboard stays list-only for them.";
+                : "web.allowAdminWrites is off, and that turns off only the dashboard's Admin writes (" + DarlingWebStoreWrites.AdminArmWrites
+                  + "): every user who signs in can still " + DarlingWebStoreWrites.EditSeatWrites + ".";
         logger.LogWarning("web.network.oidc has no role mapping, so every user who signs in has the edit seat. {Effect} Set web.network.oidc.roleClaim with adminRoles and viewerRoles to limit who can edit.", effect);
         return true;
     }

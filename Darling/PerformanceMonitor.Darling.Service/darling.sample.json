@@ -544,15 +544,18 @@
     // Uncomment to serve local browsers with no token (see TOKEN above). Default off.
     // "allowTokenlessLoopback": true,
 
-    // On the managed store the dashboard reads as the read-only "viewer" login. A person signed in to the dashboard
+    // On the managed store the dashboard signs in as the least-privilege "web" login. A person signed in to the dashboard
     // as an admin (the shared web token or an OIDC admin) can also make its Admin writes (routes and environment
     // profiles, threshold overrides, report feedback, server actions, note decisions, undoing an agent change and
     // the agent switch, closing a request, writing a note, practice requests, case export), when this is true:
     // it opens a second small connection pool that signs in as the managed "admin" login (the one the Viewer uses).
-    // A darling.json WITHOUT this key keeps it false (the dashboard stays list-only on the managed store), so an
+    // A darling.json WITHOUT this key keeps it false (those Admin writes stay off on the managed store), so an
     // upgrade from 3.11 changes nothing until you set it. The installer and the compose sample write true for a
-    // new install. With OIDC on and no role mapping every signed-in user is an admin, so map roles
-    // (network.oidc.roleClaim, adminRoles, viewerRoles) before you turn this on. Restart to change.
+    // new install. False turns off those Admin writes and nothing else: a sign-in that can edit still adds and
+    // edits monitored servers and writes mute rules, dismissals and custom alert rules.
+    // With OIDC on and no role mapping every signed-in user can edit: each one can add a server whatever this
+    // says, and with this true each one is an admin. Map roles (network.oidc.roleClaim, adminRoles, viewerRoles)
+    // to limit who can edit. Restart to change.
     // A store you bring yourself is not affected.
     "allowAdminWrites": true,
 
