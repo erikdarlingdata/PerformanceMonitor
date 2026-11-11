@@ -156,7 +156,7 @@ LIMIT 10";
             await ExecAsync(connection, ct,
                 "INSERT INTO query_plan_dim (digest, query_plan_xml, query_plan_gz, last_seen) VALUES (sha256(convert_to('a8570-plan122', 'UTF8')), NULL, NULL, now() AT TIME ZONE 'UTC')");
 
-            var end = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var end = LiveClock.Now();
             var start = end.AddHours(-24);
             /* Keys 121 (own column, no digest), 122 (dimension row without content) and 123 (digest with no dimension row) outrank the rest. */
             await ExecAsync(connection, ct,

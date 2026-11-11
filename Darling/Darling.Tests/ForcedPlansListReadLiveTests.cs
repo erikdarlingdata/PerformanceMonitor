@@ -170,7 +170,7 @@ LIMIT 2001";
         var succeeded = false;
         try
         {
-            var to = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var to = LiveClock.Now();
             var from = to.AddHours(-24);
             await ExecAsync(connection, ct,
                 @"INSERT INTO collect.query_store_forced_plans
