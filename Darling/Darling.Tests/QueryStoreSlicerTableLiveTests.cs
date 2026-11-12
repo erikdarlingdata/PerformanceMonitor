@@ -104,6 +104,12 @@ public sealed class QueryStoreSlicerTableLiveTests
         var rawAfter = Lines(await viewer.ReadQueryStatsSlicerAsync(ViewerDataService.QueryStoreSlicerSql, ServerId, start, end, null, ct));
         Assert.Equal(before, rawAfter);
 
+        /* The read names the source that answered: the table's plan over the 30 day window, and no plan under the slicer's seven days. */
+        var tableRead = await viewer.GetQueryStoreSlicerWithReachAsync(ServerId, start, end, null, ct);
+        Assert.Equal(viaTable, Lines(tableRead.Buckets));
+        Assert.True(tableRead.Plan is { UseTable: true, EffectiveStart: not null }, "the 30 day slicer read reports the interval table's plan and the start it served from");
+        Assert.Null((await viewer.GetQueryStoreSlicerWithReachAsync(ServerId, WindowStart, WindowStart.AddDays(6), null, ct)).Plan);
+
         var sixDays = Lines(await viewer.GetQueryStoreSlicerDataAsync(ServerId, WindowStart, WindowStart.AddDays(6), null, ct));
         Assert.Equal(Lines(await viewer.ReadQueryStatsSlicerAsync(ViewerDataService.QueryStoreSlicerSql, ServerId, WindowStart, WindowStart.AddDays(6), null, ct)), sixDays);
 
@@ -117,5 +123,6 @@ public sealed class QueryStoreSlicerTableLiveTests
         }
 
         Assert.Equal(before, Lines(await viewer.GetQueryStoreSlicerDataAsync(ServerId, start, end, null, ct)));
+        Assert.Null((await viewer.GetQueryStoreSlicerWithReachAsync(ServerId, start, end, null, ct)).Plan);
     }
 }
