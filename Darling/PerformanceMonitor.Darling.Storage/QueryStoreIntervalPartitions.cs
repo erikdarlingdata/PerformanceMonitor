@@ -1721,6 +1721,26 @@ WHERE s.relid = to_regclass($1);";
 
                 await ReopenAsync(connection, logger, cancellationToken).ConfigureAwait(false);
             }
+
+            /* #8549: after the partitions are maintained (a day dropped at retention is not built on, a new one is seen), the covering
+               index on the wide table's closed day leaves. Its own catch, like the BRIN step: a build that cannot run never fails
+               the partition work above, and a lock timeout is RetryLater, not a failure. */
+            try
+            {
+                var cover = await QueryStoreIntervalWideCoverIndex.EnsureAsync(connection, table, utcNow, logger, cancellationToken).ConfigureAwait(false);
+                if (cover.Outcome is StepOutcome.Done or StepOutcome.RetryLater)
+                {
+                    changed += cover.Count;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                failed++;
+                logger.LogWarning(
+                    "Query Store interval table {Table}: building the covering index on its closed day leaves failed ({Message}); the next pass retries.",
+                    table.Parent, ex.Message);
+                await ReopenAsync(connection, logger, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         return new PassResult(changed, failed);
