@@ -865,6 +865,19 @@ public sealed class DarlingAgReaderTests
     }
 
     [Fact]
+    public void Build_LimitCutsManyGroups_TheNoteEndsItsNameListWithAndNMoreNotAnEllipsis()
+    {
+        /* #8738: a fleet of 8 groups at limit 1 leaves 7 unnamed-by-view; the note names five and counts the rest in words. */
+        var views = Enumerable.Range(1, 8).Select(i => AgView(i, $"AG{i}", $"g{i}", true, 1)).ToArray();
+
+        var result = BuildViews(1, views);
+
+        Assert.True(result.GroupsTruncated);
+        Assert.Contains(", and 2 more.", result.GroupsTruncatedNote, StringComparison.Ordinal);
+        Assert.DoesNotContain("…", result.GroupsTruncatedNote, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Build_SecondaryViewIsCriticalPrimaryViewHealthy_SeedsTheCriticalView()
     {
         var primaryHealthy = AgView(1, "AG1", "g1", true, 2);

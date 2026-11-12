@@ -57,4 +57,24 @@ public sealed class PgColumnStatsEmptyHintTests
         using var floor = JsonDocument.Parse(DarlingMcpPgIndexTools.EmptyColumnStatsReply("pg-a", 24, new PgColumnStatsCoverageVerdict(other, "Census.", "Cause.")));
         Assert.False(floor.RootElement.TryGetProperty("hints", out var hints) && hints.TryGetProperty("reason", out _));
     }
+
+    /// <summary>#8738: pg_stats keeps correlation, null_frac and the top-value share as 4-byte floats, so a reply figure carries six significant digits.</summary>
+    [Theory]
+    [InlineData(0.965292751789093, 0.965293)]
+    [InlineData(0.9639183282852173, 0.963918)]
+    [InlineData(0.15341947972774506, 0.153419)]
+    [InlineData(0.43907058238983154, 0.439071)]
+    [InlineData(-0.0123456789, -0.0123457)]
+    [InlineData(1.0, 1.0)]
+    public void ColumnStatsFigure_RoundsToSixSignificantDigits(double stored, double expected)
+    {
+        Assert.Equal(expected, DarlingMcpPgIndexTools.SixSignificantDigits(stored));
+    }
+
+    [Fact]
+    public void ColumnStatsFigure_AbsentStaysAbsent_AndANonFiniteValuePassesThrough()
+    {
+        Assert.Null(DarlingMcpPgIndexTools.SixSignificantDigits(null));
+        Assert.True(double.IsNaN(DarlingMcpPgIndexTools.SixSignificantDigits(double.NaN)!.Value));
+    }
 }

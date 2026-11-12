@@ -33,7 +33,7 @@ public sealed class McpToolGuideHeadsLongQueryTests
     /// genuinely quiet window and a collector that was off: never switched on, or switched off since. "Never enabled"
     /// was too narrow; a collector switched off yesterday leaves the last 24 hours empty too.</summary>
     private const string CollectorGateFact =
-        "Collector is opt-in, OFF by default: empty can mean none in the window, or the collector was off";
+        "Collector is opt-in, OFF by default: not_collected means it never ran, empty means it ran and found none";
 
     [Fact]
     public void Head_CarriesThePageRankingTrap_TheCollectorGate_AndThePointer()
@@ -65,7 +65,7 @@ public sealed class McpToolGuideHeadsLongQueryTests
         Assert.Contains("An attention row (client cancel or timeout) carries no statement text, so its query_identity is null", tail, StringComparison.Ordinal);
         Assert.Contains("a null query_identity is never a group key", tail, StringComparison.Ordinal);
         Assert.Contains(
-            "The collector is OFF by default; if it returns empty, enable the 'long_query_completions' collector in the schedule.",
+            "The collector is OFF by default; if it answers not_collected, enable the 'long_query_completions' collector in the schedule, and read again after its first pass.",
             tail, StringComparison.Ordinal);
     }
 }
