@@ -229,6 +229,7 @@ public static class DarlingJobHistoryReader
     /// a category whose only run sits in that margin can be offered, which costs an empty grid and never a missing choice. With
     /// <paramref name="serverId"/> the read is that server's, so the drop-down is not offered a category only another server has (a pick
     /// that would give an empty grid); without it the read is fleet-wide.
+    /// <para>#8549: where the hourly category summary (<see cref="JobHistoryCategoryHourly"/>) holds the window, the answer comes from it and from the raw rows collected since; elsewhere (a store the pass has not reached, a window older than its coverage, a store below V265) it is <see cref="BuildCategoriesSql"/>'s read as it always was. The categories are the same either way.</para>
     /// </summary>
     /// <param name="dataSource">The store.</param>
     /// <param name="sinceUtc">The window's start (naive UTC), the grid's.</param>
@@ -243,13 +244,26 @@ public static class DarlingJobHistoryReader
         ArgumentNullException.ThrowIfNull(dataSource);
 
         var categories = new List<string>();
-        await using var command = dataSource.CreateCommand(BuildCategoriesSql(untilUtc.HasValue, serverId.HasValue));
+        var floor = EventWindowFloor.For(sinceUtc);
+        var since = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified);
+        var until = untilUtc is { } u ? DateTime.SpecifyKind(u, DateTimeKind.Unspecified) : (DateTime?)null;
+
+        /* #8549: the hourly summary answers the read where its coverage holds the window; the raw statement is the answer everywhere else
+           (a store a pass has not reached, one that is still backfilling, a window older than the coverage), and gives the same categories. */
+        var coverage = await ReadCategoryCoverageAsync(dataSource, commandTimeoutSeconds, cancellationToken);
+        var useSummary = coverage is { } held && JobHistoryCategoryHourly.Covers(held, floor, since, until);
+        var tailFloor = useSummary && coverage!.Value.To > floor ? coverage.Value.To : floor;
+
+        await using var command = dataSource.CreateCommand(
+            useSummary
+                ? JobHistoryCategoryHourly.BuildRolledCategoriesSql(untilUtc.HasValue, serverId.HasValue)
+                : BuildCategoriesSql(untilUtc.HasValue, serverId.HasValue));
         command.CommandTimeout = commandTimeoutSeconds;
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified) });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(sinceUtc) });
-        if (untilUtc is { } until)
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = since });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = useSummary ? tailFloor : floor });
+        if (until is { } end)
         {
-            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(until, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = end });
         }
 
         if (serverId is { } server)
@@ -264,6 +278,29 @@ public static class DarlingJobHistoryReader
         }
 
         return categories;
+    }
+
+    /// <summary>
+    /// The category summary's coverage (<see cref="JobHistoryCategoryHourly"/>), or null when the store has none to offer: no pass has run
+    /// yet (no coverage row) or the store is below the V265 rung (no table, SQLSTATE 42P01). Any other failure is the read's failure, as it
+    /// is for the statement that follows.
+    /// </summary>
+    internal static async Task<JobHistoryCategoryHourly.Coverage?> ReadCategoryCoverageAsync(
+        NpgsqlDataSource dataSource, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = dataSource.CreateCommand(JobHistoryCategoryHourly.CoverageReadSql);
+            command.CommandTimeout = commandTimeoutSeconds;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await reader.ReadAsync(cancellationToken)
+                ? new JobHistoryCategoryHourly.Coverage(reader.GetDateTime(0), reader.GetDateTime(1))
+                : null;
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+        {
+            return null;
+        }
     }
 
     /// <summary>

@@ -789,6 +789,8 @@ DROP TABLE IF EXISTS collect.schema_capture_passes;"),
         new(263, "hasJobHistoryOldestDaily", PerformanceMonitor.Darling.Storage.TimescaleSupport.DropRetiredBaselineRelationSql(PerformanceMonitor.Darling.Storage.TimescaleSupport.JobHistoryOldestDailyView)),
         // V264 (#8691): the per-hour drop counts of the oversized-plan backlog. A new table; the rewind drops it and a re-run of V264 makes it again.
         new(264, "hasOversizedPlanBacklogDropCounts", "DROP TABLE IF EXISTS collect.oversized_plan_backlog_drops;"),
+        // V265 (#8549): the hourly summary of job_history's categories and its coverage table. Two new tables; the rewind drops both and a re-run of V265 makes them again.
+        new(265, "hasJobHistoryCategoryHourly", "DROP TABLE IF EXISTS collect.job_history_category_hourly; DROP TABLE IF EXISTS collect.job_history_category_coverage;"),
     ];
 
     /// <summary>
