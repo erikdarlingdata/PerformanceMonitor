@@ -311,8 +311,9 @@ public partial class JobHistoryTab : UserControl
         }
         finally
         {
-            /* #8549: a load a newer one stopped says so, so its line names the read it was waiting on as stopped, not as client work. */
-            if (_loads.Superseded(nameof(LoadJobsAsync), gen))
+            /* #8549: a load a newer one stopped says so (the newer claim cancels this token), so its line names the read it was waiting on
+               as stopped, not as client work. */
+            if (loadToken.IsCancellationRequested)
             {
                 timer.MarkSuperseded();
             }
