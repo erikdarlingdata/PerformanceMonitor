@@ -63,7 +63,7 @@ public static class QueryTagSightingWriter
     /// adds up on every conflict (it is not indexed). <c>last_seen</c> moves when the stored value is over an hour old, and
     /// also when the conflict fills an object name or text sample the row lacked, because those are what the map resolver
     /// reads and the map's changed-keys read (<see cref="QueryTagMapStore.ChangedKeysSql"/>) finds a key by this column.
-    /// The time source is the statement's own <c>now()</c>, as before.</para>
+    /// The time source is the statement's own <c>now()</c>, as before, reached through the column default and read as <c>EXCLUDED.last_seen</c> (the insert list leaves <c>last_seen</c> out). That is the same clock as the stored value, and it keeps the comparison <c>timestamptz</c> against <c>timestamptz</c>.</para>
     /// </summary>
     internal const string UpsertSql = """
 INSERT INTO collect.query_tag_sightings AS t
@@ -74,10 +74,10 @@ FROM unnest($1::integer[], $2::text[], $3::text[], $4::text[], $5::text[], $6::t
 ON CONFLICT (server_id, key_kind, key, COALESCE(application_name, ''), COALESCE(login_name, ''), COALESCE(host_name, ''), COALESCE(database_name, ''))
 DO UPDATE SET
     last_seen = CASE
-        WHEN t.last_seen < now() - interval '1 hour'
+        WHEN t.last_seen < EXCLUDED.last_seen - interval '1 hour'
           OR (t.object_name IS NULL AND EXCLUDED.object_name IS NOT NULL)
           OR (t.text_sample IS NULL AND EXCLUDED.text_sample IS NOT NULL)
-        THEN now() ELSE t.last_seen END,
+        THEN EXCLUDED.last_seen ELSE t.last_seen END,
     seen_count = t.seen_count + EXCLUDED.seen_count,
     object_name = COALESCE(t.object_name, EXCLUDED.object_name),
     text_sample = COALESCE(t.text_sample, EXCLUDED.text_sample)
