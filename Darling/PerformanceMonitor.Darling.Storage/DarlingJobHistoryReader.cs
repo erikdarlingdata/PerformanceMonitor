@@ -319,10 +319,19 @@ public static class DarlingJobHistoryReader
     LIMIT 1";
 
     /// <summary>
+    /// The servers <see cref="LatestOffsetsSql"/> descends for (#8549): every server that has an offset row, read from <c>server_properties</c>
+    /// itself (a segmentby column on its compressed chunks, so no payload is read). Exactly the servers that can take an offset, so a
+    /// server with runs in the read's window always gets its latest one, and one with none costs a single descent. Taking the list from
+    /// <c>job_history</c> instead (the servers with rows in the window) read that table a second time, the whole window of it, and on the
+    /// hourly path the summary as well. <paramref name="serverFilter"/> is an <c>AND server_id = $n</c> tail or empty.
+    /// </summary>
+    internal static string ServersWithOffsetSql(string serverFilter) =>
+        "SELECT DISTINCT server_id FROM server_properties WHERE utc_offset_minutes IS NOT NULL" + serverFilter;
+
+    /// <summary>
     /// <see cref="LatestOffsetSql"/> for each server of <paramref name="serversSql"/> (a query that returns a <c>server_id</c> column), as
     /// the <c>svr</c> CTE body of the Category reads: (server_id, utc_offset_minutes), one row per server that has an offset and none for a
-    /// server that has not, so its runs take offset 0, as they did. The servers are the ones the read's own table holds rows for in its
-    /// window: a server with an offset and no runs there costs nothing, and one with runs and no offset row is absent, as before.
+    /// server that has not, so its runs take offset 0, as they did. The servers are the ones <see cref="ServersWithOffsetSql"/> lists: a server with runs and no offset row is absent, as before.
     /// </summary>
     internal static string LatestOffsetsSql(string serversSql) =>
         "    SELECT s.server_id, o.utc_offset_minutes\n    FROM (" + serversSql + ") AS s\n    CROSS JOIN LATERAL ("
@@ -344,8 +353,7 @@ public static class DarlingJobHistoryReader
             ? "\nAND   jh.run_datetime <= $3 + make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) + interval '1 hour'"
             : string.Empty;
 
-        var serversSql = "SELECT DISTINCT server_id FROM job_history WHERE collection_time >= $2"
-            + (forServer ? $" AND server_id = ${(bounded ? 4 : 3)}" : string.Empty);
+        var serversSql = ServersWithOffsetSql(forServer ? $" AND server_id = ${(bounded ? 4 : 3)}" : string.Empty);
 
         return $@"
 WITH svr AS (

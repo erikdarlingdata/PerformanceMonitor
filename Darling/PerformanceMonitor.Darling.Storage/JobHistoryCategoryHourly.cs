@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -34,7 +35,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <c>CollectionLogHourly.RollUpAsync</c>, in one transaction. It folds the rows <i>collected</i> (by <c>collection_time</c>, not by run
 /// time: a first collection copies a server's whole msdb history in one batch, so a run's hour can be long before the collection that
 /// stores it) in the last <see cref="RecomputeHours"/> closed hours, then walks the coverage back by at most
-/// <see cref="CatchUpDays"/> days toward the retention edge (the backfill, newest first), then moves the coverage row and deletes run
+/// <see cref="CatchUpDays"/> days toward the retention edge, one day per command and within <see cref="BackfillBudget"/> (the backfill, newest first), then moves the coverage row and deletes run
 /// hours older than the retention edge. The one-row <c>collect.job_history_category_coverage</c> says which collection times the table holds
 /// whole: <c>covered_from</c> to <c>covered_to</c>. The migration creates the tables empty, so the upgrade itself stays fast and the passes
 /// fill them.</para>
@@ -58,8 +59,14 @@ public static class JobHistoryCategoryHourly
     /// day of <c>job_history</c> is about 700,000 rows and its fold costs about 5 seconds cold (7 at worst), so a pass of four stays near 20
     /// seconds (28 at worst) inside <see cref="PassTimeoutSeconds"/>, and a 30-day window is covered in about 7 hourly passes, not 26. It is
     /// the last step of the sweep and holds no lock a read waits on (the upsert takes row locks on the summary only). A pass that runs past
-    /// its slice rolls back whole and plans the same range again, so the days a pass takes must stay a small share of the slice.</summary>
+    /// its slice rolls back whole and plans the same range again, so each day is its own command and the pass stops folding days once its
+    /// elapsed time crosses <see cref="BackfillBudget"/>: a store ten times larger folds fewer days a pass instead of none.</summary>
     public const int CatchUpDays = 4;
+
+    /// <summary>The elapsed time after which a pass folds no further backfill day (#8549): a quarter of <see cref="PassTimeoutSeconds"/>. Each
+    /// day is its own command, so the pass can run past this by at most one day's fold, and a store whose day folds in 30 seconds still moves
+    /// one day an hour instead of rolling back a four-day command every hour.</summary>
+    internal static readonly TimeSpan BackfillBudget = TimeSpan.FromSeconds(PassTimeoutSeconds / 4);
 
     /// <summary>Command timeout of each statement of the pass.</summary>
     public const int PassTimeoutSeconds = 120;
@@ -152,9 +159,15 @@ WHERE run_hour < $1::timestamp;";
     /// the clock <c>collection_time</c> is written in. One transaction, so the coverage row never names rows the table does not hold.
     /// Returns the number of summary rows written.
     /// </summary>
-    public static async Task<int> RollUpAsync(NpgsqlConnection connection, DateTime nowUtc, ILogger? logger, CancellationToken cancellationToken)
+    public static Task<int> RollUpAsync(NpgsqlConnection connection, DateTime nowUtc, ILogger? logger, CancellationToken cancellationToken) =>
+        RollUpAsync(connection, nowUtc, logger, BackfillBudget, cancellationToken);
+
+    /// <summary>The pass with its backfill time budget given, so a test can run it with none (one day) or an ample one without sleeping.</summary>
+    internal static async Task<int> RollUpAsync(
+        NpgsqlConnection connection, DateTime nowUtc, ILogger? logger, TimeSpan backfillBudget, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
+        var clock = Stopwatch.StartNew();
         var currentHour = new DateTime(nowUtc.Year, nowUtc.Month, nowUtc.Day, nowUtc.Hour, 0, 0, DateTimeKind.Unspecified);
 
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -173,14 +186,29 @@ WHERE run_hour < $1::timestamp;";
 
         var plan = Plan(coveredFrom, coveredTo, retentionDays, currentHour);
         var written = await UpsertRangeAsync(connection, transaction, plan.ForwardFrom, currentHour, plan.Cutoff, cancellationToken);
+        var coveredFromNow = plan.CoveredFrom;
         if (plan.BackfillFrom is { } backfillFrom)
         {
-            written += await UpsertRangeAsync(connection, transaction, backfillFrom, plan.BackfillTo, plan.Cutoff, cancellationToken);
+            // One day per command, newest first, so no single command can outrun its timeout on a large store (#8549). The pass stops after
+            // CatchUpDays days or once its elapsed time crosses the budget, but always folds at least one day so the backfill moves. The
+            // coverage then starts at the oldest day folded, so it never names a day the table lacks.
+            var dayTo = plan.BackfillTo;
+            while (dayTo > backfillFrom)
+            {
+                var dayFrom = dayTo.AddDays(-1) > backfillFrom ? dayTo.AddDays(-1) : backfillFrom;
+                written += await UpsertRangeAsync(connection, transaction, dayFrom, dayTo, plan.Cutoff, cancellationToken);
+                coveredFromNow = dayFrom;
+                dayTo = dayFrom;
+                if (clock.Elapsed >= backfillBudget)
+                {
+                    break;
+                }
+            }
         }
 
         await using (var coverage = new NpgsqlCommand(CoverageUpsertSql, connection, transaction) { CommandTimeout = PassTimeoutSeconds })
         {
-            coverage.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = plan.CoveredFrom });
+            coverage.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = coveredFromNow });
             coverage.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = currentHour });
             await coverage.ExecuteNonQueryAsync(cancellationToken);
         }
@@ -193,7 +221,7 @@ WHERE run_hour < $1::timestamp;";
 
         await transaction.CommitAsync(cancellationToken);
         logger?.LogDebug(
-            "job_history_category_hourly pass wrote {Rows} summary rows, coverage now {From:u} to {To:u}", written, plan.CoveredFrom, currentHour);
+            "job_history_category_hourly pass wrote {Rows} summary rows, coverage now {From:u} to {To:u}", written, coveredFromNow, currentHour);
         return written;
     }
 
@@ -299,12 +327,9 @@ WHERE run_hour < $1::timestamp;";
             ? "\n    AND   jh.run_datetime <= $3 + make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) + interval '1 hour'"
             : string.Empty;
 
-        /* #8549: the offset is read for the servers the two parts hold rows for (the summary's range, the raw tail), by a descent per
-           server, not by one pass over every chunk of server_properties. A superset of the servers either part joins is enough. */
-        var serversSql = "SELECT server_id FROM collect.job_history_category_hourly WHERE run_hour >= $1 - interval '1 day'"
-            + (forServer ? $" AND server_id = ${serverParam}" : string.Empty)
-            + " UNION SELECT server_id FROM job_history WHERE collection_time >= $2"
-            + (forServer ? $" AND server_id = ${serverParam}" : string.Empty);
+        /* #8549: the offset is read by a descent per server, not by one pass over every chunk of server_properties, and the server
+           list comes from server_properties, not from the two parts (that read them a second time). */
+        var serversSql = DarlingJobHistoryReader.ServersWithOffsetSql(forServer ? $" AND server_id = ${serverParam}" : string.Empty);
 
         return $@"
 WITH svr AS (

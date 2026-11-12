@@ -127,6 +127,47 @@ public sealed class JobHistoryCategoryHourlyLiveTests
         Assert.False(JobHistoryCategoryHourly.Covers(coverage with { From = floor.AddMinutes(1) }, floor, since, null), "coverage starting after the floor is partial");
     }
 
+    /// <summary>
+    /// The backfill is one day per command inside the one transaction, and a pass stops folding days once its budget is spent (#8549): a store
+    /// too large to fold CatchUpDays days inside the command timeout still moves one day a pass instead of rolling back each hour.
+    /// </summary>
+    [Fact]
+    public async Task ThePass_FoldsOneBackfillDayWithNoBudget_AndCatchUpDaysWithAnAmpleOne_AndTheCoverageNamesExactlyThoseDays()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        var now = await SeedAsync(connection, ct);
+        var forwardFrom = Floor(now).AddHours(-JobHistoryCategoryHourly.RecomputeHours);
+
+        /* The summary holds only runs collected inside the coverage: the folded rows are the ones the coverage names. */
+        async Task<long> RowsOutsideAsync(DateTime coveredFrom) => await ScalarAsync<long>(connection, $@"
+SELECT count(*) FROM collect.job_history_category_hourly h
+WHERE NOT EXISTS (SELECT 1 FROM collect.job_history j
+                  WHERE j.collection_time >= '{coveredFrom:yyyy-MM-dd HH:mm:ss}'::timestamp
+                    AND date_trunc('hour', j.run_datetime) = h.run_hour
+                    AND j.server_id = h.server_id AND j.category_name = h.category_name)", ct);
+
+        await JobHistoryCategoryHourly.RollUpAsync(connection, now, null, TimeSpan.Zero, ct);
+        var one = await CoverageAsync(connection, ct);
+        var oneRows = await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_history_category_hourly", ct);
+        Assert.Equal(forwardFrom.AddDays(-1), one.From);
+        Assert.Equal(Floor(now), one.To);
+        Assert.Equal(0L, await RowsOutsideAsync(one.From));
+
+        await ExecuteAsync(connection, "DELETE FROM collect.job_history_category_hourly; DELETE FROM collect.job_history_category_coverage;", ct);
+        await JobHistoryCategoryHourly.RollUpAsync(connection, now, null, TimeSpan.FromHours(1), ct);
+        var ample = await CoverageAsync(connection, ct);
+        var ampleRows = await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.job_history_category_hourly", ct);
+        Assert.Equal(forwardFrom.AddDays(-JobHistoryCategoryHourly.CatchUpDays), ample.From);
+        Assert.Equal(Floor(now), ample.To);
+        Assert.True(oneRows > 0 && oneRows < ampleRows, $"one day folded {oneRows} summary rows, {JobHistoryCategoryHourly.CatchUpDays} days folded {ampleRows}");
+    }
+
     // ── The answers ─────────────────────────────────────────────────────────────────────────
 
     /// <summary>
