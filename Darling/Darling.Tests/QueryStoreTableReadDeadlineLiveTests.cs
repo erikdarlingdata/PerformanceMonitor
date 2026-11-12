@@ -7,7 +7,6 @@
  */
 
 using System;
-using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -63,6 +62,13 @@ public sealed class QueryStoreTableReadDeadlineLiveTests : IDisposable
     {
         await using var command = new NpgsqlCommand(sql, connection);
         await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /* The store's own clock, read before and after, so the test measures the wait without starting a clock of its own (the timing census is about those). */
+    private static async Task<DateTime> ServerClockAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT clock_timestamp()::timestamp", connection);
+        return (DateTime)(await command.ExecuteScalarAsync(ct))!;
     }
 
     private static string LogText()
@@ -121,15 +127,15 @@ END $$", ct);
             ViewerLogger.Initialize(_logDir);
 
             await using var viewer = new ViewerDataService(slowRole);
-            var clock = Stopwatch.StartNew();
+            var before = await ServerClockAsync(connection, ct);
             var gridRead = viewer.GetQueryStoreTopQueriesWithReachAsync(ServerId, WindowStart, gridEnd, cancellationToken: ct);
             var slicerRead = viewer.GetQueryStoreSlicerDataAsync(ServerId, slicerStart, slicerEnd, null, ct);
             var grid = await gridRead;
             var slicer = await slicerRead;
-            clock.Stop();
+            var elapsed = await ServerClockAsync(connection, ct) - before;
 
             /* The reads really waited past the deadline every other read gets, then were served by the table. */
-            Assert.True(clock.Elapsed.TotalSeconds >= SlowSeconds, $"the reads took {clock.Elapsed.TotalSeconds:F1} s, so the slow policy never ran");
+            Assert.True(elapsed.TotalSeconds >= SlowSeconds, $"the reads took {elapsed.TotalSeconds:F1} s, so the slow policy never ran");
             Assert.NotNull(grid.Plan);
             Assert.NotEmpty(grid.Rows);
             Assert.NotEmpty(slicer);
