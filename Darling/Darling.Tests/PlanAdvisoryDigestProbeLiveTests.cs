@@ -96,6 +96,50 @@ ORDER BY r.delta_worker_time DESC";
             Assert.False(newProbes.WholeScan, "the plan fetch scans query_plan_dim whole instead of probing it by digest");
         });
 
+    /// <summary>
+    /// The probe of the window's digests reads the server's own rows. A predicate on <c>query_plan_digest IS NOT NULL</c> there implied the partial index
+    /// <c>ix_query_stats_digest_floor</c> (<c>collection_time</c> only), and the planner walked it: every server's rows in the window, each heap page fetched to test
+    /// <c>server_id</c>. On a store of 18 servers that was 25,400 pages for one server's 86,000-row window, against 5,600 through the server index (#8570).
+    /// The seed puts 40 other servers' rows into the same window. The statement must return the same rows as before and never read query_stats through the
+    /// partial index; the statement with the predicate put back must (so the seed is held to the defect).
+    /// </summary>
+    [Fact]
+    public Task TheDigestProbe_ReadsTheServersOwnRows_NotEveryServersRowsThroughThePartialIndex() =>
+        WithSeedAsync(async (connection, start, end, ct) =>
+        {
+            /* The collector appends snapshots in time order, so the heap follows collection_time, and the planner prices a walk of the time-only partial index
+               as cheap for that reason. The seed's bulk rows are not in that order, so the table is rewritten in it. */
+            await ExecAsync(connection, ct, "CREATE TEMP TABLE qs_ordered AS SELECT * FROM query_stats ORDER BY collection_time");
+            await ExecAsync(connection, ct, "TRUNCATE query_stats");
+            await ExecAsync(connection, ct, "INSERT INTO query_stats SELECT * FROM qs_ordered");
+            await ExecAsync(connection, ct, "DROP TABLE qs_ordered");
+            await ExecAsync(connection, ct, "ANALYZE query_stats");
+            /* This seed is far smaller than a field window, where the planner never reads the table whole or through a bitmap. With both off the two indexes compete
+               on cost alone, as they did on the field store. */
+            await ExecAsync(connection, ct, "SET enable_seqscan = off");
+            await ExecAsync(connection, ct, "SET enable_bitmapscan = off");
+
+            const string probedWhere = "AND   f.query_plan_xml IS NULL";
+            Assert.Contains(probedWhere, PgFactCollector.PlanAdvisorySql);
+            var withPredicate = PgFactCollector.PlanAdvisorySql.Replace(probedWhere, probedWhere + " AND f.query_plan_digest IS NOT NULL");
+
+            var expected = await RowsAsync(connection, withPredicate, start, end, ct);
+            var actual = await RowsAsync(connection, PgFactCollector.PlanAdvisorySql, start, end, ct);
+            Assert.Equal(10, actual.Count);
+            Assert.Equal(expected, actual);
+
+            Assert.True(await UsesPartialIndexAsync(connection, withPredicate, start, end, ct), "the seed does not put the planner on the partial index with the predicate, so it does not show the defect");
+            Assert.False(await UsesPartialIndexAsync(connection, PgFactCollector.PlanAdvisorySql, start, end, ct), "the plan fetch reads query_stats through ix_query_stats_digest_floor, which walks every server's rows in the window");
+        });
+
+    private static async Task<bool> UsesPartialIndexAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + sql, connection) { CommandTimeout = 120 };
+        AddParameters(command, start, end);
+        var json = (string)(await command.ExecuteScalarAsync(ct))!;
+        return json.Contains("ix_query_stats_digest_floor", StringComparison.Ordinal);
+    }
+
     private static async Task<List<string>> RowsAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
@@ -224,6 +268,13 @@ ORDER BY r.delta_worker_time DESC";
                          10, (10000000 - (k - 1001) * 100000) - r * 1000, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
                   FROM generate_series(1001, 1005) k CROSS JOIN generate_series(0, 9) r",
                 id, end.AddMinutes(-10), ServerId);
+            /* Other servers' rows in the same window (#8570): each has a plan digest and no plan of its own, the rows the partial index covers. */
+            await ExecAsync(connection, ct,
+                insertHead + @"SELECT $1 + 400000 + (s - 85701)::bigint * 100000 + g * 100 + r, $2 - (r * interval '4 minutes'), s, 'a8570o', 'PlanDb', '0xH' || g, '0xP' || g, '0xS' || g, '0xL' || g,
+                         NULL, NULL, sha256(convert_to('a8570p-d' || (((g - 1) % 200) + 1), 'UTF8')),
+                         10, 1000 + g * 100 + r, 100, 100, 0, 0, 1, 100, 1, 100, 1, 1, 3600
+                  FROM generate_series(85702, 85741) s CROSS JOIN generate_series(1, 200) g CROSS JOIN generate_series(0, 24) r",
+                id, end.AddMinutes(-10));
             await ExecAsync(connection, ct, "ANALYZE query_stats");
 
             await body(connection, start, end.AddMinutes(5), ct);
@@ -232,7 +283,7 @@ ORDER BY r.delta_worker_time DESC";
         finally
         {
             await LiveStoreCleanup.RunAsync(connectionString!, succeeded, async (cleanupConnection, cleanupCt) =>
-                await ExecAsync(cleanupConnection, cleanupCt, "DELETE FROM query_stats WHERE server_id = 85701"));
+                await ExecAsync(cleanupConnection, cleanupCt, "DELETE FROM query_stats WHERE server_id BETWEEN 85701 AND 85741"));
         }
     }
 

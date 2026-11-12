@@ -1498,7 +1498,12 @@ WITH probed AS
         AND   f.collection_time >= $2
         AND   f.collection_time <= $3
         AND   f.query_plan_xml IS NULL
-        AND   f.query_plan_digest IS NOT NULL
+        /* #8570: no 'query_plan_digest IS NOT NULL' here. That predicate implies the partial index
+           ix_query_stats_digest_floor (collection_time only, rows with a digest), and the planner took it over
+           idx_query_stats_time (server_id, collection_time): it walks the window's rows of EVERY server and
+           fetches each one's heap page just to test server_id. On a store of 18 servers that was 25,400 pages read
+           for one server's 86,000-row window, against 5,600 through the server index. A NULL digest needs no test
+           here: the lateral lookup below matches no dimension row for it, so it never reaches the rank. */
     ) AS w,
     LATERAL
     (
