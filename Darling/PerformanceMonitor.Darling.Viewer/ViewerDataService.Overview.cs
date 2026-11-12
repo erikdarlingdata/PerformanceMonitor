@@ -1347,8 +1347,15 @@ public sealed class ServerSummaryItem
     /// keeps, so what it collected is gone. Every other such card reads "Never", whatever its band.</para>
     /// </summary>
     public string LastCollectionDisplay => LastCollectionTime.HasValue
-        ? LastCollectLabelled(LastCollectionTime.Value, ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.MachineClock(), DateTime.UtcNow)
-        : HistoryAgedOut(RegisteredAt, DateTime.UtcNow) ? "None retained" : "Never";
+        ? LastCollectLabelled(LastCollectionTime.Value, ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.MachineClock(), WordingNowUtc)
+        : HistoryAgedOut(RegisteredAt, WordingNowUtc) ? "None retained" : "Never";
+
+    /* #8722, #8464: the instant this card's Last Collect wording reads. It is the clock ApplyFreshness banded the card on, so the band
+       and the words cannot disagree about whether the server's history has aged out. The wall clock is only the fallback for a card
+       nobody has banded yet. Before this, a caller that banded on its own clock (a test pinned in September) got "None retained"
+       once the wall clock passed the 60-day horizon. */
+    private DateTime? _freshnessNowUtc;
+    private DateTime WordingNowUtc => _freshnessNowUtc ?? DateTime.UtcNow;
 
     /// <summary>
     /// The card's Last Collect text for <paramref name="mode"/> on <paramref name="clock"/>: the time
@@ -1715,6 +1722,7 @@ public sealed class ServerSummaryItem
     /// </summary>
     public void ApplyFreshness(DateTime nowUtc)
     {
+        _freshnessNowUtc = nowUtc;
         /* #7590: as on the sidebar row, a collection newer than the first failed connect makes the stored flag stale. */
         ConnectDownSince = ServerHealthClassifier.EffectiveConnectDownSince(LastCollectionTime, ConnectDownSince);
         var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, RegisteredAt, nowUtc, ConnectDownSince, Attempted));
