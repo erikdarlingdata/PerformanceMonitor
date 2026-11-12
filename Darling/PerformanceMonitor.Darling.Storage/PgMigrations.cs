@@ -3469,6 +3469,9 @@ $rung$;";
         new Migration(263, "job-history-oldest-daily-rollup", V263Sql),
         /* V264 (#8691): the per-hour counts of oversized-plan backlog rows the trim deletes. A new table only: no existing row moves. */
         new Migration(264, "oversized-plan-backlog-dropped-counts", OversizedPlanBacklog.CreateDropCountsTableSql),
+        /* V265 (#8549): the hourly summary of job_history's categories and its one-row coverage table. Two new tables, created empty: no existing row
+           moves and nothing is backfilled here, so the upgrade stays fast and the service's hourly pass fills them. */
+        new Migration(265, "job-history-category-hourly", JobHistoryCategoryHourly.CreateSql),
     };
 
     /* V256 (#7643): schema tracking. Versioned table and view definitions, kept by the schema_objects collector (Darling only).
