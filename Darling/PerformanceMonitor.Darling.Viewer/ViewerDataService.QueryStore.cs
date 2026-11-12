@@ -768,7 +768,8 @@ public sealed partial class ViewerDataService
 
             /* #7736: the monitor's own statements leave ranked before its candidate limit, once the key backfill has run. */
             topSql = await WithSelfKeysBeforeCandidateLimitAsync(connection, transaction, topSql, cancellationToken);
-            await using (var command = new Npgsql.NpgsqlCommand(topSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
+            /* #8549: the table read alone gets the longer deadline (ViewerCommandDeadlines.QueryStoreTableReadSeconds): a cold first read can run past 15 s and still beat the raw read it would otherwise fall back to. */
+            await using (var command = new Npgsql.NpgsqlCommand(topSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds })
             {
                 command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
                 command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
@@ -1243,15 +1244,16 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// The interval-table twin of <see cref="QueryStoreSlicerSql"/> (#8549). <c>query_store_interval_wide</c> already holds one row per
     /// interval identity, the newest snapshot (the rule the raw statement's DISTINCT ON applies), so there is no dedupe step: the rows
-    /// are binned on the same expression, and the same columns weighted the same way. The distinct-query count is two hash steps,
-    /// one row per (bucket, query_id) and then one per bucket, where the raw statement counts first rows of a query in a bucket
+    /// are binned on the same expression, and the same columns weighted the same way. The bucket totals are one aggregate over the binned rows, and the distinct-query
+    /// count is a separate narrow step over (bucket, query_id) pairs alone, where the raw statement counts first rows of a query in a bucket
     /// over rows that arrive sorted by query_id. The window and the <c>first_execution_time</c> bounds are the grid's own
     /// (<see cref="QueryStoreTopTablePrefix"/>), so the btree and the day partitions serve it.
     /// $1 server_id, $2 the read plan's start (<see cref="QueryStoreIntervalWide.WideReadPlan.ReadStart"/>), $3 window end (naive UTC),
     /// $4 database filter, $5 bucket minutes.
     /// </summary>
     public static readonly string QueryStoreSlicerTableSql = $$"""
-        WITH binned AS (
+        WITH binned AS NOT MATERIALIZED (
+            /* Read twice below, once per aggregate. NOT MATERIALIZED scans the table twice, the second time from cache, instead of writing every binned row to a temp store (#8549). */
             SELECT
                 query_id,
                 date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), {{TrendBucketSql.OriginSql}}) AS bucket,
@@ -1268,28 +1270,53 @@ public sealed partial class ViewerDataService
             AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ),
-        per_query AS (
-            /* One row per (bucket, query_id): a NULL query_id forms its own group and is never counted, as COUNT(DISTINCT) skips it. */
+        sums AS (
+            /* #8549: the bucket totals are added straight off the binned rows. They used to be summed per (bucket, query_id) first, which made
+               the sort or hash carry all five sums on a 2.5-million-group step: on a field store that was a sort of 2.77 million wide rows
+               (about 196 MB of temp files) and then two more aggregate steps. Only the distinct-query count needs the pairs. */
             SELECT
                 bucket,
-                query_id,
                 SUM(cpu) AS cpu,
                 SUM(dur) AS dur,
                 SUM(reads) AS reads,
                 SUM(writes) AS writes,
                 SUM(preads) AS preads
             FROM binned
-            GROUP BY bucket, query_id
+            GROUP BY bucket
+        ),
+        counts AS (
+            /* One narrow row per (bucket, query_id): the grouping carries two columns and no sums. A NULL query_id is never counted, as
+               COUNT(DISTINCT) skips it, but its work is still in sums above. */
+            SELECT
+                bucket,
+                COUNT(*) AS query_count
+            FROM
+            (
+                SELECT bucket, query_id
+                FROM binned
+                WHERE query_id IS NOT NULL
+                GROUP BY bucket, query_id
+            ) AS pairs
+            GROUP BY bucket
+        ),
+        parts AS (
+            /* One row per bucket from each side, stacked and added up below. Joining the two aggregates instead made the planner sort the
+               2.7 million wide rows by bucket to feed a merge join (#8549). */
+            SELECT bucket, CAST(NULL AS bigint) AS query_count, cpu, dur, reads, writes, preads
+            FROM sums
+            UNION ALL
+            SELECT bucket, query_count, NULL, NULL, NULL, NULL, NULL
+            FROM counts
         )
         SELECT
             bucket,
-            COUNT(query_id) AS query_count,
+            CAST(COALESCE(SUM(query_count), 0) AS bigint) AS query_count,
             COALESCE(SUM(cpu), 0) / 1000.0 AS total_cpu_ms,
             COALESCE(SUM(dur), 0) / 1000.0 AS total_duration_ms,
             COALESCE(SUM(reads), 0) AS total_reads,
             COALESCE(SUM(writes), 0) AS total_writes,
             COALESCE(SUM(preads), 0) AS total_physical_reads
-        FROM per_query
+        FROM parts
         GROUP BY bucket
         ORDER BY bucket
         """;
@@ -1349,7 +1376,8 @@ public sealed partial class ViewerDataService
                 return null;
             }
 
-            await using var command = new Npgsql.NpgsqlCommand(QueryStoreSlicerTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+            /* #8549: the table read alone gets the longer deadline, as the grid's does. */
+            await using var command = new Npgsql.NpgsqlCommand(QueryStoreSlicerTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentQueryStoreTableReadSeconds };
             command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
             command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
