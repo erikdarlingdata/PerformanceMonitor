@@ -156,7 +156,8 @@ public static class DatabaseProtectionBands
     /// <summary>"3 days 4 hours", "5 hours 10 minutes" or "42 minutes": the two largest units. The tool, the web panels, the Viewer and the alert detail say an age this way.</summary>
     public static string Describe(TimeSpan age)
     {
-        string Unit(long n, string unit) => string.Create(CultureInfo.InvariantCulture, $"{n} {unit}{(n == 1 ? "" : "s")}");
+        /* #8572: a count of days reads "2,196 days", grouped like every other count in a reply. */
+        string Unit(long n, string unit) => string.Create(CultureInfo.InvariantCulture, $"{n:N0} {unit}{(n == 1 ? "" : "s")}");
         if (age.TotalDays >= 1) return Unit(age.Days, "day") + (age.Hours > 0 ? " " + Unit(age.Hours, "hour") : "");
         if (age.TotalHours >= 1) return Unit(age.Hours, "hour") + (age.Minutes > 0 ? " " + Unit(age.Minutes, "minute") : "");
         return Unit((long)age.TotalMinutes, "minute");

@@ -77,7 +77,7 @@ public sealed class DarlingMcpReadLatencyTools
         + "max_in_flight is the most other reads already running on the service when one of these reads started. "
         + "wait_total_ms is the summed part of these reads' time spent waiting for a store connection rather than running; it never includes "
         + "time spent waiting for a long-read slot. "
-        + "Since #5506 the service runs only a few long reads at once, and the rows that are not a read running are counted on their own, "
+        + "The service runs only a few long reads at once, and the rows that are not a read running are counted on their own, "
         + "outside count, mean_ms, max_ms, the percentiles, max_in_flight and wait_total_ms: queued is the reads that waited for a long-read "
         + "slot, queue_wait_ms their summed wait and queue_wait_p95_ms the 95th percentile of that wait (a bucket upper bound like the others, "
         + "null when none waited); rejected is the reads answered busy (HTTP 429 on the web) because the slots and their queue were full; "

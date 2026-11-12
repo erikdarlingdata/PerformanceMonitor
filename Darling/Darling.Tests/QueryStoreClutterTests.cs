@@ -572,13 +572,14 @@ public sealed class QueryStoreClutterTests
     }
 
     [Fact]
-    public void CaptureModeNote_NamesTheRung_AndWhatANullMeans()
+    public void CaptureModeNote_NamesNoTrackerNumber_AndSaysWhatANullMeans()
     {
-        Assert.Contains("#3796", DarlingMcpQueryStoreClutterTools.CaptureModeNote, StringComparison.Ordinal);
-        Assert.Contains("V137", DarlingMcpQueryStoreClutterTools.CaptureModeNote, StringComparison.Ordinal);
+        /* #8572: reader text carries no tracker number or rung number. */
+        Assert.Empty(ReplyTextScan.Hits(DarlingMcpQueryStoreClutterTools.CaptureModeNote));
+        Assert.DoesNotContain("rung", DarlingMcpQueryStoreClutterTools.CaptureModeNote, StringComparison.Ordinal);
         /* The whole job of this sentence: a null is an unasked question, and a reader who takes it for the
            engine's NONE has read a real mode out of an absence. */
-        Assert.Contains("never asked, never NONE", DarlingMcpQueryStoreClutterTools.CaptureModeNote, StringComparison.Ordinal);
+        Assert.Contains("was never asked for, and it is not NONE", DarlingMcpQueryStoreClutterTools.CaptureModeNote, StringComparison.Ordinal);
     }
 
     /* ─────────────────────────── the statements ─────────────────────────── */

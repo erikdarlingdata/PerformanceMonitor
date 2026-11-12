@@ -656,7 +656,7 @@ public static class SameStatementPileupDetector
                 + "self-clears when the plan churns out, and eviction forces that churn now. Where Query Store is "
                 + "readable on this server, the PLAN_REGRESSION finding and its force-plan drill-down will surface the "
                 + "flip on the next analysis pass as confirmation and offer the durable fix (forcing the historical "
-                + "plan); this finding deliberately does not wait for it (#2296 deployments have no Query Store to "
+                + "plan); this finding deliberately does not wait for it (a deployment with the Query Store readers disabled has no Query Store to "
                 + "read). If the pileup recurs (episodes fold onto one incident id), the statement is re-drawing its "
                 + "bad plan on plan-cache churn, and the parameter-sensitivity playbook applies to the statement itself."));
     }

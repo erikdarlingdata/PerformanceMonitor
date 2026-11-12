@@ -103,7 +103,12 @@ export const SERVER_TABS = [
   {
     id: "overview",
     label: "Overview",
-    build: (server, ctx) => [
+    build: (server, ctx) => {
+      /* #8554: get_daily_summary_range is the slowest read on a server's first visit (2 to 10 s), and the heavy-read gate lets two reads go at
+         a time in the order they are asked for, so the longest read is asked for FIRST: built here, before the strips', and placed after the
+         findings panel below as before. The strips' trends then take the next slots and the baseline the last. */
+      const dailySummary = dailySummaryPanels(server);
+      return [
       stat("Overview", "get_server_summary", { server }, OVERVIEW_STATS, SNAPSHOT, 2),
       stat("Server Properties", "get_server_properties", { server }, PROPERTY_STATS, SNAPSHOT, 2),
       /* #6291: the desktop Overview's five stacked strips on one time axis and one crosshair. The CPU, Memory, Blocked process
@@ -119,8 +124,9 @@ export const SERVER_TABS = [
          from ONE fetch of get_daily_summary_range, today's tile being the range's anchor-day row, where they
          used to be two reads (get_daily_summary beside the range) that cost the store the day's aggregate
          twice per load. See dailySummaryPanels. */
-      ...dailySummaryPanels(server),
-    ],
+      ...dailySummary,
+      ];
+    },
   },
 
   {

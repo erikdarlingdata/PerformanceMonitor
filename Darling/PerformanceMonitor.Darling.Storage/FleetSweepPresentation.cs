@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -332,7 +333,9 @@ public static class FleetSweepPresentation
 
         try
         {
-            return JsonNode.Parse(json);
+            /* #8572: a stored signals document carries unrounded doubles (a window in minutes as 13.287291981666666). They are rounded as the
+               document is embedded, so every row stored before the fix reads clean on the MCP tool, the web feed and the Viewer alike. */
+            return McpHelpers.RoundFloatNoise(JsonNode.Parse(json));
         }
         catch (JsonException)
         {
