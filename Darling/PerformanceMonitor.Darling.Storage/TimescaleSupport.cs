@@ -17737,6 +17737,11 @@ public sealed class RollupCoverage
     /// the closed days it holds and reads raw <c>wait_stats</c> for the rest; without it, the whole window reads raw.</summary>
     public bool HasWaitStatsDaily => _availability.WaitStatsDaily;
 
+    /// <summary>Does the store hold <see cref="TimescaleSupport.QueryStatsIntervalDailyView"/> (#8549)? The Daily Summary's hourly tier counts
+    /// the unique queries of each closed day it holds from it instead of from the interval hourly, in about 24 times fewer rows. Without it, or
+    /// with only the legacy daily, the hourly read keeps its own path.</summary>
+    public bool HasQueryStatsIntervalDaily => _availability.QueryGrainIntervalDaily;
+
     /// <summary>Does the store hold any retention rollup at all? None is the plain-PostgreSQL shape (<see cref="RollupAvailability"/>),
     /// where every chunk is an ordinary uncompressed heap, so the Daily Summary's raw queries read can use the shape that needs the
     /// restart-row partial index (#8651). A TimescaleDB store whose probe failed reads the same as none, and takes that shape too,
