@@ -25,6 +25,15 @@ public sealed class JobHistoryCategoryCacheTests
     private static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(30);
     private static readonly DateTime T0 = new(2026, 11, 11, 15, 0, 0, DateTimeKind.Unspecified);
 
+    /// <summary>
+    /// The fake store hands out tasks the test completes by hand, so a cache that stopped answering from memory would leave a caller
+    /// waiting on a task nobody completes: the class would hang until the test job's own timeout instead of failing. Every wait on a task
+    /// the cache returned goes through this, so that regression fails within seconds.
+    /// </summary>
+    private static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(10);
+
+    private static Task<T> Done<T>(Task<T> task) => task.WaitAsync(WaitLimit);
+
     private static JobHistoryChoicesKey Key(int? serverId, int hours = 24) =>
         JobHistoryChoicesKey.For(startSlides: true, startUtc: T0.AddHours(-hours), endUtc: T0, endIsLive: true, serverId);
 
@@ -64,9 +73,9 @@ public sealed class JobHistoryCategoryCacheTests
 
         store.Pending.SetResult(["Database Maintenance", "ETL Loads"]);
 
-        Assert.Equal(["Database Maintenance", "ETL Loads"], await first);
-        Assert.Same(await first, await second);
-        Assert.Same(await first, await third);
+        Assert.Equal(["Database Maintenance", "ETL Loads"], await Done(first));
+        Assert.Same(await Done(first), await Done(second));
+        Assert.Same(await Done(first), await Done(third));
         Assert.Equal(1, cache.ReadsStarted);
     }
 
@@ -83,18 +92,18 @@ public sealed class JobHistoryCategoryCacheTests
 
         var a = cache.GetAsync(day, T0, store.Read);
         store.Pending.SetResult(["A"]);
-        await a;
+        await Done(a);
         var b = cache.GetAsync(month, T0.AddMinutes(1), store.Read);
         store.Pending.SetResult(["A", "B"]);
-        await b;
+        await Done(b);
         var c = cache.GetAsync(oneServer, T0.AddMinutes(2), store.Read);
         store.Pending.SetResult(["A"]);
-        await c;
+        await Done(c);
         Assert.Equal(3, store.Reads);
 
-        Assert.Equal(["A"], await cache.GetAsync(day, T0.AddMinutes(10), store.Read));
-        Assert.Equal(["A", "B"], await cache.GetAsync(month, T0.AddMinutes(11), store.Read));
-        Assert.Equal(["A"], await cache.GetAsync(oneServer, T0.AddMinutes(12), store.Read));
+        Assert.Equal(["A"], await Done(cache.GetAsync(day, T0.AddMinutes(10), store.Read)));
+        Assert.Equal(["A", "B"], await Done(cache.GetAsync(month, T0.AddMinutes(11), store.Read)));
+        Assert.Equal(["A"], await Done(cache.GetAsync(oneServer, T0.AddMinutes(12), store.Read)));
         Assert.Equal(3, store.Reads);
     }
 
@@ -108,15 +117,15 @@ public sealed class JobHistoryCategoryCacheTests
 
         var first = cache.GetAsync(key, T0, store.Read);
         store.Pending.SetResult(["A"]);
-        await first;
+        await Done(first);
 
-        await cache.GetAsync(key, T0 + Lifetime, store.Read);
+        await Done(cache.GetAsync(key, T0 + Lifetime, store.Read));
         Assert.Equal(1, store.Reads);
 
         var again = cache.GetAsync(key, T0 + Lifetime + TimeSpan.FromSeconds(1), store.Read);
         Assert.Equal(2, store.Reads);
         store.Pending.SetResult(["A", "C"]);
-        Assert.Equal(["A", "C"], await again);
+        Assert.Equal(["A", "C"], await Done(again));
     }
 
     /// <summary>A read that failed is not kept: every caller waiting on it sees the failure, and the next caller reads again.</summary>
@@ -131,14 +140,14 @@ public sealed class JobHistoryCategoryCacheTests
         var waiting = cache.GetAsync(key, T0.AddSeconds(1), store.Read);
         store.Pending.SetException(new InvalidOperationException("canceling statement due to statement timeout"));
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => first);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => waiting);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Done(first));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Done(waiting));
         Assert.Equal(1, store.Reads);
 
         var retry = cache.GetAsync(key, T0.AddSeconds(2), store.Read);
         Assert.Equal(2, store.Reads);
         store.Pending.SetResult(["A"]);
-        Assert.Equal(["A"], await retry);
+        Assert.Equal(["A"], await Done(retry));
     }
 
     /// <summary>The cache is bounded: past its capacity the oldest finished read goes, and a read still running never does.</summary>
@@ -150,16 +159,16 @@ public sealed class JobHistoryCategoryCacheTests
 
         var one = cache.GetAsync(Key(1), T0, store.Read);
         store.Pending.SetResult(["one"]);
-        await one;
+        await Done(one);
         var two = cache.GetAsync(Key(2), T0.AddSeconds(1), store.Read);
         store.Pending.SetResult(["two"]);
-        await two;
+        await Done(two);
         var three = cache.GetAsync(Key(3), T0.AddSeconds(2), store.Read);
         var runningThree = store.Pending;
 
         /* Key 1 was the oldest finished read, so it went when key 3 started; key 3 is still running and key 2 is kept. */
         Assert.Equal(3, store.Reads);
-        Assert.Equal(["two"], await cache.GetAsync(Key(2), T0.AddSeconds(3), store.Read));
+        Assert.Equal(["two"], await Done(cache.GetAsync(Key(2), T0.AddSeconds(3), store.Read)));
         Assert.Equal(3, store.Reads);
         Assert.Same(three, cache.GetAsync(Key(3), T0.AddSeconds(3), store.Read));
         Assert.Equal(3, store.Reads);
@@ -168,7 +177,7 @@ public sealed class JobHistoryCategoryCacheTests
         Assert.Equal(4, store.Reads);
         store.Pending.SetResult(["one again"]);
         runningThree.SetResult(["three"]);
-        Assert.Equal(["one again"], await oneAgain);
-        Assert.Equal(["three"], await three);
+        Assert.Equal(["one again"], await Done(oneAgain));
+        Assert.Equal(["three"], await Done(three));
     }
 }
