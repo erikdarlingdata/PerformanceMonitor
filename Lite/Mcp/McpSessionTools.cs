@@ -26,7 +26,7 @@ public sealed class McpSessionTools
         [Description("Filter to a specific database. Applied in SQL; a head blocker in ANOTHER database is then not on the page, and its victims say blocker_not_shown = filtered.")] string? database_name = null,
         [Description("Show only queries involved in blocking: rows with blocking_session_id > 0, plus the head blockers those rows name in the same capture.")] bool blocking_only = false,
         [Description("Only rows waiting on this wait type at capture, e.g. PAGEIOLATCH_SH: exact name, any case. Applied in SQL. A head blocker on another wait is then off the page (blocker_not_shown = filtered).")] string? wait_type = null,
-        [Description("Maximum number of rows to return. Default 25 (#4198, down from 50, sized to fit the response budget). The page is bounded by limit, not hours_back: truncated says whether the window held more.")] int limit = DefaultLimit,
+        [Description("Maximum number of rows to return. Default 25 (down from 50, sized to fit the response budget). The page is bounded by limit, not hours_back: truncated says whether the window held more.")] int limit = DefaultLimit,
         [Description("Return each row's full query text instead of a 400-character preview. Default false.")] bool full_text = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(QueryTagReadScope.ParameterDescription)] string? tag = null,

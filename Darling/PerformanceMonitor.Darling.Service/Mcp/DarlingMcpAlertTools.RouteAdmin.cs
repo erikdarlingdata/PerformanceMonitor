@@ -219,7 +219,7 @@ public sealed partial class DarlingMcpAlertTools
         "Use set_notification_route_enabled to turn a route off and on without the rest. " +
         "The answer's previous is the route before the change and undo is the update_notification_route call that puts the match, scope, enabled flag, resolution override and fallback back. " +
         "For an operator token undo puts the agent fields back too: agent_level and the four limits, or clear_agent_level true when the level was Inherit. " +
-        "An operator token can turn approval on but never off (#7109): action_approval only to required, approval_single_person only to false. " +
+        "An operator token can turn approval on but never off: action_approval only to required, approval_single_person only to false. " +
         "A Level 3 route with action_approval required cannot be disabled, put back to Inherit, or have its match, scope or severities changed (its level can go down to 0, 1 or 2), " +
         "and a route with action_approval off cannot be raised to Level 3, nor, at Level 3, be enabled or have its match, scope or severities changed. A person makes those changes in the Viewer or on the web dashboard. " +
         "undo never carries action_approval or approval_single_person: a person undoes a change to them in the Viewer or on the web dashboard. " +

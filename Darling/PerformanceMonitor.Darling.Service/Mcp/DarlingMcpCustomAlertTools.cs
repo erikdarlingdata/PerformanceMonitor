@@ -288,7 +288,7 @@ public sealed class DarlingMcpCustomAlertTools
         "fleet-wide, an enabled create is refused as {status:\"invalid\", ...}; paused rules do not count, so " +
         "enabled=false still saves. Optional expires_at_utc (a future ISO-8601 UTC instant) makes it a short-term watch that stops " +
         "evaluating on its own; the answer says when it expires, and a past expiry is refused. " +
-        "Server scope is part of the definition, not a separate argument (#6455): with no 'scope' the rule applies to EVERY monitored server; " +
+        "Server scope is part of the definition, not a separate argument: with no 'scope' the rule applies to EVERY monitored server; " +
         "to limit it, put {\"scope\":{\"mode\":\"servers\",\"servers\":[\"<server name>\"]}} (or mode 'tag' with a fleet-tag 'tagId') in the definition.")]
     public static async Task<string> CreateCustomAlertRule(
         NpgsqlDataSource postgres,
@@ -368,7 +368,7 @@ public sealed class DarlingMcpCustomAlertTools
         "its expiry is EXPIRED: it is not evaluated and does not fire, and enabled:true on its own does not revive it. Turn it " +
         "back on by sending a later expires_at_utc, or \"\", with the rule's current version; the answer to any update of an " +
         "expired rule says this and repeats the call. The answer also carries previous (the values before the change) and undo (the update_custom_alert_rule call, at the new version, that restores the fields this call changed). " +
-        "Server scope is part of the definition, not a separate argument (#6455): a rule with no 'scope' applies to EVERY monitored server, " +
+        "Server scope is part of the definition, not a separate argument: a rule with no 'scope' applies to EVERY monitored server, " +
         "and a new definition replaces the old one whole, so to keep or set a limit include {\"scope\":{\"mode\":\"servers\",\"servers\":[\"<server name>\"]}} " +
         "(or mode 'tag' with a fleet-tag 'tagId') in it.")]
     public static async Task<string> UpdateCustomAlertRule(

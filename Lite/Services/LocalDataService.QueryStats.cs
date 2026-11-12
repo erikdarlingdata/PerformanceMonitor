@@ -112,7 +112,36 @@ ORDER BY bucket";
     /// <paramref name="candidates"/> is the ranking cut TopFill asked for.
     /// </summary>
     internal static string TopQueriesByCpuSql(string dbClause, int candidates) => @"
-WITH ranked AS (
+WITH winners AS (
+    /* #8549 pass 1 of 2, as Darling's reads do (#5226): rank every group of the window on the NARROW columns, the grouping key and the
+       ranking sum. The wide row below (forty aggregates and a distinct count that hashes every row's text) used to share the GROUP BY
+       that ranks, so the whole window paid for it, groups that never reached the page included. Everything that decides which groups
+       exist or survive is the old statement's, unchanged: the window, the last-execution floor, the database, exclusion and tag
+       filters, the grouping key, both HAVING predicates, the ordering and its tie-break. */
+    SELECT
+        database_name AS win_database_name,
+        query_hash AS win_query_hash,
+        host_object_name AS win_host_object_name
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + @"
+    GROUP BY database_name, query_hash, host_object_name
+    HAVING (SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0)
+    /* #3541 A13: the parallelism floor is part of the QUERY, on the grouped population before the ranking
+       and the cap - see the method's note. $6 = 0 admits every group; NULL max_dop (never captured) reads
+       as 0 and stays out of a filtered page, as the C# arm it replaces did. */
+    AND   COALESCE(MAX(max_dop), 0) >= $6
+    /* #5299 round 3 (O16): the ranking ends on the whole group key, so a tie at the candidate cut picks the same keys in every
+       refill round, as the Darling and Viewer twins do. */
+    ORDER BY SUM(delta_worker_time) DESC, database_name, query_hash, host_object_name
+    LIMIT " + candidates + @"
+),
+ranked AS (
+    /* #8549 pass 2 of 2: the wide row, built for pass 1's winners only, over the same window and floor. The join is the exact
+       NULL-safe match on the grouping key (host_object_name is NULL on every ad-hoc row), and a winner is unique per key, so no
+       row repeats and every figure is what the single pass gave. */
     SELECT
         database_name,
         query_hash,
@@ -164,21 +193,16 @@ WITH ranked AS (
            display count. */
         COUNT(DISTINCT hash(query_text)) AS distinct_texts,
         host_object_name
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + @"
+    FROM v_query_stats AS q
+    JOIN winners AS w
+      ON  q.database_name IS NOT DISTINCT FROM w.win_database_name
+      AND q.query_hash IS NOT DISTINCT FROM w.win_query_hash
+      AND q.host_object_name IS NOT DISTINCT FROM w.win_host_object_name
+    WHERE q.server_id = $1
+    AND   q.collection_time >= $2
+    AND   q.collection_time <= $3
+    AND   q.last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE
     GROUP BY database_name, query_hash, host_object_name
-    HAVING (SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0)
-    /* #3541 A13: the parallelism floor is part of the QUERY, on the grouped population before the ranking
-       and the cap — see the method's note. $6 = 0 admits every group; NULL max_dop (never captured) reads
-       as 0 and stays out of a filtered page, as the C# arm it replaces did. */
-    AND   COALESCE(MAX(max_dop), 0) >= $6
-    /* #5299 round 3 (O16): the ranking ends on the whole group key, so a tie at the candidate cut picks the same keys in every
-       refill round, as the Darling and Viewer twins do. */
-    ORDER BY SUM(delta_worker_time) DESC, database_name, query_hash, host_object_name
-    LIMIT " + candidates + @"
 ),
 module AS (
     /* #1568 module attribution: one procedure_stats identity per sql_handle (latest collection_time

@@ -71,7 +71,7 @@ public static partial class PgTargetAdvice
                 Investigation =
                     $"pg_cpu_utilization holds rows for this instance{samplesClause}, but none in the window carried " +
                     "acu_utilization_percent, so there is no percent-of-configured-ceiling to grade and this pass assigns the " +
-                    "CPU family no severity: a percentage of an unknown denominator is Unknown, never Healthy (#3271). A " +
+                    "CPU family no severity: a percentage of an unknown denominator is Unknown, never Healthy. A " +
                     "provisioned instance class has no ACU concept and lands here by design; a serverless one landing here " +
                     "means Performance Insights returned no capacity points for the window." + rawClause,
             };

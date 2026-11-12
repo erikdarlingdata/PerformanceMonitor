@@ -275,8 +275,8 @@ public static class FindingRouting
         if (StoryConfidence.IsLegacyPathShape(confidence, factCount))
         {
             return uncorroboratedRoute == FindingRoute.Page
-                ? new FindingRouteDecision(FindingRoute.Page, "uncorroborated: a lone symptom persisted at the pre-#3538 path-shape 1.0, which is not an evidence score. Paged because analysis.uncorroborated_route is 'page'.")
-                : new FindingRouteDecision(FindingRoute.Digest, "uncorroborated: a lone symptom persisted at the pre-#3538 path-shape 1.0, which is not an evidence score.");
+                ? new FindingRouteDecision(FindingRoute.Page, "uncorroborated: a lone symptom persisted at the path-shape 1.0 of the older confidence formula, which is not an evidence score. Paged because analysis.uncorroborated_route is 'page'.")
+                : new FindingRouteDecision(FindingRoute.Digest, "uncorroborated: a lone symptom persisted at the path-shape 1.0 of the older confidence formula, which is not an evidence score.");
         }
 
         /* The one re-derived arm. A one-fact story's path-depth term is exactly 0, so anything above the

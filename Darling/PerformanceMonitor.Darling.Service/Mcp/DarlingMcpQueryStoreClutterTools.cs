@@ -88,7 +88,7 @@ public sealed class DarlingMcpQueryStoreClutterTools
     /// health row captured before the V137 rung (#3796) created the column — the mode was never asked for —
     /// and a reader must not read it as <c>NONE</c>, which is a mode the engine really can be in.</summary>
     public const string CaptureModeNote =
-        "query_capture_mode is the query_store_health column added by the V137 rung (#3796) and filled hourly; null means the newest capture predates the rung, never asked, never NONE";
+        "query_capture_mode is a query_store_health column that is filled hourly; null means the newest capture predates the column, so the mode was never asked for, and it is not NONE";
 
     /* The four arms of the memory clerk's `note`. The web page's plain-text.js rewrites the field and relation names in them, and
        WebPlainTextTests feeds these constants through it, so a reword here breaks that test (#6649). */

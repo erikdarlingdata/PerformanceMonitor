@@ -129,7 +129,7 @@ public sealed partial class DarlingMcpInvestigationTools
         "claims_exhausted, evidence_ready, follow_up, deadlock_digest) and answers each with its request's id, server and " +
         "family. Writes nothing. status ok or empty. Call again with the cursor it answers; claim with " +
         "claim_investigation_request. <<GUIDE>> " +
-        "A long poll (#5822): the MCP transport is stateless, so the server cannot push a notification; this call is how an " +
+        "A long poll: the MCP transport is stateless, so the server cannot push a notification; this call is how an " +
         "agent hears of a new request, and of what happens to one, without listing on a timer. It answers at once when an " +
         "event was journaled on route_ids after the cursor; otherwise it waits up to timeout_seconds (0-25, default 20; capped " +
         "at 25 so a proxy or a client's request timeout never cuts the call) for one, and at the timeout answers empty with the " +

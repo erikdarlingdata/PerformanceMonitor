@@ -91,7 +91,7 @@ public static class CustomAlertTemplates
             "PostgreSQL: replication slot retaining WAL",
             "Fires when a replication slot's retained WAL stays large: a disconnected or slow consumer holds "
             + "WAL that cannot be recycled, and the disk fills for the WHOLE instance. This is the storage risk "
-            + "#3282 flags (PostgreSQL has no database-size gauge to threshold directly). Starter: warn at ~10 GB "
+            + "this alert guards (PostgreSQL has no database-size gauge to threshold directly). Starter: warn at ~10 GB "
             + "retained, critical at ~50 GB. Set below your free disk headroom.",
             "{\"metric\":{\"source\":\"pg_replication_slot_stats\",\"measure\":\"pg_slot_retained_wal_bytes\",\"aggregate\":\"max\",\"unit\":\"mb\",\"hours\":1}," +
             "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":10240,\"criticalThreshold\":51200}," +
