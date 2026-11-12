@@ -27,7 +27,8 @@ namespace PerformanceMonitorLite.Tests;
 /// header (also with no rows), an empty window shows one muted sentence in the grid area with the slicer band gone, and the Memory
 /// Broker panel does not repeat its tab's name as a title.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class GridPolishTests
 {
     [Theory]

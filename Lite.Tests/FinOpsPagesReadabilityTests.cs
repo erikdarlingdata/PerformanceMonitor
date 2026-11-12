@@ -34,7 +34,8 @@ namespace PerformanceMonitorLite.Tests;
 /// sentence, not two; and the 7-Day Provisioning Trend shows the stolen memory that decides a low-CPU day, gives the day's reason on
 /// its Status, and says which window the badge covers. The Darling Viewer's twin is ViewerFinOpsPagesReadabilityTests in Darling.Tests.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class FinOpsPagesReadabilityTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

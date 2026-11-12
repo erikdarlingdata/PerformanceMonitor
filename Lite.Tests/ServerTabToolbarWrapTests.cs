@@ -27,7 +27,8 @@ namespace PerformanceMonitorLite.Tests;
 /// inside the tab's bounds at its full width: a toolbar that does not wrap arranges its overflow past the right edge, where the header
 /// clips it and nothing can reach it.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ServerTabToolbarWrapTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

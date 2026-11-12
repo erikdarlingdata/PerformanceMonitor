@@ -31,7 +31,8 @@ namespace PerformanceMonitorLite.Tests;
 /// Plan Viewer tab and that tab is shown. A fetch that comes back empty says the plan is not in Query Store, and a fetch that
 /// fails says why it failed; both leave the grid showing.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class QueryStoreInlineViewTests
 {
     private const string Ns = "http://schemas.microsoft.com/sqlserver/2004/07/showplan";

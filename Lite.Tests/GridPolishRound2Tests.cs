@@ -30,7 +30,8 @@ namespace PerformanceMonitorLite.Tests;
 /// the realized controls (<see cref="GridPolishProbe"/>): where each column starts, whether its header and its values end on the same edge, whether a
 /// header carries the filter button, and whether long text is trimmed with an ellipsis and a tooltip. The Viewer's twin is ViewerGridPolishRound2Tests.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class GridPolishRound2Tests
 {
     private static readonly string[] Themes = { "DarkTheme", "LightTheme", "CoolBreezeTheme" };

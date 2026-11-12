@@ -6,7 +6,9 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
+using System.Threading;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Common;
 
@@ -26,19 +28,40 @@ public class CredentialService
 {
     internal const string CredentialPrefix = "PerformanceMonitorLite_";
 
-    private readonly CredentialStore _store;
+    /* #8754: a test can put an in-memory store behind every service made in its own async flow (see UseStoreForCurrentTest).
+       Null in the app: the default below is always the real Windows Credential Manager. */
+    private static readonly AsyncLocal<ICredentialStore?> s_testStore = new();
+
+    private readonly ICredentialStore _store;
 
     public CredentialService(ILogger<CredentialService>? logger = null)
     {
-        _store = new CredentialStore(
+        _store = s_testStore.Value ?? new CredentialStore(
             CredentialPrefix,
             "SQL Server credentials for Performance Monitor Lite",
             logger);
     }
 
+    /// <summary>
+    /// #8754: until the returned scope is disposed, a <c>new CredentialService()</c> made in this async flow (and the flows it starts)
+    /// reads and writes <paramref name="store"/> instead of Windows Credential Manager. The override is per flow, so tests that
+    /// run in parallel never share a store. Only tests call it; the app never does.
+    /// </summary>
+    internal static IDisposable UseStoreForCurrentTest(ICredentialStore store)
+    {
+        var prior = s_testStore.Value;
+        s_testStore.Value = store;
+        return new Restore(prior);
+    }
+
+    private sealed class Restore(ICredentialStore? prior) : IDisposable
+    {
+        public void Dispose() => s_testStore.Value = prior;
+    }
+
     /// <summary>A service over a store with another prefix, so a test can use the real Credential Manager under keys of its
     /// own without touching the user's Lite credentials (#5775).</summary>
-    internal CredentialService(CredentialStore store)
+    internal CredentialService(ICredentialStore store)
     {
         _store = store;
     }

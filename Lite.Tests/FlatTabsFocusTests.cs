@@ -32,7 +32,8 @@ namespace Lite.Tests;
 /// every sub-tab row starts at one left offset, and the stock dotted focus box is replaced by a themed keyboard cue. Controls are
 /// built on the shared STA thread, themed, shown at the given size and read from what rendered.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class FlatTabsFocusTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

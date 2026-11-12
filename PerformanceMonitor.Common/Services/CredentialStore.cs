@@ -26,7 +26,7 @@ namespace PerformanceMonitor.Common;
 /// credentials. Each app wraps this type in a thin adapter that supplies its own prefix.
 /// </para>
 /// </summary>
-public class CredentialStore
+public class CredentialStore : ICredentialStore
 {
     /// <summary>
     /// The largest credential blob Windows accepts (CRED_MAX_CREDENTIAL_BLOB_SIZE: 5 * 512 bytes).
@@ -503,6 +503,31 @@ public class CredentialStore
         [DllImport("advapi32.dll", SetLastError = true)]
         internal static extern void CredFree(IntPtr buffer);
     }
+}
+
+/// <summary>
+/// What Lite's <c>CredentialService</c> needs from a credential store, so a test can put an in-memory one behind it instead of the
+/// real Windows Credential Manager (#8754). <see cref="CredentialStore"/> is the only product implementation.
+/// </summary>
+internal interface ICredentialStore
+{
+    bool SaveCredential(string serverId, string username, string password);
+
+    CredentialSaveResult TrySaveCredential(string serverId, string username, string password);
+
+    CredentialSaveResult TryDeleteCredential(string serverId);
+
+    (string Username, string Password)? GetCredential(string serverId);
+
+    CredentialReadOutcome TryReadCredential(string serverId, out (string Username, string Password)? credential, out string? failure);
+
+    bool DeleteCredential(string serverId);
+
+    bool CredentialExists(string serverId);
+
+    bool UpdateCredential(string serverId, string username, string password);
+
+    System.Collections.Generic.IReadOnlyList<string> ListKeys(string keyPrefix);
 }
 
 /// <summary>What <see cref="CredentialStore.TryReadCredential"/> found.</summary>

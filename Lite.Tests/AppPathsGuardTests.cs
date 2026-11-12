@@ -23,7 +23,8 @@ namespace Lite.Tests;
 /// judgement, so a failing verdict is observed rather than suffered. The facts write the process-wide statics, so the class runs in
 /// the collection that runs alone: a parallel test's own before or after check must never read a folder of this class's.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class AppPathsGuardTests
 {
     [Fact]

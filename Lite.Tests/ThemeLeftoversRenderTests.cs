@@ -25,7 +25,8 @@ namespace PerformanceMonitorLite.Tests;
 /// #8221: dark colors left over in Lite's Light and Cool Breeze themes. Every check builds the real control under the Dark theme, switches the
 /// theme at run time the way Settings does (<see cref="ThemeManager.Apply"/>), and reads the color from the element that rendered.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ThemeLeftoversRenderTests
 {
     private static Uri ThemeUri(string name) => new($"pack://application:,,,/PerformanceMonitorLite;component/Themes/{name}Theme.xaml");

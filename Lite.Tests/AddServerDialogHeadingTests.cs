@@ -21,7 +21,8 @@ namespace PerformanceMonitorLite.Tests;
 /// edit a server, "Add SQL Server Connection" when it was opened to add one. The window title already followed the mode; the
 /// heading in the body is what the person reads.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class AddServerDialogHeadingTests
 {
     [Fact]
