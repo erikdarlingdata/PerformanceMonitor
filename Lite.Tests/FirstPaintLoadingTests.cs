@@ -175,6 +175,39 @@ public sealed class FirstPaintLoadingTests
             Assert.False(calendar.IsLoading);
         });
 
+    /// <summary>#8728: the Queries sub-tabs keep a collapsed comparison grid in the main grid's cell. Its "Loading..." must not outlive the read.</summary>
+    [Fact]
+    public void ACollapsedComparisonGridInTheMainGridsCell_NeverLeavesLoadingOverTheMainGridsRows() =>
+        StaTestThread.Run(() =>
+        {
+            var root = new Grid();
+            var cell = new Grid();
+            var main = new DataGrid { Name = "QueryStatsGrid" };
+            var comparison = new DataGrid { Name = "QueryStatsComparisonGrid", Visibility = Visibility.Collapsed };
+            cell.Children.Add(main);
+            cell.Children.Add(comparison);
+            root.Children.Add(cell);
+            var first = new FirstPaintLoading(new ChartRenderHelper(), _ => { });
+            first.Show(root);
+
+            main.ItemsSource = new List<string> { "a row" };
+
+            var window = new Window { Content = root, Width = 400, Height = 300 };
+            try
+            {
+                StaTestThread.ShowOffScreen(window);
+                first.Resolve(root);
+            }
+            finally
+            {
+                window.Close();
+            }
+
+            Assert.False(EmptyState.IsShowingLoading(main));
+            Assert.False(EmptyState.IsShowingLoading(comparison));
+            Assert.DoesNotContain(cell.Children.OfType<TextBlock>(), t => t.Text == EmptyState.LoadingText && t.Visibility == Visibility.Visible);
+        });
+
     [Fact]
     public void WhenAPassEndsWithoutFillingATab_WhatIsOnScreenStopsSayingLoading() =>
         StaTestThread.Run(() =>
