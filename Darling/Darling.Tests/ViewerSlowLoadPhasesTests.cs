@@ -207,6 +207,7 @@ public sealed class ViewerSlowLoadPhasesTests
     [Theory]
     [InlineData("Optimization", "idle databases panel,tempdb summary panel,wait categories panel,expensive queries panel,memory grants panel")]
     [InlineData("Server Inventory", "server inventory read")]
+    [InlineData("Utilization", "utilization read")]
     public void FinOps_ALoadOfTheSubTab_BooksItsReadsByName_AndWritesASlowLoadLine(string header, string expectedPhases)
     {
         var expected = expectedPhases.Split(',');
@@ -246,6 +247,61 @@ public sealed class ViewerSlowLoadPhasesTests
         }
 
         Assert.Contains("slow load: FinOps > " + header, line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AlertHistory_AFirstOpen_CountsTheWaitAndTheLayout_AndWritesOneLine()
+    {
+        var port = FreePort();
+        var lines = new List<string>();
+        RunThemed(async () =>
+        {
+            var tab = new AlertsHistoryTab { FirstOpenSlowThresholdMs = 0, SlowLoadSink = lines.Add };
+            tab.Initialize(new ViewerDataService(ClosedStore(port)));
+            var window = new Window { Content = tab, Width = 1200, Height = 800 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                tab.BeginFirstOpen();
+                await Task.Delay(150);
+                tab.FirstOpenRefreshStarted();
+                await tab.RefreshAlertsAsync();
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        var line = Assert.Single(lines);
+        Assert.Contains("slow load: first open > Alert History", line, StringComparison.Ordinal);
+        Assert.Contains("waited for the shell to start this refresh", line, StringComparison.Ordinal);
+        /* The wait is booked before the read, and the closed store fails the read, so the line shows the wait and the clock that ran from the show. */
+        Assert.True(line.Contains("waited for the shell to start this refresh 1", StringComparison.Ordinal)
+            || line.Contains("waited for the shell to start this refresh 2", StringComparison.Ordinal), line);
+    }
+
+    [Fact]
+    public void ASlowClock_NamesTheLayoutPassItWaitedFor()
+    {
+        string? line = null;
+        RunThemed(async () =>
+        {
+            var window = new Window { Width = 100, Height = 100 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                var timer = SlowClock();
+                await timer.SettleLayoutAsync(window.Dispatcher);
+                line = timer.Finish("Anything");
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.Contains("layout and render", line, StringComparison.Ordinal);
     }
 
     private static int FreePort()

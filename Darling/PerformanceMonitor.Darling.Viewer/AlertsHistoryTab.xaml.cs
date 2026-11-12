@@ -141,6 +141,21 @@ public partial class AlertsHistoryTab : UserControl
         }
     }
 
+    /* #8549: the first open's clock (see ViewerFirstOpen): the shell starts it when the tab becomes visible and the tab's first load runs on it. */
+    private readonly ViewerFirstOpen _firstOpen = new();
+
+    /// <summary>Where a slow load's line goes; null is the Viewer log's "SlowLoad" source. A test swaps it to read the line.</summary>
+    internal Action<string>? SlowLoadSink { get; set; }
+
+    /// <summary>The first open's slow-load threshold. A test lowers it to read a line without waiting three seconds.</summary>
+    internal int FirstOpenSlowThresholdMs { get => _firstOpen.SlowThresholdMs; set => _firstOpen.SlowThresholdMs = value; }
+
+    /// <summary>#8549: the shell calls this when it makes the tab visible, so a wait behind another tab's refresh counts in a slow first open's line.</summary>
+    internal void BeginFirstOpen() => _firstOpen.Begin();
+
+    /// <summary>#8549: the shell calls this when the fleet lane starts the tab's refresh.</summary>
+    internal void FirstOpenRefreshStarted() => _firstOpen.RefreshStarted();
+
     /// <summary>Reloads the alert history (the shell calls this when the Alerts tab becomes visible / on the timer).</summary>
     public Task RefreshAlertsAsync() => LoadAlertsAsync();
 
@@ -218,7 +233,7 @@ public partial class AlertsHistoryTab : UserControl
             return;
         }
 
-        var timer = loadTimer ?? new ViewerLoadTimer();
+        var timer = loadTimer ?? _firstOpen.Take() ?? new ViewerLoadTimer();
         var gen = _loads.Claim(nameof(LoadAlertsAsync));
 
         try
@@ -235,6 +250,8 @@ public partial class AlertsHistoryTab : UserControl
             }
 
             var displayCount = timer.Step("alert grid bind", () => ShowAlerts(alerts));
+            /* #8549: the grid's rows are measured and drawn after this method's own code, so the clock waits for that pass and the line names it. */
+            await timer.SettleLayoutAsync(Dispatcher);
 
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
@@ -254,7 +271,7 @@ public partial class AlertsHistoryTab : UserControl
             /* #8549: a slow load names the read or step that was slow. A caller that passed its own clock reads it and logs nothing. */
             if (loadTimer is null)
             {
-                timer.FinishAndLog("Alert History");
+                timer.FinishAndLog("Alert History", SlowLoadSink);
             }
         }
     }

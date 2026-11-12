@@ -189,7 +189,8 @@ public partial class FinOpsTab
                 break;
             case FinOpsUtilizationSubTabIndex:
             default:
-                await LoadFinOpsUtilizationAsync();
+                timer?.Surface = "FinOps > Utilization";
+                await LoadFinOpsUtilizationAsync(timer);
                 break;
         }
     }
@@ -199,47 +200,73 @@ public partial class FinOpsTab
 
     // ── Utilization ──
 
-    private async Task LoadFinOpsUtilizationAsync()
+    private async Task LoadFinOpsUtilizationAsync() => await LoadFinOpsUtilizationAsync(null);
+
+    /// <summary>#8549: each store read of the page is booked on the load's clock by name, and the client's own stretches (the summary cards, the grid and
+    /// chart binds) as steps. The load logged "no store phase timed" and 3.5 s of "client work" in the field, which could not say whether the time was the
+    /// six reads (they run one after another) or the page.</summary>
+    private async Task LoadFinOpsUtilizationAsync(ViewerLoadTimer? timer)
     {
-        var data = await _dataService.GetUtilizationEfficiencyAsync(_server.ServerId);
+        var data = await ViewerServerTab.Timed(timer, "utilization read", _dataService.GetUtilizationEfficiencyAsync(_server.ServerId));
 
         List<DatabaseSizeRow> dbSizes = [];
+        (List<TopResourceConsumerRow> ByTotal, List<TopResourceConsumerRow> ByAvg) topConsumers = default;
+        List<DatabaseSizeSummaryRow> dbSizeSummary = [];
+        List<ProvisioningTrendRow> trend = [];
         if (data != null)
         {
             /* Per-server FinOps budget (0 = hide the cost cards, like Lite). */
             data.MonthlyCost = _server.MonthlyCostUsd;
 
-            /* Free space % for the storage health score, from the latest database sizes. */
+            /* #8549: the four reads below do not depend on each other, so they run side by side. They ran one after another, so the page waited for the
+               sum of four round trips to the store, plus the display-zone read the trend needs first, where it now waits for the slowest. */
+            using var readFanOut = ViewerReadFanOut.Of(4);
+
             /* #5312: deliberately NOT narrowed by the saved database filter. The free-space figure is the server's volume headroom, a
                server-level health score, not a per-database size, so it reads every database's files whatever the filter says. */
-            dbSizes = await _dataService.GetDatabaseSizeLatestAsync(_server.ServerId);
+            var sizesRead = ViewerServerTab.Timed(timer, "database sizes read", _dataService.GetDatabaseSizeLatestAsync(_server.ServerId));
+            /* #4227: one round trip feeds both grids instead of two independent 24h query_stats scans. */
+            var topRead = ViewerServerTab.Timed(timer, "top consumers read", _dataService.GetTopResourceConsumersAsync(_server.ServerId));
+            var summaryRead = ViewerServerTab.Timed(timer, "database size summary read", _dataService.GetDatabaseSizeSummaryAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter));
+            var trendRead = ReadProvisioningTrendAsync(timer);
+            await Task.WhenAll(sizesRead, topRead, summaryRead, trendRead);
+            dbSizes = sizesRead.Result;
+            topConsumers = topRead.Result;
+            dbSizeSummary = summaryRead.Result;
+            trend = trendRead.Result;
+
+            /* Free space % for the storage health score, from the latest database sizes. */
             var totalStorageMb = DatabaseSizeRow.AllocatedTotalMb(dbSizes);
             var totalFreeMb = DatabaseSizeRow.FreeTotalMb(dbSizes);
             data.FreeSpacePct = FinOpsUtilizationFigures.FreeSpacePct(totalStorageMb, totalFreeMb);
         }
 
-        UpdateUtilizationSummary(data);
-        FinOpsNoUtilizationMessage.Visibility = data == null ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsSummaryContent.Visibility = data == null ? Visibility.Collapsed : Visibility.Visible;
+        ViewerServerTab.ClientStep(timer, "utilization summary", () =>
+        {
+            UpdateUtilizationSummary(data);
+            FinOpsNoUtilizationMessage.Visibility = data == null ? Visibility.Visible : Visibility.Collapsed;
+            FinOpsSummaryContent.Visibility = data == null ? Visibility.Collapsed : Visibility.Visible;
+        });
 
         if (data != null)
         {
-            /* #4227: one round trip feeds both grids instead of two independent 24h query_stats scans. */
-            var topConsumers = await _dataService.GetTopResourceConsumersAsync(_server.ServerId);
-            FinOpsTopTotalGrid.ItemsSource = topConsumers.ByTotal;
-            FinOpsTopAvgGrid.ItemsSource = topConsumers.ByAvg;
-            var dbSizeSummary = await _dataService.GetDatabaseSizeSummaryAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
-            FinOpsDbSizeChart.ItemsSource = dbSizeSummary;
-            /* A server with no CPU sample in the window is stale or not collecting: its latest sizes can be days old, so the chart is
-               hidden rather than shown as if they were current. */
-            FinOpsDbSizeChartGroup.Visibility = data.ShowsDatabaseSizeChart ? Visibility.Visible : Visibility.Collapsed;
-            /* The caption names only the databases that have a bar, so it is built from the list the chart is painted from. */
-            var chartCaption = DatabaseSizeRow.ChartCaption(dbSizes, dbSizeSummary.Select(b => b.DatabaseName));
-            FinOpsDbSizeChartCaption.Text = chartCaption ?? "";
-            FinOpsDbSizeChartCaption.Visibility = chartCaption is null ? Visibility.Collapsed : Visibility.Visible;
-            /* The trend's days are counted in the selected time display on this server's clock, as every other time on the page reads. */
-            var dayZone = await _dataService.DisplayDayZoneAsync(_server.ServerId);
-            FinOpsProvisioningTrendGrid.ItemsSource = await _dataService.GetProvisioningTrendAsync(_server.ServerId, dayZone);
+            ViewerServerTab.ClientStep(timer, "top consumer grids bind", () =>
+            {
+                FinOpsTopTotalGrid.ItemsSource = topConsumers.ByTotal;
+                FinOpsTopAvgGrid.ItemsSource = topConsumers.ByAvg;
+            });
+            ViewerServerTab.ClientStep(timer, "database size chart bind", () =>
+            {
+                FinOpsDbSizeChart.ItemsSource = dbSizeSummary;
+                /* A server with no CPU sample in the window is stale or not collecting: its latest sizes can be days old, so the chart is
+                   hidden rather than shown as if they were current. */
+                FinOpsDbSizeChartGroup.Visibility = data.ShowsDatabaseSizeChart ? Visibility.Visible : Visibility.Collapsed;
+                /* The caption names only the databases that have a bar, so it is built from the list the chart is painted from. */
+                var chartCaption = DatabaseSizeRow.ChartCaption(dbSizes, dbSizeSummary.Select(b => b.DatabaseName));
+                FinOpsDbSizeChartCaption.Text = chartCaption ?? "";
+                FinOpsDbSizeChartCaption.Visibility = chartCaption is null ? Visibility.Collapsed : Visibility.Visible;
+            });
+            ViewerServerTab.ClientStep(timer, "provisioning trend bind", () => FinOpsProvisioningTrendGrid.ItemsSource = trend);
         }
         else
         {
@@ -251,6 +278,14 @@ public partial class FinOpsTab
             FinOpsDbSizeChartCaption.Visibility = Visibility.Collapsed;
             FinOpsProvisioningTrendGrid.ItemsSource = null;
         }
+    }
+
+    /// <summary>The provisioning trend: the display zone its days are counted in, then the trend read. The trend's days are counted in the selected time
+    /// display on this server's clock, as every other time on the page reads.</summary>
+    private async Task<List<ProvisioningTrendRow>> ReadProvisioningTrendAsync(ViewerLoadTimer? timer)
+    {
+        var dayZone = await ViewerServerTab.Timed(timer, "display zone read", _dataService.DisplayDayZoneAsync(_server.ServerId));
+        return await ViewerServerTab.Timed(timer, "provisioning trend read", _dataService.GetProvisioningTrendAsync(_server.ServerId, dayZone));
     }
 
     private void UpdateUtilizationSummary(UtilizationEfficiencyRow? data)

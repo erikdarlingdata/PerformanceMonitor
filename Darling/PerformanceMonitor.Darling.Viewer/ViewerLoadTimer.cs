@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Windows.Threading;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -95,6 +96,29 @@ public sealed class ViewerLoadTimer
         Action run = () => result = work();
         Step(step, run);
         return result!;
+    }
+
+    /// <summary>#8549: waits for the dispatcher to finish the layout and render pass the load's binds queued, and books the wait as the step
+    /// "layout and render". A grid's rows are measured and drawn after the load's own code has returned, at a lower priority than the code that set
+    /// the items, so a load's clock stopped before that pass and the first open of a tab with a big grid wrote no line for the seconds it took. It
+    /// waits at <see cref="DispatcherPriority.Background"/>, behind the render pass and ahead of idle work. Off the UI thread, or once the
+    /// dispatcher is shutting down, there is no pass to wait for and it returns at once.</summary>
+    internal async Task SettleLayoutAsync(Dispatcher dispatcher)
+    {
+        if (!dispatcher.CheckAccess() || dispatcher.HasShutdownStarted)
+        {
+            return;
+        }
+
+        var started = ElapsedMs;
+        try
+        {
+            await dispatcher.InvokeAsync(static () => { }, DispatcherPriority.Background);
+        }
+        finally
+        {
+            RecordStep("layout and render", ElapsedMs - started);
+        }
     }
 
     /// <summary>#8549: books a stretch of client work that ran before this clock could time it (a tab's construction) as <paramref name="step"/>.</summary>
@@ -200,12 +224,12 @@ public sealed class ViewerLoadTimer
     }
 
     /// <summary>#8549: stops the clock and writes the slow-load line to the Viewer log (the "SlowLoad" source the server tab's loads use) when
-    /// the load was slow. For a fleet tab, which has no inner-tab shell to do it. <paramref name="surface"/> names the tab.</summary>
-    internal void FinishAndLog(string surface)
+    /// the load was slow. For a fleet tab, which has no inner-tab shell to do it. <paramref name="surface"/> names the tab. A <paramref name="sink"/> takes the line in place of the log (a test reads it).</summary>
+    internal void FinishAndLog(string surface, Action<string>? sink = null)
     {
         if (Finish(surface) is { } slow)
         {
-            ViewerLogger.Warn("SlowLoad", slow);
+            (sink ?? (line => ViewerLogger.Warn("SlowLoad", line)))(slow);
         }
     }
 
