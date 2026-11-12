@@ -35,7 +35,7 @@ public sealed class McpToolGuideHeadsLongQueryTests
     /// genuinely quiet window and a collector that was off: never switched on, or switched off since. "Never enabled"
     /// was too narrow; a collector switched off yesterday leaves the last 24 hours empty too.</summary>
     private const string CollectorGateFact =
-        "Collector is opt-in, OFF by default: not_collected means it has never run for the server, empty means it ran and found none in the window";
+        "Collector is opt-in, OFF by default: not_collected means it never ran, empty means it ran and found none";
 
     [Fact]
     public void Head_CarriesThePageRankingTrap_TheCollectorGate_AndThePointer()
