@@ -515,7 +515,7 @@ public static class QueryStoreClutter
                     break;
                 case ReasonReadCostDominant when row.ReadCost is { } a:
                     lines.Add(
-                        $"This database was the slowest item on {RunsSlowestPct(a).ToString("0.#", culture)}% of the query_store collector's fan-out runs and held a median {a.SlowestSharePctP50.ToString("0.#", culture)}% of the pass when it was — one database owning the read, not a wide fan-out. The levers are the collector's, not the engine's: a per-database schedule override or a stagger on the query_store collector (get_collection_health's fanout block is the same evidence), and its Query Store catalog size (current_storage_size_mb, beside the plan count) says how much the read has to walk.");
+                        $"This database was the slowest item on {RunsSlowestPct(a).ToString("0.#", culture)}% of the query_store collector's fan-out runs and held a median {a.SlowestSharePctP50.ToString("0.#", culture)}% of the pass when it was. One database owning the read, not a wide fan-out. The levers are the collector's, not the engine's: a per-database schedule override or a stagger on the query_store collector (get_collection_health's fanout block is the same evidence), and its Query Store catalog size (current_storage_size_mb, beside the plan count) says how much the read has to walk.");
                     break;
                 case ReasonPlanChurnHigh when row.PlanChurn is { } b:
                     lines.Add(
@@ -525,7 +525,7 @@ public static class QueryStoreClutter
                     break;
                 case ReasonOneShotPlans when row.PlanChurn is { } b:
                     lines.Add(
-                        $"{(NeverSeenTwiceFraction(b) is { } f ? (100 * f).ToString("0.#", culture) : "?")}% of the plans observed in the window were seen under exactly one collection — plans that ran once and never again, the ad-hoc signature QUERY_CAPTURE_MODE = AUTO exists to keep out of the store. QUERY_CAPTURE_MODE: " + CaptureModeClause(row.Config));
+                        $"{(NeverSeenTwiceFraction(b) is { } f ? (100 * f).ToString("0.#", culture) : "?")}% of the plans observed in the window were seen under exactly one collection. Plans that ran once and never again, the ad-hoc signature QUERY_CAPTURE_MODE = AUTO exists to keep out of the store. QUERY_CAPTURE_MODE: " + CaptureModeClause(row.Config));
                     break;
                 case ReasonPlansAtCap when row.PlanChurn is { } b && row.Config is { } c2:
                     lines.Add(
@@ -583,21 +583,21 @@ public static class QueryStoreClutter
     {
         if (config is null)
         {
-            return "no query_store_health capture for this database inside the window, so the mode is unread here — get_query_store_health carries it.";
+            return "no query_store_health capture for this database inside the window, so the mode is unread here: get_query_store_health carries it.";
         }
 
         if (config.QueryCaptureMode is not { Length: > 0 } mode)
         {
-            return "the newest health capture for this database predates the V137 rung (#3796) that added the column, so the mode was never asked — it lands on the next hourly capture. Until then, read it on the target.";
+            return "the newest health capture for this database predates the V137 rung (#3796) that added the column, so the mode was never asked. It lands on the next hourly capture. Until then, read it on the target.";
         }
 
         return mode.ToUpperInvariant() switch
         {
-            "ALL" => "it is ALL, which captures every query the engine compiles — one-off ad hoc statements included — so on an ad hoc workload the churn above is the capture mode manufacturing it. AUTO is the fix (it was the engine default from SQL Server 2019 and on Azure SQL Database, and skips queries under the engine's own significance thresholds).",
+            "ALL" => "it is ALL, which captures every query the engine compiles (one-off ad hoc statements included), so on an ad hoc workload the churn above is the capture mode manufacturing it. AUTO is the fix (it was the engine default from SQL Server 2019 and on Azure SQL Database, and skips queries under the engine's own significance thresholds).",
             "AUTO" => "it is already AUTO, so the engine is already skipping insignificant queries and the churn above is the WORKLOAD: unique plans are arriving faster than the store forgets them. The levers left are the plan cap, the stale-query threshold, and the queries themselves.",
-            "CUSTOM" => "it is CUSTOM — AUTO with operator-set thresholds (the 2019+ capture_policy_* knobs, which this row does not collect, so CUSTOM says the thresholds were tuned and not to what). Read the policy on the target before blaming the workload.",
+            "CUSTOM" => "it is CUSTOM, which is AUTO with operator-set thresholds (the 2019+ capture_policy_* knobs, which this row does not collect, so CUSTOM says the thresholds were tuned and not to what). Read the policy on the target before blaming the workload.",
             "NONE" => "it is NONE, so no NEW query is being captured at all: the churn above is inside the queries the store already holds, and tightening the capture mode further cannot reduce it.",
-            _ => $"it is {mode}, which is not one of the four modes this view knows (ALL / AUTO / CUSTOM / NONE) — read it on the target rather than acting on this row.",
+            _ => $"it is {mode}, which is not one of the four modes this view knows (ALL / AUTO / CUSTOM / NONE). Read it on the target rather than acting on this row.",
         };
     }
 

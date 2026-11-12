@@ -406,10 +406,10 @@ public sealed class ScopedLoadOrderingTests
             /* Positive control, identical Regex form on the identical needle in a haystack where it does
                belong: the ledger IS used in this body, so a zero count from the keyed patterns below is a
                fact about the KEY rather than about the ledger being absent. */
-            Assert.Matches(new Regex(@"_loads\s*\.\s*(Claim|Superseded)\s*\("), body);
+            Assert.Matches(new Regex(@"_loads\s*\.\s*(Claim(?:Cancelling)?|Superseded)\s*\("), body);
 
             var keyed = Matches(body, Claim(site)).Count() + Checks(site, body).Count;
-            var any = Regex.Matches(body, @"_loads\s*\.\s*(?:Claim|Superseded)\s*\(").Count;
+            var any = Regex.Matches(body, @"_loads\s*\.\s*(?:Claim(?:Cancelling)?|Superseded)\s*\(").Count;
 
             Assert.True(
                 keyed == any,
@@ -446,7 +446,7 @@ public sealed class ScopedLoadOrderingTests
         Assert.Empty(UnguardedPaintsOf(body));
         /* The keyed count the claim/check pin takes: the one Superseded call inside the statement is the check, counted once. */
         Assert.Equal(
-            Regex.Matches(body, @"_loads\s*\.\s*(?:Claim|Superseded)\s*\(").Count,
+            Regex.Matches(body, @"_loads\s*\.\s*(?:Claim(?:Cancelling)?|Superseded)\s*\(").Count,
             Matches(body, Claim(s_synthetic)).Count() + Checks(s_synthetic, body).Count);
     }
 
@@ -600,7 +600,7 @@ public sealed class ScopedLoadOrderingTests
         @"\b[A-Z]\w*\s*\.\s*(?:ItemsSource|Text|Visibility|Content|IsEnabled|SelectedIndex|SelectedItem)";
 
     private static Regex Claim(Site site) =>
-        new(@"_loads\s*\.\s*Claim\s*\(\s*nameof\s*\(\s*" + Regex.Escape(site.Method) + @"\s*\)\s*\)");
+        new(@"_loads\s*\.\s*Claim(?:Cancelling)?\s*\(\s*nameof\s*\(\s*" + Regex.Escape(site.Method) + @"\s*\)\s*\)");
 
     /// <summary>One supersession check: <paramref name="Pos"/> is where the paints below it become protected (the start of a plain
     /// <c>if</c>, the end of the whole statement for the bind shape, whose <c>await</c> sits inside it);

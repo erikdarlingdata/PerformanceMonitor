@@ -101,14 +101,14 @@ public static partial class PgTargetAdvice
 
         var inv = new StringBuilder();
         inv.Append(CultureInfo.InvariantCulture,
-            $"Statement queryid {queryId} held {share * 100:0.#}% of the window's total statement execution time ({FormatMs(totalMs)} of {FormatMs(fact.Metadata.GetValueOrDefault("window_total_exec_ms"))}), across ");
+            $"Statement queryid {queryId} held {share * 100:#,##0.#}% of the window's total statement execution time ({FormatMs(totalMs)} of {FormatMs(fact.Metadata.GetValueOrDefault("window_total_exec_ms"))}), across ");
         inv.Append(CultureInfo.InvariantCulture, $"{calls:N0} {(calls == 1 ? "call" : "calls")}");
         if (hasRate)
-            inv.Append(CultureInfo.InvariantCulture, $" ({callsPerSec:0.##}/s over the time the collector's runs covered)");
+            inv.Append(CultureInfo.InvariantCulture, $" ({callsPerSec:#,##0.##}/s over the time the collector's runs covered)");
         if (hasMean)
-            inv.Append(CultureInfo.InvariantCulture, $", averaging {meanMs:0.#} ms per call");
+            inv.Append(CultureInfo.InvariantCulture, $", averaging {meanMs:#,##0.#} ms per call");
         if (hasMax)
-            inv.Append(CultureInfo.InvariantCulture, $" with a worst single execution of {maxMs:0.#} ms");
+            inv.Append(CultureInfo.InvariantCulture, $" with a worst single execution of {maxMs:#,##0.#} ms");
         inv.Append('.');
         if (hasPeakMem)
             inv.Append(CultureInfo.InvariantCulture, $" Peak executor memory for a single execution reached {FormatBytes(peakMemBytes)} (Aurora only, context, not a threshold).");
@@ -128,7 +128,7 @@ public static partial class PgTargetAdvice
         var rem = new StringBuilder();
         rem.Append(CultureInfo.InvariantCulture, $"total = calls × mean: {calls:N0}");
         rem.Append(hasMean
-            ? string.Format(CultureInfo.InvariantCulture, " × {0:0.#} ms.", meanMs)
+            ? string.Format(CultureInfo.InvariantCulture, " × {0:#,##0.#} ms.", meanMs)
             : " calls; the mean is unknown for this window.");
         rem.Append(LeversSentence());
 
@@ -189,7 +189,7 @@ public static partial class PgTargetAdvice
         var zeroHistory = IsZeroHistory(anomaly);
         var inv = new StringBuilder();
         inv.Append(CultureInfo.InvariantCulture,
-            $"Statement queryid {queryId} held {windowShare * 100:0.#}% of the window's total statement execution time. Its own normal is judged on its share of each collection's execution time, not on that window total: against {RoutineClause(anomaly)}, it {(zeroHistory ? $"was scored at the display cap ({AnomalyThresholds.SigmaDisplayCap:0.#}) on" : $"sat {Sigma(sigma)} times its usual variation above normal on")} the window's peak per-collection share ({peakShare * 100:0.#}%) and {(zeroHistory ? "on" : $"{Sigma(meanSigma)} times on")} its mean ({meanShare * 100:0.#}%)");
+            $"Statement queryid {queryId} held {windowShare * 100:#,##0.#}% of the window's total statement execution time. Its own normal is judged on its share of each collection's execution time, not on that window total: against {RoutineClause(anomaly)}, it {(zeroHistory ? $"was scored at the display cap ({AnomalyThresholds.SigmaDisplayCap:#,##0.#}) on" : $"sat {Sigma(sigma)} times its usual variation above normal on")} the window's peak per-collection share ({peakShare * 100:#,##0.#}%) and {(zeroHistory ? "on" : $"{Sigma(meanSigma)} times on")} its mean ({meanShare * 100:#,##0.#}%)");
         if (samples > 0)
             inv.Append(CultureInfo.InvariantCulture, $", over {samples:N0} baseline samples");
         inv.Append('.');
@@ -199,7 +199,7 @@ public static partial class PgTargetAdvice
             var calls = card.Metadata.GetValueOrDefault("calls");
             inv.Append(CultureInfo.InvariantCulture, $" The statement ran {calls:N0} {(calls == 1 ? "call" : "calls")}");
             if (card.Metadata.TryGetValue("mean_exec_ms", out var meanMs))
-                inv.Append(CultureInfo.InvariantCulture, $" averaging {meanMs:0.#} ms per call");
+                inv.Append(CultureInfo.InvariantCulture, $" averaging {meanMs:#,##0.#} ms per call");
             /* #8572: no pointer at a PG_BAD_ACTOR card or a drill-down here. The reply holds this anomaly finding and may hold neither of them,
                so a sentence that sends the reader to them can send them to nothing. */
             inv.Append(" this window.");
@@ -250,7 +250,7 @@ public static partial class PgTargetAdvice
         {
             case 2 when anomaly is not null && string.Equals(anomaly.ObjectName, queryId, StringComparison.Ordinal) && IsZeroHistory(anomaly):
                 return string.Format(CultureInfo.InvariantCulture,
-                    "This was scored at the display cap ({0:0.#}) against the statement's OWN hour-of-week normal ({1}), which is the grade (ANOMALY_PG_BAD_ACTOR_SHARE, walked into this card): the statement holds far more of the window than it usually holds of this hour.",
+                    "This was scored at the display cap ({0:#,##0.#}) against the statement's OWN hour-of-week normal ({1}), which is the grade (ANOMALY_PG_BAD_ACTOR_SHARE, walked into this card): the statement holds far more of the window than it usually holds of this hour.",
                     AnomalyThresholds.SigmaDisplayCap, RoutineClause(anomaly));
             case 2 when anomaly is not null && string.Equals(anomaly.ObjectName, queryId, StringComparison.Ordinal):
                 return string.Format(CultureInfo.InvariantCulture,
@@ -298,8 +298,8 @@ public static partial class PgTargetAdvice
            never used. Say what happened instead. */
         if (IsZeroHistory(anomaly))
             return string.Format(CultureInfo.InvariantCulture,
-                "its own routine of {0:0.#}% (it was never above zero at this hour-of-week, so no spread was measured)", centre * 100);
-        return string.Format(CultureInfo.InvariantCulture, "its own routine of {0:0.#}% ± {1:0.#}% for this hour-of-week", centre * 100, spread * 100);
+                "its own routine of {0:#,##0.#}% (it was never above zero at this hour-of-week, so no spread was measured)", centre * 100);
+        return string.Format(CultureInfo.InvariantCulture, "its own routine of {0:#,##0.#}% ± {1:#,##0.#}% for this hour-of-week", centre * 100, spread * 100);
     }
 
     /// <summary>The absolute share named for what it is on the measured population — context, never the grade.
@@ -336,8 +336,8 @@ public static partial class PgTargetAdvice
     private static string FormatMs(double ms) => ms switch
     {
         < 1_000 => string.Format(CultureInfo.InvariantCulture, "{0:0} ms", ms),
-        < 60_000 => string.Format(CultureInfo.InvariantCulture, "{0:0.#} s", ms / 1_000),
-        _ => string.Format(CultureInfo.InvariantCulture, "{0:0.#} min", ms / 60_000),
+        < 60_000 => string.Format(CultureInfo.InvariantCulture, "{0:#,##0.#} s", ms / 1_000),
+        _ => string.Format(CultureInfo.InvariantCulture, "{0:#,##0.#} min", ms / 60_000),
     };
 
     /// <summary>Bytes rendered at the scale a reader thinks in — the same MB/GB scale a memory grant is
@@ -346,7 +346,7 @@ public static partial class PgTargetAdvice
     private static string FormatBytes(double bytes) => bytes switch
     {
         < 1_048_576 => string.Format(CultureInfo.InvariantCulture, "{0:0} KB", bytes / 1_024),
-        < 1_073_741_824 => string.Format(CultureInfo.InvariantCulture, "{0:0.#} MB", bytes / 1_048_576),
-        _ => string.Format(CultureInfo.InvariantCulture, "{0:0.#} GB", bytes / 1_073_741_824),
+        < 1_073_741_824 => string.Format(CultureInfo.InvariantCulture, "{0:#,##0.#} MB", bytes / 1_048_576),
+        _ => string.Format(CultureInfo.InvariantCulture, "{0:#,##0.#} GB", bytes / 1_073_741_824),
     };
 }

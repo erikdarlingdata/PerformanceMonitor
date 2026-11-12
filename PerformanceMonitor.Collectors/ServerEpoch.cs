@@ -317,7 +317,7 @@ public static class ServerEpoch
             {
                 context.Deltas.ClearServer(
                     context.ServerId,
-                    "identity epoch changed — " + DescribeChange(replaced, current)
+                    "identity epoch changed. " + DescribeChange(replaced, current)
                     + ": every delta baseline and pass window for this server was forgotten, so this pass re-baselines "
                     + "and the next reports the first interval measured on the instance the connection now reaches");
                 /* What was observed, not the merge with the prior: the prior's components describe the OLD
@@ -361,7 +361,7 @@ public static class ServerEpoch
             var replaced = prior.GetValueOrDefault();
             context.Deltas.ClearGroups(
                 context.ServerId,
-                "pg_stat_statements epoch changed — stats_reset " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime)
+                "pg_stat_statements epoch changed: stats_reset " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime)
                 + ": the pg_statement_stats baselines and pass window were forgotten, so this pass re-baselines the "
                 + "family and the next reports the first interval measured against the reset counters",
                 groups);
@@ -429,7 +429,7 @@ public static class ServerEpoch
             var replaced = prior.GetValueOrDefault();
             context.Deltas.ClearGroups(
                 context.ServerId,
-                "postmaster epoch changed — pg_postmaster_start_time " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime)
+                "postmaster epoch changed: pg_postmaster_start_time " + Describe(replaced.StartTime) + " → " + Describe(current.StartTime)
                 + ": the pg_wait_stats baselines and pass window were forgotten, so this pass re-baselines the "
                 + "family and the next reports the first interval measured on the restarted instance",
                 groups);

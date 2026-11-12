@@ -834,7 +834,7 @@ public sealed class DarlingMcpHealthParserTools
     /// <see cref="Rows"/>. The id rides along for the #2511 engine-capability probe on the zero-row path —
     /// re-resolving the name there would be a second registry read, which could answer for a different server.</summary>
     private readonly record struct Collected<T>(
-        string? EarlyReturn, int ServerId, string ServerName, string DisplayName, List<T> Rows, int RawEventCount, DateTime? LastCapturedAt, DateTime WindowEnd, IReadOnlyDictionary<string, int>? NotificationCounts = null, string? HostOs = null);
+        string? EarlyReturn, int ServerId, string ServerName, string DisplayName, List<T> Rows, int RawEventCount, DateTime? LastCapturedAt, DateTime WindowEnd, IReadOnlyDictionary<string, int>? NotificationCounts = null, string? HostOs = null, bool AsOfNamed = false);
 
     /// <summary>
     /// Resolves the server, validates hours_back + as_of + limit, reads the raw event_xml for
@@ -887,7 +887,7 @@ public sealed class DarlingMcpHealthParserTools
             }
         }
 
-        return new Collected<T>(null, resolved.ServerId, resolved.ServerName, resolved.DisplayName, rows, xmls.Count, lastCapturedAt, now, HostOs: hostOs);
+        return new Collected<T>(null, resolved.ServerId, resolved.ServerName, resolved.DisplayName, rows, xmls.Count, lastCapturedAt, now, HostOs: hostOs, AsOfNamed: !string.IsNullOrWhiteSpace(asOf));
     }
 
     /* ─────────────────────────── the four nothings (#3541 A12) ─────────────────────────── */
@@ -924,6 +924,10 @@ public sealed class DarlingMcpHealthParserTools
         NpgsqlDataSource postgres, Collected<T> c, int hoursBack, string eventType, string noneQualifiedBecause,
         ILogger? logger = null, CancellationToken cancellationToken = default)
     {
+        /* CollectAsync resolved as_of inside its own async frame, so the anchor InTheLast reads did not come back to this one: an
+           as_of read said "in the last 168 hours" about a window that ended earlier. Set it again here, from what the read used. */
+        if (c.AsOfNamed) McpHelpers.AnchorAsOf(c.WindowEnd);
+
         /* The type-scoped probe runs on every rung: on rung 1 the type exists in the window so the backward
            index walk stops at its first row, and the stamp it returns is THIS type's newest capture rather
            than the server-level witness standing in for it. */
@@ -950,7 +954,7 @@ public sealed class DarlingMcpHealthParserTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"{CountText.Plural(c.RawEventCount, $"{eventType} event")} {(c.RawEventCount == 1 ? "was" : "were")} captured for {c.DisplayName} in the last {CountText.Plural(hoursBack, "hour")} and {noneQualifiedBecause}",
+                    factual: $"{CountText.Plural(c.RawEventCount, $"{eventType} event")} {(c.RawEventCount == 1 ? "was" : "were")} captured for {c.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))} and {noneQualifiedBecause}",
                     coveredClaim: ". Events ARE being captured, so this is the healthy answer for this read rather than missing data."),
                 sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: c.RawEventCount, hints: notice.AsHints(), notificationCounts: c.NotificationCounts);
         }
@@ -963,7 +967,7 @@ public sealed class DarlingMcpHealthParserTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice.WindowTruncated, notice.EffectiveStart,
-                    factual: $"No {eventType} events were captured for {c.DisplayName} in the last {CountText.Plural(hoursBack, "hour")}. This server has captured them before (the newest was stored at {Stamp(seen)})",
+                    factual: $"No {eventType} events were captured for {c.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}. This server has captured them before (the newest was stored at {Stamp(seen)})",
                     coveredClaim: ", so nothing happened in this window: widen hours_back to reach the most recent events."),
                 sourceObserved: true, c.LastCapturedAt, lastCapturedOfTypeAt: seen, eventsInWindow: 0,
                 hints: notice.AsHints()), cancellationToken, c.WindowEnd.AddHours(-hoursBack));

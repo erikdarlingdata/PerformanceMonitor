@@ -48,7 +48,7 @@
 import { keepScroll, refreshGridInPlace, replaceNodes } from "../refresh-in-place.js";
 import { keepLonePanelsWide } from "../panel-layout.js";
 import { el, mount, apiGet, apiGetFleet, setChartDataStart, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, localizeIsoText, storeHash, clampTileDetails } from "../util.js";
-import { getDatabaseFilter, hasDatabaseFilter, isRememberedPostgres, rememberEngine } from "../viewer-local.js";
+import { getDatabaseFilter, hasDatabaseFilter, isRememberedPostgres, rememberEngine, rememberedServerId, rememberServerId } from "../viewer-local.js";
 import { databaseFilterControl, databaseFilterUnavailable, closeDatabaseFilter } from "./database-filter.js";
 import { setPanelSignal } from "../panels.js";
 import { serverTabsFor, isPostgresTarget, findServerTab, tabNote } from "./server-tabs.js";
@@ -407,14 +407,40 @@ export function renderServer(main, server, tabId, opts) {
   /* #6310: a remembered card is reused for a tab click only while it is young. The charts re-read on every click, so an old card
      kept the header tiles (Deadlocks 0) behind a chart that already showed the event, for as long as the poll was slow or off. */
   if (!remembered || isPoll || rememberedCardIsStale(remembered, Date.now())) {
-    loadServerCard(server, (card, reason) => {
+    loadServerCard(server, (card, reason, found) => {
       /* A newer render has started since this fetch went out — everything below writes module state or mounts
          into nodes this render no longer owns, so the only correct thing to do with a stale answer is drop it. */
       if (generation !== renderGeneration) return;
 
+      /* #8741: the fleet answered, and no one server answers to the route's name. The read API refuses or guesses on such a name,
+         so the page says so and reads nothing, rather than drawing panels under a header it cannot fill. */
+      if (found && (found.kind === "none" || found.kind === "ambiguous")) {
+        lastCard.delete(server);
+        showUnknownServer(tabsSlot, gridNode, dot, unknownServerText(server, found));
+        beforeCard = false;
+        return;
+      }
+
+      /* #8741: the name matched one server only in part (or in another letter case). Open the page by that server's own name, as the
+         sidebar does: the card is kept under the new name so the render that follows paints at once, and the link is replaced, not
+         pushed, so Back does not return to the partial name. */
+      if (card && found && !found.canonical && found.kind !== "failed") {
+        const exactName = cardRouteName(card);
+        if (exactName && exactName !== server) {
+          lastCard.set(exactName, { card, reason, at: Date.now() });
+          rememberEngine(exactName, isPostgresTarget(card));
+          rememberServerId(exactName, card.server_id);
+          const next = storeHash("#/server/" + encodeURIComponent(exactName)) + (tabId ? "/" + encodeURIComponent(tabId) : "");
+          if (typeof history !== "undefined" && history.replaceState) history.replaceState(null, "", next);
+          window.dispatchEvent(new Event("hashchange"));
+          return;
+        }
+      }
+
       if (card) {
         lastCard.set(server, { card, reason, at: Date.now() });
         rememberEngine(server, isPostgresTarget(card));
+        rememberServerId(server, card.server_id);
       }
       fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason);
       fillDatabaseFilter(dbSlot, server, card);
@@ -437,10 +463,15 @@ export function renderServer(main, server, tabId, opts) {
 }
 
 /** Whether the page may start a server's panel reads before its fleet card arrives (#8554). Not for a server this browser has seen as
- *  PostgreSQL (its tab set is the other one), not for a tab only the PostgreSQL set has, and not while any database filter is saved:
- *  a filter is keyed by the card's server id, so reads sent without the card would be the unfiltered ones. */
+ *  PostgreSQL (its tab set is the other one), not for a tab only the PostgreSQL set has, and not while a database filter is saved and
+ *  this browser does not know the server's id: a filter is keyed by the card's server id, so reads sent without it would be the
+ *  unfiltered ones. The one fleet roll-up that gate waits for is the server's own store's, never the other stores' (#8554). */
 function mayStartBeforeCard(server, tabId) {
-  if (isRememberedPostgres(server) || hasDatabaseFilter()) return false;
+  if (isRememberedPostgres(server)) return false;
+  /* A saved filter is looked up by the card's server id. With the id this browser remembered for the server the filter is known now, so the
+     reads leave with it (or without one, when none is saved for it). With no remembered id the filter cannot be told from the route, and the
+     reads wait for the card of this server's own store, as before. */
+  if (hasDatabaseFilter() && rememberedServerId(server) === null) return false;
   return !tabId || serverTabsFor(null).some((t) => t.id === tabId);
 }
 
@@ -574,7 +605,9 @@ function redrawPanels() {
    card's id keys the choice, not the route's name, so a rename keeps it. */
 function applyDatabaseFilter() {
   const card = current.server ? (lastCard.get(current.server) || {}).card : null;
-  const databases = card && !isPostgresTarget(card) && card.server_id ? getDatabaseFilter(card.server_id) : [];
+  /* #8554: before the card is in, the id this browser remembered for the server stands in for it. */
+  const id = card ? card.server_id : current.server ? rememberedServerId(current.server) : null;
+  const databases = (!card || !isPostgresTarget(card)) && id ? getDatabaseFilter(id) : [];
   setActiveDatabaseFilter({ server: current.server, databases });
 }
 
@@ -677,16 +710,72 @@ function heldSpanMs(nowMs = Date.now()) {
 function loadServerCard(server, onCard) {
   (async () => {
     const res = await apiGetFleet();
-    if (res.kind !== "data") return onCard(null, null);
+    if (res.kind !== "data") return onCard(null, null, { kind: "failed" });
 
-    const matches = (c) => c.server_name === server || c.display_name === server;
-    const card = (res.data.cards || []).find(matches) || null;
+    /* A roll-up with no cards at all is a store that has not built its fleet yet, not proof that this server is unknown: like a failed
+       read it leaves the page as it is. */
+    if (!(res.data.cards || []).length) return onCard(null, null, { kind: "failed" });
+    const found = resolveFleetCard(res.data.cards, server);
+    const card = found.card;
     /* The reason belongs to the RANKING, not to the card, so it travels as its own value rather than being
        stapled onto the card object — and a server outside the ranking has none, which stays a null here
        rather than becoming a sentence invented in the browser. */
     const ranked = (res.data.worst_servers || []).find((w) => w.display_name === server);
-    onCard(card, ranked && ranked.reason ? ranked.reason : null);
+    onCard(card, ranked && ranked.reason ? ranked.reason : null, found);
   })();
+}
+
+/** The fleet card a route's server name answers to (#8741), by the rule the read API resolves a server_name with
+ *  (ServerNameMatcher.Match, a read): a single exact storage name, then every card whose storage or display name equals the name
+ *  ignoring case, then every card whose storage or display name contains it. One card answers; none is "none"; several is "ambiguous"
+ *  and carries them. `kind` is "exact" or "partial" for an answer, and `canonical` is true when the name is already the card's own
+ *  storage or display name (no link rewrite). */
+export function resolveFleetCard(cards, name) {
+  const want = String(name == null ? "" : name).trim();
+  if (!want) return { kind: "none", card: null, matches: [] };
+  const lower = want.toLowerCase();
+  const has = (value, test) => typeof value === "string" && test(value.toLowerCase());
+  const one = (kind, list) => ({ kind, card: list[0], matches: list, canonical: list[0].server_name === name || list[0].display_name === name });
+  const many = (list) => ({ kind: "ambiguous", card: null, matches: list });
+
+  const bySame = cards.filter((c) => c.server_name === want);
+  if (bySame.length === 1) return one("exact", bySame);
+  const byStored = cards.filter((c) => has(c.server_name, (v) => v === lower));
+  if (byStored.length === 1) return one("exact", byStored);
+
+  const exact = cards.filter((c) => has(c.server_name, (v) => v === lower) || has(c.display_name, (v) => v === lower));
+  if (exact.length === 1) return one("exact", exact);
+  if (exact.length > 1) return many(exact);
+
+  const partial = cards.filter((c) => has(c.server_name, (v) => v.includes(lower)) || has(c.display_name, (v) => v.includes(lower)));
+  if (partial.length === 1) return one("partial", partial);
+  if (partial.length > 1) return many(partial);
+  return { kind: "none", card: null, matches: [] };
+}
+
+/** The route name a card is opened by from the sidebar and the fleet page: its storage name, else its display name. */
+function cardRouteName(card) {
+  return card.server_name || card.display_name;
+}
+
+/** Replace the page's panels with the not-found sentence (#8741) and stop the reads that are out. Nothing is read for the name after this:
+ *  `current` is emptied, so a range or poll redraw has no server to read for. */
+function showUnknownServer(tabsSlot, grid, dot, text) {
+  if (panelAbort) panelAbort.abort();
+  setPanelSignal();
+  current = { server: null, tab: null };
+  gridKey = "";
+  dot.className = "dot";
+  if (grid) mount(grid, []);
+  mount(tabsSlot, el("div", { class: "strip error", role: "alert", text }));
+}
+
+/** The sentence for a route name that no single server answers to (#8741). The page draws it in place of the panels. */
+function unknownServerText(name, found) {
+  if (found.kind !== "ambiguous") return "No monitored server is named \"" + name + "\". Open one from the sidebar or the Fleet page.";
+  const names = found.matches.slice(0, 5).map((c) => c.display_name || c.server_name);
+  const more = found.matches.length > names.length ? " and " + (found.matches.length - names.length) + " more" : "";
+  return "\"" + name + "\" matches " + found.matches.length + " monitored servers (" + names.join(", ") + more + "). Open one from the sidebar or the Fleet page.";
 }
 
 /* The server header's title, status dot, band badge, engine badge and the WHY beneath them, all from the card above.

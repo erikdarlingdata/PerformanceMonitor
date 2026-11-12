@@ -1641,15 +1641,15 @@ public sealed partial class DarlingWorker
     internal static string DescribeRawPurgeNowOutcome(string outcome, TimescaleSupport.RawLastPurgeReadState readState) => outcome switch
     {
         "ran" => "The gated purge ran this pass.",
-        "not_covered" => "Held — the rollup does not yet cover the oldest rows.",
-        "hole" => "Held — a hole was found inside the range the gate would have dropped.",
-        "epoch_stale" => "Held — no materialization repair has finished under the current start yet.",
-        "gate_error" => "Held — the gate's own check failed partway through.",
-        "no_chunks" => "Nothing to purge — no chunks exist yet.",
-        "run_failed" => "Held — the gate passed, but the purge run itself failed.",
+        "not_covered" => "Held: the rollup does not yet cover the oldest rows.",
+        "hole" => "Held: a hole was found inside the range the gate would have dropped.",
+        "epoch_stale" => "Held: no materialization repair has finished under the current start yet.",
+        "gate_error" => "Held: the gate's own check failed partway through.",
+        "no_chunks" => "Nothing to purge: no chunks exist yet.",
+        "run_failed" => "Held: the gate passed, but the purge run itself failed.",
         _ => readState == TimescaleSupport.RawLastPurgeReadState.NeverWritten
-            ? "Held — a successor's materialization could not be resolved, or no purge pass has recorded an outcome for it yet."
-            : "Held — a successor's materialization could not be resolved, or the last outcome could not be read.",
+            ? "Held: a successor's materialization could not be resolved, or no purge pass has recorded an outcome for it yet."
+            : "Held: a successor's materialization could not be resolved, or the last outcome could not be read.",
     };
 
     /// <summary>

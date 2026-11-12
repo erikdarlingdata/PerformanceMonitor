@@ -1780,7 +1780,7 @@ AND   j.hypertable_name = '{relation}'", connection))
             }
 
             /* #8549: the hourly summary of job_history's categories the Job History Category list reads. After the collection log's pass and in
-               its own slice, for the same reason: its first passes after the upgrade backfill a day of history each, and a slow one must not
+               its own slice, for the same reason: its first passes after the upgrade backfill a few days of history each, and a slow one must not
                cancel the flushes above. A failed or canceled pass rolls its transaction back, so the coverage row never names rows the table
                does not hold, and the next pass retries; the list falls back to the raw read until the summary covers its window. */
             if (connection.State != ConnectionState.Open)

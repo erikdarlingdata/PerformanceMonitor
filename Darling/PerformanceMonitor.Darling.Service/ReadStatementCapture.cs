@@ -23,8 +23,9 @@ internal static class StatementLabel
 {
     internal const int MaxLabelLength = 120;
 
-    /// <summary>The first line that is not blank and not a <c>--</c> comment, trimmed and cut to
-    /// <see cref="MaxLabelLength"/> characters.</summary>
+    /// <summary>The statement's own first line: leading whitespace, <c>--</c> line comments and
+    /// <c>/* */</c> block comments are skipped (a product query often opens with a comment that explains it),
+    /// then the rest of that line is trimmed and cut to <see cref="MaxLabelLength"/> characters.</summary>
     internal static string Label(string? sql)
     {
         if (string.IsNullOrEmpty(sql))
@@ -32,18 +33,38 @@ internal static class StatementLabel
             return string.Empty;
         }
 
-        foreach (var raw in sql.Split('\n'))
+        var text = sql;
+        var i = 0;
+        while (i < text.Length)
         {
-            var line = raw.Trim();
-            if (line.Length == 0 || line.StartsWith("--", StringComparison.Ordinal))
+            if (char.IsWhiteSpace(text[i]))
             {
-                continue;
+                i++;
             }
-
-            return line.Length > MaxLabelLength ? line[..MaxLabelLength] : line;
+            else if (string.CompareOrdinal(text, i, "--", 0, 2) == 0)
+            {
+                var eol = text.IndexOf('\n', i);
+                i = eol < 0 ? text.Length : eol + 1;
+            }
+            else if (string.CompareOrdinal(text, i, "/*", 0, 2) == 0)
+            {
+                var close = text.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                i = close < 0 ? text.Length : close + 2;
+            }
+            else
+            {
+                break;
+            }
         }
 
-        return string.Empty;
+        if (i >= text.Length)
+        {
+            return string.Empty;
+        }
+
+        var end = text.IndexOf('\n', i);
+        var line = (end < 0 ? text.AsSpan(i) : text.AsSpan(i, end - i)).Trim().ToString();
+        return line.Length > MaxLabelLength ? line[..MaxLabelLength] : line;
     }
 
     /// <summary>Eight hex characters of the SHA-256 of the whole text: stable across runs and processes.</summary>

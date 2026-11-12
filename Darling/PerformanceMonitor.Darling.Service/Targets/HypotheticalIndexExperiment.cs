@@ -180,8 +180,8 @@ public static class HypotheticalIndexExperiment
             return new Result(
                 false, 0, 0, null, null, null,
                 $"This server is PostgreSQL {postgresMajorVersion}, and EXPLAIN (GENERIC_PLAN) arrived in "
-                + $"{MinimumPostgresMajorForGenericPlan}. Stored statement text is normalized — literals "
-                + "are $1, $2 — so without GENERIC_PLAN there is no way to plan it that does not involve "
+                + $"{MinimumPostgresMajorForGenericPlan}. Stored statement text is normalized: literals "
+                + "are $1, $2, so without GENERIC_PLAN there is no way to plan it that does not involve "
                 + "inventing parameter values, which would produce a plan for a query nobody ran. Refused "
                 + "rather than guessed.");
         }
@@ -260,7 +260,7 @@ public static class HypotheticalIndexExperiment
                 used
                     ? $"The planner WOULD use this index: estimated cost falls from {beforeText} to "
                       + $"{afterText}, a {savedText}% reduction. That is an ESTIMATE from the planner's own "
-                      + "cost model on this server's current statistics, not a measured runtime — no "
+                      + "cost model on this server's current statistics, not a measured runtime. No "
                       + "statement was run and no index was built."
                     : $"The planner would NOT use this index. The plan is unchanged at an estimated cost of "
                       + $"{beforeText}. This is a real answer rather than an inconclusive run: on this "

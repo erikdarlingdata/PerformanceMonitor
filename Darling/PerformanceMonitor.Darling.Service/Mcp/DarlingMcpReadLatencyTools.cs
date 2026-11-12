@@ -85,11 +85,11 @@ public sealed class DarlingMcpReadLatencyTools
         + "they finished. A cache miss is a read that ran, so it is in count. A route whose only rows are these shows count 0. "
         + "When the host admits long reads, admission is this service process's live state since it started (never stored): limit, "
         + "running, queued, and per route the reads admitted, queued, rejected, answered from the cache and missed by it. "
-        + "Rows stored before schema V182 read as band none with 0 for both. "
+        + "Older rows read as band none with 0 for both. "
         + "distinct_callers is the most different callers (MCP clients by name and version, web sessions by a salted hash that "
-        + "holds no personal data) that read the route in any one hour of the window, 0 on rows stored before schema V183. At most 1,000 are counted per hour; 1,000 means at least that many. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
+        + "holds no personal data) that read the route in any one hour of the window, 0 on older rows. At most 1,000 are counted per hour; 1,000 means at least that many. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
         + "both are optional and compose (AND) when both are given. Empty means no read was recorded for the "
-        + "window/filter, which on a fresh store, or one below schema V148, is the expected answer, not a "
+        + "window/filter, which on a fresh store, is the expected answer, not a "
         + "sign anything is broken. The page is capped at limit rows or the shared ~32 KB response budget, whichever cuts first: "
         + "truncated says either cut applied, reads_returned is the rows sent and reads_total the rows the window "
         + "held, so reads_total minus reads_returned were left out, always from the end of the order above. Raise "
@@ -122,10 +122,10 @@ public sealed class DarlingMcpReadLatencyTools
             var rows = await DarlingReadLatencyReader.GetSummaryAsync(postgres, since, surface, route, cancellationToken);
             if (rows.Count == 0)
             {
-                var emptyMessage = $"No read recorded in the last {CountText.Plural(hours, "hour")}" +
+                var emptyMessage = $"No read recorded {McpHelpers.InTheLast(CountText.Plural(hours, "hour"))}" +
                     (string.IsNullOrWhiteSpace(surface) && string.IsNullOrWhiteSpace(route) ? "" : " for that filter") +
-                    ". The service records an hourly histogram per (surface, route, outcome, window band); a store before " +
-                    "schema V148, or a quiet window, has no row.";
+                    ". The service records an hourly histogram per (surface, route, outcome, window band); a fresh store, " +
+                    "or a quiet window, has no row.";
 
                 /* #5506 part 3: rows flush hourly, so a quiet store window can still have long reads running or queued right
                    now; the empty answer carries the live admission object too, under hints. */

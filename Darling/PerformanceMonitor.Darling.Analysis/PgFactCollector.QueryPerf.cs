@@ -712,12 +712,7 @@ WITH plan_agg AS
         END AS rows_per_exec,
         MAX(last_exec) AS last_exec,
         bool_or(is_forced_plan) AS is_forced_plan,
-        MAX(force_failure_count) AS force_failure_count,
-        -- #5630: one plan_id per hash group, so the caller can read the two plans' compiled parameter values. The
-        -- group's newest-run plan stands for the latest group, its most-executed plan for the best group; ties
-        -- break on plan_id so the pick is the same on every read.
-        (array_agg(plan_id ORDER BY last_exec DESC, plan_id DESC))[1] AS newest_plan_id,
-        (array_agg(plan_id ORDER BY execs DESC, plan_id DESC))[1] AS busiest_plan_id
+        MAX(force_failure_count) AS force_failure_count
     FROM plan_agg
     /*SEC*/
     GROUP BY database_name, query_id, replica_role, query_plan_hash
@@ -775,9 +770,11 @@ compared AS
         -- #3953: when the best plan last ran, so the advice can state its age. The window reaches a full 14 days
         -- on both SKUs, so a best plan can be two weeks old.
         b.last_exec AS best_last_exec,
-        -- #5630: the plans to compare, and the key for the statement text.
-        l.newest_plan_id AS latest_plan_id,
-        b.busiest_plan_id AS best_plan_id
+        -- #5630: the two plans to compare are picked below, for the surviving candidates only (#8570). The two hash
+        -- groups and the replica carry the key for that pick.
+        l.replica_role,
+        l.query_plan_hash AS latest_hash,
+        b.query_plan_hash AS best_hash
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -812,6 +809,36 @@ candidates AS
     -- #7417: by the CPU the regression lost, the factor second. The first row leads the card and its force statement.
     ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
     LIMIT 100
+),
+latest_plan AS
+(
+    -- #5630: one plan_id per hash group, so the caller can read the two plans' compiled parameter values. The group's
+    -- newest-run plan stands for the latest group, its most-executed plan for the best group; ties break on plan_id so
+    -- the pick is the same on every read. #8570: picked here, from plan_agg, for the 100 candidates at most. It was an
+    -- ordered array_agg inside plan_dedup, which sorted and ran a per-group tuplesort for every hash group of the window
+    -- (113,000 on a busy primary) to keep 100. A candidate is one row per (database, query, replica), so DISTINCT ON
+    -- with the same ORDER BY returns the plan_id the aggregate returned, NULLs first on a DESC sort in both.
+    SELECT DISTINCT ON (c.database_name, c.query_id, c.replica_role)
+        c.database_name, c.query_id, c.replica_role, a.plan_id
+    FROM candidates AS c
+    JOIN plan_agg AS a
+      ON  a.database_name = c.database_name
+      AND a.query_id = c.query_id
+      AND a.replica_role IS NOT DISTINCT FROM c.replica_role
+      AND a.query_plan_hash = c.latest_hash
+    ORDER BY c.database_name, c.query_id, c.replica_role, a.last_exec DESC, a.plan_id DESC
+),
+best_plan AS
+(
+    SELECT DISTINCT ON (c.database_name, c.query_id, c.replica_role)
+        c.database_name, c.query_id, c.replica_role, a.plan_id
+    FROM candidates AS c
+    JOIN plan_agg AS a
+      ON  a.database_name = c.database_name
+      AND a.query_id = c.query_id
+      AND a.replica_role IS NOT DISTINCT FROM c.replica_role
+      AND a.query_plan_hash = c.best_hash
+    ORDER BY c.database_name, c.query_id, c.replica_role, a.execs DESC, a.plan_id DESC
 )
 SELECT
     c.query_id,
@@ -829,13 +856,21 @@ SELECT
     c.best_last_exec,
     -- #5630: appended for the same reason. The two plans to compare, then the statement text (the table is keyed
     -- on (server, database, query_id), so it cannot fan a row out).
-    c.latest_plan_id,
-    c.best_plan_id,
+    lp.plan_id AS latest_plan_id,
+    bp.plan_id AS best_plan_id,
     x.query_sql_text,
     -- #5631: appended for the same reason. Rows per call of the newer and the cheaper plan; NULL when unknown.
     c.latest_rows,
     c.best_rows
 FROM candidates AS c
+LEFT JOIN latest_plan AS lp
+  ON  lp.database_name = c.database_name
+  AND lp.query_id = c.query_id
+  AND lp.replica_role IS NOT DISTINCT FROM c.replica_role
+LEFT JOIN best_plan AS bp
+  ON  bp.database_name = c.database_name
+  AND bp.query_id = c.query_id
+  AND bp.replica_role IS NOT DISTINCT FROM c.replica_role
 LEFT JOIN query_store_text AS x
   ON  x.server_id = $1
   AND x.database_name = c.database_name

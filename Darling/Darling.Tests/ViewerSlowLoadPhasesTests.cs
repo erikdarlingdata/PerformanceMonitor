@@ -41,6 +41,54 @@ public sealed class ViewerSlowLoadPhasesTests
         Assert.Contains("[client steps: CPU lane draw 3500 ms, lane axis sync 700 ms]", line, StringComparison.Ordinal);
     }
 
+    private static long ClientWorkMs(string line)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(line, @"then (\d+) ms of client work");
+        Assert.True(m.Success, line);
+        return long.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    [Fact]
+    public async Task Finish_NamesAReadStillInFlight_AsStoppedByANewerPick_AndKeepsItsTimeOutOfClientWork()
+    {
+        /* #8549: a newer pick superseded a load while its read was running, and the load wrote its line then. The read's watcher had not
+           booked it, so the line left it out and counted its whole run as client work. */
+        var timer = new ViewerLoadTimer(0);
+        var read = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        timer.Track("job history read", read.Task);
+        await Task.Delay(400, TestContext.Current.CancellationToken);
+
+        timer.MarkSuperseded();
+        var line = timer.Finish("Job History");
+
+        Assert.NotNull(line);
+        Assert.Contains("job history read ", line, StringComparison.Ordinal);
+        Assert.Contains("(stopped by a newer pick)", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("no store phase timed", line, StringComparison.Ordinal);
+        Assert.True(ClientWorkMs(line) < 300, line);
+        read.SetCanceled();
+    }
+
+    [Fact]
+    public async Task Finish_NamesAReadTheNewerPickCancelled_AsStopped_WhicheverSideOfTheWatcherItLandsOn()
+    {
+        var timer = new ViewerLoadTimer(0);
+        using var cts = new System.Threading.CancellationTokenSource();
+        var read = Task.Delay(System.Threading.Timeout.Infinite, cts.Token);
+        timer.Track("job history read", read);
+        await Task.Delay(400, TestContext.Current.CancellationToken);
+
+        cts.Cancel();
+        await Assert.ThrowsAsync<TaskCanceledException>(() => read);
+        timer.MarkSuperseded();
+        var line = timer.Finish("Job History");
+
+        Assert.NotNull(line);
+        Assert.Contains("job history read ", line, StringComparison.Ordinal);
+        Assert.Contains("(stopped by a newer pick)", line, StringComparison.Ordinal);
+        Assert.True(ClientWorkMs(line) < 300, line);
+    }
+
     [Fact]
     public void Step_RunsTheWork_AndBooksItByName()
     {
@@ -331,6 +379,71 @@ public sealed class ViewerSlowLoadPhasesTests
         });
 
         Assert.Contains("layout and render", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void JobHistory_ALoad_BooksTheGridRead_AndEachChoicesRead_OnItsOwn()
+    {
+        var port = FreePort();
+        string? line = null;
+        List<string> booked = new();
+        RunThemed(async () =>
+        {
+            var tab = new JobHistoryTab();
+            tab.Initialize(new ViewerDataService(ClosedStore(port)));
+            var window = new Window { Content = tab, Width = 1200, Height = 800 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                var timer = SlowClock();
+                await tab.RefreshJobsAsync(timer);
+                booked = await PhasesAsync(timer, 4);
+                line = timer.Finish("Job History");
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        /* The Category list read is what took 21 s in the field and wrote no line: it is booked apart from the grid's read and the server list. */
+        foreach (var phase in new[] { "job history read", "category choices read", "server choices read", "data start read" })
+        {
+            Assert.True(booked.Contains(phase), "got " + string.Join(",", booked) + " want " + phase);
+        }
+
+        Assert.NotNull(line);
+        Assert.Contains("slow load: Job History", line, StringComparison.Ordinal);
+        Assert.Contains("category choices read", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void JobHistory_AFirstOpen_CountsTheWait_AndWritesOneLine()
+    {
+        var port = FreePort();
+        var lines = new List<string>();
+        RunThemed(async () =>
+        {
+            var tab = new JobHistoryTab { FirstOpenSlowThresholdMs = 0, SlowLoadSink = lines.Add };
+            tab.Initialize(new ViewerDataService(ClosedStore(port)));
+            var window = new Window { Content = tab, Width = 1200, Height = 800 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                tab.BeginFirstOpen();
+                await Task.Delay(150);
+                tab.FirstOpenRefreshStarted();
+                await tab.RefreshJobsAsync();
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        var line = Assert.Single(lines);
+        Assert.Contains("slow load: first open > Job History", line, StringComparison.Ordinal);
+        Assert.Contains("waited for the shell to start this refresh", line, StringComparison.Ordinal);
     }
 
     private static int FreePort()

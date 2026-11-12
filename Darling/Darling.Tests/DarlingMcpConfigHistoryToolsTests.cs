@@ -277,7 +277,7 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
             "wait_stats_capture_mode ON (the default) records per-plan wait statistics",
             "OFF saves both",
             "*_desc spelling verbatim",
-            "null means the row predates the V137 rung or, for wait_stats_capture_mode, the engine is older than SQL Server 2017",
+            "null means the row was written by a build that did not record it or, for wait_stats_capture_mode, the engine is older than SQL Server 2017",
             "never OFF",
             "Consumed by the Viewer's Query Store grid",
             /* #3898 D4: the issue ref that used to sit after this tool name came off the wire (head and tail

@@ -131,57 +131,45 @@ grants AS (
     AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before id 1 was collected */
     GROUP BY server_id
 ),
-/* The latest size-snapshot TIME per server (LATERAL LIMIT 1, indexed descent), shared by storage_totals
-   (sums every database at that instant) and latest_dbs (the idle check's known-databases universe) so
-   neither re-derives it. */
-size_latest AS (
+/* #8570: the newest size snapshot of every server, read ONCE. Its rows are the totals (storage_totals) and the idle check's known-databases
+   universe (latest_dbs). The snapshot's time is not known when the statement is planned (it comes from each server's own newest row), so
+   no chunk can be dropped at plan time: every reference to the hypertable plans every chunk of the size history, and the ones above the
+   newest snapshot are only skipped while it runs. This read used to name the table three times (the newest time, then the totals and the
+   databases each joined back on that time), 133 chunks each on a store with 133 days of history. FETCH FIRST 1 ROW WITH TIES returns every row
+   that ties the newest collection_time of the server, which is exactly the rows an equality on that time returned, from one reference. The
+   per-server LATERAL keeps the descent through the (server_id, collection_time) index, newest chunk first, as the old probe did. */
+latest_size AS MATERIALIZED (
     SELECT
         s.server_id,
-        latest_time.collection_time
+        newest.database_name,
+        newest.total_size_mb,
+        newest.used_size_mb
     FROM servers s
     CROSS JOIN LATERAL (
-        SELECT collection_time
-        FROM v_database_size_stats
-        WHERE server_id = s.server_id
-        ORDER BY collection_time DESC
-        LIMIT 1
-    ) AS latest_time
+        SELECT d.database_name, d.total_size_mb, d.used_size_mb
+        FROM v_database_size_stats d
+        WHERE d.server_id = s.server_id
+        ORDER BY d.collection_time DESC
+        FETCH FIRST 1 ROW WITH TIES
+    ) AS newest
 ),
-/* #8570: both reads of the newest snapshot probe v_database_size_stats once per server, by (server_id, collection_time), in a LATERAL. A plain
-   JOIN on the snapshot time was planned as a hash join that read EVERY chunk of the table (twice, once here and once for latest_dbs), so the
-   read grew with the size-history retention instead of with the 42 snapshots it needs. The aggregate / DISTINCT inside each LATERAL keeps the
-   planner from folding it back into a join. Same rows as the join: the snapshot time came from a row of this table, so each server has one. */
 storage_totals AS (
     SELECT
-        sl.server_id,
-        t.total_storage_gb,
-        t.alloc_mb,
-        t.free_mb
-    FROM size_latest sl
-    CROSS JOIN LATERAL (
-        SELECT
-            SUM(vd.total_size_mb) / 1024.0 AS total_storage_gb,
-            /* The allocated and free totals the Utilization view scores storage from (FinOpsUtilizationFigures.LatestStorageTotalsSql) at the same
-               newest snapshot: a row with no total adds nothing to either, a row with no used size has no free space. */
-            COALESCE(SUM(vd.total_size_mb), 0) AS alloc_mb,
-            COALESCE(SUM(CASE WHEN vd.total_size_mb IS NOT NULL AND vd.used_size_mb IS NOT NULL THEN vd.total_size_mb - vd.used_size_mb END), 0) AS free_mb
-        FROM v_database_size_stats vd
-        WHERE vd.server_id = sl.server_id
-        AND   vd.collection_time = sl.collection_time
-    ) AS t
+        ls.server_id,
+        SUM(ls.total_size_mb) / 1024.0 AS total_storage_gb,
+        /* The allocated and free totals the Utilization view scores storage from (FinOpsUtilizationFigures.LatestStorageTotalsSql) at the same
+           newest snapshot: a row with no total adds nothing to either, a row with no used size has no free space. */
+        COALESCE(SUM(ls.total_size_mb), 0) AS alloc_mb,
+        COALESCE(SUM(CASE WHEN ls.total_size_mb IS NOT NULL AND ls.used_size_mb IS NOT NULL THEN ls.total_size_mb - ls.used_size_mb END), 0) AS free_mb
+    FROM latest_size ls
+    GROUP BY ls.server_id
 ),
 latest_dbs AS (
-    SELECT
-        sl.server_id,
-        vd.database_name
-    FROM size_latest sl
-    CROSS JOIN LATERAL (
-        SELECT DISTINCT d.database_name
-        FROM v_database_size_stats d
-        WHERE d.server_id = sl.server_id
-        AND   d.collection_time = sl.collection_time
-        AND   d.database_name NOT IN ('master', 'model', 'msdb', 'tempdb', 'PerformanceMonitor')
-    ) AS vd
+    SELECT DISTINCT
+        ls.server_id,
+        ls.database_name
+    FROM latest_size ls
+    WHERE ls.database_name NOT IN ('master', 'model', 'msdb', 'tempdb', 'PerformanceMonitor')
 ),
 active_dbs AS (
     SELECT DISTINCT server_id, database_name

@@ -1109,6 +1109,10 @@ public partial class MainWindow : Window
         {
             FinOpsContent.BeginFirstOpen();
         }
+        else if (ReferenceEquals(MainTabs.SelectedItem, JobHistoryTabItem))
+        {
+            JobHistoryContent.BeginFirstOpen();
+        }
 
         await RefreshVisibleAsync();
         /* The status bar's collector-health scope flips with the active tab (a per-server tab shows that
@@ -1351,6 +1355,7 @@ public partial class MainWindow : Window
                     await AlertsHistoryContent.RefreshAlertsAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, JobHistoryTabItem):
+                    JobHistoryContent.FirstOpenRefreshStarted();
                     await JobHistoryContent.RefreshJobsAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, DatabaseProtectionTabItem):

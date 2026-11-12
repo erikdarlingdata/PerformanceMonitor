@@ -471,7 +471,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         Assert.Contains("the STORE winning", read, StringComparison.Ordinal);
         Assert.Contains("analysis.uncorroborated_route_source", read, StringComparison.Ordinal);
         Assert.Contains("'store', 'file' or 'default'", read, StringComparison.Ordinal);
-        Assert.Contains("analysis.uncorroborated_route is WRITABLE since V137", write, StringComparison.Ordinal);
+        Assert.Contains("analysis.uncorroborated_route is WRITABLE", write, StringComparison.Ordinal);
         Assert.Contains("null CLEARS the column", write, StringComparison.Ordinal);
         Assert.Contains("uncorroborated_route_source", write, StringComparison.Ordinal);
         foreach (var description in new[] { read, write })

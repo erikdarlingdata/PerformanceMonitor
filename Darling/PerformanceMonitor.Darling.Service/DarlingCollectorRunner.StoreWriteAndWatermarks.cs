@@ -468,7 +468,7 @@ public sealed partial class DarlingCollectorRunner
     /// </summary>
     internal const string StoreWriteReattemptLogTemplate =
         "{Collector} on '{Server}': the store write of {Rows} row(s) failed on a transport fault " +
-        "({Message}) — re-attempting once on a fresh store connection (#3099). The batch is still in " +
+        "({Message}). Re-attempting once on a fresh store connection. The batch is still in " +
         "memory and nothing was committed, so a successful re-attempt costs no sample.";
 
     /// <summary>
@@ -512,7 +512,7 @@ public sealed partial class DarlingCollectorRunner
     /// for replay, and the note is what keeps a failing apply visible on a cycle that otherwise reads as a success.
     /// </summary>
     internal const string QueryStoreIntervalMissNoteFormat =
-        "{0} Query Store batch(es) this cycle stored their raw rows but missed the interval table (#3953); they are " +
+        "{0} Query Store batch(es) this cycle stored their raw rows but missed the interval table; they are " +
         "queued for replay, and PLAN_REGRESSION reads raw for this server until they apply";
 
     /// <summary><see cref="QueryStoreIntervalMissNoteFormat"/> parsed once (CA1863).</summary>

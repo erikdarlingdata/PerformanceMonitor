@@ -503,7 +503,7 @@ public sealed class DarlingMcpPgTableBloatTools
                 "empty",
                 McpHelpers.QuietUnlessCut(
                     notice is { IsUnavailable: false, WindowTruncated: true }, notice.EffectiveStart,
-                    factual: $"No tables were recorded for {serverName} in the last {CountText.Plural(hoursBack, "hour")} even though "
+                    factual: $"No tables were recorded for {serverName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))} even though "
                         + "collection ran. Every table on every collected database is under the collector's 1 MB "
                         + "floor, below which bloat is not an actionable amount of space",
                     coveredClaim: ". That is a genuine all-clear rather than missing data."),
@@ -513,7 +513,7 @@ public sealed class DarlingMcpPgTableBloatTools
         return await DarlingServerOfflineNote.UnavailableAsync(
             postgres, serverId, serverName,
             probe.RowsEver > 0
-                ? $"No bloat snapshots were collected for {serverName} in the last {CountText.Plural(hoursBack, "hour")}, so "
+                ? $"No bloat snapshots were collected for {serverName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}, so "
                 + "the window says nothing either way. Collection HAS run for this server outside the "
                 + "window: widen hours_back, or use get_collection_health to find where it stopped."
                 : $"No bloat snapshots have EVER been collected for {serverName}, so there is nothing to "

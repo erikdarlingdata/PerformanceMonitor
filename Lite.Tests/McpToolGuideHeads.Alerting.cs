@@ -114,7 +114,7 @@ public sealed class McpToolGuideHeadsAlertingTests
         Assert.Contains("it does NOT report the email or webhook outcome", tail, StringComparison.Ordinal);
         Assert.Contains("On this edition an alert that was dismissed AFTER aging into the parquet archive is removed by the archive view itself", tail, StringComparison.Ordinal);
         Assert.Contains("severity_source says where it came from", tail, StringComparison.Ordinal);
-        Assert.Contains("routing is the corroboration gate's decision for an 'Analysis", tail, StringComparison.Ordinal);
+        Assert.Contains("routing is the corroboration gate's decision for an Analysis finding", tail, StringComparison.Ordinal);
         Assert.Contains("Dismissal is an acknowledgement, not a verdict", tail, StringComparison.Ordinal);
         Assert.DoesNotContain("(#3712)", tail, StringComparison.Ordinal);
     }

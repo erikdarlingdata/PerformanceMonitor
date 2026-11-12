@@ -489,6 +489,32 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
+    public async Task AReSightingWithinTheHour_AddsToTheCount_AndLeavesLastSeenAlone()
+    {
+        Sight(Snapshot(HashA));
+        await SetLastSeenAsync(HashA, DateTime.UtcNow.AddMinutes(-10));
+        var before = await CountAsync($"SELECT epoch_us(last_seen) FROM query_tag_sightings WHERE key = '{HashA}'");
+
+        Sight(Snapshot(HashA));
+
+        Assert.Equal(before, await CountAsync($"SELECT epoch_us(last_seen) FROM query_tag_sightings WHERE key = '{HashA}'"));
+        Assert.Equal(2L, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashA}'"));
+    }
+
+    [Fact]
+    public async Task AReSightingOfARowOverAnHourOld_MovesLastSeen()
+    {
+        Sight(Snapshot(HashA));
+        await SetLastSeenAsync(HashA, DateTime.UtcNow.AddHours(-2));
+        var before = await CountAsync($"SELECT epoch_us(last_seen) FROM query_tag_sightings WHERE key = '{HashA}'");
+
+        Sight(Snapshot(HashA));
+
+        Assert.True(await CountAsync($"SELECT epoch_us(last_seen) FROM query_tag_sightings WHERE key = '{HashA}'") > before + 3_600_000_000L);
+        Assert.Equal(2L, await CountAsync($"SELECT seen_count FROM query_tag_sightings WHERE key = '{HashA}'"));
+    }
+
+    [Fact]
     public async Task WhileTheV71MigrationIsHeldBack_TheFlushWritesNothing_AndWarnsOnce()
     {
         await WithV70Async(async dbPath =>

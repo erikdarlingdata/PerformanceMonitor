@@ -12,6 +12,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -125,6 +126,209 @@ public sealed class ViewerFirstOpenSlowLoadTests
         });
 
         Assert.DoesNotContain(lines, l => l.Contains("server tab first open", StringComparison.Ordinal));
+    }
+
+    /* A later refresh (a sub-tab pick, a range change, the auto-refresh tick) runs the same reads as the first open does. The server clock,
+       data start and collection interval reads run before its sub-tab's load, on that refresh's clock too, so its line names them and its
+       total counts them. The freshness and permission-count reads run beside the load, and the line names one only when it ended before
+       the load did, so neither is asked for here. The first open here writes nothing (its threshold is out of reach), so the one line is
+       the later refresh's. */
+    [Fact]
+    public void ASlowReadBeforeTheSubTabsLoad_IsNamedInALaterRefreshsSlowLoadLine()
+    {
+        var lines = new List<string>();
+        RunThemed(async () =>
+        {
+            using var silent = new TcpListener(IPAddress.Loopback, 0);
+            silent.Start();
+            var port = ((IPEndPoint)silent.LocalEndpoint).Port;
+            var tab = new ViewerServerTab(
+                new ViewerDataService($"Host=127.0.0.1;Port={port};Database=darling;Username=darling;Timeout=1"),
+                new DarlingServer(10, "later-refresh-host.invalid", "later-refresh-alias", true, null))
+            {
+                FirstOpenSlowThresholdMs = 600_000,
+                SlowLoadSink = lines.Add,
+            };
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                tab.BeginFirstOpen();
+                await tab.RefreshActiveInnerTabAsync();
+                lines.Clear();
+                await tab.RefreshActiveInnerTabAsync();
+            }
+            finally
+            {
+                window.Close();
+                silent.Stop();
+            }
+        });
+
+        var line = Assert.Single(lines);
+        Assert.Contains("[later-refresh-alias]", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("server tab first open", line, StringComparison.Ordinal);
+        Assert.Contains("server clock read ", line, StringComparison.Ordinal);
+        Assert.Contains("server data start read ", line, StringComparison.Ordinal);
+        Assert.Contains("collection interval read ", line, StringComparison.Ordinal);
+    }
+
+    /* A refresh asked for while a sub-tab's load runs is queued, and loads when that one ends. Its clock starts at the ask, so the wait
+       behind the load in flight is in its line by name. The store here tells the test each time a read reaches it, and the test asks for
+       a refresh at every one until the first load's line is written: an ask that lands before the load begins is served by that load,
+       and the first one after it is the queued refresh's start. Two lines follow, the first open's and the queued refresh's. */
+    [Fact]
+    public void ARefreshAskedForWhileALoadRuns_BooksItsWaitInItsOwnSlowLoadLine()
+    {
+        var lines = new List<string>();
+        RunThemed(async () =>
+        {
+            using var silent = new TcpListener(IPAddress.Loopback, 0);
+            silent.Start();
+            var port = ((IPEndPoint)silent.LocalEndpoint).Port;
+            var asking = true;
+            var tab = new ViewerServerTab(
+                new ViewerDataService($"Host=127.0.0.1;Port={port};Database=darling;Username=darling;Timeout=1"),
+                new DarlingServer(11, "queued-refresh-host.invalid", "queued-refresh-alias", true, null))
+            {
+                /* Zero makes the first open write its line, which is when the test stops asking. */
+                FirstOpenSlowThresholdMs = 0,
+                SlowLoadSink = line =>
+                {
+                    asking = false;
+                    lines.Add(line);
+                },
+            };
+            var held = new List<TcpClient>();
+
+            async Task AskAtEveryReadAsync()
+            {
+                while (true)
+                {
+                    TcpClient? client = null;
+                    try
+                    {
+                        client = await silent.AcceptTcpClientAsync();
+                    }
+                    catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
+                    {
+                        /* The listener closed at the test's end: no more reads to answer. */
+                    }
+
+                    if (client is null)
+                    {
+                        break;
+                    }
+
+                    held.Add(client);
+                    if (asking)
+                    {
+                        await tab.RefreshActiveInnerTabAsync();
+                    }
+                }
+            }
+
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                tab.BeginFirstOpen();
+                var first = tab.RefreshActiveInnerTabAsync();
+                var asks = AskAtEveryReadAsync();
+                await first;
+                silent.Stop();
+                await asks;
+            }
+            finally
+            {
+                window.Close();
+                silent.Stop();
+                foreach (var client in held)
+                {
+                    client.Dispose();
+                }
+            }
+        });
+
+        Assert.Contains(lines, l => l.Contains("server tab first open", StringComparison.Ordinal));
+        var queued = Assert.Single(lines, l => !l.Contains("server tab first open", StringComparison.Ordinal));
+        Assert.Contains("[queued-refresh-alias]", queued, StringComparison.Ordinal);
+        Assert.Contains("waited for the refresh in flight ", queued, StringComparison.Ordinal);
+    }
+
+    /* The freshness readout and the permission-denied count feed the tab's header, not the sub-tab's load, so a slow one does not hold
+       the load back. The store here never answers, so each read is out until its one-second timeout. The sub-tab is the Plan Viewer,
+       whose load reads nothing and stamps at once: the stamp arrives while the freshness read is still out, so the readout still shows
+       what it showed before the refresh. The read then gives up and blanks the readout, and the refresh returns only after that. The
+       line the load writes names the reads that ended before it did, and neither of the two still out. */
+    [Fact]
+    public void ASlowFreshnessOrPermissionCountRead_DoesNotHoldBackTheSubTabsLoad()
+    {
+        const string before = "collected before this refresh";
+        var lines = new List<string>();
+        string? readoutAtTheStamp = null;
+        string? readoutAfterTheRefresh = null;
+        RunThemed(async () =>
+        {
+            using var silent = new TcpListener(IPAddress.Loopback, 0);
+            silent.Start();
+            var port = ((IPEndPoint)silent.LocalEndpoint).Port;
+            var tab = new ViewerServerTab(
+                new ViewerDataService($"Host=127.0.0.1;Port={port};Database=darling;Username=darling;Timeout=1"),
+                new DarlingServer(12, "beside-load-host.invalid", "beside-load-alias", true, null))
+            {
+                /* Zero makes the first open write its line when the sub-tab's load ends. */
+                FirstOpenSlowThresholdMs = 0,
+                SlowLoadSink = lines.Add,
+            };
+            var readout = (TextBlock)tab.FindName("ServerFreshnessText");
+            ((TabControl)tab.FindName("InnerTabs")).SelectedIndex = ViewerServerTab.PlanViewerInnerTabIndex;
+            readout.Text = before;
+            tab.StatusChanged += status =>
+            {
+                if (status.Contains(": refreshed ", StringComparison.Ordinal))
+                {
+                    readoutAtTheStamp ??= readout.Text;
+                }
+            };
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                tab.BeginFirstOpen();
+                await tab.RefreshActiveInnerTabAsync();
+                readoutAfterTheRefresh = readout.Text;
+            }
+            finally
+            {
+                window.Close();
+                silent.Stop();
+            }
+        });
+
+        Assert.Equal(before, readoutAtTheStamp);
+        Assert.Equal(string.Empty, readoutAfterTheRefresh);
+        var line = Assert.Single(lines);
+        Assert.Contains("server clock read ", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("server freshness read", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("permission denied count read", line, StringComparison.Ordinal);
+    }
+
+    /* A read that runs beside a load is booked when it ends. One that ended while the load ran is on the load's line with its own time.
+       One still out when the load ends is not on the line. */
+    [Fact]
+    public void AReadBesideTheLoad_IsOnItsSlowLoadLine_OnlyWhenItEndedBeforeTheLoadDid()
+    {
+        var timer = new ViewerLoadTimer(slowThresholdMs: 0);
+        var stillOut = new TaskCompletionSource();
+        Assert.Same(Task.CompletedTask, ViewerServerTab.Timed(timer, "server freshness read", Task.CompletedTask));
+        Assert.Same(stillOut.Task, ViewerServerTab.Timed(timer, "permission denied count read", stillOut.Task));
+        var line = timer.Finish("Overview");
+        stillOut.SetResult();
+
+        Assert.NotNull(line);
+        Assert.Contains("server freshness read ", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("permission denied count read", line, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -442,7 +442,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             {
                 return McpHelpers.Status(
                     "empty",
-                    $"No Query Store capture on {serverName} in the last {CountText.Plural(hours_back, "hour")} or in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline before it matched {scope}, so the filter matched nothing and this is NOT the all-clear: no query in {that} was compared. Check the database {(one ? "name" : "names")}, or drop the filter to read every database.",
+                    $"No Query Store capture on {serverName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))} or in the {DarlingQueryStoreRegressionReader.BaselineLookbackDays}-day baseline before it matched {scope}, so the filter matched nothing and this is NOT the all-clear: no query in {that} was compared. Check the database {(one ? "name" : "names")}, or drop the filter to read every database.",
                     notice.AsHints());
             }
 
@@ -468,7 +468,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
             "empty",
             McpHelpers.QuietUnlessCut(
                 notice.WindowTruncated, notice.EffectiveStart,
-                factual: $"No query on {serverName} regressed in the last {CountText.Plural(hours_back, "hour")}. Both a baseline and this window were collected and no query's Regular average CPU is more than 25% worse than its baseline with at least 1 s of added CPU, and none of their timeouts or errors rose",
+                factual: $"No query on {serverName} regressed {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}. Both a baseline and this window were collected and no query's Regular average CPU is more than 25% worse than its baseline with at least 1 s of added CPU, and none of their timeouts or errors rose",
                 coveredClaim: ": this is the all-clear for this read."),
             notice.AsHints());
     }

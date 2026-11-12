@@ -36,6 +36,9 @@ export const KEY_VIEW_GROUPS = "darling.local.viewGroups.v1";
 /** The PostgreSQL servers this browser has opened (#8554), as hashes of the route's server name (a name is never stored): the server page
  *  starts a server's first reads before its fleet card arrives, on the SQL Server tabs, unless the server is in this set. */
 export const KEY_PG_SERVERS = "darling.local.pgServers.v1";
+/** The server id a fleet card gave each server this browser has opened (#8554), by hash of the route's server name (a name is never stored).
+ *  A saved database filter is keyed by that id, so with it the server page can apply the filter before the card arrives. */
+export const KEY_SERVER_IDS = "darling.local.serverIds.v1";
 /** The collapsed sidebar groups of ONE store at a front door (#6840), under this key plus "/" and the store's name. A tag id is
  *  handed out by each store on its own, so tag 5 in one store is not tag 5 in another. Server ids are not scoped this way: they
  *  are a hash of the server's name, the same server has the same id in every store, and favourites, acknowledgements and the
@@ -51,6 +54,7 @@ export const MAX_DB_NAME_LENGTH = 128;
 export const MAX_DB_QUERY_BYTES = 4096;
 const DB_PAIR_OVERHEAD = "&database_name=".length;
 const MAX_PG_SERVERS = 500;
+const MAX_SERVER_IDS = 500;
 
 /** The severities with a colour choice, in the order the settings list them, and the palette each falls back to. */
 export const SEVERITIES = ["critical", "warning", "info"];
@@ -84,6 +88,7 @@ let dbFilters = new Map(); // server_id -> the chosen database names (1 to MAX_D
 let viewGroups = new Set(); // collapsed Custom Views sidebar groups (#6214): "my", or "folder:" + the folder's name
 let sidebarGroups = new Set(); // collapsed sidebar groups: tag ids, plus the fixed ids "favourites" and "untagged"
 let pgServers = new Set(); // hashes of the route names of servers a fleet card called PostgreSQL (#8554), oldest first
+let serverIds = new Map(); // hash of the route's server name -> the server id its fleet card gave (#8554), oldest first
 let storeScope = null; // the front door's picked store, or null (store mode: the keys are what they always were)
 let attention = new Map(); // server_id -> { count, critical, latestMs } from the last alert read
 const listeners = new Set();
@@ -180,6 +185,14 @@ export function reload() {
 
   const pg = readJson(KEY_PG_SERVERS);
   pgServers = new Set(pg && Array.isArray(pg.hashes) ? pg.hashes.filter(Number.isInteger).slice(-MAX_PG_SERVERS) : []);
+
+  serverIds = new Map();
+  const si = readJson(KEY_SERVER_IDS);
+  if (si && Array.isArray(si.ids)) {
+    for (const pair of si.ids.slice(-MAX_SERVER_IDS)) {
+      if (Array.isArray(pair) && Number.isInteger(pair[0]) && isServerId(pair[1])) serverIds.set(pair[0], pair[1]);
+    }
+  }
 
   const s = readJson(KEY_SIDEBAR);
   sidebarCollapsed = !!(s && s.collapsed === true);
@@ -360,6 +373,23 @@ export function rememberEngine(routeName, isPostgres) {
     pgServers.delete(h);
   }
   writeJson(KEY_PG_SERVERS, { hashes: [...pgServers] });
+}
+
+/** The server id a fleet card gave the server named by the route when this browser last saw one, or null. */
+export function rememberedServerId(routeName) {
+  const id = serverIds.get(nameHash(routeName));
+  return id === undefined ? null : id;
+}
+
+/** Notes the id a fleet card gave the server named by the route (#8554). A card with no usable id leaves what was there. */
+export function rememberServerId(routeName, serverId) {
+  if (!isServerId(serverId)) return;
+  const h = nameHash(routeName);
+  if (serverIds.get(h) === serverId) return;
+  serverIds.delete(h);
+  serverIds.set(h, serverId);
+  if (serverIds.size > MAX_SERVER_IDS) serverIds.delete(serverIds.keys().next().value);
+  writeJson(KEY_SERVER_IDS, { ids: [...serverIds] });
 }
 
 /* ─────────────────────────── alert count and acknowledgement ─────────────────────────── */

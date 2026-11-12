@@ -122,13 +122,13 @@ public sealed class ViewerJobHistoryDataStartTests : IDisposable
         Assert.Equal(1, Matches(load, @"var sinceUtc = windowStartUtc;"));
         Assert.Equal(1, Matches(load, @"ViewerTimeRangeWindow\.Window\("));
         Assert.Equal(0, Matches(load, @"DateTime\.UtcNow\.AddHours"));
-        Assert.Equal(1, Matches(load, @"var dataStartTask = _dataService\.GetJobHistoryDataStartAsync\(serverId,\s*sinceUtc,\s*nowUtc\);"));
+        Assert.Equal(1, Matches(load, @"var dataStartTask = ViewerServerTab\.Timed\(timer,\s*""data start read"",\s*_dataService\.GetJobHistoryDataStartAsync\(serverId,\s*sinceUtc,\s*nowUtc,\s*loadToken\)\);"));
         /* #5562 R6: a finished range hands its end to the read, so the end bound lands before the row cap. */
         /* #5703: and the tab's Status and Category, so the row cap counts only the runs the grid shows. */
-        Assert.Equal(1, Matches(load, @"var readTask = _dataService\.GetJobHistoryAsync\(sinceUtc,\s*serverId,\s*RowCap,\s*untilUtc:\s*windowIsLive \? null : windowEndUtc,\s*runStatus:\s*statusFilter,\s*category:\s*categoryFilter\)"));
+        Assert.Equal(1, Matches(load, @"var readTask = ViewerServerTab\.Timed\(timer,\s*""job history read"",\s*_dataService\.GetJobHistoryAsync\(sinceUtc,\s*serverId,\s*RowCap,\s*untilUtc:\s*windowIsLive \? null : windowEndUtc,\s*runStatus:\s*statusFilter,\s*category:\s*categoryFilter,\s*cancellationToken:\s*loadToken\)\)"));
         /* The probe starts beside the read, not after it. */
         Assert.True(
-            load.IndexOf("GetJobHistoryDataStartAsync(", StringComparison.Ordinal) < load.IndexOf("var readTask = _dataService.GetJobHistoryAsync(", StringComparison.Ordinal),
+            load.IndexOf("GetJobHistoryDataStartAsync(", StringComparison.Ordinal) < load.IndexOf("var readTask = ViewerServerTab.Timed(timer, \"job history read\"", StringComparison.Ordinal),
             "the probe starts after the read has been awaited");
     }
 
@@ -150,7 +150,7 @@ public sealed class ViewerJobHistoryDataStartTests : IDisposable
         var bindRows = MethodBody(file, @"private void BindRows\(");
 
         /* The check and the bind are one helper call, and the bind is a plain (non-async) method. */
-        Assert.Equal(1, Matches(load, @"JobHistoryLoadSteps\.BindWhenCurrentAsync\(readTask,\s*\(\) => _loads\.Superseded\(nameof\(LoadJobsAsync\),\s*gen\),\s*BindRows\)"));
+        Assert.Equal(1, Matches(load, @"JobHistoryLoadSteps\.BindWhenCurrentAsync\(readTask,\s*\(\) => _loads\.Superseded\(nameof\(LoadJobsAsync\),\s*gen\),\s*r => timer\.Step\(""job grid bind"",\s*\(\) => BindRows\(r\)\)\)"));
         Assert.DoesNotContain("await", bindRows, StringComparison.Ordinal);
 
         /* The choices start before the read and are applied after the bind, un-awaited until the end of the load: the bind never waits on them. */

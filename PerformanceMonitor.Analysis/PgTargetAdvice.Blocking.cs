@@ -267,7 +267,7 @@ public static partial class PgTargetAdvice
 
         var inv = new StringBuilder();
         inv.Append(CultureInfo.InvariantCulture,
-            $"The engine logged {waits:0} lock {(waits == 1 ? "wait" : "waits")} that outlived deadlock_timeout ({FormatDuration(deadlockTimeoutMs)}) in the window: {perHour:0.#} per observed hour, and {acquired:0} of them {(acquired == 1 ? "was" : "were")} later acquired, for {FormatDuration(acquiredMs)} of waiting the engine wrote down; the longest single wait was {FormatDuration(maxMs)}{(hasLastEvent ? $", the last line {FormatAge(lastEventSeconds)} before the window's end" : string.Empty)}.");
+            $"The engine logged {waits:0} lock {(waits == 1 ? "wait" : "waits")} that outlived deadlock_timeout ({FormatDuration(deadlockTimeoutMs)}) in the window: {perHour:#,##0.#} per observed hour, and {acquired:0} of them {(acquired == 1 ? "was" : "were")} later acquired, for {FormatDuration(acquiredMs)} of waiting the engine wrote down; the longest single wait was {FormatDuration(maxMs)}{(hasLastEvent ? $", the last line {FormatAge(lastEventSeconds)} before the window's end" : string.Empty)}.");
         if (deadlocks > 0)
             inv.Append(CultureInfo.InvariantCulture, $" {deadlocks:0} of the lines {(deadlocks == 1 ? "was" : "were")} a detected deadlock: the deadlock family grades those.");
         if (relation is not null)

@@ -269,6 +269,12 @@ ORDER BY
     /// server count now comes from a hash aggregate over the distinct (collector, server) pairs, and the median from
     /// <c>idx_oversized_plan_backlog_collector_bytes</c> (V260), the way <see cref="PerServerRollupSql"/> reads its own.</para>
     ///
+    /// <para>#8570: the heap is read once. The counts come from one pass grouped by (collector, server), and the per-collector totals and the
+    /// server count are taken from those few rows, where the server count used to be a second full scan of the table for its distinct pairs.
+    /// On a field store (1.23 M rows, 394 MB) the first call after a restart read the whole table twice from disk in this statement and took
+    /// 16.1 s. The counts of one collector are sums of its servers' counts, its extremes are the extremes of theirs, so the rows are the same.
+    /// What a read of this table still cannot avoid without an index that carries the stamps is the one pass over the heap.</para>
+    ///
     /// <para>It exists because the two collectors' shares of this table are not predictable from each
     /// other and not stable across stores: measured the day after the V121 fleet install,
     /// <c>procedure_stats</c> held the larger half on one production store (1,111 rows against 1,095) and
@@ -277,9 +283,10 @@ ORDER BY
     /// wrong on one of the two stores whichever way they guess.</para>
     /// </summary>
     public const string CollectorCensusSql = @"
-WITH held AS (
+WITH pairs AS (
 SELECT
     b.collector_name                                                         AS collector_name,
+    b.server_id                                                              AS server_id,
     count(*)                                                                 AS held_rows,
     count(*) FILTER (WHERE " + PendingPredicate + @")                        AS pending_rows,
     count(*) FILTER (WHERE b.captured_at IS NOT NULL)                        AS captured_rows,
@@ -293,7 +300,23 @@ SELECT
     count(*) FILTER (WHERE " + DroppedPredicate + @")                        AS held_dropped_rows
 FROM " + OversizedPlanBacklog.TableName + @" AS b
 GROUP BY
-    b.collector_name),
+    b.collector_name,
+    b.server_id),
+held AS (
+SELECT
+    p.collector_name                                                         AS collector_name,
+    sum(p.held_rows)::bigint                                                 AS held_rows,
+    sum(p.pending_rows)::bigint                                              AS pending_rows,
+    sum(p.captured_rows)::bigint                                             AS captured_rows,
+    sum(p.expired_rows)::bigint                                              AS expired_rows,
+    max(p.last_captured_at)                                                  AS last_captured_at,
+    max(p.last_expired_at)                                                   AS last_expired_at,
+    min(p.min_observed_bytes)                                                AS min_observed_bytes,
+    max(p.max_observed_bytes)                                                AS max_observed_bytes,
+    sum(p.held_dropped_rows)::bigint                                         AS held_dropped_rows
+FROM pairs AS p
+GROUP BY
+    p.collector_name),
 dropped AS (
 SELECT
     d.collector_name                                                         AS collector_name,
@@ -307,9 +330,8 @@ SELECT
     count(*)                                                                 AS servers
 FROM
 (
-    SELECT b.collector_name, b.server_id
-    FROM " + OversizedPlanBacklog.TableName + @" AS b
-    GROUP BY b.collector_name, b.server_id
+    SELECT p.collector_name, p.server_id
+    FROM pairs AS p
     UNION
     SELECT d.collector_name, d.server_id
     FROM " + OversizedPlanBacklog.DropCountsTableName + @" AS d

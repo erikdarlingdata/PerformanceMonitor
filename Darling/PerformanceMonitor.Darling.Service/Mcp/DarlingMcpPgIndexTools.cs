@@ -147,7 +147,7 @@ public sealed class DarlingMcpPgIndexTools
 
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                     "empty",
-                    $"No index bloat rows for {resolved.DisplayName} in the last {CountText.Plural(hours_back, "hour")}"
+                    $"No index bloat rows for {resolved.DisplayName} {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}"
                     + ". This collector runs DAILY, so a window shorter than a day can be empty "
                     + "on a perfectly healthy server: widen it before concluding anything. "
                     + coverage.Message), cancellationToken, windowEnd.AddHours(-hours_back));
@@ -388,6 +388,13 @@ public sealed class DarlingMcpPgIndexTools
         }
     }
 
+    /// <summary>A pg_stats figure kept as a 4-byte float, rounded to the six significant digits that type holds (#8738). The double read
+    /// from the store carries the float's conversion noise past the sixth digit; null stays null and a non-finite value passes through.</summary>
+    internal static double? SixSignificantDigits(double? value) =>
+        value is { } v && double.IsFinite(v)
+            ? double.Parse(v.ToString("G6", CultureInfo.InvariantCulture), CultureInfo.InvariantCulture)
+            : value;
+
     /// <summary>#7548: the structured hint an empty Column Statistics reply carries, so the web panel can say one sentence and the grant without reading the message. Present only when the privilege filter is the cause (the monitoring login cannot read pg_stats); every other empty cause sends none.</summary>
     internal static object? EmptyColumnStatsHints(PgColumnStatsCoverageArm arm) =>
         arm == PgColumnStatsCoverageArm.StatisticsNotVisible ? new { reason = "pg_stats_unreadable" } : null;
@@ -396,7 +403,7 @@ public sealed class DarlingMcpPgIndexTools
     internal static string EmptyColumnStatsReply(string displayName, int hoursBack, PgColumnStatsCoverageVerdict coverage) =>
         McpHelpers.Status(
             "empty",
-            $"No column statistics for {displayName} in the last {CountText.Plural(hoursBack, "hour")}. "
+            $"No column statistics for {displayName} {McpHelpers.InTheLast(CountText.Plural(hoursBack, "hour"))}. "
             + "This collector runs DAILY, so a window shorter than a day can be empty on a "
             + "perfectly healthy server - widen it before concluding anything. " + coverage.Message,
             /* #7548: the web panel says one sentence and the grant for a login that cannot read pg_stats, built from this field and not from the message. */
@@ -480,10 +487,12 @@ public sealed class DarlingMcpPgIndexTools
                 /* Passed through with its sign intact. Normalising it to an absolute count would need the
                    row count at the time the sample was taken, which is not stored and would be a guess. */
                 n_distinct = r.NDistinct,
-                null_frac = r.NullFrac,
+                /* #8738: pg_stats holds null_frac, correlation and the top-value share as 4-byte floats, so the digits past the sixth are
+                   conversion noise (0.9639183282852173 for what the source holds as 0.963918). */
+                null_frac = SixSignificantDigits(r.NullFrac),
                 avg_width = r.AvgWidth,
-                correlation = r.Correlation,
-                top_value_frequency = r.TopValueFrequency,
+                correlation = SixSignificantDigits(r.Correlation),
+                top_value_frequency = SixSignificantDigits(r.TopValueFrequency),
                 /* Null means NO most-common-value list at all, which is itself informative: a perfectly
                    uniform column has none. Zero would claim the list exists and is empty. */
                 common_value_count = r.CommonValueCount,

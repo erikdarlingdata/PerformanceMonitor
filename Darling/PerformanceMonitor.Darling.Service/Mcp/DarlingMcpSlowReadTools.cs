@@ -64,15 +64,15 @@ public sealed class DarlingMcpSlowReadTools
         + "already running on the service when this read started, and wait_ms is the part of total_ms it spent waiting for a store "
         + "connection rather than running (a connection wait only: a read's total_ms starts once it has its long-read slot, so "
         + "time spent queued for a slot is in neither figure and shows in get_read_latency's queued and queue_wait_ms instead; a read "
-        + "refused busy is never offered here); both are null on rows stored before schema V182. caller is who made the read: an MCP "
+        + "refused busy is never offered here); both are null on older rows. caller is who made the read: an MCP "
         + "client's own name and version (ua: and its User-Agent product token when it sent none, unknown when neither), or web: "
         + "and 12 hex characters of a hash of the web session key under a salt that lives only in the service's memory, so it holds "
-        + "no personal data and cannot be turned back into the key; null on rows stored before schema V183. A statement label is the product's own SQL "
+        + "no personal data and cannot be turned back into the key; null on rows stored before this column existed. A statement label is the product's own SQL "
         + "text with a short hash; parameter values are never stored. summary counts reads per (surface, route, outcome) "
         + "over the window and the filters, so it covers more than the page. reads is newest first, then newest id; the "
         + "page is capped at limit rows or the ~32 KB response budget, whichever cuts first, and truncated says either "
         + "cut applied. Every instant is UTC from the store's own clock, so there are no *_server_local fields. "
-        + "Empty means no read was recorded for the window and filters, which on a fresh store or one below schema V162 "
+        + "Empty means no read was recorded for the window and filters, which on a fresh store "
         + "is the expected answer.")]
     public static async Task<string> GetSlowReads(
         NpgsqlDataSource postgres,
@@ -121,10 +121,10 @@ public sealed class DarlingMcpSlowReadTools
             {
                 return McpHelpers.Status(
                     "empty",
-                    $"No slow read recorded in the last {CountText.Plural(hours, "hour")}" +
+                    $"No slow read recorded {McpHelpers.InTheLast(CountText.Plural(hours, "hour"))}" +
                     (serverId is null && string.IsNullOrWhiteSpace(surface) && string.IsNullOrWhiteSpace(route) ? "" : " for that filter") +
                     ". The service records a read that took 5 seconds or more, or ended in a timeout, error or limit; " +
-                    "a store before schema V162, or a quiet window, has none.");
+                    "a fresh store, or a quiet window, has none.");
             }
 
             return BuildResponse(hours, server_name, surface, route, page, limit, full_detail, McpResponseBudget.DefaultBytes);
