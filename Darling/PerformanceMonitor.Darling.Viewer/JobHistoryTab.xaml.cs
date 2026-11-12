@@ -208,7 +208,8 @@ public partial class JobHistoryTab : UserControl
             /* The two reads start side by side, here, where the width is declared; JoinChoicesAsync only waits for both. */
             var serversTask = refreshChoices ? ReadHalfAsync("servers", "server", () => service.GetJobHistoryServersAsync(), choicesKey) : null;
             var categoriesTask = refreshChoices
-                ? ReadHalfAsync("categories", "category", () => service.GetJobHistoryCategoriesAsync(windowStartUtc, windowIsLive ? null : windowEndUtc, serverId: serverId), choicesKey)
+                ? ReadHalfAsync("categories", "category", () => _categoryCache.GetAsync(choicesKey, DateTime.UtcNow,
+                    () => service.GetJobHistoryCategoriesAsync(windowStartUtc, windowIsLive ? null : windowEndUtc, serverId: serverId)), choicesKey)
                 : null;
             var choicesTask = serversTask is null || categoriesTask is null ? null : JoinChoicesAsync(serversTask, categoriesTask);
             /* #8133: at All Servers every server with runs in the window is guaranteed its share of the cap, so one busy server cannot fill
@@ -340,6 +341,16 @@ public partial class JobHistoryTab : UserControl
 
     /// <summary>When the choices are read again: for a different window or server, or after <see cref="ChoicesLifetime"/>.</summary>
     private readonly JobHistoryChoicesFreshness _choicesFreshness = new(ChoicesLifetime);
+
+    /// <summary>How long a category list stays current for its window and server (#8549). Longer than <see cref="ChoicesLifetime"/>: the
+    /// read is the slowest statement of the tab on a large store, and a category that appears later still reaches the drop-down through
+    /// the runs the grid reads.</summary>
+    private static readonly TimeSpan CategoriesLifetime = TimeSpan.FromMinutes(30);
+
+    /// <summary>The category lists read this session, per window and server, with one read in flight per key (#8549): a load that was
+    /// superseded while the read ran, a refresh after <see cref="ChoicesLifetime"/> and a return to a window already read all take the
+    /// same answer instead of running the statement again.</summary>
+    private readonly JobHistoryCategoryCache _categoryCache = new(CategoriesLifetime);
 
     /// <summary>Failed choices reads, logged once per window (the next refresh still reads again).</summary>
     private readonly ChoicesFailureLogGate<JobHistoryChoicesKey> _choicesFailures = new();
