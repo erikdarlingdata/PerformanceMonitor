@@ -52,9 +52,17 @@ public partial class FinOpsTab
         FinOpsIndexAnalysisDetailTitle.Visibility = visibility;
     }
 
-    private async Task LoadFinOpsIndexAnalysisAsync()
+    private async Task LoadFinOpsIndexAnalysisAsync() => await LoadFinOpsIndexAnalysisAsync(null);
+
+    /// <summary>#8549: the read is booked on the load's clock by name, and the projection of its rows and the grid and banner binds as a client step.</summary>
+    private async Task LoadFinOpsIndexAnalysisAsync(ViewerLoadTimer? timer)
     {
-        var read = await _dataService.GetIndexAnalysisWithSnapshotTimesAsync(_server.ServerId);
+        var read = await ViewerServerTab.Timed(timer, "index analysis read", _dataService.GetIndexAnalysisWithSnapshotTimesAsync(_server.ServerId));
+        ViewerServerTab.ClientStep(timer, "index analysis bind", () => BindIndexAnalysis(read));
+    }
+
+    private void BindIndexAnalysis(PerformanceMonitor.Darling.Storage.FinOps.IndexAnalysisWithSnapshotTimes read)
+    {
         var result = read.Result;
 
         var nothingCollected = result.DatabaseRollups.Count == 0;

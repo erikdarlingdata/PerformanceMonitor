@@ -331,8 +331,7 @@ public partial class FinOpsTab : UserControl
         {
             if (logSlowLoad)
             {
-                var header = (FinOpsSubTabControl.SelectedItem as TabItem)?.Header as string;
-                timer.FinishAndLog(string.IsNullOrWhiteSpace(header) ? "FinOps" : "FinOps > " + header.Trim(), SlowLoadSink);
+                timer.FinishAndLog(ActiveSubTabSurface, SlowLoadSink);
             }
         }
     }

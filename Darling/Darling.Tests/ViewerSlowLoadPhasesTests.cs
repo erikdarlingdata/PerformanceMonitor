@@ -208,7 +208,26 @@ public sealed class ViewerSlowLoadPhasesTests
     [InlineData("Optimization", "idle databases panel,tempdb summary panel,wait categories panel,expensive queries panel,memory grants panel")]
     [InlineData("Server Inventory", "server inventory read")]
     [InlineData("Utilization", "utilization read")]
+    [InlineData("Database Resources", "database resources read")]
+    [InlineData("Storage Growth", "storage growth read")]
+    [InlineData("Locking & Contention", "locking databases read,index locking read,optimized locking note read,separately monitored read")]
+    [InlineData("Database Sizes", "database sizes read,table sizes read")]
+    [InlineData("Version Store (PVS)", "version store read,version store trend read")]
+    [InlineData("High Impact", "high impact queries read")]
+    [InlineData("Application Connections", "application connections read")]
+    [InlineData("Index Analysis", "index analysis read")]
+    [InlineData("Cost Savings", "recommendations read")]
     public void FinOps_ALoadOfTheSubTab_BooksItsReadsByName_AndWritesASlowLoadLine(string header, string expectedPhases)
+        => FinOpsSubTabLoad(header, expectedPhases, drill: null);
+
+    /// <summary>The Storage Growth sub-tab's drill levels read other things than its parent grid, so a refresh while drilled in names those reads.</summary>
+    [Theory]
+    [InlineData(1, "display zone read")]
+    [InlineData(2, "index detail read")]
+    public void FinOps_StorageGrowthDrilledIn_BooksTheDrillLevelsReadsByName(int level, string expectedPhases)
+        => FinOpsSubTabLoad("Storage Growth", expectedPhases, drill: level);
+
+    private static void FinOpsSubTabLoad(string header, string expectedPhases, int? drill)
     {
         var expected = expectedPhases.Split(',');
         var port = FreePort();
@@ -228,6 +247,16 @@ public sealed class ViewerSlowLoadPhasesTests
                 var subTabs = (TabControl)tab.FindName("FinOpsSubTabControl");
                 subTabs.SelectedIndex = subTabs.Items.OfType<TabItem>().ToList().FindIndex(t => Equals(t.Header, header));
                 Assert.True(subTabs.SelectedIndex >= 0, header);
+                if (drill is int level)
+                {
+                    /* The drill state is private to the tab (a row double-click sets it). Set it the way that click does: level, then the database, schema and table. */
+                    const System.Reflection.BindingFlags instance = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                    var levelField = typeof(FinOpsTab).GetField("_finopsStorageLevel", instance)!;
+                    levelField.SetValue(tab, Enum.ToObject(levelField.FieldType, level));
+                    typeof(FinOpsTab).GetField("_finopsObjDrillDb", instance)!.SetValue(tab, "drilldb");
+                    typeof(FinOpsTab).GetField("_finopsObjDrillSchema", instance)!.SetValue(tab, "dbo");
+                    typeof(FinOpsTab).GetField("_finopsObjDrillTable", instance)!.SetValue(tab, "drilltable");
+                }
 
                 var timer = SlowClock();
                 await tab.LoadActiveSubTabGuardedAsync(timer, logSlowLoad: false);

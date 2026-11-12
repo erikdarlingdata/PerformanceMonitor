@@ -150,50 +150,53 @@ public partial class FinOpsTab
             return;
         }
 
+        /* #8549: every sub-tab's reads are booked on this load's clock by name, and the line leads with the sub-tab's own name. */
+        timer?.Surface = ActiveSubTabSurface;
         switch (FinOpsSubTabControl.SelectedIndex)
         {
             case FinOpsDatabaseResourcesSubTabIndex:
-                await LoadFinOpsDatabaseResourcesAsync();
+                await LoadFinOpsDatabaseResourcesAsync(timer);
                 break;
             case FinOpsStorageGrowthSubTabIndex:
-                await LoadFinOpsStorageGrowthActiveAsync();
+                await LoadFinOpsStorageGrowthActiveAsync(timer);
                 break;
             case FinOpsLockingSubTabIndex:
-                await LoadFinOpsIndexLockingAsync();
+                await LoadFinOpsIndexLockingAsync(timer);
                 break;
             case FinOpsDatabaseSizesSubTabIndex:
-                await LoadFinOpsDatabaseSizesAsync();
+                await LoadFinOpsDatabaseSizesAsync(timer);
                 break;
             case FinOpsPvsStatsSubTabIndex:
-                await LoadFinOpsPvsStatsAsync();
+                await LoadFinOpsPvsStatsAsync(timer);
                 break;
             case FinOpsOptimizationSubTabIndex:
-                timer?.Surface = "FinOps > Optimization";
                 await LoadFinOpsOptimizationAsync(timer);
                 break;
             case FinOpsHighImpactSubTabIndex:
-                await LoadFinOpsHighImpactAsync();
+                await LoadFinOpsHighImpactAsync(timer);
                 break;
             case FinOpsApplicationConnectionsSubTabIndex:
-                await LoadFinOpsApplicationConnectionsAsync();
+                await LoadFinOpsApplicationConnectionsAsync(timer);
                 break;
             case FinOpsServerInventorySubTabIndex:
-                timer?.Surface = "FinOps > Server Inventory";
                 await LoadFinOpsServerInventoryAsync(timer);
                 break;
             case FinOpsIndexAnalysisSubTabIndex:
-                await LoadFinOpsIndexAnalysisAsync();
+                await LoadFinOpsIndexAnalysisAsync(timer);
                 break;
             case FinOpsRecommendationsSubTabIndex:
-                await LoadFinOpsRecommendationsAsync();
+                await LoadFinOpsRecommendationsAsync(timer);
                 break;
             case FinOpsUtilizationSubTabIndex:
             default:
-                timer?.Surface = "FinOps > Utilization";
                 await LoadFinOpsUtilizationAsync(timer);
                 break;
         }
     }
+
+    /// <summary>#8549: what a slow load's line calls the active sub-tab: "FinOps > " and the sub-tab's header, or "FinOps" before one is selected.</summary>
+    private string ActiveSubTabSurface
+        => (FinOpsSubTabControl.SelectedItem as TabItem)?.Header is string header && !string.IsNullOrWhiteSpace(header) ? "FinOps > " + header.Trim() : "FinOps";
 
     /// <summary>True while Server Inventory, the one sub-tab that reads the whole fleet rather than the picker's server, is the active sub-tab.</summary>
     private bool SelectedSubTabIsCrossServer => FinOpsSubTabControl.SelectedIndex == FinOpsServerInventorySubTabIndex;
@@ -431,68 +434,98 @@ public partial class FinOpsTab
 
     // ── Database Resources ──
 
-    private async Task LoadFinOpsDatabaseResourcesAsync()
+    private async Task LoadFinOpsDatabaseResourcesAsync() => await LoadFinOpsDatabaseResourcesAsync(null);
+
+    private async Task LoadFinOpsDatabaseResourcesAsync(ViewerLoadTimer? timer)
     {
         var hoursBack = HoursBackFromPicker(FinOpsResourceUsageTimeRangeCombo);
-        var data = await _dataService.GetDatabaseResourceUsageAsync(_server.ServerId, hoursBack);
-        _finopsDbResourcesFilterMgr!.UpdateData(data);
-        FinOpsNoDatabaseResourcesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsDbResourcesCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "database") : "";
+        var data = await ViewerServerTab.Timed(timer, "database resources read", _dataService.GetDatabaseResourceUsageAsync(_server.ServerId, hoursBack));
+        ViewerServerTab.ClientStep(timer, "database resources bind", () =>
+        {
+            _finopsDbResourcesFilterMgr!.UpdateData(data);
+            FinOpsNoDatabaseResourcesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            FinOpsDbResourcesCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "database") : "";
+        });
     }
 
     // ── Database Sizes ──
 
-    private async Task LoadFinOpsDatabaseSizesAsync()
+    private async Task LoadFinOpsDatabaseSizesAsync() => await LoadFinOpsDatabaseSizesAsync(null);
+
+    private async Task LoadFinOpsDatabaseSizesAsync(ViewerLoadTimer? timer)
     {
+        /* #8549: the table sizes read does not depend on the database sizes read, so it starts beside it. It started only after the sizes grid was
+           bound, which put its whole round trip behind the first one. The sizes grid is still bound as soon as its own read is in. */
+        using var readFanOut = ViewerReadFanOut.Of(2);
+
         /* Proportional cost share by size (mirrors Lite's LoadDatabaseSizesAsync). The share is of the whole server's allocated size,
            so a database filter narrows the rows without shrinking the total (#7174). A row with no allocated size (the Hyperscale
            log file, in the log service) takes no share. */
-        var data = await _dataService.GetDatabaseSizeLatestWithCostShareAsync(_server.ServerId, SelectedDatabaseFilter, _server.MonthlyCostUsd);
+        var sizesRead = ViewerServerTab.Timed(timer, "database sizes read", _dataService.GetDatabaseSizeLatestWithCostShareAsync(_server.ServerId, SelectedDatabaseFilter, _server.MonthlyCostUsd));
+        var tablesRead = ViewerServerTab.Timed(timer, "table sizes read", _dataService.GetTableSizesAsync(_server.ServerId, SelectedDatabaseFilter));
 
-        _finopsDbSizesFilterMgr!.UpdateData(data);
-        FinOpsNoDbSizesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsDbSizeCountIndicator.Text = DatabaseSizeRow.Caption(data);
+        var data = await sizesRead;
+        ViewerServerTab.ClientStep(timer, "database sizes bind", () =>
+        {
+            _finopsDbSizesFilterMgr!.UpdateData(data);
+            FinOpsNoDbSizesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            FinOpsDbSizeCountIndicator.Text = DatabaseSizeRow.Caption(data);
 
-        /* The Note column holds words only for a row that has a note, so a server with none gets no empty column. */
-        FinOpsDatabaseSizesNoteColumn.Visibility = data.Any(r => r.Note != null) ? Visibility.Visible : Visibility.Collapsed;
+            /* The Note column holds words only for a row that has a note, so a server with none gets no empty column. */
+            FinOpsDatabaseSizesNoteColumn.Visibility = data.Any(r => r.Note != null) ? Visibility.Visible : Visibility.Collapsed;
+        });
 
-        await LoadFinOpsTableSizesAsync();
+        await LoadFinOpsTableSizesAsync(tablesRead, timer);
     }
 
     /// <summary>#6388: Table &amp; Index Sizes under the database files, the same shared read as the web's <c>get_table_index_sizes</c>
-    /// (one page of the largest tables, one row past it observing truncation). A moment, not the toolbar's window.</summary>
-    private async Task LoadFinOpsTableSizesAsync()
+    /// (one page of the largest tables, one row past it observing truncation). A moment, not the toolbar's window. The caller starts
+    /// the read (#8549) so it runs beside the database sizes read.</summary>
+    private async Task LoadFinOpsTableSizesAsync(Task<List<TableSizeGrowthRow>> tablesRead, ViewerLoadTimer? timer)
     {
-        var rows = await _dataService.GetTableSizesAsync(_server.ServerId, SelectedDatabaseFilter);
-        var truncated = rows.Count > DarlingTableSizeGrowthReader.TopTables;
-        var page = truncated ? rows.Take(DarlingTableSizeGrowthReader.TopTables).ToList() : rows;
+        var rows = await tablesRead;
+        ViewerServerTab.ClientStep(timer, "table sizes bind", () =>
+        {
+            var truncated = rows.Count > DarlingTableSizeGrowthReader.TopTables;
+            var page = truncated ? rows.Take(DarlingTableSizeGrowthReader.TopTables).ToList() : rows;
 
-        FinOpsTableSizesDataGrid.ItemsSource = page;
-        FinOpsNoTableSizesMessage.Visibility = page.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsTableSizesNote.Text = page.Count == 0
-            ? ""
-            : $"{CountText.Plural(page.Count, "table")}, largest first, at the {HistoryTime.SnapshotCollected(page[0].LatestSnapshotTime, "--")} snapshot"
-              + (truncated ? $"; the {DarlingTableSizeGrowthReader.TopTables} largest of more" : "")
-              + (page[0].DaysOfData < 30 ? $"; the store holds {CountText.Plural(page[0].DaysOfData, "day")} of snapshots, so growth the history does not reach shows n/a" : "");
+            FinOpsTableSizesDataGrid.ItemsSource = page;
+            FinOpsNoTableSizesMessage.Visibility = page.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            FinOpsTableSizesNote.Text = page.Count == 0
+                ? ""
+                : $"{CountText.Plural(page.Count, "table")}, largest first, at the {HistoryTime.SnapshotCollected(page[0].LatestSnapshotTime, "--")} snapshot"
+                  + (truncated ? $"; the {DarlingTableSizeGrowthReader.TopTables} largest of more" : "")
+                  + (page[0].DaysOfData < 30 ? $"; the store holds {CountText.Plural(page[0].DaysOfData, "day")} of snapshots, so growth the history does not reach shows n/a" : "");
+        });
     }
 
     // ── Version Store (PVS) ──
 
-    private async Task LoadFinOpsPvsStatsAsync()
+    private async Task LoadFinOpsPvsStatsAsync() => await LoadFinOpsPvsStatsAsync(null);
+
+    private async Task LoadFinOpsPvsStatsAsync(ViewerLoadTimer? timer)
     {
-        var (data, secondaryNote) = await _dataService.GetPvsStatsLatestWithNoteAsync(_server, SelectedDatabaseFilter);
-
-        /* #7706: a database held only as an availability group secondary copy has no row here; the strip says so, as the web page does. */
-        FinOpsPvsSecondaryNote.Text = secondaryNote ?? "";
-        FinOpsPvsSecondaryNote.Visibility = secondaryNote is null ? Visibility.Collapsed : Visibility.Visible;
-        _finopsPvsStatsFilterMgr!.UpdateData(data);
-        FinOpsNoPvsStatsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsPvsCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "database") : "";
-
+        /* #8549: the trend read does not depend on the grid's, so it starts beside it (it started only once the grid was bound). The grid is
+           still bound as soon as its own read is in. */
+        using var readFanOut = ViewerReadFanOut.Of(2);
+        var statsRead = ViewerServerTab.Timed(timer, "version store read", _dataService.GetPvsStatsLatestWithNoteAsync(_server, SelectedDatabaseFilter));
         /* #1984 stage 2: the trend beside the grid — "when did it start growing" on the same axis
            family as Storage Growth. Top-5 databases by current PVS size, 7 days of hourly points. */
-        var trend = await _dataService.GetPvsTrendAsync(_server.ServerId, DateTime.UtcNow.AddDays(-7), SelectedDatabaseFilter);
-        RenderPvsTrendChart(trend);
+        var trendRead = ViewerServerTab.Timed(timer, "version store trend read", _dataService.GetPvsTrendAsync(_server.ServerId, DateTime.UtcNow.AddDays(-7), SelectedDatabaseFilter));
+
+        var (data, secondaryNote) = await statsRead;
+        ViewerServerTab.ClientStep(timer, "version store grid bind", () =>
+        {
+            /* #7706: a database held only as an availability group secondary copy has no row here; the strip says so, as the web page does. */
+            FinOpsPvsSecondaryNote.Text = secondaryNote ?? "";
+            FinOpsPvsSecondaryNote.Visibility = secondaryNote is null ? Visibility.Collapsed : Visibility.Visible;
+            _finopsPvsStatsFilterMgr!.UpdateData(data);
+            FinOpsNoPvsStatsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            FinOpsPvsCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "database") : "";
+        });
+
+        var trend = await trendRead;
+        ViewerServerTab.ClientStep(timer, "version store trend chart", () => RenderPvsTrendChart(trend));
     }
 
     /// <summary>
@@ -541,23 +574,33 @@ public partial class FinOpsTab
 
     // ── Application Connections ──
 
-    private async Task LoadFinOpsApplicationConnectionsAsync()
+    private async Task LoadFinOpsApplicationConnectionsAsync() => await LoadFinOpsApplicationConnectionsAsync(null);
+
+    private async Task LoadFinOpsApplicationConnectionsAsync(ViewerLoadTimer? timer)
     {
-        var data = await _dataService.GetApplicationConnectionsAsync(_server.ServerId);
-        _finopsAppConnectionsFilterMgr!.UpdateData(data);
-        FinOpsNoAppConnectionsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsAppConnectionsCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "application") : "";
+        var data = await ViewerServerTab.Timed(timer, "application connections read", _dataService.GetApplicationConnectionsAsync(_server.ServerId));
+        ViewerServerTab.ClientStep(timer, "application connections bind", () =>
+        {
+            _finopsAppConnectionsFilterMgr!.UpdateData(data);
+            FinOpsNoAppConnectionsMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            FinOpsAppConnectionsCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "application") : "";
+        });
     }
 
     // ── High Impact ──
 
-    private async Task LoadFinOpsHighImpactAsync()
+    private async Task LoadFinOpsHighImpactAsync() => await LoadFinOpsHighImpactAsync(null);
+
+    private async Task LoadFinOpsHighImpactAsync(ViewerLoadTimer? timer)
     {
         var hoursBack = HoursBackFromPicker(FinOpsHighImpactTimeRangeCombo);
-        var data = await _dataService.GetHighImpactQueriesAsync(_server.ServerId, hoursBack);
-        _finopsHighImpactFilterMgr!.UpdateData(data);
-        FinOpsHighImpactNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        FinOpsHighImpactCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "high-impact query", "high-impact queries") : "";
+        var data = await ViewerServerTab.Timed(timer, "high impact queries read", _dataService.GetHighImpactQueriesAsync(_server.ServerId, hoursBack));
+        ViewerServerTab.ClientStep(timer, "high impact queries bind", () =>
+        {
+            _finopsHighImpactFilterMgr!.UpdateData(data);
+            FinOpsHighImpactNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            FinOpsHighImpactCountIndicator.Text = data.Count > 0 ? PerformanceMonitor.Common.CountText.Plural(data.Count, "high-impact query", "high-impact queries") : "";
+        });
     }
 
     // ── Optimization (idle DBs + tempdb + wait categories + expensive queries + memory grants) ──
