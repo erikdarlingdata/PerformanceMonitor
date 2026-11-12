@@ -259,8 +259,10 @@ out.next5m = await secondsToNextRead("5m");
   out.backoffGaps = starts.slice(1).map((v, i) => v - starts[i]);
   out.backoffHintSaysSlow = hintSlow;
   bootDelay = 100000; // reads outlast many 30 s intervals
-  await fresh("30s");
+  /* Counted from before the boot: the page's first render starts its reads with the page (#8554), not after the fleet card, so it is
+     one of the renders this counts, and a second one inside the window would be a stacked render. */
   const b = renders;
+  await fresh("30s");
   await advance(150);
   out.stackedRenders = renders - b;
   bootDelay = 0;
