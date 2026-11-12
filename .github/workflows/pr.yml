@@ -93,6 +93,8 @@ jobs:
       class_lists: ${{ steps.plan.outputs.class_lists }}
       build: ${{ steps.plan.outputs.build }}
       pg_old_targets: ${{ steps.plan.outputs.pg_old_targets }}
+      pinned: ${{ steps.pinned.outputs.pinned }}
+      pinned_classes: ${{ steps.pinned.outputs.pinned_classes }}
       full_suite: ${{ steps.plan.outputs.full_suite }}
       legs: ${{ steps.plan.outputs.legs }}
       legs_json: ${{ steps.plan.outputs.legs_json }}
@@ -242,6 +244,17 @@ jobs:
           retention-days: 3
           overwrite: true
           if-no-files-found: error
+
+      # #8753: a pull request that adds or changes live Darling.Tests classes also runs them with the test clock pinned to two UTC
+      # times (the pinned-hours job). This step names the classes; it runs on a pull request that goes and builds, from the same
+      # changed-file list the plan read, and picks none when no such file exists (the job is then skipped).
+      - name: Pick the classes for the pinned-hour pass
+        id: pinned
+        if: steps.skip.outputs.skip != 'true' && github.event_name == 'pull_request' && steps.plan.outputs.run == 'true' && steps.plan.outputs.build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I .github/scripts/ci-select.py pinned-classes --files-from changed.txt --github-output "${GITHUB_OUTPUT}"
 
       # The exporter job (Exporter/) has its own path rule: the `exporter` filter in build.yml, read here through ci-select.py
       # so there is one copy of the patterns. A run that plans every area (the hourly dispatch, a push the map answered FULL for),
@@ -851,10 +864,136 @@ jobs:
           overwrite: true
           if-no-files-found: ignore
 
+  # #8753: the live test classes a pull request adds or changes, run again with the test clock pinned to the two edges of the UTC
+  # day: 23:30 on the previous UTC day and 00:30 on the current one. A live test that seeds against the real clock can pass at the
+  # hour its pull request ran and fail at another (#8752); LiveClock.cs reads DARLING_TEST_CLOCK_UTC, and nothing else set it.
+  # The plan job picks the classes (ci-select.py pinned-classes: the live classes of the changed Darling.Tests files, at most 40)
+  # and this job runs only when it picked some, on a pull request only. The verdict job folds the result into `CI result` like
+  # a test leg's, so a failure here fails the pull request; its log and error annotation name the pinned time.
+  pinned-hours:
+    name: Live classes at 23:30 and 00:30 UTC
+    needs: [plan, build]
+    if: ${{ github.event_name == 'pull_request' && needs.plan.outputs.run == 'true' && needs.plan.outputs.build == 'true' && needs.plan.outputs.pinned == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check the runner can start a process
+        timeout-minutes: 2
+        shell: bash
+        run: dotnet --version
+
+      - uses: actions/checkout@v7
+
+      - name: Fetch the build
+        uses: actions/download-artifact@v8
+        with:
+          name: ci-test-build
+          path: .
+
+      # The tests find the repo root through [CallerFilePath], so a binary built at another path would read another tree.
+      - name: Check the fetched build is for this workspace and commit
+        shell: pwsh
+        env:
+          THIS_WORKSPACE: ${{ github.workspace }}
+          THIS_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $origin = @{}
+          if (Test-Path guard-build-origin.txt) {
+            foreach ($line in Get-Content guard-build-origin.txt) { if ($line -match '^(\w+)=(.*)$') { $origin[$Matches[1]] = $Matches[2] } }
+          }
+          if ($origin['workspace'] -ne $env:THIS_WORKSPACE -or $origin['sha'] -ne $env:THIS_SHA) {
+            Write-Host "::error title=Build is for another workspace or commit::The fetched build says workspace '$($origin['workspace'])' at '$($origin['sha'])'; this job is at '$env:THIS_WORKSPACE' at '$env:THIS_SHA'."
+            exit 1
+          }
+          foreach ($file in @('Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll', 'Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.exe', 'Darling/Darling.Tests/obj/project.assets.json')) {
+            if (-not (Test-Path $file)) { Write-Host "::error title=Build is incomplete::The fetched build has no $file."; exit 1 }
+          }
+
+      # The same key as every other job (the fetch script's own content hash): a warm cache means no ~340MB download.
+      - name: Cache Darling pg-runtime.zip
+        id: cache-pg-runtime
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/pg-runtime.zip
+          key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
+
+      - name: Build Darling pg-runtime.zip (cache miss only)
+        if: steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./Darling/tools/fetch-pg-runtime.ps1
+
+      - name: Extract pg-runtime
+        shell: pwsh
+        run: |
+          $zip  = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime.zip"
+          $dest = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
+          if (-not (Test-Path "$dest\pgsql\bin\pg_ctl.exe")) { throw "pg-runtime missing pgsql\bin\pg_ctl.exe" }
+
+      - name: Start PostgreSQL
+        shell: pwsh
+        run: ./.github/scripts/start-test-pg.ps1 -Mode Start
+
+      # Both times are fixed here, once, so a run that crosses midnight still runs the two passes against one UTC day.
+      - name: Pin the two UTC times
+        id: hours
+        shell: pwsh
+        run: |
+          $today = [DateTime]::UtcNow.Date
+          $format = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+          $late = $today.AddDays(-1).AddHours(23).AddMinutes(30).ToString($format, [System.Globalization.CultureInfo]::InvariantCulture)
+          $early = $today.AddMinutes(30).ToString($format, [System.Globalization.CultureInfo]::InvariantCulture)
+          Write-Host "late-day edge: $late; midnight edge: $early"
+          "late=$late" >> $env:GITHUB_OUTPUT
+          "early=$early" >> $env:GITHUB_OUTPUT
+
+      # The second pass runs even when the first failed, so one run shows both hours.
+      - name: Run the classes with the clock at ${{ steps.hours.outputs.late }}
+        id: late
+        timeout-minutes: 15
+        shell: pwsh
+        env:
+          PINNED_CLASSES: ${{ needs.plan.outputs.pinned_classes }}
+          PINNED_UTC: ${{ steps.hours.outputs.late }}
+        run: ./.github/scripts/run-pinned-hour.ps1 -Classes $env:PINNED_CLASSES -ClockUtc $env:PINNED_UTC -Label late
+
+      - name: Run the classes with the clock at ${{ steps.hours.outputs.early }}
+        id: early
+        if: ${{ !cancelled() && steps.hours.outcome == 'success' }}
+        timeout-minutes: 15
+        shell: pwsh
+        env:
+          PINNED_CLASSES: ${{ needs.plan.outputs.pinned_classes }}
+          PINNED_UTC: ${{ steps.hours.outputs.early }}
+        run: ./.github/scripts/run-pinned-hour.ps1 -Classes $env:PINNED_CLASSES -ClockUtc $env:PINNED_UTC -Label early
+
+      - name: Stop PostgreSQL
+        if: always()
+        shell: pwsh
+        run: ./.github/scripts/start-test-pg.ps1 -Mode Stop
+
+      - name: Upload the logs
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v6
+        with:
+          name: pinned-hours-results
+          path: |
+            TestResults/
+            !TestResults/crash-dumps/**
+            ${{ runner.temp }}/darling-pg*.log
+          retention-days: 7
+          overwrite: true
+          if-no-files-found: ignore
+
   # Named "CI verdict", never "CI result": `CI result` is the commit status this job sets.
   verdict:
     name: CI verdict
-    needs: [plan, build, test, pg-old-targets, exporter]
+    needs: [plan, build, test, pg-old-targets, pinned-hours, exporter]
     # A run that does not go and is not train-blocked has nothing to say, so skip the runner; a failed plan job still reports.
     # The scheduled re-dispatch and an hourly run that found its commit already covered plan nothing and say nothing (#7819).
     if: ${{ always() && github.event_name != 'schedule' && (needs.plan.result != 'success' || needs.plan.outputs.run == 'true' || needs.plan.outputs.outcome == 'train-blocked') }}
@@ -886,6 +1025,8 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           PLAN_PG_OLD: ${{ needs.plan.outputs.pg_old_targets }}
           PG_OLD_RESULT: ${{ needs.pg-old-targets.result }}
+          PLAN_PINNED: ${{ needs.plan.outputs.pinned }}
+          PINNED_RESULT: ${{ needs.pinned-hours.result }}
           PLAN_RUN: ${{ needs.plan.outputs.run }}
           PLAN_EXPORTER: ${{ needs.plan.outputs.exporter }}
           EXPORTER_RESULT: ${{ needs.exporter.result }}
@@ -913,6 +1054,8 @@ jobs:
             [ "${TEST_RESULT}" = "${want_test}" ]   || { state=failure; failed="${failed} test (${TEST_RESULT})"; }
             want_pg=skipped;    [ "${PLAN_PG_OLD}" = "true" ] && [ "${PLAN_BUILD}" = "true" ] && want_pg=success
             [ "${PG_OLD_RESULT}" = "${want_pg}" ]   || { state=failure; failed="${failed} pg-old-targets (${PG_OLD_RESULT})"; }
+            want_pinned=skipped; [ "${EVENT_NAME}" = "pull_request" ] && [ "${PLAN_PINNED}" = "true" ] && [ "${PLAN_BUILD}" = "true" ] && want_pinned=success
+            [ "${PINNED_RESULT}" = "${want_pinned}" ] || { state=failure; failed="${failed} pinned-hours (${PINNED_RESULT})"; }
             want_exporter=skipped; [ "${PLAN_RUN}" = "true" ] && [ "${PLAN_EXPORTER}" = "true" ] && want_exporter=success
             [ "${EXPORTER_RESULT}" = "${want_exporter}" ] || { state=failure; failed="${failed} exporter (${EXPORTER_RESULT})"; }
           fi
