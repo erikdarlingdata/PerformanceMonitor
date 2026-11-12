@@ -23,21 +23,27 @@ namespace PerformanceMonitor.Darling.Viewer;
 public partial class FinOpsTab
 {
     /// <summary>Reads the collected recommendations for this server and repaints the grid + count indicator.</summary>
-    private async Task LoadFinOpsRecommendationsAsync()
+    private async Task LoadFinOpsRecommendationsAsync() => await LoadFinOpsRecommendationsAsync(null);
+
+    /// <summary>#8549: the read and the grid bind are booked on the load's clock by name.</summary>
+    private async Task LoadFinOpsRecommendationsAsync(ViewerLoadTimer? timer)
     {
         /* #8115: while the read runs the sub-tab says so; empty headers under the caption are otherwise the same picture as no findings. */
         FinOpsRecommendationsCountIndicator.Text = FinOpsRecommendationsCountText.Loading;
         FinOpsRecommendationsNoDataMessage.Visibility = Visibility.Collapsed;
         try
         {
-            var (data, skippedNote) = await _dataService.GetRecommendationsWithNoteAsync(_server.ServerId, _server.MonthlyCostUsd);
+            var (data, skippedNote) = await ViewerServerTab.Timed(timer, "recommendations read", _dataService.GetRecommendationsWithNoteAsync(_server.ServerId, _server.MonthlyCostUsd));
 
-            /* #5558: databases this server holds only as an Availability Group secondary copy are left to the primary's findings. */
-            FinOpsRecommendationsSecondaryNote.Text = skippedNote ?? "";
-            FinOpsRecommendationsSecondaryNote.Visibility = skippedNote is null ? Visibility.Collapsed : Visibility.Visible;
-            _finopsRecommendationsFilterMgr!.UpdateData(data);
-            FinOpsRecommendationsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            FinOpsRecommendationsCountIndicator.Text = FinOpsRecommendationsCountText.For(data.Count);
+            ViewerServerTab.ClientStep(timer, "recommendations bind", () =>
+            {
+                /* #5558: databases this server holds only as an Availability Group secondary copy are left to the primary's findings. */
+                FinOpsRecommendationsSecondaryNote.Text = skippedNote ?? "";
+                FinOpsRecommendationsSecondaryNote.Visibility = skippedNote is null ? Visibility.Collapsed : Visibility.Visible;
+                _finopsRecommendationsFilterMgr!.UpdateData(data);
+                FinOpsRecommendationsNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                FinOpsRecommendationsCountIndicator.Text = FinOpsRecommendationsCountText.For(data.Count);
+            });
         }
         catch
         {

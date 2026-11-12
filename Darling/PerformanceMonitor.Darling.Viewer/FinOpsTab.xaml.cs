@@ -292,7 +292,25 @@ public partial class FinOpsTab : UserControl
     }
 
     /// <summary>Runs the active sub-tab's loader (FinOpsTab.Loaders.cs) with the status-bar error surfacing the per-server tab's LoadInnerTabAsync uses.</summary>
-    private async Task LoadActiveSubTabGuardedAsync() => await LoadActiveSubTabGuardedAsync(new ViewerLoadTimer(), logSlowLoad: true);
+    private async Task LoadActiveSubTabGuardedAsync() => await LoadActiveSubTabGuardedAsync(_firstOpen.Take() ?? new ViewerLoadTimer(), logSlowLoad: true);
+
+    /* #8549: the first open's clock (see ViewerFirstOpen): the shell starts it when the tab becomes visible and the tab's first load runs on it. */
+    private readonly ViewerFirstOpen _firstOpen = new();
+
+    /// <summary>Where a slow load's line goes; null is the Viewer log's "SlowLoad" source. A test swaps it to read the line.</summary>
+    internal Action<string>? SlowLoadSink { get; set; }
+
+    /// <summary>The first open's slow-load threshold. A test lowers it to read a line without waiting three seconds.</summary>
+    internal int FirstOpenSlowThresholdMs { get => _firstOpen.SlowThresholdMs; set => _firstOpen.SlowThresholdMs = value; }
+
+    /// <summary>#8549: the shell calls this when it makes the tab visible, so a wait behind another tab's refresh counts in a slow first open's line.</summary>
+    internal void BeginFirstOpen() => _firstOpen.Begin();
+
+    /// <summary>#8549: the shell calls this when the fleet lane starts the tab's refresh.</summary>
+    internal void FirstOpenRefreshStarted() => _firstOpen.RefreshStarted();
+
+    /// <summary>#8549: times a read the shell makes for this tab before its load (the picker's server list) as a store read of the first open.</summary>
+    internal Task<T> TrackFirstOpenRead<T>(string phase, Task<T> read) => _firstOpen.Track(phase, read);
 
     /// <summary>#8549: the guarded load on a clock the caller may own (a test reads its phases). The sub-tab loads wrote no SlowLoad line at all, so a
     /// slow FinOps open names the read or panel that was slow.</summary>
@@ -301,6 +319,8 @@ public partial class FinOpsTab : UserControl
         try
         {
             await LoadFinOpsAsync(timer);
+            /* #8549: the page's grids and cards are measured and drawn after the loader's own code, so the clock waits for that pass and the line names it. */
+            await timer.SettleLayoutAsync(Dispatcher);
             StatusChanged?.Invoke($"{_server.DisplayName}: refreshed {ViewerTimeHelper.RefreshedStamp()}");
         }
         catch (Exception ex)
@@ -311,8 +331,7 @@ public partial class FinOpsTab : UserControl
         {
             if (logSlowLoad)
             {
-                var header = (FinOpsSubTabControl.SelectedItem as TabItem)?.Header as string;
-                timer.FinishAndLog(string.IsNullOrWhiteSpace(header) ? "FinOps" : "FinOps > " + header.Trim());
+                timer.FinishAndLog(ActiveSubTabSurface, SlowLoadSink);
             }
         }
     }

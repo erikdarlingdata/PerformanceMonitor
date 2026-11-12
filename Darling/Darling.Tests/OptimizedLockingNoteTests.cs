@@ -149,7 +149,7 @@ public sealed class OptimizedLockingNoteSurfacePinTests
     public void ViewerLockingLoader_DrivesTheNoteFromTheFlagRead()
     {
         var src = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.Locking.cs");
-        var body = MethodBody(src, "private async Task LoadFinOpsIndexLockingGridAsync()");
+        var body = MethodBody(src, "private async Task LoadFinOpsIndexLockingGridAsync(ViewerLoadTimer? timer, string? db)");
         Assert.Contains("OptimizedLockingNote", body, StringComparison.Ordinal);
         Assert.Contains("FinOpsOptimizedLockingNote.Visibility", body, StringComparison.Ordinal);
     }

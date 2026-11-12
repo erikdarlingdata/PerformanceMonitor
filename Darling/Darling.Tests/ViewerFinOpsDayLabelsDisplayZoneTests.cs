@@ -108,7 +108,7 @@ public sealed class ViewerFinOpsDayLabelsDisplayZoneTests
             try
             {
                 StaTestThread.Settle(window);
-                await (Task)typeof(FinOpsTab).GetMethod(loader, Instance)!.Invoke(tab, [])!;
+                await (Task)typeof(FinOpsTab).GetMethod(loader, Instance, Type.EmptyTypes)!.Invoke(tab, [])!;
                 StaTestThread.Settle(window);
                 rows.AddRange(((DataGrid)tab.FindName(gridName)).Items.Cast<object>());
             }

@@ -1101,6 +1101,14 @@ public partial class MainWindow : Window
             /* #8549: the tab's first-open clock starts here, so a wait behind another tab's refresh counts in a slow first open's line. */
             activated.BeginFirstOpen();
         }
+        else if (ReferenceEquals(MainTabs.SelectedItem, AlertsTab))
+        {
+            AlertsHistoryContent.BeginFirstOpen();
+        }
+        else if (ReferenceEquals(MainTabs.SelectedItem, FinOpsTab))
+        {
+            FinOpsContent.BeginFirstOpen();
+        }
 
         await RefreshVisibleAsync();
         /* The status bar's collector-health scope flips with the active tab (a per-server tab shows that
@@ -1339,6 +1347,7 @@ public partial class MainWindow : Window
                    its load finishes, or its failure line when a read fails. Its refresh returns normally either way, so nothing here
                    writes after it. */
                 case TabItem tab when ReferenceEquals(tab, AlertsTab):
+                    AlertsHistoryContent.FirstOpenRefreshStarted();
                     await AlertsHistoryContent.RefreshAlertsAsync();
                     break;
                 case TabItem tab when ReferenceEquals(tab, JobHistoryTabItem):
@@ -1363,12 +1372,13 @@ public partial class MainWindow : Window
                     /* The picker lists the servers known when LoadServersAsync last ran; a server added since
                        (by another client) is picked up here, keeping the current selection, or taking the
                        sidebar's server when the selected one is gone. */
+                    FinOpsContent.FirstOpenRefreshStarted();
                     if (_dataService is not null)
                     {
                         try
                         {
                             FinOpsContent.SetServers(
-                                ApplyFavoritesAndSort(await _dataService.GetManagedServersAsync()),
+                                ApplyFavoritesAndSort(await FinOpsContent.TrackFirstOpenRead("managed servers read", _dataService.GetManagedServersAsync())),
                                 (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId);
                         }
                         catch (Exception ex) when (ex is not OperationCanceledException)

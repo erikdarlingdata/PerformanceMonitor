@@ -457,7 +457,7 @@ public sealed class DesktopDatabaseFilterSourcePinTests
         Assert.Contains("GetPvsStatsLatestWithNoteAsync(_server, SelectedDatabaseFilter)", loaders, StringComparison.Ordinal);
         Assert.Contains("GetPvsTrendAsync(_server.ServerId, DateTime.UtcNow.AddDays(-7), SelectedDatabaseFilter)", loaders, StringComparison.Ordinal);
         /* The free-space health score stays server-wide: its read is the one unfiltered size read, and says why. */
-        Assert.Contains("dbSizes = await _dataService.GetDatabaseSizeLatestAsync(_server.ServerId);", loaders, StringComparison.Ordinal);
+        Assert.Contains("\"database sizes read\", _dataService.GetDatabaseSizeLatestAsync(_server.ServerId))", loaders, StringComparison.Ordinal);
 
         var locking = ViewerFile("FinOpsTab.Locking.cs");
         Assert.Contains("GetIndexLockingDatabasesAsync(_server.ServerId, SelectedDatabaseFilter)", locking, StringComparison.Ordinal);

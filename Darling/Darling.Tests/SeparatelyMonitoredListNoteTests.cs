@@ -183,7 +183,9 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = $3
         var web = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         Assert.Contains("Rows(c, \"limit\", 200), registryState, ", web, StringComparison.Ordinal);
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.Locking.cs");
-        Assert.Contains("SeparatelyMonitoredListNoteFor(await _dataService.GetSeparatelyMonitoredAsync(", viewer, StringComparison.Ordinal);
+        /* #8549: the registry read starts beside the grid's and is awaited where the note is built, so the read and the note are two lines. */
+        Assert.Contains("_dataService.GetSeparatelyMonitoredAsync(_server.ServerId)", viewer, StringComparison.Ordinal);
+        Assert.Contains("SeparatelyMonitoredListNoteFor(await separatelyMonitoredRead)", viewer, StringComparison.Ordinal);
         Assert.Contains("FinOpsSeparatelyMonitoredNote.Visibility", viewer, StringComparison.Ordinal);
         Assert.Contains("FinOpsSeparatelyMonitoredNote", RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "FinOpsTab.xaml"), StringComparison.Ordinal);
     }
