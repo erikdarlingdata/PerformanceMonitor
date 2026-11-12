@@ -924,7 +924,7 @@ namespace N
             .ToArray();
 
     /// <summary>
-    /// The gate test's name, bound with <c>nameof</c> so a rename moves it. The release workflow's gate step filters on this
+    /// The gate test's name, bound with <c>nameof</c> so a rename moves it. The pull request workflow's release gate step filters on this
     /// name, and <c>ReleaseStatementGateWorkflowTests</c> reads this constant, so a rename that leaves the workflow behind
     /// fails a pin instead of leaving the gate matching zero tests (#5320, review of #5367).
     /// </summary>
@@ -934,9 +934,10 @@ namespace N
     /// The statement-column ratchet (see the release-checklist skill). It fails while ANY statement-column census entry or
     /// watched writer is pending, and its message is the pending count and the list. Nothing is pending now, so a pull
     /// request that adds a statement column or writer without judging it fails here on its own, in every normal Darling
-    /// test run, instead of at the release cut (#5320, ruling 2026-10-06). The name stays because the release workflow's
-    /// gate step and <c>ReleaseStatementGateWorkflowTests</c> bind to it. That step still sets <c>DARLING_RELEASE_CUT=1</c>
-    /// and runs this one test ahead of every publish step; the variable no longer changes what the test asserts.
+    /// test run, instead of at the release cut (#5320, ruling 2026-10-06). The name stays because pr.yml's
+    /// "Statement filter release gate" step and <c>ReleaseStatementGateWorkflowTests</c> bind to it. That step sets
+    /// <c>DARLING_RELEASE_CUT=1</c> and runs this one test on a pull request whose base is <c>main</c>, so before the tag
+    /// (#8756); the variable no longer changes what the test asserts.
     /// </summary>
     [Fact]
     public void StatementCensus_PendingEntries_BlockARelease()
