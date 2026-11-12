@@ -751,6 +751,7 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 - **The attention table purge finds its oldest expired row through the server index** ([#8719]) - On a large store the daily purge of the client timeout events found its oldest expired row with two scans that, once earlier purges had left pages not yet vacuumed, fetched most of the table's heap pages, so the delete read the table three times instead of once. The oldest expired time is now found through the server index in a few hundred buffer reads. The same rows are deleted.
 - **The Overview card words an empty Last Collect on the same clock it uses for its status** ([#8722]) - The card decided "None retained" or "Never" from the wall clock, while its status band used the time it was given. The two sometimes disagreed about whether a server's history had aged out. The wording now reads the same time as the band.
 - **Job History loads faster on large stores and a quick re-pick no longer stacks reads** ([#8549]) - The Job History grid looked up each server's UTC offset by scanning every chunk of the server properties history, and it now reads only the newest offset for each server it shows (the same answer, about 26 times fewer pages for that step on a test store). A load that a newer pick supersedes now cancels its grid and status reads instead of leaving them running. The Category list's hourly summary now catches up four days an hour instead of one, one day at a time within a 30 second budget, so after an upgrade a 30-day Category list reads the summary instead of the raw history after about 8 hours instead of about 30, and a very large store still moves forward every hour.
+- **MCP tool guides send an agent only to tools the connected server serves** ([#8252]) - Six tool guides, two parameter descriptions and one refusal message pointed an agent at a tool its server does not have, so an agent that followed them got an unknown-tool error. In Darling, `recompile_module` and `evict_cached_plan` named `get_procedure_stats`, which neither product has. They now name `get_top_procedures_by_cpu` and its `full_name`, or `get_top_queries_by_cpu` for a `plan_handle`. The `analyze_server`, `get_collection_health` and `get_query_store_health` guides in Lite now say which pointers are for Darling only. The `get_plan_corrections` guide compares its `full_text` opt-in to `get_query_store_top`, which both products serve.
 
 ## [3.12.0] - 2026-10-30
 
@@ -7492,6 +7493,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#8244]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8244
 [#8245]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8245
 [#8246]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8246
+[#8252]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8252
 [#8262]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8262
 [#8266]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8266
 [#8275]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8275
