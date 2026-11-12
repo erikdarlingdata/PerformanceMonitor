@@ -103,7 +103,7 @@ public class AlertContextBuildersTests
         Assert.NotNull(context);
         /* 3 session items (capped) + 3 appended incident items (one per hashed query). */
         Assert.Equal(6, context!.Details.Count);
-        Assert.Equal("Session #71 — 5m 14s", context.Details[0].Heading);
+        Assert.Equal("Session #71: 5m 14s", context.Details[0].Heading);
         Assert.Equal("Incident 1 of 3", context.Details[3].Heading);
         Assert.NotNull(context.Incidents);
         Assert.Equal(3, context.Incidents!.Count);
@@ -150,7 +150,7 @@ public class AlertContextBuildersTests
         });
 
         Assert.NotNull(context);
-        Assert.Equal("Session #71 — 1m 1s", context!.Details[0].Heading);
+        Assert.Equal("Session #71: 1m 1s", context!.Details[0].Heading);
         Assert.DoesNotContain(context.Details[0].Fields, f => f.Label == "Program");
     }
 
@@ -488,7 +488,7 @@ public class AlertContextBuildersTests
         Assert.NotNull(context);
         /* 1 volume item + 1 appended incident item. */
         Assert.Equal(2, context!.Details.Count);
-        Assert.Equal("C:\\ — 5% Free", context.Details[0].Heading);
+        Assert.Equal("C:\\: 5% Free", context.Details[0].Heading);
         Assert.Equal(
             new List<(string, string)>
             {
@@ -536,7 +536,7 @@ public class AlertContextBuildersTests
 
         Assert.NotNull(context);
         var item = Assert.Single(context!.Details);
-        Assert.Equal("tempdb — 80% Reserved", item.Heading);
+        Assert.Equal("tempdb: 80% Reserved", item.Heading);
         Assert.Equal(
             new List<(string, string)>
             {
@@ -673,7 +673,7 @@ public class AlertContextBuildersTests
             {
                 ("Job", "Backup Job"),
                 ("Failed At", "2026-06-19 07:15:00Z"),
-                ("Step", "2 — Backup databases"),
+                ("Step", "2: Backup databases"),
                 ("Message", new string('x', 300) + "...")
             },
             context.Details[0].Fields);
