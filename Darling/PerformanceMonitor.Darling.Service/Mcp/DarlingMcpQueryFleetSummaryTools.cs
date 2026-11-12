@@ -296,39 +296,9 @@ public sealed class DarlingMcpQueryFleetSummaryTools
     /// <summary>#7609: the most hours the Query Store source reads. A longer window answers the plan cache in full and says the Query Store part was cut.</summary>
     public const int QueryStoreMaxHours = 168;
 
-    /// <summary>
-    /// The Query Store fleet statement (#7609), same row shape as <see cref="BuildSql"/>: server_name, display_name, database_name, executions,
-    /// cpu_us, elapsed_us, first_hour, last_hour, pairs. It reads <c>query_store_stats_corrected_hourly</c> (never <c>query_store_stats_hourly</c>,
-    /// which counts one interval's work once per collection) for the buckets below the rollup's materialization boundary $4, and the
-    /// interval-deduped raw rows at or above it, the split <see cref="QueryStoreTrendRouting.BuildRollupTrendSql"/> makes, so an hour is never
-    /// counted twice. With <paramref name="useRollup"/> false the whole window is raw (a store with no rollup keeps its raw rows).
-    /// $1 query_hash, $2/$3 window (naive UTC), $4 the instant raw takes over, $5 the row cap.
-    /// <para>The deduped raw arm is a copy of the <c>placed</c> arm in <see cref="QueryStoreTrendRouting.BuildRollupTrendSql"/>, with <c>server_id</c> added
-    /// to the dedup partition because this read has no server filter. That arm is welded to its own <c>server_id = $1</c> filter, optional database
-    /// filter and column list, so sharing it would mean reshaping the statement <c>get_query_store_duration_trend</c> runs (#7667).</para>
-    /// </summary>
-    public static string BuildQueryStoreSql(bool useRollup)
-    {
-        var hourly = useRollup
-            ? $"""
-            hourly AS
-            (
-                SELECT f.server_id, f.database_name,
-                       SUM(f.execution_count_sum)::double precision AS executions, SUM(f.cpu_us_weighted_sum) AS cpu_us, SUM(f.duration_us_weighted_sum) AS elapsed_us,
-                       MIN(f.bucket) AS first_hour, MAX(f.bucket) AS last_hour
-                FROM {TimescaleSupport.QueryStoreStatsCorrectedHourlyView} AS f
-                WHERE f.query_hash = $1
-                AND   f.bucket >= $2
-                AND   f.bucket < $3
-                AND   f.bucket < $4
-                GROUP BY f.server_id, f.database_name
-            ),
-            """
-            : "";
-        var union = useRollup ? "SELECT * FROM hourly UNION ALL " : "";
-
-        return $"""
-        WITH {hourly}
+    /// <summary>#8570: the deduped raw arm and its per-pair sums, shared by the one-relation and the daily-mid Query Store statements so the two
+    /// cannot drift. Ends with the comma that precedes the <c>pairs</c> arm. $1 query_hash, $2/$3 window, $4 the instant raw takes over.</summary>
+    private const string QueryStoreTailCtes = """
         placed AS
         (
             SELECT server_id, database_name, interval_start_time_utc AS point_time, execution_count, avg_duration_us, avg_cpu_time_us
@@ -371,12 +341,169 @@ public sealed class DarlingMcpQueryFleetSummaryTools
             FROM placed
             GROUP BY server_id, database_name
         ),
+        """;
+
+    /// <summary>
+    /// The Query Store fleet statement (#7609), same row shape as <see cref="BuildSql"/>: server_name, display_name, database_name, executions,
+    /// cpu_us, elapsed_us, first_hour, last_hour, pairs. It reads <c>query_store_stats_corrected_hourly</c> (never <c>query_store_stats_hourly</c>,
+    /// which counts one interval's work once per collection) for the buckets below the rollup's materialization boundary $4, and the
+    /// interval-deduped raw rows at or above it, the split <see cref="QueryStoreTrendRouting.BuildRollupTrendSql"/> makes, so an hour is never
+    /// counted twice. With <paramref name="useRollup"/> false the whole window is raw (a store with no rollup keeps its raw rows).
+    /// $1 query_hash, $2/$3 window (naive UTC), $4 the instant raw takes over, $5 the row cap.
+    /// <para>The deduped raw arm is a copy of the <c>placed</c> arm in <see cref="QueryStoreTrendRouting.BuildRollupTrendSql"/>, with <c>server_id</c> added
+    /// to the dedup partition because this read has no server filter. That arm is welded to its own <c>server_id = $1</c> filter, optional database
+    /// filter and column list, so sharing it would mean reshaping the statement <c>get_query_store_duration_trend</c> runs (#7667).</para>
+    /// </summary>
+    public static string BuildQueryStoreSql(bool useRollup)
+    {
+        var hourly = useRollup
+            ? $"""
+            hourly AS
+            (
+                SELECT f.server_id, f.database_name,
+                       SUM(f.execution_count_sum)::double precision AS executions, SUM(f.cpu_us_weighted_sum) AS cpu_us, SUM(f.duration_us_weighted_sum) AS elapsed_us,
+                       MIN(f.bucket) AS first_hour, MAX(f.bucket) AS last_hour
+                FROM {TimescaleSupport.QueryStoreStatsCorrectedHourlyView} AS f
+                WHERE f.query_hash = $1
+                AND   f.bucket >= $2
+                AND   f.bucket < $3
+                AND   f.bucket < $4
+                GROUP BY f.server_id, f.database_name
+            ),
+            """
+            : "";
+        var union = useRollup ? "SELECT * FROM hourly UNION ALL " : "";
+
+        return $"""
+        WITH {hourly}
+        {QueryStoreTailCtes}
         pairs AS
         (
             SELECT server_id, database_name,
                    COALESCE(SUM(executions), 0)::bigint AS executions, COALESCE(SUM(cpu_us), 0)::bigint AS cpu_us,
                    COALESCE(SUM(elapsed_us), 0)::bigint AS elapsed_us, MIN(first_hour) AS first_hour, MAX(last_hour) AS last_hour
             FROM ({union}SELECT * FROM tail) AS u
+            GROUP BY server_id, database_name
+        )
+        SELECT s.server_name, s.display_name, p.database_name, p.executions, p.cpu_us, p.elapsed_us, p.first_hour, p.last_hour,
+               COUNT(*) OVER () AS pairs
+        FROM pairs AS p
+        JOIN servers AS s ON s.server_id = p.server_id
+        WHERE ($6::integer[] IS NULL OR p.server_id = ANY($6))
+        ORDER BY p.cpu_us DESC, s.server_name, p.database_name
+        LIMIT $5
+        """;
+    }
+
+    /// <summary>
+    /// #8570: where <c>query_store_stats_corrected_daily</c> can stand in for the corrected hourly rows of whole closed days. The corrected
+    /// daily reads the same interval-deduped layer (<c>query_store_stats_interval_hourly</c>) as the corrected hourly and groups it by the same
+    /// dimensions at a one-day bucket, so a day's daily row is the sum of that day's hourly rows. Null (read the corrected hourly alone, as
+    /// before) unless the daily has a measured ceiling, at least <see cref="MinMidDays"/> whole days lie between the window's first midnight
+    /// and the least of the window end, the hourly boundary <paramref name="rawFrom"/>, the daily's ceiling and the daily policy's re-read
+    /// span before <paramref name="now"/> (a day inside it can still change and the hourly edge reads it, as <see cref="PlanDailyMid"/> does).
+    /// The no-hole probe is <see cref="DailyHasNoHoleAsync"/>.
+    /// </summary>
+    internal static DailyMidPlan? PlanQueryStoreDailyMid(RollupCoverage coverage, DateTime start, DateTime windowEnd, DateTime rawFrom, DateTime now)
+    {
+        var dailyView = TimescaleSupport.QueryStoreStatsCorrectedDailyView;
+        if (coverage.CeilingOf(dailyView) is not DateTime dailyEnd)
+        {
+            return null;
+        }
+
+        var dStart = start == start.Date ? start : start.Date.AddDays(1);
+        var settled = (now - TimescaleSupport.DailyRefreshStartSpanFor(dailyView)).Date;
+        var limit = new[] { windowEnd, rawFrom, dailyEnd, settled }.Min();
+        var dEnd = DateTime.SpecifyKind(limit.Date, DateTimeKind.Unspecified);
+        return (dEnd - dStart).TotalDays >= MinMidDays
+            ? new DailyMidPlan($"{dailyView} AS d", dailyView, DateTime.SpecifyKind(dStart, DateTimeKind.Unspecified), dEnd)
+            : null;
+    }
+
+    /// <summary>
+    /// #8570: the Query Store fleet statement with the closed whole days read from <c>query_store_stats_corrected_daily</c>. Same
+    /// parameters and rows as <see cref="BuildQueryStoreSql"/> (with the rollup) plus $7 (<see cref="DailyMidPlan.DStart"/>) and $8
+    /// (<see cref="DailyMidPlan.DEnd"/>): <c>edge_start</c> is the corrected hourly rows in <c>[$2, $7)</c>, <c>mid</c> the daily rows in
+    /// <c>[$7, $8)</c>, <c>edge_end</c> the hourly rows in <c>[$8, $3)</c> below the boundary $4. The raw tail is unchanged. A daily row
+    /// carries no hour, so first_hour and last_hour of a pair that is only in the mid are the two ordered LIMIT 1 probes of the corrected
+    /// hourly <see cref="BuildMidSql"/> makes. On a compressed store each hourly arm is a ColumnarScan that decompresses a chunk to keep the
+    /// rows of one hash, the cost the daily rollup (24 times fewer rows) takes out of the days between the edges.
+    /// </summary>
+    public static string BuildQueryStoreMidSql()
+    {
+        var hourlyRelation = $"{TimescaleSupport.QueryStoreStatsCorrectedHourlyView} AS f";
+        var dailyRelation = $"{TimescaleSupport.QueryStoreStatsCorrectedDailyView} AS d";
+        return $"""
+        WITH edge_start AS
+        (
+            SELECT f.server_id, f.database_name,
+                   SUM(f.execution_count_sum)::double precision AS executions, SUM(f.cpu_us_weighted_sum) AS cpu_us, SUM(f.duration_us_weighted_sum) AS elapsed_us,
+                   MIN(f.bucket) AS first_hour, MAX(f.bucket) AS last_hour
+            FROM {hourlyRelation}
+            WHERE f.query_hash = $1
+            AND   f.bucket >= $2
+            AND   f.bucket < $7
+            GROUP BY f.server_id, f.database_name
+        ),
+        edge_end AS
+        (
+            SELECT f.server_id, f.database_name,
+                   SUM(f.execution_count_sum)::double precision AS executions, SUM(f.cpu_us_weighted_sum) AS cpu_us, SUM(f.duration_us_weighted_sum) AS elapsed_us,
+                   MIN(f.bucket) AS first_hour, MAX(f.bucket) AS last_hour
+            FROM {hourlyRelation}
+            WHERE f.query_hash = $1
+            AND   f.bucket >= $8
+            AND   f.bucket < $3
+            AND   f.bucket < $4
+            GROUP BY f.server_id, f.database_name
+        ),
+        mid AS
+        (
+            SELECT d.server_id, d.database_name,
+                   SUM(d.execution_count_sum)::double precision AS executions, SUM(d.cpu_us_weighted_sum) AS cpu_us, SUM(d.duration_us_weighted_sum) AS elapsed_us,
+                   MIN(d.bucket) AS first_day, MAX(d.bucket) AS last_day
+            FROM {dailyRelation}
+            WHERE d.query_hash = $1
+            AND   d.bucket >= $7
+            AND   d.bucket < $8
+            GROUP BY d.server_id, d.database_name
+        ),
+        mid_edges AS
+        (
+            SELECT m.server_id, m.database_name, m.executions, m.cpu_us, m.elapsed_us, m.first_day, m.last_day,
+                   EXISTS (SELECT 1 FROM edge_start AS es WHERE es.server_id = m.server_id AND es.database_name IS NOT DISTINCT FROM m.database_name) AS in_start,
+                   EXISTS (SELECT 1 FROM edge_end AS ee WHERE ee.server_id = m.server_id AND ee.database_name IS NOT DISTINCT FROM m.database_name) AS in_end
+            FROM mid AS m
+        ),
+        probe AS
+        (
+            SELECT m.server_id, m.database_name, m.executions, m.cpu_us, m.elapsed_us, fh.bucket AS first_hour, lh.bucket AS last_hour
+            FROM mid_edges AS m
+            LEFT JOIN LATERAL
+            (
+                SELECT f.bucket FROM {hourlyRelation}
+                WHERE NOT m.in_start
+                AND   f.query_hash = $1 AND f.server_id = m.server_id AND f.database_name IS NOT DISTINCT FROM m.database_name
+                AND   f.bucket >= m.first_day AND f.bucket < m.first_day + interval '1 day'
+                ORDER BY f.bucket LIMIT 1
+            ) AS fh ON true
+            LEFT JOIN LATERAL
+            (
+                SELECT f.bucket FROM {hourlyRelation}
+                WHERE NOT m.in_end
+                AND   f.query_hash = $1 AND f.server_id = m.server_id AND f.database_name IS NOT DISTINCT FROM m.database_name
+                AND   f.bucket >= m.last_day AND f.bucket < m.last_day + interval '1 day'
+                ORDER BY f.bucket DESC LIMIT 1
+            ) AS lh ON true
+        ),
+        {QueryStoreTailCtes}
+        pairs AS
+        (
+            SELECT server_id, database_name,
+                   COALESCE(SUM(executions), 0)::bigint AS executions, COALESCE(SUM(cpu_us), 0)::bigint AS cpu_us,
+                   COALESCE(SUM(elapsed_us), 0)::bigint AS elapsed_us, MIN(first_hour) AS first_hour, MAX(last_hour) AS last_hour
+            FROM (SELECT * FROM edge_start UNION ALL SELECT * FROM probe UNION ALL SELECT * FROM edge_end UNION ALL SELECT * FROM tail) AS u
             GROUP BY server_id, database_name
         )
         SELECT s.server_name, s.display_name, p.database_name, p.executions, p.cpu_us, p.elapsed_us, p.first_hour, p.last_hour,
@@ -497,9 +624,22 @@ public sealed class DarlingMcpQueryFleetSummaryTools
             var qsHours = hours_back > QueryStoreMaxHours ? QueryStoreMaxHours : hours_back;
             var qsStart = windowEnd.AddHours(-qsHours);
             var qsRoute = await QueryStoreTrendRouting.ResolveAsync(coverage, postgres, cancellationToken);
+
+            /* #8570: the Query Store source reads whole closed days from the corrected daily rollup, the way the plan-cache source does. Any
+               guard that fails (no daily ceiling, fewer than two settled whole days, a day with no daily row) leaves the corrected hourly read alone. */
+            DailyMidPlan? qsMid = null;
+            if (qsRoute.UseRollup)
+            {
+                qsMid = PlanQueryStoreDailyMid(coverage, qsStart, windowEnd, qsRoute.RawStartUtc, TimeProvider.System.GetUtcNow().UtcDateTime);
+                if (qsMid is not null && !await DailyHasNoHoleAsync(postgres, qsMid, cancellationToken))
+                {
+                    qsMid = null;
+                }
+            }
+
             var (qsRows, qsPairs) = await ReadFleetAsync(
-                postgres, BuildQueryStoreSql(qsRoute.UseRollup), QueryStoreSource, hash, qsStart, windowEnd,
-                qsRoute.UseRollup ? qsRoute.RawStartUtc : qsStart, limit, cancellationToken);
+                postgres, qsMid is null ? BuildQueryStoreSql(qsRoute.UseRollup) : BuildQueryStoreMidSql(), QueryStoreSource, hash, qsStart, windowEnd,
+                qsRoute.UseRollup ? qsRoute.RawStartUtc : qsStart, limit, cancellationToken, qsMid);
             var qsCut = hours_back > QueryStoreMaxHours;
             var qsUnservedBefore = QueryStoreTrendRouting.UnservedBefore(qsRoute, qsStart);
 
