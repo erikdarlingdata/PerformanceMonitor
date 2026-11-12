@@ -28,13 +28,12 @@ public sealed class OversizedPlanBacklogDropCountsRungTests
 {
     private const string TableName = "collect.oversized_plan_backlog_drops";
 
-    private static PgMigrations.Migration Rung => PgMigrations.Scripts[^1];
+    private static PgMigrations.Migration Rung => PgMigrations.Scripts.Single(s => s.Version == 264);
 
     [Fact]
-    public void TheRungIsTheNewestOnADenseLadder_AndCreatesTheCountTable()
+    public void TheRungIsV264OnADenseLadder_AndCreatesTheCountTable()
     {
         Assert.Equal("oversized-plan-backlog-dropped-counts", Rung.Name);
-        Assert.Equal(StorageVersion.SchemaVersion, Rung.Version);
         Assert.Contains(TableName, Rung.Sql, StringComparison.Ordinal);
 
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
@@ -42,21 +41,27 @@ public sealed class OversizedPlanBacklogDropCountsRungTests
     }
 
     [Fact]
-    public void TheViewerProbe_FindsTheTable_AndMapsItToTheNewestRung()
+    public void TheViewerProbe_FindsTheTable_AndMapsItToV264WhenNoNewerRungIsThere()
     {
         Assert.Contains($"to_regclass('{TableName}') IS NOT NULL", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        var ordinal = parameters.Length - 1;
-        Assert.Equal("hasOversizedPlanBacklogDropCounts", parameters[ordinal].Name);
+        var ordinal = Array.FindIndex(parameters, p => p.Name == "hasOversizedPlanBacklogDropCounts");
+        Assert.True(ordinal >= 0);
 
+        /* Every sentinel but the newer rungs' answers V264; without the table the store maps one rung lower. */
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
-        Assert.Equal(PgMigrations.Scripts[^1].Version, (int)method.Invoke(null, all)!);
+        for (var i = ordinal + 1; i < parameters.Length; i++)
+        {
+            all[i] = false;
+        }
+
+        Assert.Equal(264, (int)method.Invoke(null, all)!);
 
         var without = (object[])all.Clone();
         without[ordinal] = false;
-        Assert.Equal(PgMigrations.Scripts[^1].Version - 1, (int)method.Invoke(null, without)!);
+        Assert.Equal(263, (int)method.Invoke(null, without)!);
     }
 
     /// <summary>
