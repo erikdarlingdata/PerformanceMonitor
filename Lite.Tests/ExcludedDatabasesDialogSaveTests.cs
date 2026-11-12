@@ -20,7 +20,7 @@ namespace PerformanceMonitorLite.Tests;
 /// <summary>
 /// #7639: saving the Excluded Databases dialog, in either mode, must not touch Credential Manager. The save used to go through
 /// <c>ServerManager.UpdateServer</c> with no username, which deletes an Entra MFA server's stored username (the UPN lives only
-/// there). All Credential Manager use is under a prefix of the test's own.
+/// there). Every credential here goes to an in-memory store of the test's own, so the real Credential Manager is never read or written.
 /// </summary>
 [InMemoryCredentials]
 public sealed class ExcludedDatabasesDialogSaveTests : IDisposable
