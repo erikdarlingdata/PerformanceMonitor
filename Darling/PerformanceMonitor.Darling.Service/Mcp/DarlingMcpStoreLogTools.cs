@@ -105,8 +105,8 @@ public sealed class DarlingMcpStoreLogTools
                     "not_collected",
                     $"No store-log captures {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}, so this window makes no claim "
                     + "about what the store's log holds. The service reads its own store's log on the hourly "
-                    + "self-metrics tick; the first capture lands within an hour of starting on a store at "
-                    + "schema V111 or later. Two conditions make this permanently empty on a store the "
+                    + "self-metrics tick; the first capture lands within an hour of starting. "
+                    + "Two conditions make this permanently empty on a store the "
                     + "operator brought themselves rather than one the service provisioned: the server may "
                     + "have no logging collector writing files for pg_ls_logdir() to list, and the role the "
                     + "service connects as needs pg_read_server_files plus EXECUTE on pg_read_binary_file "

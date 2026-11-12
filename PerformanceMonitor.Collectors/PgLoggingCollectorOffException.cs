@@ -62,12 +62,12 @@ public sealed class PgLoggingCollectorOffException : Exception
 
     private static string BuildMessage() =>
         $"{SettingName} is off on this target, so PostgreSQL writes its log to stderr and whatever started "
-        + "the server captures it - systemd's journal, a container runtime, a redirect - where no SQL "
+        + "the server captures it (systemd's journal, a container runtime, a redirect), where no SQL "
         + "function can follow. There are no server-managed log files to read, so nothing was read this "
         + "cycle, and this is NOT 'the log held nothing'. Neither a grant nor a path change helps: this is "
         + "not 42501's missing privilege and not 58P01's missing file, and anything a leftover log "
         + "directory still holds predates the setting being switched off, which is why it is deliberately "
-        + $"not read. To capture deadlocks and plans from this server's log, set {SettingName} = on - it "
+        + $"not read. To capture deadlocks and plans from this server's log, set {SettingName} = on. It "
         + "is a postmaster setting, so it takes a server RESTART rather than a reload. Recorded as a named "
         + "non-fatal skip rather than an error so it does not fill the log every cycle; the collector "
         + "retries every cycle and starts collecting on the first one after the setting is on.";

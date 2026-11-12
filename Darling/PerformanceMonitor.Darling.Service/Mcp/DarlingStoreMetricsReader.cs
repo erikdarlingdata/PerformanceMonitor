@@ -1623,8 +1623,8 @@ LIMIT $1";
         {
             if (toastBytes is not long file)
             {
-                return "toast_bytes is not recorded on this row: the sweep that wrote it predates V137, or the table has no "
-                    + "TOAST relation. The next hourly sweep on a V137+ store records the file size.";
+                return "toast_bytes is not recorded on this row: the sweep that wrote it did not record it, or the table has no "
+                    + "TOAST relation. The next hourly sweep records the file size.";
             }
 
             if (file == 0)

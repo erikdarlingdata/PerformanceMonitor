@@ -38,7 +38,7 @@ public sealed class PlanForceActionDetailScrubLiveTests
     /// (non-safe-shape) <c>state_unavailable</c> block with — the WHOLE block is replaced, so the
     /// rewritten text has no parenthetical at all, unlike <see cref="SafeDetail"/>'s.</summary>
     private const string RedactedLegacyDetail =
-        "state_unavailable: the forcing and automatic-plan-correction state read failed \u2014 an unattended force cannot proceed on an unknown engine state";
+        "state_unavailable: the forcing and automatic-plan-correction state read failed. An unattended force cannot proceed on an unknown engine state";
 
     /// <summary>
     /// Pins 1-3 together against one scratch store: a legacy row's raw credential/host text is rewritten

@@ -8,6 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -69,6 +71,33 @@ public sealed class McpServedTextResidualTests
         /* A call that names no anchor resets it, so the sentence reads as the window that ended now. */
         Assert.Null(McpHelpers.ResolveAsOf(null, out _));
         Assert.Equal("in the last 24 hours", McpHelpers.InTheLast(CountText.Plural(24, "hour")));
+    }
+
+    /// <summary>Two tool calls in flight at once, one with as_of and one without, each resolving its window and then
+    /// yielding before it words its reply. Each reply keeps its own wording: the anchor is per call, never shared.</summary>
+    [Fact]
+    public async Task TwoConcurrentCalls_KeepTheirOwnWindowWording()
+    {
+        using var bothResolved = new Barrier(2);
+
+        async Task<string> Call(string? asOf)
+        {
+            Assert.Null(McpHelpers.ResolveAsOf(asOf, out _));
+            await Task.Yield();
+            bothResolved.SignalAndWait(TimeSpan.FromSeconds(10));
+            await Task.Delay(20);
+            return McpHelpers.InTheLast(CountText.Plural(24, "hour"));
+        }
+
+        for (var round = 0; round < 25; round++)
+        {
+            var anchored = Task.Run(() => Call("2026-11-10T12:00:00Z"));
+            var live = Task.Run(() => Call(null));
+            var replies = await Task.WhenAll(anchored, live);
+
+            Assert.Equal("in the 24 hours ending at 2026-11-10 12:00 UTC", replies[0]);
+            Assert.Equal("in the last 24 hours", replies[1]);
+        }
     }
 
     [Fact]

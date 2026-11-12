@@ -104,7 +104,7 @@ public sealed class DarlingMcpStallProbeTools
                     + "declares a wall-clock budget is a quarter of the way through it and still delivering under "
                     + $"{StallWaitProbePolicy.ThroughputFloorBytesPerSecond / 1024 / 1024} MB/s, which on the "
                     + "measured population is about 1% of the runs of two collectors on 2 of 43 servers. It is "
-                    + "also permanently empty on a store below schema V112, and on any window predating the "
+                    + "also permanently empty on any window predating the "
                     + "service build that carries the probe.");
             }
 

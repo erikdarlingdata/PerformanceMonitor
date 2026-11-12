@@ -202,12 +202,12 @@ namespace PerformanceMonitor.Common
         /// freshness: there is no live ping to a monitored server.</summary>
         public static string Headline(this ServerCollectionStatus status) => status switch
         {
-            ServerCollectionStatus.Stale => "Warning - collection has lagged on this server",
-            ServerCollectionStatus.Online => "Online - collection is current",
-            ServerCollectionStatus.Offline => "Offline - nothing has been collected for long enough to call the server dark",
+            ServerCollectionStatus.Stale => "Warning: collection has lagged on this server",
+            ServerCollectionStatus.Online => "Online: collection is current",
+            ServerCollectionStatus.Offline => "Offline: nothing has been collected for long enough to call the server dark",
             ServerCollectionStatus.AwaitingFirstCollection =>
-                "Awaiting first collection - registered, but the service has not reached it yet",
-            _ => "Unknown - this server's collection freshness has not been classified",
+                "Awaiting first collection: registered, but the service has not reached it yet",
+            _ => "Unknown: this server's collection freshness has not been classified",
         };
     }
 
@@ -2733,7 +2733,7 @@ namespace PerformanceMonitor.Common
             return string.Format(
                 CultureInfo.InvariantCulture,
                 "produced {0:N0} rows until {1} and has recorded SUCCESS with zero rows on {2:N0} runs "
-                + "since - a collector that stops producing is a different fact from one that never "
+                + "since. A collector that stops producing is a different fact from one that never "
                 + "produced",
                 rowsInPriorWindow,
                 DateTime.SpecifyKind(lastProductiveTimeUtc.Value, DateTimeKind.Utc)
@@ -2869,7 +2869,7 @@ namespace PerformanceMonitor.Common
 
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "produced {0:N0} rows in the seven days before {1}; has reported {2} since - a restart or "
+                "produced {0:N0} rows in the seven days before {1}; has reported {2} since. A restart or "
                 + "upgrade changed what this collector can read",
                 rowsInPriorWindow,
                 DateTime.SpecifyKind(lastNonSkipTimeUtc.Value, DateTimeKind.Utc)
@@ -4000,7 +4000,7 @@ namespace PerformanceMonitor.Common
 
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "On the cycle where every scheduled cadence comes due together this body costs {0:N0} ms - {1:N1}% of the {2:N0} ms sweep budget - so that body cannot finish inside its cadence and its relaunch is skipped, however much headroom the sustained {3:N1}% reports. Its largest single contributor is {4}, {5:N0} ms on a heavy run and {6:N1}% of the budget on its own, every {7} minutes. Amortized over that cadence it is worth {8:N0} ms per minute, so the sustained figure and the heaviest_collectors ranked by it both understate what this collector does to one body.{9} The lever here is the schedule's shape - moving or splitting that collector so it stops sharing a cycle - not the capacity answer a SATURATED verdict calls for.",
+                "On the cycle where every scheduled cadence comes due together this body costs {0:N0} ms ({1:N1}% of the {2:N0} ms sweep budget), so that body cannot finish inside its cadence and its relaunch is skipped, however much headroom the sustained {3:N1}% reports. Its largest single contributor is {4}, {5:N0} ms on a heavy run and {6:N1}% of the budget on its own, every {7} minutes. Amortized over that cadence it is worth {8:N0} ms per minute, so the sustained figure and the heaviest_collectors ranked by it both understate what this collector does to one body.{9} The lever here is the schedule's shape: moving or splitting that collector so it stops sharing a cycle, not the capacity answer a SATURATED verdict calls for.",
                 Math.Round(pressure.PeakCycleMs),
                 pressure.PeakCyclePercent,
                 SweepBudgetMs,

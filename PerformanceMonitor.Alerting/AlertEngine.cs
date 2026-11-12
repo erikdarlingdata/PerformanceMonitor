@@ -3292,7 +3292,7 @@ public sealed class AlertEngine
                     var elapsedMinutes = worst.ElapsedSeconds / 60;                 /* :354 — integer division, exactly Lite */
                     /* :355-356 — the query-text preview feeds ShortMessage (the toast body). */
                     var preview = AlertContextBuilders.TruncateStatement(worst.QueryText, 80);
-                    var previewSuffix = string.IsNullOrEmpty(preview) ? "" : $" - {preview}";
+                    var previewSuffix = string.IsNullOrEmpty(preview) ? "" : $": {preview}";
 
                     var muteCtx = new AlertMuteContext                              /* :358-364 */
                     {
@@ -4269,13 +4269,13 @@ public sealed class AlertEngine
                     /* :698-708. ShortMessage = the toast body of :690. */
                     var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Failed Agent Job",
-                        $"{failedJobs.Count} job {(failedJobs.Count == 1 ? "failure" : "failures")} in last {failedJobLookbackMinutes}m - {jobNames}",
+                        $"{failedJobs.Count} job {(failedJobs.Count == 1 ? "failure" : "failures")} in last {failedJobLookbackMinutes}m: {jobNames}",
                         $"last {failedJobLookbackMinutes}m",
                         failedJobContext, detailText,
                         NumericCurrentValue: failedJobs.Count,
                         NumericThresholdValue: 0,
                         Muted: mute.Muted, Hold: mute.Hold, Severity: failedJobContext?.SeverityOverride,
-                        ShortMessage: $"{failedJobs.Count} job {(failedJobs.Count == 1 ? "failure" : "failures")} - {jobNames}"), ct);
+                        ShortMessage: $"{failedJobs.Count} job {(failedJobs.Count == 1 ? "failure" : "failures")}: {jobNames}"), ct);
                     AfterFire("Failed Agent Job", _lastFailedJobAlert, key, now, alertCooldown, delivery);
 
                     /* #4752: the in-memory watermark moved to the newest failure BEFORE the fire; the saved one

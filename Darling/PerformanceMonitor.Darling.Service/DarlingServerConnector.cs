@@ -184,7 +184,7 @@ SELECT /* PerformanceMonitorLite */
 
         return $"Registration '{displayName}' is registered for database '{registeredDatabase}' but its connection " +
                $"landed in '{connectedDatabase}'. Everything collected under this registration describes " +
-               $"'{connectedDatabase}', stored under this registration's identity - so if another registration " +
+               $"'{connectedDatabase}', stored under this registration's identity. So if another registration " +
                $"names '{connectedDatabase}', both are collecting the same database and its history is duplicated " +
                "under two identities. Check this server's Initial Catalog / database setting in the Viewer's " +
                "Manage Servers, or the 'database' field for it in darling.json.";
@@ -1094,7 +1094,7 @@ FROM pg_catalog.pg_control_system() AS s";
               $"(skipped: {string.Join(", ", skipped)})";
 
         return $"PostgreSQL {probe.PostgresMajorVersion} (server_version_num {probe.PostgresVersionNum}), " +
-            $"{role}, {flavour} - {applies}";
+            $"{role}, {flavour}: {applies}";
     }
 
     /// <summary>Human-readable SERVERPROPERTY('EngineEdition') description for the probe result.

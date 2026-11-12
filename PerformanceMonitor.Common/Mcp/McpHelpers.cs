@@ -482,7 +482,7 @@ internal static class McpHelpers
 
         if (hoursBack <= 0)
         {
-            return Refusal("hours_back", $"Invalid hours_back value '{hoursBack}'. Must be a positive integer - a negative or zero window has no meaning and is refused rather than read as its absolute value. This read has no upper bound on hours_back.");
+            return Refusal("hours_back", $"Invalid hours_back value '{hoursBack}'. Must be a positive integer. A negative or zero window has no meaning and is refused rather than read as its absolute value. This read has no upper bound on hours_back.");
         }
 
         return ResolveAsOf(asOf, out endUtc);
@@ -521,7 +521,7 @@ internal static class McpHelpers
                 DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
                 out var parsed))
         {
-            return Refusal("summary_date", $"Invalid summary_date value '{summaryDate}'. Expected an ISO-8601 calendar date, yyyy-MM-dd (e.g. 2026-07-09), read as a UTC day. Other spellings - including 07/09/2026 - are refused rather than guessed at, because 01/02/2026 reads as two different days depending on who wrote it.");
+            return Refusal("summary_date", $"Invalid summary_date value '{summaryDate}'. Expected an ISO-8601 calendar date, yyyy-MM-dd (e.g. 2026-07-09), read as a UTC day. Other spellings, including 07/09/2026, are refused rather than guessed at, because 01/02/2026 reads as two different days depending on who wrote it.");
         }
 
         date = DateTime.SpecifyKind(parsed, DateTimeKind.Utc).Date;
@@ -993,9 +993,9 @@ internal static class McpHelpers
     public static string? ValidateMinMs(double? minMs, string paramName)
     {
         if (minMs is { } value && !double.IsFinite(value))
-            return Refusal(paramName, $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor must be a finite number - NaN and Infinity parse but can never match a run, so the read would come back empty and duration-ranked with nothing to say the floor was unusable. Note that an oversized number overflows to Infinity rather than being rejected as too large.");
+            return Refusal(paramName, $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor must be a finite number. NaN and Infinity parse but can never match a run, so the read would come back empty and duration-ranked with nothing to say the floor was unusable. Note that an oversized number overflows to Infinity rather than being rejected as too large.");
         if (minMs is < 0)
-            return Refusal(paramName, $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor cannot be negative - use 0 to admit every row, or omit it entirely.");
+            return Refusal(paramName, $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor cannot be negative. Use 0 to admit every row, or omit it entirely.");
         return null;
     }
 

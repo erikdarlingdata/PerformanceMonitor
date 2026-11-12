@@ -33,22 +33,23 @@ internal static class StatementLabel
             return string.Empty;
         }
 
+        var text = sql;
         var i = 0;
-        while (i < sql.Length)
+        while (i < text.Length)
         {
-            if (char.IsWhiteSpace(sql[i]))
+            if (char.IsWhiteSpace(text[i]))
             {
                 i++;
             }
-            else if (string.CompareOrdinal(sql, i, "--", 0, 2) == 0)
+            else if (string.CompareOrdinal(text, i, "--", 0, 2) == 0)
             {
-                var eol = sql.IndexOf('\n', i);
-                i = eol < 0 ? sql.Length : eol + 1;
+                var eol = text.IndexOf('\n', i);
+                i = eol < 0 ? text.Length : eol + 1;
             }
-            else if (string.CompareOrdinal(sql, i, "/*", 0, 2) == 0)
+            else if (string.CompareOrdinal(text, i, "/*", 0, 2) == 0)
             {
-                var close = sql.IndexOf("*/", i + 2, StringComparison.Ordinal);
-                i = close < 0 ? sql.Length : close + 2;
+                var close = text.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                i = close < 0 ? text.Length : close + 2;
             }
             else
             {
@@ -56,13 +57,13 @@ internal static class StatementLabel
             }
         }
 
-        if (i >= sql.Length)
+        if (i >= text.Length)
         {
             return string.Empty;
         }
 
-        var end = sql.IndexOf('\n', i);
-        var line = (end < 0 ? sql[i..] : sql[i..end]).Trim();
+        var end = text.IndexOf('\n', i);
+        var line = (end < 0 ? text.AsSpan(i) : text.AsSpan(i, end - i)).Trim().ToString();
         return line.Length > MaxLabelLength ? line[..MaxLabelLength] : line;
     }
 

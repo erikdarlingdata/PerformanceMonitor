@@ -111,7 +111,7 @@ public sealed class DarlingMcpCollectorCostTools
                 return McpHelpers.Status(
                     "empty",
                     "No collector cost recorded yet. The service records an hourly aggregate per (server, collector); " +
-                    "the first lands within an hour of starting on a store at schema V105 or later.");
+                    "the first lands within an hour of the service starting.");
             }
 
             return JsonSerializer.Serialize(new

@@ -313,22 +313,22 @@ public static class PostgresAlertEvaluator
             shortMessage = $"[{db.DatabaseName}] {counter} age {age:N0} is {pctOfCeiling:0.#}% of the way to the "
                 + "wraparound wall"
                 + (viaCeiling
-                    ? " - past vacuum_failsafe_age, where PostgreSQL abandons its cost limits and skips "
+                    ? ". Past vacuum_failsafe_age, where PostgreSQL abandons its cost limits and skips "
                       + "index cleanup trying to catch up."
-                    : $" and past twice {settingName} ({setting:N0}) - autovacuum's own wraparound defence "
+                    : $" and past twice {settingName} ({setting:N0}). Autovacuum's own wraparound defence "
                       + "is not keeping up.")
                 + " At the wall the server stops accepting writes, and the remedy is hours of vacuuming, so act now.";
         }
         else if (viaCeiling)
         {
             shortMessage = $"[{db.DatabaseName}] {counter} age {age:N0} is {pctOfCeiling:0.#}% of the way to the "
-                + "wraparound wall - already well past the routine vacuum-forcing point on this cluster's own "
+                + "wraparound wall. Already well past the routine vacuum-forcing point on this cluster's own "
                 + $"{settingName}. Vacuum now rather than waiting to see if autovacuum keeps pace.";
         }
         else
         {
-            shortMessage = $"[{db.DatabaseName}] {counter} age {age:N0} has reached {settingName} ({setting:N0}) - "
-                + "the point where autovacuum forces a wraparound-prevention vacuum - and has not come back down "
+            shortMessage = $"[{db.DatabaseName}] {counter} age {age:N0} has reached {settingName} ({setting:N0}), "
+                + "the point where autovacuum forces a wraparound-prevention vacuum, and has not come back down "
                 + "since. Confirm autovacuum is actually keeping up rather than merely running.";
         }
 
@@ -450,7 +450,7 @@ public static class PostgresAlertEvaluator
         var rotating = !identityFractionHolds;
         var subject = rotating ? XminRotatingHoldersSubject : holder;
         var holderClause = rotating
-            ? $"by a succession of different holders rather than one chronic one - the latest is {holder}"
+            ? $"by a succession of different holders rather than one chronic one. The latest is {holder}"
             : $"by {holder}, the winner in {xmin.ObservationsHeld} of the {xmin.ObservationsTotal} "
                 + "collections that recorded a holder";
 
@@ -476,12 +476,12 @@ public static class PostgresAlertEvaluator
     /// </summary>
     public static string RemedyFor(string? source) => source switch
     {
-        "session" => "A backend is idle in transaction - end it, and look at why the application left it open.",
-        "replication_slot" => "An inactive replication slot is pinning it - if its consumer is gone, the slot must be dropped.",
-        "replication_slot_catalog" => "A logical slot's catalog_xmin is pinning it - its consumer is not confirming; check the CDC/logical pipeline.",
-        "standby_feedback" => "A standby's hot_standby_feedback is pinning it - a long query on the replica, or the feedback setting itself.",
-        "prepared_transaction" => "An orphaned prepared transaction is pinning it - COMMIT PREPARED or ROLLBACK PREPARED it.",
-        _ => "Unrecognized holder - read pg_stat_activity, pg_replication_slots and pg_prepared_xacts directly.",
+        "session" => "A backend is idle in transaction. End it, and look at why the application left it open.",
+        "replication_slot" => "An inactive replication slot is pinning it. If its consumer is gone, the slot must be dropped.",
+        "replication_slot_catalog" => "A logical slot's catalog_xmin is pinning it. Its consumer is not confirming; check the CDC/logical pipeline.",
+        "standby_feedback" => "A standby's hot_standby_feedback is pinning it. A long query on the replica, or the feedback setting itself.",
+        "prepared_transaction" => "An orphaned prepared transaction is pinning it. COMMIT PREPARED or ROLLBACK PREPARED it.",
+        _ => "Unrecognized holder: read pg_stat_activity, pg_replication_slots and pg_prepared_xacts directly.",
     };
 
     public static Finding? EvaluateSlot(PostgresSlotAlertInfo slot)
@@ -507,9 +507,9 @@ public static class PostgresAlertEvaluator
 
         var body = slot.WalStatus switch
         {
-            "lost" => $"Slot [{slot.SlotName}] is LOST - the WAL its consumer needs is gone and the slot "
+            "lost" => $"Slot [{slot.SlotName}] is LOST. The WAL its consumer needs is gone and the slot "
                     + "cannot resume. It has to be recreated, and its consumer resynchronised.",
-            "unreserved" => $"Slot [{slot.SlotName}] is UNRESERVED - required WAL has already been removed. "
+            "unreserved" => $"Slot [{slot.SlotName}] is UNRESERVED. Required WAL has already been removed. "
                           + "Its consumer will fail on next connect.",
             _ when severity == AlertSeverityLevel.Critical =>
                 $"Slot [{slot.SlotName}] is inactive and still accumulating: {gb:N1} GB retained, "
@@ -646,7 +646,7 @@ public static class PostgresAlertEvaluator
                 + $"(an average of {breachedAvg:0.#} {(breachedAvg == 1 ? "backend" : "backends")} continuously waiting)"),
             string.Create(CultureInfo.InvariantCulture,
                 $"[{subject}] {accumulatedSeconds:N0}s of wait accumulated in the last "
-                + $"{PoisonWaitWindowMinutes} minutes across {wait.AccumulatedWaits:N0} waits - on average "
+                + $"{PoisonWaitWindowMinutes} minutes across {wait.AccumulatedWaits:N0} waits. On average "
                 + $"{avgWaiters:N1} {(avgWaiters == 1 ? "backend" : "backends")} continuously stuck. {PoisonWaitRemedyFor(wait.WaitEvent)}"),
             wait.AccumulatedWaitMs,
             breachedAvg * windowMs);
@@ -720,10 +720,10 @@ public static class PostgresAlertEvaluator
     /// </summary>
     public static string PoisonWaitRemedyFor(string? waitEvent) => waitEvent?.ToLowerInvariant() switch
     {
-        "btreepage" => "Backends are queueing on individual B-tree index pages - a hot index insert point "
+        "btreepage" => "Backends are queueing on individual B-tree index pages. A hot index insert point "
             + "is serializing them. Sample pg_stat_activity for the statements waiting on this event and "
             + "look at the indexes their writes converge on.",
-        "bufferio" => "Backends are stacked behind one another's in-flight page reads - the same pages are "
+        "bufferio" => "Backends are stacked behind one another's in-flight page reads. The same pages are "
             + "being demanded faster than storage returns them. Look for a working set outgrowing "
             + "shared_buffers, or a storage latency shift in the I/O statistics.",
         _ => "Sample pg_stat_activity for the statements waiting on this event.",

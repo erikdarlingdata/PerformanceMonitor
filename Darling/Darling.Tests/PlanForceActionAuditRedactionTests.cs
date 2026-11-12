@@ -59,7 +59,7 @@ public sealed class PlanForceActionAuditRedactionTests
         Assert.DoesNotContain("db-primary-02", sanitized);
         Assert.DoesNotContain("password authentication failed", sanitized);
         Assert.Equal(
-            "state_unavailable: the forcing and automatic-plan-correction state read failed \u2014 an unattended force cannot proceed on an unknown engine state",
+            "state_unavailable: the forcing and automatic-plan-correction state read failed. An unattended force cannot proceed on an unknown engine state",
             sanitized);
     }
 
@@ -100,7 +100,7 @@ public sealed class PlanForceActionAuditRedactionTests
         Assert.DoesNotContain("db-primary-02", sanitized);
         Assert.DoesNotContain("password authentication failed", sanitized);
         Assert.Equal(
-            "state_unavailable: the forcing and automatic-plan-correction state read failed \u2014 an unattended force cannot proceed on an unknown engine state",
+            "state_unavailable: the forcing and automatic-plan-correction state read failed. An unattended force cannot proceed on an unknown engine state",
             sanitized);
     }
 
@@ -117,7 +117,7 @@ public sealed class PlanForceActionAuditRedactionTests
         Assert.DoesNotContain("hunter2", sanitized);
         Assert.DoesNotContain("db-primary-02", sanitized);
         Assert.Equal(
-            "state_unavailable: the forcing and automatic-plan-correction state read failed \u2014 an unattended force cannot proceed on an unknown engine state",
+            "state_unavailable: the forcing and automatic-plan-correction state read failed. An unattended force cannot proceed on an unknown engine state",
             sanitized);
     }
 
@@ -204,7 +204,7 @@ public sealed class PlanForceActionAuditRedactionTests
         Assert.StartsWith("apc_owns_it: query_store_stats: plan 7 is_forced_plan = true\n", sanitized);
         Assert.Equal(
             "apc_owns_it: query_store_stats: plan 7 is_forced_plan = true\n" +
-            "state_unavailable: the forcing and automatic-plan-correction state read failed \u2014 an unattended force cannot proceed on an unknown engine state",
+            "state_unavailable: the forcing and automatic-plan-correction state read failed. An unattended force cannot proceed on an unknown engine state",
             sanitized);
     }
 

@@ -277,7 +277,7 @@ public sealed class RdsCpuIngestor
                whichever replica happened to answer this cycle — not a coherent series for any one instance. */
             throw new InvalidOperationException(
                 $"'{host}' is an Aurora {(parsed.Kind == RdsEndpointKind.ClusterReader ? "reader" : "custom")} "
-                + "endpoint, which does not resolve to a stable instance - it moves between replicas call to "
+                + "endpoint, which does not resolve to a stable instance. It moves between replicas call to "
                 + "call. Point the target at the cluster writer endpoint or at a specific instance so CPU "
                 + "readings belong to a server that can be named.");
         }

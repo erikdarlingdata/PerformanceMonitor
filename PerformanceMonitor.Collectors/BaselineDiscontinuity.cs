@@ -330,14 +330,14 @@ public static class BaselineDiscontinuities
         if (o.Label == ServerEpoch.StatementsChangesMeasurement)
         {
             return new Resolved(o.At, o.Collector, o.Label, StatsResetReason,
-                "pg_stat_statements_info.stats_reset moved - the statements family's counters were reset (pg_stat_statements_reset(), a crash the extension's saved statistics did not survive, or an endpoint now reaching an instance with its own history), and its delta baselines were forgotten and re-established on the next pass",
+                "pg_stat_statements_info.stats_reset moved. The statements family's counters were reset (pg_stat_statements_reset(), a crash the extension's saved statistics did not survive, or an endpoint now reaching an instance with its own history), and its delta baselines were forgotten and re-established on the next pass",
                 Specific: true);
         }
 
         if (o.Label == ServerEpoch.PostmasterChangesMeasurement)
         {
             return new Resolved(o.At, o.Collector, o.Label, PostmasterRestartReason,
-                "pg_postmaster_start_time() moved - PostgreSQL restarted (or the endpoint now reaches a different instance), so the in-memory wait counters started from zero and the wait family's delta baselines were forgotten and re-established on the next pass",
+                "pg_postmaster_start_time() moved. PostgreSQL restarted (or the endpoint now reaches a different instance), so the in-memory wait counters started from zero and the wait family's delta baselines were forgotten and re-established on the next pass",
                 Specific: true);
         }
 
@@ -347,13 +347,13 @@ public static class BaselineDiscontinuities
         {
             var reason = DeriveIdentityReason(replaced, current);
             return new Resolved(o.At, o.Collector, o.Label, reason,
-                "instance identity changed - " + ServerEpoch.DescribeChange(replaced, current)
+                "instance identity changed. " + ServerEpoch.DescribeChange(replaced, current)
                 + "; every delta baseline for this server was forgotten and re-established on the next pass",
                 Specific: reason != IdentityReason);
         }
 
         return new Resolved(o.At, o.Collector, o.Label, IdentityReason,
-            "instance identity changed (sqlserver_start_time or @@SERVERNAME moved) and every delta baseline for this server was forgotten and re-established on the next pass; the old and new pair for THIS event is not stored - collector_state holds only the latest change's pair - so whether this was a restart, a rename or a failover is not recoverable from the store",
+            "instance identity changed (sqlserver_start_time or @@SERVERNAME moved) and every delta baseline for this server was forgotten and re-established on the next pass; the old and new pair for THIS event is not stored (collector_state holds only the latest change's pair), so whether this was a restart, a rename or a failover is not recoverable from the store",
             Specific: false);
     }
 

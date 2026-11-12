@@ -48,7 +48,7 @@ public class AnalysisSinglesDigestTests
 
     private static AnalysisSinglesDigestReader.DigestRoutedRow Row(
         DateTime at, int serverId, string server, string category, string hash8, double severity,
-        string reason = "uncorroborated: a lone fact - 1 fact in the chain and 0 of 5 co-fire checks matched.",
+        string reason = "uncorroborated: a lone fact: 1 fact in the chain and 0 of 5 co-fire checks matched.",
         params string[] dedupKeys)
         => new(at, serverId, server, $"Analysis: {category} [{hash8}]", severity, ContextJson(reason, dedupKeys));
 
@@ -217,7 +217,7 @@ public class AnalysisSinglesDigestTests
         Assert.DoesNotContain('—', detail);
         Assert.DoesNotMatch(@"#\d{3,}", detail);
         Assert.DoesNotMatch(@"\bV\d{2,3}\b", detail);
-        Assert.Contains("1. pm-server-2 - Analysis: anomaly [bbbbbbbb] - severity 1.91", detail, StringComparison.Ordinal);
+        Assert.Contains("1. pm-server-2: Analysis: anomaly [bbbbbbbb], severity 1.91", detail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -234,10 +234,10 @@ public class AnalysisSinglesDigestTests
         Assert.Contains(Day.ToString("o"), detail, StringComparison.Ordinal);
 
         /* Top movers: rank, server, the KEY a page would have carried, the severity, the reason, the fingerprints. */
-        Assert.Contains("1. pm-server-2 - Analysis: anomaly [bbbbbbbb] - severity 1.91 - uncorroborated:", detail, StringComparison.Ordinal);
-        Assert.Contains("dedup: dk-2a, dk-2b", detail, StringComparison.Ordinal);
-        Assert.Contains("2. pm-server-1 - Analysis: anomaly [aaaaaaaa] - severity 1.62", detail, StringComparison.Ordinal);
-        Assert.Contains("3. pm-server-1 - Analysis: queries [cccccccc] - severity 1.55", detail, StringComparison.Ordinal);
+        Assert.Contains("1. pm-server-2: Analysis: anomaly [bbbbbbbb], severity 1.91. uncorroborated:", detail, StringComparison.Ordinal);
+        Assert.Contains("Dedup: dk-2a, dk-2b", detail, StringComparison.Ordinal);
+        Assert.Contains("2. pm-server-1: Analysis: anomaly [aaaaaaaa], severity 1.62", detail, StringComparison.Ordinal);
+        Assert.Contains("3. pm-server-1: Analysis: queries [cccccccc], severity 1.55", detail, StringComparison.Ordinal);
 
         /* By family, then server. */
         Assert.Contains("- anomaly: 2 singles across 2 servers", detail, StringComparison.Ordinal);
@@ -292,7 +292,7 @@ public class AnalysisSinglesDigestTests
         Assert.Contains("- anomaly: 14 singles across 14 servers", detail, StringComparison.Ordinal);
         Assert.Contains("+ 4 more servers", detail, StringComparison.Ordinal);
         /* The highest severity ranks first — server 14 at 1.64. */
-        Assert.Contains("1. pm-server-14 - ", detail, StringComparison.Ordinal);
+        Assert.Contains("1. pm-server-14: ", detail, StringComparison.Ordinal);
     }
 
     /* ---------------- the fire shape and lifecycle ---------------- */
@@ -526,7 +526,7 @@ public class AnalysisSinglesDigestTests
         var detail = fired.DetailText!;
         Assert.Contains("Held back from paging (3 alerts in 1 group):", detail, StringComparison.Ordinal);
         Assert.Contains(
-            "- pm-server-1 - Runnable Queue Warning: 3 held, first 2026-09-19 03:00 UTC, last 2026-09-19 10:00 UTC. latest hold",
+            "- pm-server-1, Runnable Queue Warning: 3 held, first 2026-09-19 03:00 UTC, last 2026-09-19 10:00 UTC. latest hold",
             detail, StringComparison.Ordinal);
         Assert.DoesNotContain("second hold", detail, StringComparison.Ordinal);
         Assert.Contains("Analysis singles (2 across 2 servers).", detail, StringComparison.Ordinal);
@@ -541,7 +541,7 @@ public class AnalysisSinglesDigestTests
         var group = Assert.Single(groups.Records);
         Assert.Equal(1, group.Ordinal);
         Assert.Equal(
-            "pm-server-1 - Runnable Queue Warning: 3 held, first 2026-09-19 03:00 UTC, last 2026-09-19 10:00 UTC. latest hold",
+            "pm-server-1, Runnable Queue Warning: 3 held, first 2026-09-19 03:00 UTC, last 2026-09-19 10:00 UTC. latest hold",
             group.Summary);
         Assert.Contains(fired.Context.Details, d => d.Heading == "Singles summary");
     }
@@ -613,7 +613,7 @@ public class AnalysisSinglesDigestTests
         var group = new DarlingSelfAlertEvaluator.HeldAlertGroup(
             "pm-server-1", "Poison Wait", 1, Day, Day, "");
 
-        Assert.Equal("pm-server-1 - Poison Wait: 1 held, at 2026-09-19 12:00 UTC", DarlingSelfAlertEvaluator.HeldGroupLine(group));
+        Assert.Equal("pm-server-1, Poison Wait: 1 held, at 2026-09-19 12:00 UTC", DarlingSelfAlertEvaluator.HeldGroupLine(group));
     }
 
     [Fact]
@@ -687,7 +687,7 @@ public class AnalysisSinglesDigestTests
 
         /* Nothing was dropped: every held group, the "N more" line, the singles and all four families are in the message. */
         var all = string.Join("\n", texts.Concat(fieldTexts));
-        Assert.Contains("pm-server-40 - Runnable Queue Warning", all, StringComparison.Ordinal);
+        Assert.Contains("pm-server-40, Runnable Queue Warning", all, StringComparison.Ordinal);
         Assert.Contains("#40", all, StringComparison.Ordinal);
         Assert.Contains("+5 more held groups, not listed", all, StringComparison.Ordinal);
         Assert.Contains("#10 ", all, StringComparison.Ordinal);

@@ -468,7 +468,7 @@ public sealed partial class DarlingCollectorRunner
     /// </summary>
     internal const string StoreWriteReattemptLogTemplate =
         "{Collector} on '{Server}': the store write of {Rows} row(s) failed on a transport fault " +
-        "({Message}) - re-attempting once on a fresh store connection. The batch is still in " +
+        "({Message}). Re-attempting once on a fresh store connection. The batch is still in " +
         "memory and nothing was committed, so a successful re-attempt costs no sample.";
 
     /// <summary>

@@ -49,6 +49,6 @@ public static class QueryStatExtremes
             _ => "max_elapsed_ms exceeds",
         };
 
-        return $"{which} this window's total - min/max (like max_dop) are lifetime extremes for the plan's time in cache, and this extreme predates the window; use total and avg for what happened in the window";
+        return $"{which} this window's total: min/max (like max_dop) are lifetime extremes for the plan's time in cache, and this extreme predates the window; use total and avg for what happened in the window";
     }
 }
