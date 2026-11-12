@@ -48,7 +48,7 @@
 import { keepScroll, refreshGridInPlace, replaceNodes } from "../refresh-in-place.js";
 import { keepLonePanelsWide } from "../panel-layout.js";
 import { el, mount, apiGet, apiGetFleet, setChartDataStart, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, localizeIsoText, storeHash, clampTileDetails } from "../util.js";
-import { getDatabaseFilter } from "../viewer-local.js";
+import { getDatabaseFilter, hasDatabaseFilter, isRememberedPostgres, rememberEngine } from "../viewer-local.js";
 import { databaseFilterControl, databaseFilterUnavailable, closeDatabaseFilter } from "./database-filter.js";
 import { setPanelSignal } from "../panels.js";
 import { serverTabsFor, isPostgresTarget, findServerTab, tabNote } from "./server-tabs.js";
@@ -384,11 +384,19 @@ export function renderServer(main, server, tabId, opts) {
   let painted = null;
   /* The offline state the painted panels were built with (ctx.offline), so a fresh card that flips it repaints them. */
   let paintedOffline = false;
+  /* #8554: true while the panels on screen were started before the card arrived and the tab bar is not drawn yet. */
+  let beforeCard = false;
   if (remembered) {
     fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, remembered.card, remembered.reason);
     fillDatabaseFilter(dbSlot, server, remembered.card);
     painted = paintTabsKeeping(keep, tabsSlot, server, tabId, remembered.card, inPlace);
     paintedOffline = serverIsOffline(server);
+  } else if (!isPoll && mayStartBeforeCard(server, tabId)) {
+    /* The fleet roll-up of a big store takes a second or more, and the panels' reads need only the route's server. The card says
+       which tab set the server has, so the reads start on the SQL Server tabs, the set an unclaimed server has always had, and the
+       card's arrival below keeps those panels when it agrees, or draws the right set when it does not. */
+    painted = startPanelsBeforeCard(server, tabId);
+    beforeCard = true;
   }
 
   /* /api/fleet is fetched again only to place a server this page has no card for yet, or on the poll's real
@@ -404,7 +412,10 @@ export function renderServer(main, server, tabId, opts) {
          into nodes this render no longer owns, so the only correct thing to do with a stale answer is drop it. */
       if (generation !== renderGeneration) return;
 
-      if (card) lastCard.set(server, { card, reason, at: Date.now() });
+      if (card) {
+        lastCard.set(server, { card, reason, at: Date.now() });
+        rememberEngine(server, isPostgresTarget(card));
+      }
       fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason);
       fillDatabaseFilter(dbSlot, server, card);
 
@@ -416,9 +427,34 @@ export function renderServer(main, server, tabId, opts) {
       if (!painted || (card && serverTabsFor(card) !== painted) || serverIsOffline(server) !== paintedOffline) {
         painted = paintTabsKeeping(keep && !painted, tabsSlot, server, tabId, card, inPlace);
         paintedOffline = serverIsOffline(server);
+      } else if (beforeCard) {
+        /* The card agrees with the set the panels were started on (#8554): draw the tab bar and notes around them, and read nothing again. */
+        painted = paintTabsKeeping(true, tabsSlot, server, tabId, card, inPlace);
       }
+      beforeCard = false;
     });
   }
+}
+
+/** Whether the page may start a server's panel reads before its fleet card arrives (#8554). Not for a server this browser has seen as
+ *  PostgreSQL (its tab set is the other one), not for a tab only the PostgreSQL set has, and not while any database filter is saved:
+ *  a filter is keyed by the card's server id, so reads sent without the card would be the unfiltered ones. */
+function mayStartBeforeCard(server, tabId) {
+  if (isRememberedPostgres(server) || hasDatabaseFilter()) return false;
+  return !tabId || serverTabsFor(null).some((t) => t.id === tabId);
+}
+
+/** Start the tab's panels on the default tab set for a server with no card yet. The tab bar and its notes wait for the card, which
+ *  says whether this is the set to show. Returns the registry the panels were built from, as paintTabs does. */
+function startPanelsBeforeCard(server, tabId) {
+  const tabs = serverTabsFor(null);
+  const tab = findServerTab(tabId, tabs);
+  current = { server, tab };
+  gridKey = server + "|" + (tabId || "");
+  /* The previous server's note slot is gone from the page: the notes draw with the tab bar, once the card is in. */
+  tabNoteSlot = null;
+  redrawPanels();
+  return tabs;
 }
 
 /* paintTabs, leaving the panels the previous render drew in place when `keep`. The flag is raised only for this one
