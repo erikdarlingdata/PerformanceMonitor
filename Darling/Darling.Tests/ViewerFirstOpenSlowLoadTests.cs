@@ -12,6 +12,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -244,6 +245,64 @@ public sealed class ViewerFirstOpenSlowLoadTests
         var queued = Assert.Single(lines, l => !l.Contains("server tab first open", StringComparison.Ordinal));
         Assert.Contains("[queued-refresh-alias]", queued, StringComparison.Ordinal);
         Assert.Contains("waited for the refresh in flight ", queued, StringComparison.Ordinal);
+    }
+
+    /* The freshness readout and the permission-denied count feed the tab's header, not the sub-tab's load, so a slow one does not hold
+       the load back. The store here never answers, so each read is out until its one-second timeout. The sub-tab is the Plan Viewer,
+       whose load reads nothing and stamps at once: the stamp arrives while the freshness read is still out, so the readout still shows
+       what it showed before the refresh. The read then gives up and blanks the readout, and the refresh returns only after that. The
+       line the load writes names the reads that ended before it did, and neither of the two still out. */
+    [Fact]
+    public void ASlowFreshnessOrPermissionCountRead_DoesNotHoldBackTheSubTabsLoad()
+    {
+        const string before = "collected before this refresh";
+        var lines = new List<string>();
+        string? readoutAtTheStamp = null;
+        string? readoutAfterTheRefresh = null;
+        RunThemed(async () =>
+        {
+            using var silent = new TcpListener(IPAddress.Loopback, 0);
+            silent.Start();
+            var port = ((IPEndPoint)silent.LocalEndpoint).Port;
+            var tab = new ViewerServerTab(
+                new ViewerDataService($"Host=127.0.0.1;Port={port};Database=darling;Username=darling;Timeout=1"),
+                new DarlingServer(12, "beside-load-host.invalid", "beside-load-alias", true, null))
+            {
+                /* Zero makes the first open write its line when the sub-tab's load ends. */
+                FirstOpenSlowThresholdMs = 0,
+                SlowLoadSink = lines.Add,
+            };
+            var readout = (TextBlock)tab.FindName("ServerFreshnessText");
+            ((TabControl)tab.FindName("InnerTabs")).SelectedIndex = ViewerServerTab.PlanViewerInnerTabIndex;
+            readout.Text = before;
+            tab.StatusChanged += status =>
+            {
+                if (status.Contains(": refreshed ", StringComparison.Ordinal))
+                {
+                    readoutAtTheStamp ??= readout.Text;
+                }
+            };
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                tab.BeginFirstOpen();
+                await tab.RefreshActiveInnerTabAsync();
+                readoutAfterTheRefresh = readout.Text;
+            }
+            finally
+            {
+                window.Close();
+                silent.Stop();
+            }
+        });
+
+        Assert.Equal(before, readoutAtTheStamp);
+        Assert.Equal(string.Empty, readoutAfterTheRefresh);
+        var line = Assert.Single(lines);
+        Assert.Contains("server clock read ", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("server freshness read", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("permission denied count read", line, StringComparison.Ordinal);
     }
 
     [Fact]
