@@ -123,6 +123,21 @@ async function checkPage(browser, spec) {
 
   let panels = [];
   try {
+    /* #8730: a browser that has never opened a PostgreSQL server starts its SQL Server panels before the fleet card says which tab set it
+       has, then drops them for the PostgreSQL set when the card says so (#8554, on purpose, once per browser per server). The drop cancels
+       the heavy Overview reads in flight, which this check reports as failed requests, and whether it does depends on whether the card beats
+       them. Every page here starts in a fresh browser, so a PostgreSQL server's page is opened as its second visit: the page's own code
+       records what the card said (rememberEngine), and the page then starts nothing until the card is in. The first-visit drop stays covered
+       by WebServerFirstReadsTests. A read cancelled for any other reason still fails the page. */
+    if (spec.server && (config.postgresServers || []).includes(spec.server)) {
+      recording = false;
+      try {
+        await page.goto(baseUrl + "/js/viewer-local.js", { waitUntil: "domcontentloaded" });
+        await page.evaluate(async (name) => (await import("/js/viewer-local.js")).rememberEngine(name, true), spec.server);
+      } finally {
+        recording = true;
+      }
+    }
     await page.goto(baseUrl + "/" + spec.hash, { waitUntil: "domcontentloaded" });
     await settle(page);
     panels = await page.evaluate(readPanels);
