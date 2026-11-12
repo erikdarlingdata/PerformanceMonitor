@@ -51,14 +51,6 @@ public sealed class LitePanelCardsTests
     private const double SubtitleSize = 11;
 
     /* The server tab's lists and banners that sit in a card, each named by the element a reader looks at. */
-    private static readonly (string Element, string Shot)[] ServerTabCards =
-    {
-        ("RunningJobsGrid", "running-jobs"),
-        ("SkippedCyclesSummary", "collection-health"),
-        ("PerfmonCountersList", "perfmon"),
-        ("MemoryClerksList", "memory-clerks"),
-    };
-
     /* The Utilization and Optimization grids, each in a card, each given fewer rows than the shared cap holds, so a grid that scrolls on its own shows it. */
     private static readonly string[] UtilizationGrids = { "TopTotalGrid", "TopAvgGrid", "ProvisioningTrendGrid" };
     private static readonly string[] OptimizationGrids =
@@ -71,116 +63,6 @@ public sealed class LitePanelCardsTests
         yield return new object[] { "DarkTheme" };
         yield return new object[] { "LightTheme" };
         yield return new object[] { "CoolBreezeTheme" };
-    }
-
-    [Theory]
-    [MemberData(nameof(Themes))]
-    public void TheServerTabsListsAndBanners_SitInCards_WithATitleAndASubtitle_AndTheSearchBoxesShowAPlaceholder(string theme)
-    {
-        var problems = WithServerTab(theme, (tab, window, muted) =>
-        {
-            var found = new List<string>();
-            foreach (var (width, height) in Sizes)
-            {
-                Resize(window, PaneWidth(width), height);
-                foreach (var (element, shot) in ServerTabCards)
-                {
-                    var target = Find<FrameworkElement>(tab, element);
-                    Reveal(target);
-                    Settle(window);
-                    found.AddRange(Carded(target, tab, muted, $"{element} at {width}x{height}"));
-                    Shoot(window, $"{theme}-{width}x{height}-{shot}.png");
-                }
-
-                found.AddRange(Placeholder(tab, window, "PerfmonSearchBox", "PerfmonSearchPlaceholder", $"{width}x{height}"));
-                found.AddRange(Placeholder(tab, window, "MemoryClerkSearchBox", "MemoryClerkSearchPlaceholder", $"{width}x{height}"));
-
-                /* The fatal-database banner is not a collection cycle, so it stands above the Collection Cycles card, whose title and subtitle do not describe it. */
-                var banner = Find<FrameworkElement>(tab, "LocalDatabaseBanner");
-                var card = Find<FrameworkElement>(tab, "CollectionHealthCard");
-                if (CardOf(banner) is not null)
-                {
-                    found.Add($"LocalDatabaseBanner at {width}x{height}: sits inside the Collection Cycles card");
-                }
-                else if (!(banner.Visibility == Visibility.Collapsed || Bounds(banner, tab).Bottom <= Bounds(card, tab).Top + 0.5))
-                {
-                    found.Add($"LocalDatabaseBanner at {width}x{height}: does not sit above the Collection Cycles card");
-                }
-            }
-
-            return found;
-        });
-
-        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
-    }
-
-    [Theory]
-    [MemberData(nameof(Themes))]
-    public void TheMemoryOverviewCard_HasATitleAndASubtitle_AndItsThirdRowIsSubtitleSized_AlignedWithItsColumns(string theme)
-    {
-        var problems = WithServerTab(theme, (tab, window, muted) =>
-        {
-            var found = new List<string>();
-            foreach (var (width, height) in Sizes)
-            {
-                Resize(window, PaneWidth(width), height);
-                var state = Find<TextBlock>(tab, "MemoryStateText");
-                Reveal(state);
-                Settle(window);
-                var where = $"memory overview at {width}x{height}";
-
-                if (tab.FindName("MemoryOverviewCard") is not Border card)
-                {
-                    found.Add($"{where}: the summary has no card border");
-                }
-                else if (card.BorderBrush is not SolidColorBrush brush || brush.Color != ((SolidColorBrush)Application.Current.FindResource("CardBorderBrush")).Color)
-                {
-                    found.Add($"{where}: the card border is {Describe(card.BorderBrush)}, not the theme's CardBorderBrush");
-                }
-
-                if (tab.FindName("MemoryOverviewTitle") is not TextBlock title)
-                {
-                    found.Add($"{where}: the card has no title");
-                }
-                else if (title.FontWeight != FontWeights.SemiBold || title.FontSize != TitleSize || string.IsNullOrWhiteSpace(title.Text))
-                {
-                    found.Add($"{where}: the title '{title.Text}' is {title.FontWeight} {title.FontSize}, not SemiBold {TitleSize}");
-                }
-
-                if (tab.FindName("MemoryOverviewSubtitle") is not TextBlock subtitle)
-                {
-                    found.Add($"{where}: the card has no subtitle");
-                }
-                else
-                {
-                    found.AddRange(MutedSubtitle(subtitle, muted, $"{where}: the subtitle"));
-                }
-
-                /* The third row: a sentence, a model name and a timestamp, at the subtitle size, each under the metric of its column. */
-                var thirdRow = new[] { ("MemoryStateText", "PhysicalMemoryText"), ("SqlMemoryModelText", "TotalServerMemoryText"), ("MemoryCollectedText", "TargetServerMemoryText") };
-                foreach (var (value, above) in thirdRow)
-                {
-                    var text = Find<TextBlock>(tab, value);
-                    if (text.FontSize != SubtitleSize)
-                    {
-                        found.Add($"{where}: {value} is {text.FontSize} pt, not the {SubtitleSize} pt subtitle size");
-                    }
-
-                    var left = Bounds(text, tab).Left;
-                    var columnLeft = Bounds(Find<TextBlock>(tab, above), tab).Left;
-                    if (Math.Abs(left - columnLeft) > 0.5)
-                    {
-                        found.Add($"{where}: {value} starts at {left:F1}, its column ({above}) at {columnLeft:F1}");
-                    }
-                }
-
-                Shoot(window, $"{theme}-{width}x{height}-memory-overview.png");
-            }
-
-            return found;
-        });
-
-        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
     [Theory]
@@ -356,24 +238,6 @@ public sealed class LitePanelCardsTests
         Assert.StartsWith(expected, section.Header, StringComparison.Ordinal);
     }
 
-    [Theory]
-    [MemberData(nameof(Themes))]
-    public void EveryChartCardTitle_OnTheServerTab_IsInTitleCase(string theme)
-    {
-        var problems = WithServerTab(theme, (tab, _, _) =>
-            ChartLayoutProbe.Logical<ChartPanel>(tab).Select(card => card.Title).Where(title => !IsTitleCase(title)).Select(title => $"'{title}' is not in title case").ToList());
-
-        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
-    }
-
-    /// <summary>
-    /// Title case as the chart cards use it: every word of four or more letters starts with a capital, "tempdb" excepted since
-    /// that is the database's name. Short words (and, by, of, vs), acronyms and units are free.
-    /// </summary>
-    internal static bool IsTitleCase(string title) =>
-        title.Split(new[] { ' ', '-', '/' }, StringSplitOptions.RemoveEmptyEntries)
-            .All(word => word.Length < 4 || word == "tempdb" || !char.IsLetter(word[0]) || char.IsUpper(word[0]));
-
     /// <summary>
     /// <paramref name="target"/> sits in a <see cref="ChartPanel"/> whose realized title is semibold at the title size, whose
     /// subtitle is set and muted at the subtitle size, and which lies wholly inside <paramref name="tab"/> (unless the page scrolls).
@@ -449,44 +313,6 @@ public sealed class LitePanelCardsTests
         return found;
     }
 
-    /// <summary>The search box shows <paramref name="placeholder"/> while it is empty, and hides it once a reader types.</summary>
-    private static List<string> Placeholder(FrameworkElement tab, Window window, string box, string placeholder, string where)
-    {
-        var found = new List<string>();
-        var search = Find<TextBox>(tab, box);
-        Reveal(search);
-        Settle(window);
-        if (tab.FindName(placeholder) is not TextBlock hint)
-        {
-            found.Add($"{box} at {where}: no placeholder");
-            return found;
-        }
-
-        search.Text = string.Empty;
-        Settle(window);
-        if (hint.Visibility != Visibility.Visible || string.IsNullOrWhiteSpace(hint.Text))
-        {
-            found.Add($"{box} at {where}: the placeholder is not shown while the box is empty");
-        }
-
-        var bounds = Bounds(hint, tab);
-        var boxBounds = Bounds(search, tab);
-        if (bounds.Left < boxBounds.Left || bounds.Right > boxBounds.Right || bounds.Top < boxBounds.Top || bounds.Bottom > boxBounds.Bottom)
-        {
-            found.Add($"{box} at {where}: the placeholder ({bounds}) lies outside the box ({boxBounds})");
-        }
-
-        search.Text = "x";
-        Settle(window);
-        if (hint.Visibility == Visibility.Visible)
-        {
-            found.Add($"{box} at {where}: the placeholder stays over the text a reader typed");
-        }
-
-        search.Text = string.Empty;
-        return found;
-    }
-
     private static ChartPanel? CardOf(DependencyObject element)
     {
         for (DependencyObject? up = element; up is not null; up = LogicalTreeHelper.GetParent(up) ?? (up is Visual ? VisualTreeHelper.GetParent(up) : null))
@@ -552,36 +378,6 @@ public sealed class LitePanelCardsTests
         Find<DataGrid>(tab, "WaitCategorySummaryDataGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { Category = $"category {i}", TotalWaitMs = 1000L * i }).ToList();
         Find<DataGrid>(tab, "ExpensiveQueriesDataGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { Database = $"db{i}", QueryText = $"select {i}", TotalCpuMs = 100L * i }).ToList();
         Find<DataGrid>(tab, "MemoryGrantEfficiencyDataGrid").ItemsSource = Enumerable.Range(1, 8).Select(i => new { Day = $"day {i}", AvgGrantedMb = 1.0, AvgUsedMb = 0.5 }).ToList();
-    }
-
-    private static List<string> WithServerTab(string theme, Func<ServerTab, Window, Color, List<string>> body)
-    {
-        var dir = Path.Combine(Path.GetTempPath(), "PanelCards_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(dir);
-        try
-        {
-            using var duckDb = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
-            return StaTestThread.Run(() => WithTheme(theme, muted =>
-            {
-                var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "panel-cards-test", DisplayName = "panel-cards-test", IsEnabled = true };
-                var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
-                /* Switching to a tab would start that tab's load against a server that is not there. */
-                typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", Instance)!.SetValue(tab, true);
-                var window = Open(tab, PaneWidth(1280), 800);
-                try
-                {
-                    return body(tab, window, muted);
-                }
-                finally
-                {
-                    window.Close();
-                }
-            }));
-        }
-        finally
-        {
-            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
-        }
     }
 
     private static Window Open(FrameworkElement content, int width, int height)

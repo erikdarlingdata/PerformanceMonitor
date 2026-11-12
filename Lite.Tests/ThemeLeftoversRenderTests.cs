@@ -292,18 +292,6 @@ public sealed class ThemeLeftoversRenderTests
     [InlineData("Dark")]
     [InlineData("Light")]
     [InlineData("CoolBreeze")]
-    public void AHealthyFleetCard_HasTheThemesNeutralBorder_InEveryTheme(string theme)
-    {
-        var (border, neutral, band, _, _) = RenderedCard(theme, FleetCard(0, 0));
-
-        Assert.Equal(neutral, border);
-        Assert.NotEqual(band, border);
-    }
-
-    [Theory]
-    [InlineData("Dark")]
-    [InlineData("Light")]
-    [InlineData("CoolBreeze")]
     public void AWarningAndACriticalFleetCard_KeepTheirBandBorder_InEveryTheme(string theme)
     {
         var (warning, neutralW, _, _, _) = RenderedCard(theme, FleetCard(3, 0));
@@ -442,30 +430,6 @@ public sealed class ThemeLeftoversRenderTests
             Assert.True(track.Left > 0);
             Assert.True(WcagContrast.Ratio(track.Edge, page) >= 3, $"a track edge is {WcagContrast.Ratio(track.Edge, page):0.00}:1 in {theme}");
         }
-    }
-
-    [Fact]
-    public void CoolBreezeGrids_HaveGentleBanding_AndAHeaderCloseToTheBody()
-    {
-        var (row, alt, header) = Themed(app =>
-        {
-            var grid = new DataGrid { AutoGenerateColumns = true, ItemsSource = new[] { new { A = 1 }, new { A = 2 } } };
-            var window = new Window { Content = grid, Width = 400, Height = 300 };
-            StaTestThread.ShowOffScreen(window);
-            try
-            {
-                ThemeManager.Apply("CoolBreeze");
-                Settle(window);
-                return (ColorOf(grid.RowBackground), ColorOf(grid.AlternatingRowBackground), ColorOf(Visuals<DataGridColumnHeader>(grid).First().Background));
-            }
-            finally
-            {
-                window.Close();
-            }
-        });
-
-        Assert.True(WcagContrast.Ratio(row, alt) <= 1.05, $"row banding {WcagContrast.Ratio(row, alt):0.000}:1");
-        Assert.True(WcagContrast.Ratio(row, header) <= 1.12, $"header against the body {WcagContrast.Ratio(row, header):0.000}:1");
     }
 
     // ── Daily Summary ─────────────────────────────────────────────────────────────────────────

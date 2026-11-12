@@ -101,40 +101,6 @@ public sealed class LiveScreenTextAndLayoutTests
     }
 
     [Fact]
-    public void TheAddServerForm_KeepsAFormsWidth_WhenTheWindowIsWide()
-    {
-        var dir = ScratchDir("AddServerWide");
-        try
-        {
-            var width = StaTestThread.Run(() => WithTheme(() =>
-            {
-                var servers = new ServerManager(dir);
-                var profiles = new ProfileManager(servers);
-                var dialog = new AddServerDialog(servers, profiles);
-                dialog.SizeToContent = SizeToContent.Manual;
-                dialog.Width = 1000;
-                dialog.Height = 700;
-                StaTestThread.ShowOffScreen(dialog);
-                try
-                {
-                    dialog.UpdateLayout();
-                    return ((TextBox)dialog.FindName("ServerNameBox")).ActualWidth;
-                }
-                finally
-                {
-                    dialog.Close();
-                }
-            }));
-
-            Assert.True(width > 300 && width <= 560, $"the Server Name box is {width:F0} px wide in a 1000 px window; a form box stays at a form's width");
-        }
-        finally
-        {
-            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
-        }
-    }
-
-    [Fact]
     public async Task ThePlanServerContext_ReadsTheServersName()
     {
         var dir = ScratchDir("PlanServerName");

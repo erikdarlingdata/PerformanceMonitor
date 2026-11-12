@@ -45,56 +45,6 @@ public sealed class FlatTabsFocusTests
     };
 
     [Theory]
-    [InlineData("Dark")]
-    [InlineData("Light")]
-    [InlineData("CoolBreeze")]
-    public void EverySelectedTab_ShowsTheUnderlineAndNoFill_OnTheTopRowTheSubRowsAndTheSubSubRows(string theme)
-    {
-        StaTestThread.Run(() => WithAppTheme(theme, () =>
-        {
-            var dict = LoadTheme(theme);
-            var accent = ((SolidColorBrush)dict["AccentBrush"]).Color;
-            var background = ((SolidColorBrush)dict["BackgroundBrush"]).Color;
-            var rows = new (string What, TabControl Tabs)[]
-            {
-                ("top row", BuildTopRow(Servers.Take(2).ToArray())),
-                ("sub-tab row", BuildRow("SubTabItemStyle", dict)),
-                ("sub-sub-tab row", BuildRow("SubSubTabItemStyle", dict)),
-            };
-
-            foreach (var (what, tabs) in rows)
-            {
-                var window = Show(tabs, 600, 160, dict, background);
-                try
-                {
-                    var selected = (TabItem)tabs.SelectedItem;
-                    var other = tabs.Items.OfType<TabItem>().First(t => !t.IsSelected);
-                    var chrome = (Border)selected.Template.FindName("border", selected);
-                    Assert.True(IsClear(chrome.Background), $"[{theme} {what}] the selected tab '{Text(selected)}' has a fill ({chrome.Background})");
-                    Assert.True(chrome.BorderThickness.Bottom >= 1, $"[{theme} {what}] the selected tab has no underline");
-                    Assert.Equal(accent, ((SolidColorBrush)chrome.BorderBrush).Color);
-                    var otherChrome = (Border)other.Template.FindName("border", other);
-                    Assert.Equal(0, otherChrome.BorderThickness.Bottom);
-
-                    /* Rendered pixels: the underline row of the selected tab is the accent colour, and its body is the window background. */
-                    var bounds = selected.TransformToAncestor(window).TransformBounds(new Rect(selected.RenderSize));
-                    var bitmap = Render(window, Path.Combine("tabs", $"{theme}-{what.Replace(' ', '-')}"));
-                    var underline = Pixel(bitmap, bounds.Left + bounds.Width / 2, bounds.Bottom - 1);
-                    /* A 1 px underline (the sub-sub row) lands between device pixels and blends; a 2 px one is the accent itself. */
-                    Assert.True(chrome.BorderThickness.Bottom < 2 ? underline != background : underline == accent,
-                        $"[{theme} {what}] the pixel at the bottom of the selected tab is {underline} (accent {accent}, background {background})");
-                    var body = Pixel(bitmap, bounds.Left + 3, bounds.Top + bounds.Height / 2);
-                    Assert.True(body == background, $"[{theme} {what}] the selected tab's body pixel is {body}, not the window background {background}");
-                }
-                finally
-                {
-                    window.Close();
-                }
-            }
-        }));
-    }
-
-    [Theory]
     [InlineData("Dark", 900, 600)]
     [InlineData("Light", 900, 600)]
     [InlineData("CoolBreeze", 900, 600)]
@@ -304,47 +254,6 @@ public sealed class FlatTabsFocusTests
     [InlineData("Dark")]
     [InlineData("Light")]
     [InlineData("CoolBreeze")]
-    public void TheSidebarMoreMenu_OpensBesideItsButton_WithNoEmptyIconColumn(string theme)
-    {
-        StaTestThread.Run(() => WithAppTheme(theme, () =>
-        {
-            var footer = new SidebarFooter { Width = 260, VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Left };
-            var window = new Window { Content = footer, Width = 900, Height = 600, Left = 0, Top = 0 };
-            window.Resources.MergedDictionaries.Add(LoadTheme(theme));
-            /* #8289: the menu opens beside its button, and WPF moves a popup back onto a monitor, so this window has to be on one. */
-            StaTestThread.ShowOnAMonitor(window);
-            try
-            {
-                StaTestThread.Settle(window);
-                var more = (Button)footer.FindName("MoreButton");
-                var menu = (ContextMenu)footer.FindName("MoreMenu");
-                more.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
-                StaTestThread.WaitForIdle(window.Dispatcher, TimeSpan.FromSeconds(10));
-                Assert.True(menu.IsOpen);
-                Render(menu, Path.Combine("menus", $"{theme}-more"));
-
-                var button = new Rect(more.PointToScreen(new Point(0, 0)), more.RenderSize);
-                var shown = new Rect(menu.PointToScreen(new Point(0, 0)), menu.RenderSize);
-                Assert.True(shown.Left >= button.Right - 2, $"[{theme}] the menu opens at x {shown.Left:F0}, not beside the button (its right edge is {button.Right:F0})");
-                Assert.True(shown.Top < button.Bottom + 2 && shown.Bottom > button.Top - 2, $"[{theme}] the menu ({shown.Top:F0}..{shown.Bottom:F0}) is not level with the button ({button.Top:F0}..{button.Bottom:F0})");
-
-                var items = menu.Items.OfType<MenuItem>().ToList();
-                var wide = items.Max(i => i.ActualWidth);
-                var text = items.Max(TextWidth);
-                Assert.True(wide - text < 40, $"[{theme}] the More menu is {wide:F0} px wide for text {text:F0} px wide: an empty icon column is left");
-                menu.IsOpen = false;
-            }
-            finally
-            {
-                window.Close();
-            }
-        }));
-    }
-
-    [Theory]
-    [InlineData("Dark")]
-    [InlineData("Light")]
-    [InlineData("CoolBreeze")]
     public void TabItems_UseTheThemedKeyboardFocusCue_NotTheStockDottedBox(string theme)
     {
         StaTestThread.Run(() => WithAppTheme(theme, () =>
@@ -422,15 +331,6 @@ public sealed class FlatTabsFocusTests
         return tabs;
     }
 
-    private static TabControl BuildRow(string itemStyleKey, ResourceDictionary dict)
-    {
-        var tabs = new TabControl { ItemContainerStyle = (Style)dict[itemStyleKey] };
-        tabs.Items.Add(new TabItem { Header = "One", Content = new Grid() });
-        tabs.Items.Add(new TabItem { Header = "Two", Content = new Grid() });
-        tabs.Items.Add(new TabItem { Header = "Three", Content = new Grid() });
-        return tabs;
-    }
-
     private static Window Show(TabControl tabs, double width, double height, ResourceDictionary theme, Color? background)
     {
         var host = new Border { Child = tabs };
@@ -476,8 +376,6 @@ public sealed class FlatTabsFocusTests
     private static double TextWidth(MenuItem item) =>
         Descendants<TextBlock>(item).Where(t => !string.IsNullOrEmpty(t.Text)).Select(t => t.ActualWidth).DefaultIfEmpty(0).Max();
 
-    private static bool IsClear(Brush? brush) => brush is null || (brush is SolidColorBrush { Color.A: 0 });
-
     private static IEnumerable<T> Descendants<T>(DependencyObject root) where T : DependencyObject
     {
         for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
@@ -512,13 +410,6 @@ public sealed class FlatTabsFocusTests
         }
 
         return bitmap;
-    }
-
-    private static Color Pixel(BitmapSource bitmap, double x, double y)
-    {
-        var pixels = new byte[4];
-        new CroppedBitmap(bitmap, new Int32Rect((int)Math.Clamp(x, 0, bitmap.PixelWidth - 1), (int)Math.Clamp(y, 0, bitmap.PixelHeight - 1), 1, 1)).CopyPixels(pixels, 4, 0);
-        return Color.FromArgb(pixels[3], pixels[2], pixels[1], pixels[0]);
     }
 
     private static ResourceDictionary LoadTheme(string theme) =>

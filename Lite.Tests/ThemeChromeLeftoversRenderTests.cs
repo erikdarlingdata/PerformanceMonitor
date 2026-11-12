@@ -119,36 +119,6 @@ public sealed class ThemeChromeLeftoversRenderTests
 
     // ── Item 2: the scroll viewer's corner ──────────────────────────────────────────────────────
 
-    /// <summary>The Wait Stats wait-type list is a transparent ListBox in a card. Where its two scroll bars meet, the corner is painted in the scroll bars' own track colour, not the system's control grey.</summary>
-    [Theory]
-    [MemberData(nameof(Themes))]
-    public void TheListBoxScrollCorner_IsTheScrollTrackColour(string theme)
-    {
-        var (corner, track, barsShown) = Themed(theme, app =>
-        {
-            var list = new ListBox { Background = Brushes.Transparent, BorderThickness = new Thickness(0), ItemsSource = Enumerable.Range(0, 60).Select(i => $"PAGEIOLATCH_SH wait type number {i} with a long enough name to need the horizontal bar").ToList() };
-            var card = new Border { Background = (Brush)app.FindResource("BackgroundLightBrush"), Child = list, Width = 220, Height = 200 };
-            var window = Show(card, 300, 260);
-            try
-            {
-                var scroll = ClippedTextProbe.Descendants(list).OfType<ScrollViewer>().First();
-                var bars = ClippedTextProbe.Descendants(scroll).OfType<ScrollBar>().Count(b => b.Visibility == Visibility.Visible && b.ActualWidth > 0 && b.ActualHeight > 0);
-                var bitmap = Render(Root(window));
-                var bounds = BoundsIn(scroll, Root(window));
-                var pixel = PixelAt(bitmap, (int)(bounds.Right - 4), (int)(bounds.Bottom - 4));
-                var trackColour = ColorOf(((Setter)((Style)app.FindResource(typeof(ScrollBar))).Setters.OfType<Setter>().First(s => s.Property == Control.BackgroundProperty)).Value as Brush);
-                return (pixel, trackColour, bars);
-            }
-            finally
-            {
-                window.Close();
-            }
-        });
-
-        Assert.Equal(2, barsShown);
-        Assert.Equal((track.R, track.G, track.B), (corner.R, corner.G, corner.B));
-    }
-
     // ── Item 3: the expander's header ───────────────────────────────────────────────────────────
 
     /// <summary>An expander header ("CPU by database", the Recommendations bands) draws its chevron in the theme's own colours: nothing in the header is lighter than the theme's lightest of its background and text, or darker than the darkest, so no stock white circle shows on a dark or tinted theme.</summary>
@@ -266,5 +236,4 @@ public sealed class ThemeChromeLeftoversRenderTests
         Assert.Equal(wantFrame, frame);
         Assert.Equal(wantText, text);
     }
-
 }

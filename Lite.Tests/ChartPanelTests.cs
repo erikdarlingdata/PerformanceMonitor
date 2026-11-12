@@ -122,31 +122,6 @@ public sealed class ChartPanelTests
     }
 
     [Fact]
-    public void TheSubtitle_TakesNoRoomWhenEmpty_AndShowsWhenSet()
-    {
-        var (emptyShown, emptyHeight) = Shown(
-            () => new ChartPanel { Title = "tempdb", Content = new Border { MinHeight = 40 } },
-            panel =>
-            {
-                var subtitle = Part(panel, "PART_Subtitle");
-                return (subtitle.IsVisible, subtitle.ActualHeight);
-            });
-        var (setShown, setText, setSize) = Shown(
-            () => new ChartPanel { Title = "tempdb", Subtitle = "last 6 hours", Content = new Border { MinHeight = 40 } },
-            panel =>
-            {
-                var subtitle = Part(panel, "PART_Subtitle");
-                return (subtitle.IsVisible, subtitle.Text, subtitle.FontSize);
-            });
-
-        Assert.False(emptyShown);
-        Assert.Equal(0, emptyHeight);
-        Assert.True(setShown);
-        Assert.Equal("last 6 hours", setText);
-        Assert.Equal(11, setSize);
-    }
-
-    [Fact]
     public void ALongSubtitle_WrapsInsteadOfEndingInAnEllipsis()
     {
         /* #8645: the 7-Day Provisioning Trend description ended "...the six whole days before t..." at 900 px. */

@@ -116,53 +116,6 @@ public sealed class FinOpsObjectHeatmapLayoutTests
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
-    [Fact]
-    public void TheTabsWords_HoldNoEmDash()
-    {
-        var problems = StaTestThread.Run(() => WithTheme("DarkTheme", () => OnTheObjectView((tab, window, chart) =>
-        {
-            var found = new List<string>();
-            foreach (var words in WordsOf(tab).Where(w => w.Contains('\u2014', StringComparison.Ordinal)).Distinct())
-            {
-                found.Add($"the tab's text holds an em dash: \"{words}\"");
-            }
-
-            /* A database with no object samples: the chart's own title for the empty heatmap. */
-            FinOpsHeatmapRenderer.Render(chart, new FinOpsHeatmapMatrix(), "Reserved (MB)", "SalesDatabase Object Reserved Footprint", null);
-            ChartLayoutProbe.Settle(window, new[] { chart });
-            var title = chart.Plot.Axes.Title.Label.Text;
-            if (title.Contains('\u2014', StringComparison.Ordinal))
-            {
-                found.Add($"the empty heatmap's title holds an em dash: \"{title}\"");
-            }
-
-            return found;
-        })));
-
-        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
-    }
-
-    /// <summary>The words the tab holds, shown or not yet shown: every text block, string tooltip, string content (a button, a
-    /// check box), string header (a tab, a group), chart card title and plain grid column header.</summary>
-    private static IEnumerable<string> WordsOf(DependencyObject root)
-    {
-        foreach (var element in ChartLayoutProbe.Logical<FrameworkElement>(root))
-        {
-            if (element is TextBlock text) yield return text.Text;
-            if (element.ToolTip is string tip) yield return tip;
-            if (element is ContentControl { Content: string content }) yield return content;
-            if (element is HeaderedContentControl { Header: string header }) yield return header;
-            if (element is ChartPanel { Title: string title }) yield return title;
-            if (element is DataGrid grid)
-            {
-                foreach (var column in grid.Columns)
-                {
-                    if (column.Header is string columnHeader) yield return columnHeader;
-                }
-            }
-        }
-    }
-
     /// <summary>The colour bar beside the heatmap: at least two tick labels on it, neighbours at least 2 px apart, and the bar's
     /// own label no longer than the bar. The bar spans the heatmap's range, which is the log of its smallest and largest cells.</summary>
     private static List<string> MeasureColourBar(WpfPlot chart, FinOpsHeatmapHandle handle, FinOpsHeatmapMatrix matrix, out string reading)

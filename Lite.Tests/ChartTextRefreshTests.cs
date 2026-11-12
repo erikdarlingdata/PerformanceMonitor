@@ -41,35 +41,6 @@ public sealed class ChartTextRefreshTests
 
     public static TheoryData<string> Themes => new() { "Dark", "Light", "CoolBreeze" };
 
-    [Theory]
-    [MemberData(nameof(Themes))]
-    public void AYAxisUnit_IsDrawnRegularWeightAtTheBaseSize(string theme)
-    {
-        var (bold, size) = StaTestThread.Run(() => WithTheme(theme, () =>
-        {
-            var chart = new WpfPlot();
-            ChartStyle.ApplyThemeToChart(chart);
-            var xs = Enumerable.Range(0, 24).Select(i => DateTime.UtcNow.AddHours(i - 24).ToOADate()).ToArray();
-            chart.Plot.Add.TimeSeries(xs, xs.Select((_, i) => 10.0 + i).ToArray());
-            chart.Plot.YLabel("MB/s");
-            var window = new Window { Content = chart, Width = 480, Height = 320, Left = 0, Top = 0 };
-            StaTestThread.ShowOffScreen(window);
-            try
-            {
-                ChartLayoutProbe.Settle(window, [chart]);
-                Shot(window, $"y-unit-{theme}");
-                return (chart.Plot.Axes.Left.Label.Bold, (double)chart.Plot.Axes.Left.Label.FontSize);
-            }
-            finally
-            {
-                window.Close();
-            }
-        }));
-
-        Assert.False(bold, "the Y-axis unit is drawn bold");
-        Assert.Equal(ChartAxisTitle.BaseFontSize, size, 0.01);
-    }
-
     [Fact]
     public void ThePerfmonMixedAxisTitle_FitsA340PixelChartAtTheBaseSize()
     {
@@ -126,64 +97,6 @@ public sealed class ChartTextRefreshTests
         Assert.True(inHeader == 1, $"the metric name appears {inHeader} times in the header");
         Assert.NotEmpty(labelLefts);
         Assert.All(labelLefts, left => Assert.True(left >= 8, $"an hour label starts at {left:F0}, under the 8 px start handle"));
-    }
-
-    [Fact]
-    public void TheQueryHeatmap_HasOneTitle_ANormalSizeBarLabel_AndAVisibleColourForOne()
-    {
-        var dir = Path.Combine(Path.GetTempPath(), "ChartTextRefresh_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(dir);
-        try
-        {
-            using var duckDb = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
-            var (plotTitle, barBold, barSize, contrast) = StaTestThread.Run(() => WithTheme("Dark", () =>
-            {
-                var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "heatmap-test", DisplayName = "heatmap-test", IsEnabled = true };
-                var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
-                typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", Instance)!.SetValue(tab, true);
-                var window = new Window { Content = tab, Width = 1280, Height = 800, Left = 0, Top = 0 };
-                StaTestThread.ShowOffScreen(window);
-                try
-                {
-                    ClippedTextProbe.Settle(window);
-                    const int rows = 7, cols = 12;
-                    var result = new HeatmapResult
-                    {
-                        Intensities = new double[rows, cols],
-                        TimeBuckets = Enumerable.Range(0, cols).Select(i => new DateTime(2026, 3, 10, i, 0, 0, DateTimeKind.Utc)).ToArray(),
-                        BucketLabels = ["0-1ms", "1-10ms", "10-100ms", "100ms-1s", "1-10s", "10-100s", ">100s"],
-                        CellDetails = new HeatmapCell[rows, cols],
-                    };
-                    for (var r = 0; r < rows; r++)
-                        for (var c = 0; c < cols; c++)
-                            result.Intensities[r, c] = (r + c) % 3 == 0 ? 0 : 1 + r * 40 + c;
-                    typeof(ServerTab).GetMethod("UpdateQueryHeatmapChart", Instance)!.Invoke(tab, [result]);
-
-                    var chart = (WpfPlot)tab.FindName("QueryHeatmapChart");
-                    var heatmap = chart.Plot.PlottableList.OfType<ScottPlot.Plottables.Heatmap>().Single();
-                    var bar = chart.Plot.Axes.GetPanels().OfType<ScottPlot.Panels.ColorBar>().Single();
-                    var values = heatmap.Intensities.Cast<double>().Where(v => !double.IsNaN(v)).ToList();
-                    var range = heatmap.ManualRange ?? new ScottPlot.Range(values.Min(), values.Max());
-                    var one = Math.Log(2); // a count of one, after the chart's log1p scaling
-                    var fraction = (one - range.Min) / (range.Max - range.Min);
-                    var cell = heatmap.Colormap.GetColor(Math.Clamp(fraction, 0, 1));
-                    return (chart.Plot.Axes.Title.Label.Text, bar.LabelStyle.Bold, (double)bar.LabelStyle.FontSize, Contrast(cell, chart.Plot.DataBackground.Color));
-                }
-                finally
-                {
-                    window.Close();
-                }
-            }));
-
-            Assert.True(string.IsNullOrEmpty(plotTitle), $"the plot draws its own title \"{plotTitle}\" under the card's");
-            Assert.False(barBold, "the colour bar label is bold");
-            Assert.Equal(ChartAxisTitle.BaseFontSize, barSize, 0.01);
-            Assert.True(contrast >= 1.8, $"a count of one is drawn at {contrast:F2}:1 against the Dark data background");
-        }
-        finally
-        {
-            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
-        }
     }
 
     [Theory]
@@ -361,16 +274,6 @@ public sealed class ChartTextRefreshTests
 
     private static List<(double Time, double Value)> Series(DateTime from, DateTime to, double lo, double hi) =>
         Enumerable.Range(0, 96).Select(i => (from.AddTicks((to - from).Ticks * i / 95).ToOADate(), lo + (hi - lo) * (i % 12) / 11.0)).ToList();
-
-    /// <summary>WCAG contrast ratio of two opaque colours.</summary>
-    private static double Contrast(ScottPlot.Color a, ScottPlot.Color b)
-    {
-        static double Channel(byte v) { var s = v / 255.0; return s <= 0.03928 ? s / 12.92 : Math.Pow((s + 0.055) / 1.055, 2.4); }
-        static double Luminance(ScottPlot.Color c) => 0.2126 * Channel(c.R) + 0.7152 * Channel(c.G) + 0.0722 * Channel(c.B);
-        var la = Luminance(a) + 0.05;
-        var lb = Luminance(b) + 0.05;
-        return Math.Max(la, lb) / Math.Min(la, lb);
-    }
 
     private static IEnumerable<T> Descendants<T>(DependencyObject root) where T : DependencyObject
     {

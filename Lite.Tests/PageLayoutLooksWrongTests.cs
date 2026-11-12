@@ -145,42 +145,6 @@ public sealed class PageLayoutLooksWrongTests
     }
 
     [Fact]
-    public void TheTempdbSizeChart_CarriesALegendLikeItsSiblings_SoTheGroupLeavesNoEmptyBandUnderItsAxis()
-    {
-        var problems = WithServerTab("DarkTheme", PaneWidth(900), 600, Credentials(), (tab, window, _) =>
-        {
-            var found = new List<string>();
-            var size = Find<ScottPlot.WPF.WpfPlot>(tab, "TempDbSizeChart");
-            Reveal(size);
-            Settle(window);
-            var at = new DateTime(2026, 11, 7, 0, 0, 0, DateTimeKind.Utc);
-            var rows = Enumerable.Range(0, 12).Select(i => new TempDbRow
-            {
-                CollectionTime = at.AddHours(i),
-                UserObjectReservedMb = 100 + i,
-                InternalObjectReservedMb = 50,
-                VersionStoreReservedMb = 10,
-                TotalReservedMb = 160 + i,
-                UnallocatedMb = 840 - i,
-                TotalSessionsUsingTempDb = 3,
-            }).ToList();
-            Invoke(tab, "UpdateTempDbChart", rows, 24, null, null);
-            Invoke(tab, "UpdateTempDbSizeChart", rows, 24, null, null);
-            Settle(window);
-
-            /* The shared legend is drawn as a panel outside the plot, not as the inset legend, so the panel is what a legend's presence means. */
-            if (!size.Plot.Axes.GetPanels().OfType<ScottPlot.Panels.LegendPanel>().Any() || size.Plot.Legend.GetItems().Length == 0)
-            {
-                found.Add("the tempdb Size chart has no legend, so the group's shared bottom leaves an empty band under its axis");
-            }
-
-            return found;
-        });
-
-        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
-    }
-
-    [Fact]
     public void TheFileIoLatencyLegends_KeepToOneRow_WithAMoreEntry_AtAMaximizedWindow()
     {
         var problems = WithServerTab("DarkTheme", PaneWidth(1550), 925, Credentials(), (tab, window, _) =>

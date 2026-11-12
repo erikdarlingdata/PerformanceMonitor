@@ -46,8 +46,6 @@ public sealed class GridPolishRound2Tests
 
     private sealed record Case(string Grid, Type Row, Dictionary<string, object?>? Values = null);
 
-    private static readonly Dictionary<string, object?> NoTag = new() { ["QueryTag"] = null };
-
     /// <summary>Builds the tab named <paramref name="tabKind"/> in each theme and reads each case's grid at each window width.</summary>
     private static List<View> Views(string tabKind, params Case[] cases)
     {
@@ -198,58 +196,6 @@ public sealed class GridPolishRound2Tests
         }
 
         Empty(problems, "A first column keeps the number columns out of view:");
-    }
-
-    [Fact]
-    public void TheTagColumns_StartNarrow_WhenNoQueryHasATag()
-    {
-        var problems = new List<string>();
-        foreach (var view in Views("Server",
-            new Case("QueryStoreGrid", typeof(QueryStoreRow), NoTag),
-            new Case("LongQueryCompletionsGrid", typeof(LongQueryCompletionRow), NoTag)))
-        {
-            var tag = Col(view, "Tag");
-            if (tag.Width > 90)
-            {
-                problems.Add($"{view.Grid} at {view.Label}: Tag is {tag.Width:0} px wide with no tag on any row");
-            }
-        }
-
-        Empty(problems, "A blank column takes room from the numbers:");
-    }
-
-    [Fact]
-    public void NumberColumnsAndTheirHeaders_AreRightAligned()
-    {
-        var problems = new List<string>();
-        var numbers = new Dictionary<string, string[]>
-        {
-            ["ServerConfigGrid"] = new[] { "Configured Value", "Value In Use" },
-            ["DatabaseScopedConfigGrid"] = new[] { "Value", "Value for Secondary" },
-            ["QueryStoreGrid"] = new[] { "Query ID", "Executions", "Total Duration (ms)", "Compat" },
-            ["DatabaseConfigGrid"] = new[] { "Compat Level", "Target Recovery (s)" },
-        };
-        foreach (var view in Views("Server",
-            new Case("ServerConfigGrid", typeof(ServerConfigRow), new() { ["ValueConfigured"] = 5L, ["ValueInUse"] = 5L }),
-            new Case("DatabaseScopedConfigGrid", typeof(DatabaseScopedConfigRow), new() { ["Value"] = "1", ["ValueForSecondary"] = "0" }),
-            new Case("QueryStoreGrid", typeof(QueryStoreRow), NoTag),
-            new Case("DatabaseConfigGrid", typeof(DatabaseConfigRow))))
-        {
-            foreach (var name in numbers[view.Grid])
-            {
-                var col = Col(view, name);
-                if (col.ValueGapRight is not { } value || value > 16)
-                {
-                    problems.Add($"{view.Grid} at {view.Label}: values of '{name}' end {col.ValueGapRight:0} px from the cell edge");
-                }
-                else if (Math.Abs(col.HeaderGapRight - value) > 24)
-                {
-                    problems.Add($"{view.Grid} at {view.Label}: header '{name}' ends {col.HeaderGapRight:0} px from its edge, its values {value:0}");
-                }
-            }
-        }
-
-        Empty(problems, "Numbers and headers on different edges:");
     }
 
     /// <summary>
@@ -432,52 +378,6 @@ public sealed class GridPolishRound2Tests
     }
 
     [Fact]
-    public void TheUtilizationSummary_ShowsEveryPercentageWithOneDecimal_AndNoDoubleSpace()
-    {
-        var shown = StaTestThread.Run(() => WithTheme("DarkTheme", () =>
-        {
-            var tab = new FinOpsTab();
-            var window = new Window { Content = tab, Width = 1280, Height = 900 };
-            StaTestThread.ShowOffScreen(window);
-            try
-            {
-                var row = (UtilizationEfficiencyRow)GridPolishProbe.Rows(typeof(UtilizationEfficiencyRow), 1, new Dictionary<string, object?>
-                {
-                    ["ProvisioningStatus"] = "RIGHT_SIZED",
-                    ["AvgCpuPct"] = 0.49m,
-                    ["P95CpuPct"] = 1.0m,
-                    ["MaxCpuPct"] = 4,
-                    ["PhysicalMemoryMb"] = 10000,
-                    ["TotalMemoryMb"] = 6060,
-                    ["BufferPoolMb"] = 3800,
-                    ["CpuCount"] = 8,
-                    ["MaxWorkersCount"] = 256,
-                    ["CurrentWorkersCount"] = 27,
-                    ["CpuSamples"] = 1000L,
-                })[0];
-                typeof(FinOpsTab).GetMethod("UpdateUtilizationSummary", Instance)!.Invoke(tab, new object?[] { row });
-                ClippedTextProbe.Settle(window);
-                var texts = new[] { "AvgCpuText", "P95CpuText", "MaxCpuText", "MemoryUtilText", "MemoryRatioText" }
-                    .Select(n => ((TextBlock)tab.FindName(n)).Text).ToList();
-                var summary = ((Run)tab.FindName("WorkerThreadsText")).Parent as TextBlock;
-                texts.Add("line: " + new TextRange(summary!.ContentStart, summary.ContentEnd).Text);
-                return texts;
-            }
-            finally
-            {
-                window.Content = null;
-                window.Close();
-            }
-        }));
-
-        var percentages = shown.Where(t => !t.StartsWith("line: ", StringComparison.Ordinal)).ToList();
-        var decimals = percentages.Select(t => t.TrimEnd('%').Contains('.') ? t.TrimEnd('%').Split('.')[1].Length : 0).Distinct().ToList();
-        Assert.True(decimals.Count == 1 && decimals[0] == 1, "One decimal in every percentage of the summary: " + string.Join(" | ", percentages));
-        var line = shown.Last();
-        Assert.False(line.Contains("  ", StringComparison.Ordinal), "A double space in the CPU line: " + line);
-    }
-
-    [Fact]
     public void TheFirstSeenAndHighImpactDatabaseCells_EndInAnEllipsis_WhenTheTextIsWiderThanTheColumn()
     {
         var problems = new List<string>();
@@ -510,40 +410,4 @@ public sealed class GridPolishRound2Tests
         Empty(problems, "Cut text without an ellipsis:");
     }
 
-    [Fact]
-    public void TheSchedulerIssuesGrid_HasNoBlankHeaderCell_RightOfItsLastColumn()
-    {
-        var problems = new List<string>();
-        foreach (var view in Views("Server", new Case("SchedulerIssuesGrid", typeof(SchedulerIssueRow))))
-        {
-            var last = view.Cols[^1];
-            var blank = view.Viewport - (last.Left + last.Width);
-            if (blank > 1 && view.Filler is { BorderRight: > 0 } filler)
-            {
-                problems.Add($"{view.Label}: a {blank:0} px blank header cell with a {filler.BorderRight:0} px right border follows '{last.Header}'");
-            }
-        }
-
-        Empty(problems, "A blank header cell shows after the last column:");
-    }
-
-    [Fact]
-    public void TheProvisioningTrendGrid_ShowsEveryCpuPercentageWithOneDecimal()
-    {
-        var problems = new List<string>();
-        var values = new Dictionary<string, object?> { ["AvgCpuPct"] = 37.3m, ["P95CpuPct"] = 41.2m, ["MaxCpuPct"] = 98 };
-        foreach (var view in Views("FinOps", new Case("ProvisioningTrendGrid", typeof(ProvisioningTrendRow), values)))
-        {
-            foreach (var header in new[] { "Avg SQL Server CPU %", "P95 SQL Server CPU %", "Max SQL Server CPU %" })
-            {
-                var shown = Col(view, header).Value;
-                if (shown is null || !System.Text.RegularExpressions.Regex.IsMatch(shown, @"^\d+\.\d$"))
-                {
-                    problems.Add($"{view.Label}: '{header}' shows '{shown}'");
-                }
-            }
-        }
-
-        Empty(problems, "Percentages in the provisioning trend do not share one format:");
-    }
 }

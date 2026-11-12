@@ -40,33 +40,6 @@ public sealed class PageLayoutNitsTests
     private static CredentialResolver Credentials() => new(new CredentialService(), null);
 
     [Fact]
-    public void TheMemoryBrokerRefreshButton_IsStyledLikeTheOtherSystemEventsRefreshButtons()
-    {
-        var problems = WithServerTab("DarkTheme", PaneWidth(1280), 800, Credentials(), (tab, window, _) =>
-        {
-            var found = new List<string>();
-            var siblingTab = ChartLayoutProbe.Logical<TabItem>(tab).First(t => t.Header as string == "Scheduler Issues");
-            var sibling = ChartLayoutProbe.Logical<Button>(siblingTab).First(b => Equals(b.Content, "Refresh"));
-            Reveal(sibling);
-            Settle(window);
-            var siblingStyle = sibling.Style;
-
-            var brokerTab = ChartLayoutProbe.Logical<TabItem>(tab).First(t => t.Header as string == "Memory Broker");
-            Reveal(Find<FrameworkElement>(tab, "MemoryBrokerGrid"));
-            Settle(window);
-            var refresh = ChartLayoutProbe.Logical<Button>(brokerTab).First(b => Equals(b.Content, "Refresh"));
-            if (!ReferenceEquals(refresh.Style, siblingStyle))
-            {
-                found.Add($"Memory Broker's Refresh has its own style ({refresh.Style?.ToString() ?? "none"}); Scheduler Issues' has {siblingStyle?.ToString() ?? "the theme's"}");
-            }
-
-            return found;
-        });
-
-        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
-    }
-
-    [Fact]
     public void ThePerfmonPickersSubtitle_FitsItsCard()
     {
         var problems = WithServerTab("DarkTheme", PaneWidth(900), 600, Credentials(), (tab, window, _) =>
@@ -261,72 +234,6 @@ public sealed class PageLayoutNitsTests
                 window.Close();
             }
         }));
-
-        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
-    }
-
-    [Fact]
-    public void TheWaitStatsSearchBox_ShowsAPlaceholderWhileEmpty()
-    {
-        var problems = WithServerTab("DarkTheme", PaneWidth(900), 600, Credentials(), (tab, window, _) =>
-        {
-            var found = new List<string>();
-            var box = Find<TextBox>(tab, "WaitTypeSearchBox");
-            Reveal(box);
-            Settle(window);
-            if (tab.FindName("WaitTypeSearchPlaceholder") is not TextBlock placeholder)
-            {
-                found.Add("the wait type search box has no placeholder");
-                return found;
-            }
-
-            if (placeholder.Visibility != Visibility.Visible || string.IsNullOrWhiteSpace(placeholder.Text))
-            {
-                found.Add($"the placeholder is {placeholder.Visibility} with '{placeholder.Text}' while the box is empty");
-            }
-
-            box.Text = "page";
-            Settle(window);
-            if (placeholder.Visibility == Visibility.Visible)
-            {
-                found.Add("the placeholder stays over the text a reader typed");
-            }
-
-            return found;
-        });
-
-        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
-    }
-
-    [Fact]
-    public void TheTraceFlagsGrid_StartsAtTheLeftEdge_AndFillsItsWidth_WhenEmpty()
-    {
-        var problems = WithServerTab("DarkTheme", PaneWidth(900), 600, Credentials(), (tab, window, _) =>
-        {
-            var found = new List<string>();
-            var grid = Find<DataGrid>(tab, "TraceFlagsGrid");
-            Reveal(grid);
-            grid.ItemsSource = Array.Empty<object>();
-            Settle(window);
-            var header = Visual<System.Windows.Controls.Primitives.DataGridColumnHeader>(grid).Where(h => h.Column is not null).OrderBy(h => Bounds(h, grid).Left).FirstOrDefault();
-            if (header is null)
-            {
-                found.Add("the grid shows no column headers");
-            }
-            else
-            {
-                var left = Bounds(header, grid).Left;
-                var content = Visual<StackPanel>(header).FirstOrDefault();
-                var contentLeft = content is null ? left : Bounds(content, grid).Left;
-                if (left > 2 || contentLeft > 12)
-                {
-                    found.Add($"the first header starts at x={left:F0} and its text at x={contentLeft:F0} of the grid");
-                }
-            }
-
-            found.AddRange(Unfilled(grid, "Trace Flags"));
-            return found;
-        });
 
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }

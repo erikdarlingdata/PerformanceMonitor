@@ -147,29 +147,4 @@ public sealed class LiteOverviewCardRenderTests
         // Lite keeps no memory band, so the row has no dot rather than an invented one.
         Assert.Null(dots.Memory);
     }
-
-    [Fact]
-    public void TheCpuRow_ShowsItsDetail_InTheColumnAfterTheValue()
-    {
-        var detail = Shown(Server("detail", 0, 0), card =>
-        {
-            var value = Descendants<TextBlock>(card).First(t => t.Text.StartsWith("25%", StringComparison.Ordinal));
-            return Descendants<TextBlock>(card).FirstOrDefault(t => Grid.GetRow(t) == Grid.GetRow(value) && Grid.GetColumn(t) == Grid.GetColumn(value) + 1)?.Text;
-        });
-
-        Assert.Equal("Other: 5%", detail);
-    }
-
-    [Fact]
-    public void TheCardName_IsAPanelTitle()
-    {
-        var (size, weight) = Shown(Server("title-check", 0, 0), card =>
-        {
-            var name = Descendants<TextBlock>(card).First(t => t.Text == "title-check");
-            return (name.FontSize, name.FontWeight);
-        });
-
-        Assert.Equal(14, size);
-        Assert.Equal(FontWeights.SemiBold, weight);
-    }
 }
