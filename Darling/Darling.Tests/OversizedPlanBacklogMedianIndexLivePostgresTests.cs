@@ -198,7 +198,39 @@ FROM generate_series(1, 120000) AS n;", ct);
         Assert.Contains(census, n => n.NodeType == "Index Only Scan" && n.IndexName == CollectorIndex);
     }
 
-    private sealed record PlanNode(string NodeType, string? IndexName);
+    /// <summary>
+    /// #8570: the fleet census reads the backlog table's heap ONCE. It used to scan the table twice, once for its counts and once for the
+    /// distinct (collector, server) pairs the server count came from, and on a field store a first call paid for both: the table is 394 MB
+    /// (50,391 blocks, 1.23 M rows) and the first call after a restart took 16.1 s. The pairs now come out of the one pass that counts. The
+    /// scans the median walks through the indexes are index-only scans and are not counted here.
+    /// </summary>
+    [Fact]
+    public async Task TheFleetCensus_ReadsTheTableHeapOnce()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), Skip);
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await using var connection = await MigratedConnectionAsync(scratch, ct);
+        await ExecuteAsync(connection, @"
+INSERT INTO collect.servers (server_id, server_name, is_enabled) VALUES (5201, 'once-1', TRUE), (5202, 'once-2', TRUE), (5203, 'once-3', TRUE);
+INSERT INTO collect.oversized_plan_backlog
+(server_id, collector_name, plan_handle, sql_handle, statement_start_offset, statement_end_offset,
+ database_name, query_hash, observed_bytes, first_seen_at, last_seen_at)
+SELECT 5201 + (n % 3), CASE WHEN n % 5 = 0 THEN 'procedure_stats' ELSE 'query_stats' END,
+       md5('p' || n) || md5('q' || n), md5('s' || n) || md5('t' || n), 0, 400, 'once_db', 'H' || (n % 500),
+       2000000 + (n * 7919) % 60000000, TIMESTAMP '2026-06-01 12:00', TIMESTAMP '2026-06-01 12:00'
+FROM generate_series(1, 120000) AS n;", ct);
+        await ExecuteAsync(connection, "VACUUM (ANALYZE) collect.oversized_plan_backlog", ct);
+
+        var census = await PlanNodesAsync(connection, DarlingOversizedPlanBacklogReader.CollectorCensusSql, withLastDay: false, ct);
+        var heapScans = census.Count(n => n.Relation == "oversized_plan_backlog"
+            && (n.NodeType == "Seq Scan" || n.NodeType == "Bitmap Heap Scan" || n.NodeType == "Index Scan"));
+        Assert.Equal(1, heapScans);
+    }
+
+    private sealed record PlanNode(string NodeType, string? IndexName, string? Relation = null);
 
     private static async Task<List<PlanNode>> PlanNodesAsync(NpgsqlConnection connection, string sql, bool withLastDay, CancellationToken ct)
     {
@@ -221,7 +253,8 @@ FROM generate_series(1, 120000) AS n;", ct);
     {
         nodes.Add(new PlanNode(
             plan.GetProperty("Node Type").GetString()!,
-            plan.TryGetProperty("Index Name", out var index) ? index.GetString() : null));
+            plan.TryGetProperty("Index Name", out var index) ? index.GetString() : null,
+            plan.TryGetProperty("Relation Name", out var relation) ? relation.GetString() : null));
         if (plan.TryGetProperty("Plans", out var children))
         {
             foreach (var child in children.EnumerateArray())
