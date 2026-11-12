@@ -176,7 +176,7 @@ public sealed class RdsLogEventIngestor
             /* #2633's fix, shared: rethrown so the runner degrades an authorization refusal to PERMISSIONS
                rather than recording a SUCCESS row that claims the log was opened and held nothing. */
             _logger?.LogWarning(
-                "RDS log unavailable for {Server}: {Message} — log-event capture is skipped for this target "
+                "RDS log unavailable for {Server}: {Message} - log-event capture is skipped for this target "
                 + "this cycle; every other collector is unaffected.",
                 storageName, ex.Message);
 

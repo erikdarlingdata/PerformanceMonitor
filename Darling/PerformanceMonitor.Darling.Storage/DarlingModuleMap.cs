@@ -276,7 +276,7 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogWarning("module_map table setup failed — object_name-on-query_stats routing falls back to raw: {Message}", ex.Message);
+            logger?.LogWarning("module_map table setup failed - object_name-on-query_stats routing falls back to raw: {Message}", ex.Message);
             return false;
         }
     }
@@ -346,7 +346,7 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogWarning("module_map refresh failed — the existing map keeps serving: {Message}", ex.Message);
+            logger?.LogWarning("module_map refresh failed - the existing map keeps serving: {Message}", ex.Message);
             if (outcome is not null) { outcome.Failed = true; }
             return 0;
         }
@@ -412,7 +412,7 @@ SELECT (SELECT count(*) FROM up)::integer, (SELECT refreshed_through FROM st)";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogWarning("{Label} failed — the existing map keeps serving and the next run reads from the same watermark: {Message}", label, ex.Message);
+            logger?.LogWarning("{Label} failed - the existing map keeps serving and the next run reads from the same watermark: {Message}", label, ex.Message);
             if (outcome is not null) { outcome.Failed = true; }
             return 0;
         }

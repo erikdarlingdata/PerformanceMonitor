@@ -2143,7 +2143,7 @@ public sealed partial class DarlingWorker
                         NumericThresholdValue: thresholdMinutes,
                         Muted: mute.Muted, Hold: mute.Hold,
                         Severity: PgLongRunningQueryFireSeverity,
-                        ShortMessage: $"pid {worst.Pid} running {elapsedMinutes}m — {worst.CommandTag ?? "(unknown)"}"
+                        ShortMessage: $"pid {worst.Pid} running {elapsedMinutes}m - {worst.CommandTag ?? "(unknown)"}"
                             + (worst.DatabaseName is null ? "" : $" on {worst.DatabaseName}")),
                     cancellationToken);
                 readClock.Restart();
@@ -2624,7 +2624,7 @@ public sealed partial class DarlingWorker
                     && _pgPoisonWaitHoldLogged.TryAdd(serverKey, true))
                 {
                     _logger.LogDebug(
-                        "[{Server}] PostgreSQL poison wait window unobserved: no pg_wait_stats collector run logged and no row stored in the last {WindowMinutes} min — holding the standing alert(s) rather than announcing Cleared on collector silence (#3653)",
+                        "[{Server}] PostgreSQL poison wait window unobserved: no pg_wait_stats collector run logged and no row stored in the last {WindowMinutes} min - holding the standing alert(s) rather than announcing Cleared on collector silence",
                         runtime.Config.DisplayName, PostgresAlertEvaluator.PoisonWaitWindowMinutes);
                 }
 

@@ -2055,7 +2055,7 @@ public sealed class AlertEngineTests
     {
         Assert.NotNull(fired.Context);
         var gateItem = fired.Context!.Details[0];
-        Assert.StartsWith("Blocking Wait Time — ", gateItem.Heading, StringComparison.Ordinal);
+        Assert.StartsWith("Blocking Wait Time - ", gateItem.Heading, StringComparison.Ordinal);
         return Assert.Single(gateItem.Fields, f => f.Label == AlertContextBuilders.BlockingWaitFiredByLabel).Value;
     }
 
@@ -3248,7 +3248,7 @@ public sealed class AlertEngineTests
         Assert.Equal(600_000d, fired.NumericThresholdValue);
         Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
         Assert.Equal(
-            "[THREADPOOL] 600s of wait accumulated in the last 10 minutes across 300,000 waits — on average 1.0 task continuously stuck",
+            "[THREADPOOL] 600s of wait accumulated in the last 10 minutes across 300,000 waits - on average 1.0 task continuously stuck",
             fired.ShortMessage);
 
         Assert.NotNull(fired.Context);
@@ -4624,7 +4624,7 @@ public sealed class AlertEngineTests
         Assert.NotNull(fired.Context);
         Assert.Equal(AlertSeverityLevel.Warning, fired.Context!.SeverityOverride);
         /* The card is the same card: the grade did not displace the detail item the builder renders. */
-        Assert.StartsWith("tempdb — ", Assert.Single(fired.Context.Details).Heading, StringComparison.Ordinal);
+        Assert.StartsWith("tempdb - ", Assert.Single(fired.Context.Details).Heading, StringComparison.Ordinal);
     }
 
     /* ---------------- low disk ---------------- */
@@ -5320,7 +5320,7 @@ public sealed class AlertEngineTests
         await engine.EvaluateServerAsync(Harness.Snapshot());
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Failed Agent Job", fired.MetricName);
-        Assert.Equal("1 job failure in last 60m — Backup.Full", fired.CurrentValue); /* :701 */
+        Assert.Equal("1 job failure in last 60m - Backup.Full", fired.CurrentValue); /* :701 */
         Assert.Equal((Key, firstFailure), Assert.Single(h.StateStore.SavedFailedJob));
 
         /* The same failure lingering in the lookback window never re-fires (:667). */
@@ -6103,7 +6103,7 @@ public sealed class AlertEngineTests
         Assert.True(muted.Muted, "the fire itself must still be marked muted");
         Assert.DoesNotContain(h.StateStore.DatabaseStateAlerted, r => r.Db == "Archive");
         Assert.False(h.StateStore.Memory.ContainsKey("Archive"),
-            "a muted fire must not record the state as announced — nobody was told");
+            "a muted fire must not record the state as announced - nobody was told");
 
         /* Mute removed, cooldown elapsed, same state still deviating. The adapter reports what the store
            holds, which is still nothing — so this must notify for real. */

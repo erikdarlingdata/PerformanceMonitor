@@ -356,12 +356,12 @@ public sealed partial class DarlingCollectorRunner
 
         if (quiet)
         {
-            _logger?.LogDebug("[{Server}] {Reason} — collecting from '{Database}' only.",
+            _logger?.LogDebug("[{Server}] {Reason} - collecting from '{Database}' only.",
                 server.Config.DisplayName, reason, targetDb);
         }
         else
         {
-            _logger?.LogInformation("[{Server}] {Reason} — collecting from '{Database}' only.",
+            _logger?.LogInformation("[{Server}] {Reason} - collecting from '{Database}' only.",
                 server.Config.DisplayName, reason, targetDb);
         }
 
@@ -444,7 +444,7 @@ public sealed partial class DarlingCollectorRunner
         {
             _logger?.LogWarning(
                 ex,
-                "{Collector} on '{Server}': the text fetch failed, so this run's rows ship without text for the statements not yet stored; they are read again next cycle (#7419).",
+                "{Collector} on '{Server}': the text fetch failed, so this run's rows ship without text for the statements not yet stored; they are read again next cycle.",
                 QueryStatsCollector.Instance.Name, server.Config.DisplayName);
         }
         finally
@@ -665,7 +665,7 @@ public sealed partial class DarlingCollectorRunner
         {
             _logger?.LogWarning(
                 ex,
-                "{Collector} on '{Server}': the plan fetch failed, so this run's rows ship without plans for the plans not yet stored; they are fetched again next cycle (#5158).",
+                "{Collector} on '{Server}': the plan fetch failed, so this run's rows ship without plans for the plans not yet stored; they are fetched again next cycle.",
                 QueryStatsCollector.Instance.Name, server.Config.DisplayName);
         }
         finally
@@ -790,7 +790,7 @@ public sealed partial class DarlingCollectorRunner
         {
             _logger?.LogWarning(
                 ex,
-                "{Collector} on '{Server}': the plan query failed, so this run's rows ship without plans; they are fetched again next cycle (#5449).",
+                "{Collector} on '{Server}': the plan query failed, so this run's rows ship without plans; they are fetched again next cycle.",
                 ProcedureStatsCollector.Instance.Name, server.Config.DisplayName);
         }
 
@@ -899,7 +899,7 @@ public sealed partial class DarlingCollectorRunner
             {
                 _logger?.LogWarning(
                     ex,
-                    "{Collector} on '{Server}': the module query for [{Database}] failed, so this run's rows ship without a module modify_date; it is read again next cycle (#6009).",
+                    "{Collector} on '{Server}': the module query for [{Database}] failed, so this run's rows ship without a module modify_date; it is read again next cycle.",
                     ProcedureStatsCollector.Instance.Name, server.Config.DisplayName, databaseName);
             }
         }
@@ -982,7 +982,7 @@ public sealed partial class DarlingCollectorRunner
             outcome = ProcedureStatsPlanReuse.ApplyShadow(
                 server.ServerId, cache, rows, captureOrdinal, now,
                 (key, cause) => _logger?.LogWarning(
-                    "procedure_stats on server {ServerId}: a plan identity the cache recognized rendered a different plan this run (a false hit): {Key}. Why: {Reason} (#5158).",
+                    "procedure_stats on server {ServerId}: a plan identity the cache recognized rendered a different plan this run (a false hit): {Key}. Why: {Reason}.",
                     server.ServerId, key, ProcedureStatsPlanReuse.DescribeFalseHit(cause)));
         }
         else
@@ -1012,7 +1012,7 @@ public sealed partial class DarlingCollectorRunner
             {
                 _logger?.LogWarning(
                     failure,
-                    "{Collector} on '{Server}': the plan fetch failed, so this run's rows ship without plans for the plans not yet stored; they are fetched again next cycle (#5158).",
+                    "{Collector} on '{Server}': the plan fetch failed, so this run's rows ship without plans for the plans not yet stored; they are fetched again next cycle.",
                     ProcedureStatsCollector.Instance.Name, server.Config.DisplayName);
             }
         }

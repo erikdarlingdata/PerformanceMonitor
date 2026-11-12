@@ -21,7 +21,7 @@ public static partial class McpToolGuideTopics
     /// </summary>
     public const string CpuTimeExtremesAndAttribution =
         "min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same " +
-        "semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme " +
+        "semantics as max_dop), not windowed - totals and avgs are windowed deltas; rows where an extreme " +
         "provably predates the window carry extremes_note. Also returns cpu_attribution: the returned rows' " +
         "summed CPU-seconds against the SQL process's measured CPU-seconds for the window (avg cpu_utilization " +
         "% x core count x window) - attributed_cpu_ratio says how much of the box the ranking explains; when " +

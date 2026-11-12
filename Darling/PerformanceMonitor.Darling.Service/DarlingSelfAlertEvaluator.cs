@@ -1792,7 +1792,7 @@ internal sealed class DarlingSelfAlertEvaluator
         /* Fast path: the most-recent N runs all failed. */
         if (recentRunCount >= consecutiveFailureThreshold && recentSuccessCount == 0)
         {
-            reason = $"The last {recentRunCount.ToString(CultureInfo.InvariantCulture)} collector runs all failed — no data is landing.";
+            reason = $"The last {recentRunCount.ToString(CultureInfo.InvariantCulture)} collector runs all failed - no data is landing.";
             return true;
         }
 
@@ -1803,7 +1803,7 @@ internal sealed class DarlingSelfAlertEvaluator
                success (#4757); the TEXT counts from the store's own last success when the caller has one, so a
                restart does not reset "how long" to zero for a server that has been dark for days (#5489). */
             var silent = nowUtc - (reportedLastSuccessUtc ?? lastSuccessUtc.Value);
-            reason = $"No successful collection in {FormatSilence(silent)} — the collectors are failing or the server is unreachable.";
+            reason = $"No successful collection in {FormatSilence(silent)} - the collectors are failing or the server is unreachable.";
             return true;
         }
 
@@ -2069,7 +2069,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     detail: StateRepeatNote(decision, refire) + $"The {list} Extended Events {(missing.Count == 1 ? "session is" : "sessions are")} missing. " +
                         CaptureDownCause(missing, ensure) + " " + CaptureDownConsequence(missing),
                     severity: AlertSeverityLevel.Critical,
-                    shortMessage: $"{list} capture is not running — XE {(missing.Count == 1 ? "session" : "sessions")} missing",
+                    shortMessage: $"{list} capture is not running - XE {(missing.Count == 1 ? "session" : "sessions")} missing",
                     /* Which capture is missing ("Blocking and Deadlock") against "session running". */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
@@ -2588,12 +2588,12 @@ internal sealed class DarlingSelfAlertEvaluator
                         $"{regression.LatestMs:N0} ms so far today, adding {regression.AddedMsPerDay / 1000.0:N1} s of collection " +
                         $"time a day at that volume - a regression is reported only when that added cost reaches " +
                         $"{CostRegressionAddedMsFloor / 1000.0:N0} s/day, the materiality floor both delivery surfaces share, so this " +
-                        $"is not a few hundred milliseconds of nothing (#3462)). It also cleared {threshold:N1} ms per run, the factor on the HIGHER of " +
+                        $"is not a few hundred milliseconds of nothing). It also cleared {threshold:N1} ms per run, the factor on the HIGHER of " +
                         $"that mean and the p95 of its OWN daily per-run cost over the window " +
                         $"({regression.BaselineP95MsPerRun:N1} ms) - so this is not the collector's own upper mode on a " +
-                        $"normal slow day (#3440). " +
+                        $"normal slow day. " +
                         $"This is the MONITORING TOOL's own cost, not the " +
-                        $"server's workload - each individual run is costing more than it used to. Measured PER RUN (#2846) so " +
+                        $"server's workload - each individual run is costing more than it used to. Measured PER RUN so " +
                         $"a cadence change cannot read as a cost change. get_collector_cost with " +
                         $"collector_name={regression.CollectorName} shows the trend. {CostIsNotAllTargetSide}",
                     severity: AlertSeverityLevel.Warning,
@@ -2876,7 +2876,7 @@ internal sealed class DarlingSelfAlertEvaluator
             + $" sorts low and a cheap one that moved on high volume sorts high. Only moves worth at least"
             + $" {CostRegressionAddedMsFloor / 1000.0:N0} s/day in either direction are listed - the same materiality floor the paging"
             + $" condition applies, inherited from the metric so a few hundred milliseconds of movement is not"
-            + $" restated here as news (#3462) - but there is no ratio factor and no dispersion bound: the"
+            + $" restated here as news - but there is no ratio factor and no dispersion bound: the"
             + $" baseline's own p95 and worst day are on every line for the reader to judge. A NEGATIVE figure"
             + $" is a collector that got CHEAPER, which the paging condition cannot report at all."));
 
@@ -2907,7 +2907,7 @@ internal sealed class DarlingSelfAlertEvaluator
             sb.Append(string.Create(CultureInfo.InvariantCulture,
                 $"\nHeaviest collectors over the trailing {CollectorCostDenominatorWindow.TotalHours:N0} hours,"
                 + $" every server together - a collector can be expensive without having moved, and a movement"
-                + $" ranking cannot see that (#2862):"));
+                + $" ranking cannot see that:"));
         }
 
         var listed = 0;
@@ -3271,7 +3271,7 @@ internal sealed class DarlingSelfAlertEvaluator
             rank++;
             var item = new AlertDetailItem
             {
-                Heading = string.Create(CultureInfo.InvariantCulture, $"#{rank} {single.Server} — {single.Family}"),
+                Heading = string.Create(CultureInfo.InvariantCulture, $"#{rank} {single.Server} - {single.Family}"),
                 Fields =
                 {
                     ("Server", single.Server),
@@ -5218,12 +5218,12 @@ internal sealed class DarlingSelfAlertEvaluator
                 _lastAgentDownAlert[key] = now;
                 var delivery = await FireAsync(
                     key, serverName, AgentDownMetric, "Stopped", "Running",
-                    detail: StateRepeatNote(decision, refire) + "The SQL Server Agent service on this server is stopped. Scheduled jobs — backups, " +
-                        "index and statistics maintenance, integrity checks, log shipping — will NOT run until it " +
+                    detail: StateRepeatNote(decision, refire) + "The SQL Server Agent service on this server is stopped. Scheduled jobs - backups, " +
+                        "index and statistics maintenance, integrity checks, log shipping - will NOT run until it " +
                         "is restarted, and a headless service has no dashboard to warn you. Start the SQL Server " +
                         "Agent service and set its startup type to Automatic so it survives a host reboot.",
                     severity: AlertSeverityLevel.Critical,
-                    shortMessage: "SQL Server Agent service is stopped — scheduled jobs will not run",
+                    shortMessage: "SQL Server Agent service is stopped - scheduled jobs will not run",
                     /* "Stopped" against "Running". */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
@@ -5804,7 +5804,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         Key(serverId), serverName, AgFailoverMetric, replica.RoleDesc, previousRole!,
                         detail: $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} changed " +
                             $"role from {previousRole} to {replica.RoleDesc}. A role change is either a failover somebody " +
-                            "performed or an automatic one the cluster performed after a health-check timeout — if nobody " +
+                            "performed or an automatic one the cluster performed after a health-check timeout - if nobody " +
                             "initiated it, the previous primary had a problem worth finding. Confirm the new primary is the " +
                             "node you want serving the workload, check the WSFC cluster log for the failover reason, and " +
                             "verify that backups, index maintenance and integrity checks run against the new primary.",
@@ -5911,7 +5911,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     await FireAsync(
                         Key(serverId), serverName, AgReplicaReconnectedMetric, replica.ConnectedStateDesc, "CONNECTED",
                         detail: $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is connected " +
-                            "to the primary again. It is still behind by whatever accumulated while it was gone — watch the " +
+                            "to the primary again. It is still behind by whatever accumulated while it was gone - watch the " +
                             "send and redo queues until they drain before you count it as a failover target again.",
                         severity: null,
                         shortMessage: $"{replica.ReplicaServerName} in AG {replica.AgName} reconnected",
@@ -6017,7 +6017,7 @@ internal sealed class DarlingSelfAlertEvaluator
                             $"{database.DatabaseName} on replica {database.ReplicaServerName} is SUSPENDED " +
                             $"({suspendReason}). While movement is suspended the secondary receives nothing AND the " +
                             "primary cannot truncate its transaction log, so the primary's log grows until its disk " +
-                            "fills — this is a primary-side outage risk, not just a secondary-side one. Fix the " +
+                            "fills - this is a primary-side outage risk, not just a secondary-side one. Fix the " +
                             "underlying cause, then resume it with ALTER DATABASE " +
                             $"[{database.DatabaseName}] SET HADR RESUME.",
                         severity: AlertSeverityLevel.Warning,
@@ -6069,12 +6069,12 @@ internal sealed class DarlingSelfAlertEvaluator
                             "everything still queued. Look at the network throughput between the replicas, the " +
                             "secondary's redo thread (it is single-threaded per database on older versions and is " +
                             "easily starved by CPU or storage latency on the secondary), and whether something on the " +
-                            "primary — an index rebuild, a bulk load, a long transaction — is generating log faster " +
+                            "primary - an index rebuild, a bulk load, a long transaction - is generating log faster " +
                             "than the secondary can consume it. Read the figures for what they measure: the lag " +
                             "seconds are how STALE the secondary's last hardened log is, not how much data is queued " +
                             "behind it, so on a quiet group a large value can simply mean nothing has been written " +
                             "recently. While data movement is suspended the redo queue is frozen at its last reading, " +
-                            "and log_send_queue_size — the actual backlog measure — reports nothing at all.",
+                            "and log_send_queue_size - the actual backlog measure - reports nothing at all.",
                         severity: AlertSeverityLevel.Warning,
                         shortMessage: behindReason,
                         /* #1881: JudgeSync's reason is prose that breaches on EITHER lag seconds OR redo-queue
@@ -7427,9 +7427,9 @@ internal sealed class DarlingSelfAlertEvaluator
                        hand for no reason. What IS true, and is the actual signal: the countdown cannot
                        advance while whatever blocked the write is still blocking it, because the sweep's own
                        counter write fails the same way. */
-                    ? $" BUT post-upgrade bookkeeping did NOT complete: {report.FailureMessage}. The store itself is fine and running on PostgreSQL {report.ToMajor} — this is about cleanup, not data. The retained copy's countdown simply starts on the next service start, so it ages out one start later than usual; it only stays put if whatever blocked the write is still blocking it. Check free disk space on the store volume, clear the underlying problem, and remove the directory by hand only if it is still there after a couple of starts."
+                    ? $" BUT post-upgrade bookkeeping did NOT complete: {report.FailureMessage}. The store itself is fine and running on PostgreSQL {report.ToMajor} - this is about cleanup, not data. The retained copy's countdown simply starts on the next service start, so it ages out one start later than usual; it only stays put if whatever blocked the write is still blocking it. Check free disk space on the store volume, clear the underlying problem, and remove the directory by hand only if it is still there after a couple of starts."
                     : report.WithoutRollbackCopy
-                        ? " The upgrade ran in hard-link mode, so there is NO rollback copy of the pre-upgrade store — the only way back is a restore from backup."
+                        ? " The upgrade ran in hard-link mode, so there is NO rollback copy of the pre-upgrade store - the only way back is a restore from backup."
                         : " The pre-upgrade data directory is kept as a rollback copy for the next couple of service starts, then deleted automatically.";
 
                 await FireAsync(
@@ -7506,7 +7506,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 detail: $"The monitor's own store FAILED to upgrade from PostgreSQL {report.FromMajor} to {report.ToMajor}, at step '{report.FailedStep}': {report.FailureMessage} " +
                     aftermath,
                 severity: AlertSeverityLevel.Critical,
-                shortMessage: $"store upgrade to PostgreSQL {report.ToMajor} FAILED at {report.FailedStep} — {shortAftermath}",
+                shortMessage: $"store upgrade to PostgreSQL {report.ToMajor} FAILED at {report.FailedStep} - {shortAftermath}",
                 /* Versions again, on the failure path — see the success branch above. */
                 numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                 cancellationToken);
@@ -8240,10 +8240,10 @@ WHERE c.is_enabled";
             var because = reason.Length == 0 ? string.Empty : $" ({reason})";
             var refusedValue = "not loaded; not being served";
             var refusedShort =
-                $"{tls.Surface} TLS certificate COULD NOT BE LOADED — {tls.Endpoint} is loopback-only";
+                $"{tls.Surface} TLS certificate COULD NOT BE LOADED - {tls.Endpoint} is loopback-only";
             var refusedDetail =
                 $"The {tls.Surface}'s configured TLS certificate could not be loaded when the service started{because}, "
-                + $"so the host refused to expose the {tls.Endpoint}: it is bound LOOPBACK-ONLY — unreachable from the "
+                + $"so the host refused to expose the {tls.Endpoint}: it is bound LOOPBACK-ONLY - unreachable from the "
                 + "network, and it will not fall back to plain HTTP. Check the certificate file or files, the password, "
                 + "and that the private key matches the certificate, then restart the service so the host loads it again.";
             return (refusedShort, refusedDetail, refusedValue);
@@ -8257,7 +8257,7 @@ WHERE c.is_enabled";
             var notBefore = report.NotBeforeUtc.UtcDateTime;
             var currentValue = $"not valid until {notBefore:u}; not being served";
             var shortMessage =
-                $"{tls.Surface} TLS certificate NOT YET VALID (valid from {notBefore:u}) — {tls.Endpoint} is loopback-only";
+                $"{tls.Surface} TLS certificate NOT YET VALID (valid from {notBefore:u}) - {tls.Endpoint} is loopback-only";
 
             /* Two tenses, because the operator reads this on the alert channel at some later hour: while the
                window is still ahead, the clock is the likely culprit and the date is what to check it
@@ -8267,11 +8267,11 @@ WHERE c.is_enabled";
             var clockLine = now < notBefore
                 ? $"The window opens {notBefore:u}: if that is in the past by any wall clock you trust, this host's clock "
                   + "is behind; if it is genuinely ahead, the certificate installed is one issued for a future rotation."
-                : $"The window opened {notBefore:u}, after the service started — the host judged the certificate once, at load, "
+                : $"The window opened {notBefore:u}, after the service started - the host judged the certificate once, at load, "
                   + "and stays loopback-only on that verdict until it is restarted.";
             var detail =
                 $"The {tls.Surface}'s configured TLS certificate was not yet valid when the service started (not valid "
-                + $"until {notBefore:u}), so the host refused to serve it and the {tls.Endpoint} is bound LOOPBACK-ONLY — "
+                + $"until {notBefore:u}), so the host refused to serve it and the {tls.Endpoint} is bound LOOPBACK-ONLY - "
                 + $"unreachable from the network, and it will not fall back to plain HTTP. The token is still required on the loopback listener. {clockLine} Correct the system "
                 + "clock or install the currently-valid certificate, then restart the service so the host loads it "
                 + $"again. {certRef}";
@@ -8426,14 +8426,14 @@ WHERE c.is_enabled";
                                   "other and everything it maintains (continuous-aggregate freshness, compression, " +
                                   "retention) falls further behind every cycle. "
                                 : "These runtimes scale with raw data volume, so this is the early warning that the " +
-                                  "store is outgrowing its job schedule — an onboarding wave moves this number first. ") +
+                                  "store is outgrowing its job schedule - an onboarding wave moves this number first. ") +
                             "Compare the job's duration series in collect.store_metrics (object_kind = " +
                             "'background_job') to see the trend, and " +
                             (TimescaleSupport.ScheduleIntervalDoublesAsEndOffset(job.JobName)
                                 ? "either reduce raw volume or scale the store host. Do NOT widen this job's " +
                                   "schedule_interval: on a continuous-aggregate refresh policy it is also the " +
                                   "aggregate's end_offset, so widening it changes what the refresh " +
-                                  "materializes — a wider still-filling tail is left unmaterialized, and on " +
+                                  "materializes - a wider still-filling tail is left unmaterialized, and on " +
                                   "the hourly tier the Query Store backfill horizon derived from it shortens " +
                                   "too. Narrow the refresh window or re-phase the grid instead."
                                 : "either reduce raw volume, extend the job's schedule_interval deliberately, " +
@@ -8588,7 +8588,7 @@ WHERE c.is_enabled";
                                   "real disk. ") +
                             "The policy arms ITSELF once its consumer covers everything raw holds: the coverage " +
                             "gate is re-judged at startup and on the running service's hourly maintenance tick " +
-                            "(EnsureRetentionPoliciesAsync, #3812), so the remedy is one step - " +
+                            "(EnsureRetentionPoliciesAsync), so the remedy is one step - " +
                             RetentionHoldRemedy(OperatingSystem.IsWindows()) + " - and the hold clears by itself within about an " +
                             "hour of the backfill completing. Restart the service only if you want it armed " +
                             "immediately; this alert resolves on the tick after the one that arms it. Do NOT arm " +
@@ -8597,7 +8597,7 @@ WHERE c.is_enabled";
                             "not materialized, which is precisely what the gate prevents - and the hourly pass re-holds a " +
                             "hand-armed policy whose coverage is still short. Check the service log for the " +
                             "'HELD PAUSED' line at startup naming every short consumer and the remedy for each " +
-                            "(the service fills a small floor gap itself on the hourly pass, #6081; a larger one needs the verb), and for the hourly " +
+                            "(the service fills a small floor gap itself on the hourly pass; a larger one needs the verb), and for the hourly " +
                             "'Retention re-evaluation:' line, whose 'armed this pass' count is the confirmation.",
                         severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
                         shortMessage: $"{label} held at {ratio:F1}x its {policy.DropAfter} horizon",
@@ -8745,17 +8745,17 @@ WHERE c.is_enabled";
                         StoreKey(RawPurgeOverHorizonKeyPrefix + key), _storeLabel, RawPurgeOverHorizonMetric,
                         $"{ratioValue:F1}x its {reading.DropAfter} horizon", $"{warnRatio:F1}x",
                         detail: StateRepeatNote(decision, refire) + $"Store {label} is {ratioValue:F1}x its configured {reading.DropAfter} horizon, " +
-                            $"and the last recorded purge-trigger pass did not run it — {reasonText}. " +
+                            $"and the last recorded purge-trigger pass did not run it - {reasonText}. " +
                             (critical
                                 ? "The tier is now several times its intended depth and still growing. "
                                 : "") +
-                            "This is the hourly Periodic trigger's own record (#4299), separate from the " +
+                            "This is the hourly Periodic trigger's own record, separate from the " +
                             "Retention Held coverage gate: the relation may already read covered and still " +
                             "not be purging if a hole or a run failure keeps blocking the trigger. Check the " +
                             "service log's 'Raw retention purge for' lines for this relation to see the gate " +
                             "the trigger is failing.",
                         severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
-                        shortMessage: $"{label} over horizon — {reasonText}",
+                        shortMessage: $"{label} over horizon - {reasonText}",
                         numericCurrentValue: Math.Round(ratioValue, 2),
                         numericThresholdValue: critical ? criticalRatio : warnRatio,
                         cancellationToken);
@@ -9092,7 +9092,7 @@ WHERE c.is_enabled";
                         StoreKey(ToastSlackKeyPrefix + key), _storeLabel, ToastSlackMetric,
                         $"{pct.ToString("0.0", CultureInfo.InvariantCulture)}% of {FormatGb(file)} TOAST file live",
                         $"{ToastSlackUtilisationBarPercent.ToString("0", CultureInfo.InvariantCulture)}% over {FormatGb(ToastSlackFileFloorBytes)}",
-                        detail: $"Store dimension {key}'s TOAST file — where the plan XML / statement text actually lives — is " +
+                        detail: $"Store dimension {key}'s TOAST file - where the plan XML / statement text actually lives - is " +
                             $"{FormatGb(file)} on disk and holds {FormatGb(live)} of live data " +
                             $"({pct.ToString("0.0", CultureInfo.InvariantCulture)}%); {FormatGb(slack)} is free space INSIDE the file. " +
                             "That slack is what a cycling delete pattern leaves behind: ordinary VACUUM (and autovacuum) returns " +
@@ -9107,7 +9107,7 @@ WHERE c.is_enabled";
                             "get_store_metrics publishes toast_utilisation_pct per dimension.",
                         /* No override: the per-metric map's declared INFO arm decides (the digest reasoning). */
                         severity: null,
-                        shortMessage: $"{key} TOAST file at {pct.ToString("0.0", CultureInfo.InvariantCulture)}% — --recompress-plan-dim --vacuum-full reclaims the slack; maintenance window",
+                        shortMessage: $"{key} TOAST file at {pct.ToString("0.0", CultureInfo.InvariantCulture)}% - --recompress-plan-dim --vacuum-full reclaims the slack; maintenance window",
                         numericCurrentValue: pct,
                         numericThresholdValue: ToastSlackUtilisationBarPercent,
                         cancellationToken);
@@ -9309,8 +9309,8 @@ WHERE c.is_enabled";
                     thresholdText,
                     detail: $"The store's own checkpointer ran {checkpointCount} {(checkpointCount == 1 ? "checkpoint" : "checkpoints")} over the {intervalMinutes} minutes " +
                         $"between the last two self-metrics sweeps, spending {(syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s " +
-                        $"total in its sync (fsync) phase and {writeSeconds}s in its write phase — an average of {averageSecondsText}s of sync " +
-                        $"per checkpoint — and {requested} of those checkpoints were REQUESTED — started by something other than " +
+                        $"total in its sync (fsync) phase and {writeSeconds}s in its write phase - an average of {averageSecondsText}s of sync " +
+                        $"per checkpoint - and {requested} of those checkpoints were REQUESTED - started by something other than " +
                         "checkpoint_timeout: WAL volume reaching max_wal_size, a base backup, or a CHECKPOINT statement. " +
                         longestDetail +
                         (averageOverBar
@@ -9325,7 +9325,7 @@ WHERE c.is_enabled";
                             : "PostgreSQL's counters do not say which of those started a requested checkpoint; the log_checkpoints " +
                               "lines do. Raising max_wal_size is the remedy only for the first cause: when WAL volume did it, the " +
                               "store wrote more WAL between checkpoints than max_wal_size allows, so the checkpointer ran early and " +
-                              "the next one is closer — checkpoint pressure compounds. ") +
+                              "the next one is closer - checkpoint pressure compounds. ") +
                         "The interval series is collect.store_metrics (object_kind = 'checkpointer'; the stored columns are the " +
                         "server's cumulative counters, and get_store_metrics' checkpointer block publishes the per-interval " +
                         "differences and the same per-checkpoint average). This alert re-fires on the alert cooldown while each " +
@@ -9356,7 +9356,7 @@ WHERE c.is_enabled";
                 $"{_storeLabel}: checkpointer {recoveredAverageText} and {requested} requested {(requested == 1 ? "checkpoint" : "checkpoints")} over {checkpointCount} " +
                 $"{(checkpointCount == 1 ? "checkpoint" : "checkpoints")} in the last {intervalMinutes} min" +
                 (longestSync is CheckpointSyncMax recoveredLongest ? $", longest single sync {FormatSyncSeconds(recoveredLongest.SyncMs)}s" : "") +
-                " — under the line again"), cancellationToken);
+                " - under the line again"), cancellationToken);
         }
     }
 
@@ -9496,7 +9496,7 @@ WHERE c.is_enabled";
             if (job.Family == TimescaleSupport.StorePolicyJobFamily.Other)
             {
                 _logger?.LogWarning(
-                    "TimescaleDB policy job {JobId}{Relation} was flagged as stuck ({Reason}) but its family is not one this service has alert text for — not re-armed, not alerted. The detection was widened past the band table; report it (#3816)",
+                    "TimescaleDB policy job {JobId}{Relation} was flagged as stuck ({Reason}) but its family is not one this service has alert text for - not re-armed, not alerted. The detection was widened past the band table; report it",
                     key,
                     string.IsNullOrEmpty(job.HypertableName) ? "" : " on " + job.HypertableName,
                     job.Reason);
@@ -9525,13 +9525,13 @@ WHERE c.is_enabled";
                 if (!string.IsNullOrEmpty(job.HypertableName) && TimescaleSupport.RawRelations.Contains(job.HypertableName))
                 {
                     _logger?.LogDebug(
-                        "TimescaleDB {Label} was reported as stuck while NOT scheduled — this is one of the three raw retention jobs, permanently unscheduled by design (#4299), not a #1680/#1877 coverage hold. Nothing re-armed, nothing alerted; no action needed",
+                        "TimescaleDB {Label} was reported as stuck while NOT scheduled - this is one of the three raw retention jobs, permanently unscheduled by design, not a coverage hold. Nothing re-armed, nothing alerted; no action needed",
                         label);
                     continue;
                 }
 
                 _logger?.LogWarning(
-                    "TimescaleDB {Label} was reported as stuck while NOT scheduled — a paused policy is a HELD one, not an abandoned job, and re-arming it would drop history the #1680/#1877 coverage gate is protecting. Nothing re-armed, nothing alerted; this is a detector defect worth reporting (#3816)",
+                    "TimescaleDB {Label} was reported as stuck while NOT scheduled - a paused policy is a HELD one, not an abandoned job, and re-arming it would drop history the coverage gate is protecting. Nothing re-armed, nothing alerted; this is a detector defect worth reporting",
                     label);
                 continue;
             }
@@ -9554,7 +9554,7 @@ WHERE c.is_enabled";
                        same argument for a refresh or a retention job. */
                     _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.AwaitingSchedulerRetry, job.Family);
                     _logger?.LogInformation(
-                        "TimescaleDB {Label} read {Reason}; the scheduler re-runs a crashed job by itself max(5 minutes, retry_period x consecutive_crashes) after its last job-list reload (about fifteen minutes on this service's retry period), and a re-arm would restart that wait rather than shorten it — not re-armed, not alerted; escalates if still there next check (#3591, #8302)",
+                        "TimescaleDB {Label} read {Reason}; the scheduler re-runs a crashed job by itself max(5 minutes, retry_period x consecutive_crashes) after its last job-list reload (about fifteen minutes on this service's retry period), and a re-arm would restart that wait rather than shorten it - not re-armed, not alerted; escalates if still there next check",
                         label, job.Reason);
                     continue;
                 }
@@ -9572,12 +9572,12 @@ WHERE c.is_enabled";
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} was stuck ({job.Reason}) and has been automatically re-armed " +
                             $"(alter_job next_start => now). {band.Consequence} If it re-hangs the service will " +
-                            "escalate and stop auto-re-arming — investigate the TimescaleDB background-worker health. " +
+                            "escalate and stop auto-re-arming - investigate the TimescaleDB background-worker health. " +
                             "(A next_start of -infinity is permanent only below TimescaleDB 2.26.4; from 2.26.4 on, upstream " +
-                            "#9360, the scheduler recovers it by itself and the service leaves such rows to it — if this store " +
+                            "the scheduler recovers it by itself and the service leaves such rows to it - if this store " +
                             "is on 2.26.4 or later, its extension version could not be read on this pass.)",
                         severity: band.Severity,
-                        shortMessage: $"{label} was stuck — auto-re-armed",
+                        shortMessage: $"{label} was stuck - auto-re-armed",
                         /* #1881: job.Reason is elapsed minutes when a run HUNG and a scheduler state with no
                            duration at all when next_start is -infinity, so the stored number meant minutes on
                            some rows and nothing on others. The minutes stay in the reason text and the detail,
@@ -9594,12 +9594,12 @@ WHERE c.is_enabled";
                     var delivery = await FireAsync(
                         StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                         job.Reason, "running on schedule",
-                        detail: $"TimescaleDB {label} is stuck ({job.Reason}) and the service could NOT re-arm it — " +
+                        detail: $"TimescaleDB {label} is stuck ({job.Reason}) and the service could NOT re-arm it - " +
                             "alter_job failed, usually because the store login does not own the job. " +
                             $"{band.Stalled} Re-arm it manually as the store owner " +
                             "(SELECT alter_job(<job_id>, next_start => now())), or grant ownership, then investigate why it hung.",
                         severity: band.Severity,
-                        shortMessage: $"{label} stuck — auto-re-arm FAILED",
+                        shortMessage: $"{label} stuck - auto-re-arm FAILED",
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken,
                         context: new AlertContext { PolicyJobStep = AlertContextSerializer.PolicyJobStepEscalated });
@@ -9620,7 +9620,7 @@ WHERE c.is_enabled";
                     job.Reason, "running on schedule",
                     detail: $"TimescaleDB {label} has sat in the scheduler's crash backoff ({job.Reason}) since at least the previous " +
                         "hourly check, and the scheduler has not re-run it. A crashed background worker means the " +
-                        "PostgreSQL cluster crash-restarted, failed over, or the worker was killed mid-run — read the PostgreSQL log " +
+                        "PostgreSQL cluster crash-restarted, failed over, or the worker was killed mid-run - read the PostgreSQL log " +
                         "around the job's last_run_started_at for the cause. The scheduler re-runs a crashed job " +
                         "max(5 minutes, retry_period x consecutive_crashes) after it last reloaded its job list, and every alter_job on " +
                         "the store reloads that list, so a job whose retry_period is an hour or more is pushed out again by each hourly " +
@@ -9629,7 +9629,7 @@ WHERE c.is_enabled";
                         $"retry_period => INTERVAL '{TimescaleSupport.PolicyJobRetryPeriod}'). The service did NOT re-arm it: " +
                         $"alter_job(next_start => now()) against a job in crash backoff restarts the wait instead of shortening it. {band.Stalled}",
                     severity: band.Severity,
-                    shortMessage: $"{label} still in crash backoff an hour on — escalated",
+                    shortMessage: $"{label} still in crash backoff an hour on - escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken,
                     context: new AlertContext { PolicyJobStep = AlertContextSerializer.PolicyJobStepEscalated });
@@ -9645,12 +9645,12 @@ WHERE c.is_enabled";
                 var delivery = await FireAsync(
                     StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                     job.Reason, "running on schedule",
-                    detail: $"TimescaleDB {label} is STILL stuck ({job.Reason}) after an automatic re-arm last cycle — it " +
+                    detail: $"TimescaleDB {label} is STILL stuck ({job.Reason}) after an automatic re-arm last cycle - it " +
                         "re-hung, so the service has STOPPED auto-re-arming it. This is a product-bug signal: the background " +
                         $"worker behind this policy is not making progress. {band.Stalled} Investigate the " +
                         "PostgreSQL/TimescaleDB logs and the background-worker settings.",
                     severity: band.Severity,
-                    shortMessage: $"{label} re-hung after self-heal — escalated",
+                    shortMessage: $"{label} re-hung after self-heal - escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken,
                     context: new AlertContext { PolicyJobStep = AlertContextSerializer.PolicyJobStepEscalated });
@@ -9711,7 +9711,7 @@ WHERE c.is_enabled";
                    resolve — a lone "Recovered" with no preceding alert would be the very message shape #3575
                    removed. The log carries the outcome instead. */
                 _logger?.LogInformation(
-                    "TimescaleDB {Noun} {JobId} is running on schedule again — the scheduler's own retry cleared its crash backoff; nothing was re-armed or alerted (#3591)",
+                    "TimescaleDB {Noun} {JobId} is running on schedule again - the scheduler's own retry cleared its crash backoff; nothing was re-armed or alerted",
                     band.Noun,
                     key);
                 continue;
@@ -9818,8 +9818,8 @@ WHERE c.is_enabled";
                 $"{grew} new {(grew == 1 ? "failure" : "failures")}, {job.TotalFailures} total", "at least one new failure",
                 detail: $"TimescaleDB {label} recorded {grew} more failed {(grew == 1 ? "run" : "runs")} since the previous hourly sample " +
                     $"({job.TotalFailures} failures total since the policy was created) and its last run reports Failed. " +
-                    $"{band.Consequence} The job is still SCHEDULED — the scheduler is running it and it is failing — " +
-                    "which is why neither the dead-job arm (next_start = -infinity) nor the #2136 cadence check (which " +
+                    $"{band.Consequence} The job is still SCHEDULED - the scheduler is running it and it is failing - " +
+                    "which is why neither the dead-job arm (next_start = -infinity) nor the cadence check (which " +
                     "reads only SUCCESSFUL runs, so it gets quieter as a job gets sicker) reports it. The cause is in the " +
                     "PostgreSQL log around the job's last_run_started_at; the counter series is collect.store_metrics " +
                     "(object_kind = 'background_job', total_failures). Information rather than a page: a job that fails " +
@@ -9868,7 +9868,7 @@ WHERE c.is_enabled";
     /// </summary>
     private void LogPolicyJobSummary(PolicyJobCensus census, int rearmed, int fired, bool alertsEnabled)
         => _logger?.LogInformation(
-            "Store job health: {Jobs} jobs read (compression {Compression}, refresh {Refresh}, retention {Retention}{Other}), {Dead} dead, {Hung} stuck, {Stale} stale, {Held} held, {Rearmed} re-armed, {Fired} alerted{Disabled} (#3816)",
+            "Store job health: {Jobs} jobs read (compression {Compression}, refresh {Refresh}, retention {Retention}{Other}), {Dead} dead, {Hung} stuck, {Stale} stale, {Held} held, {Rearmed} re-armed, {Fired} alerted{Disabled}",
             census.Total,
             census.Compression,
             census.Refresh,
@@ -9880,7 +9880,7 @@ WHERE c.is_enabled";
             census.Held,
             rearmed,
             fired,
-            alertsEnabled ? "" : " — alerts are DISABLED, so nothing was judged this pass");
+            alertsEnabled ? "" : " - alerts are DISABLED, so nothing was judged this pass");
 
     /// <summary>
     /// What one pass of <c>TimescaleSupport.StuckPolicyJobsSql</c> read, per family, and what the classifier
@@ -9963,8 +9963,8 @@ WHERE c.is_enabled";
                 AlertSeverityLevel.Critical,
                 "refresh job",
                 "A rollup has stopped materializing, so every reader of that view is served silently stale " +
-                "answers, the raw tier it summarizes keeps filling, and the #1680/#1877 coverage gate will " +
-                "HOLD that tier's retention policy for as long as the rollup is short — the retention hold an " +
+                "answers, the raw tier it summarizes keeps filling, and the coverage gate will " +
+                "HOLD that tier's retention policy for as long as the rollup is short - the retention hold an " +
                 "operator sees first is this job's SYMPTOM, and --backfill-rollups clears the symptom while " +
                 "leaving this cause in place to do it again.",
                 "The rollup stays where it stopped until the refresh runs."),

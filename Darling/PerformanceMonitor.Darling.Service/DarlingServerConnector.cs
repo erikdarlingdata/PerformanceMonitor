@@ -184,7 +184,7 @@ SELECT /* PerformanceMonitorLite */
 
         return $"Registration '{displayName}' is registered for database '{registeredDatabase}' but its connection " +
                $"landed in '{connectedDatabase}'. Everything collected under this registration describes " +
-               $"'{connectedDatabase}', stored under this registration's identity — so if another registration " +
+               $"'{connectedDatabase}', stored under this registration's identity - so if another registration " +
                $"names '{connectedDatabase}', both are collecting the same database and its history is duplicated " +
                "under two identities. Check this server's Initial Catalog / database setting in the Viewer's " +
                "Manage Servers, or the 'database' field for it in darling.json.";
@@ -214,7 +214,7 @@ SELECT /* PerformanceMonitorLite */
             if (usedPlaintext)
             {
                 logger?.LogWarning(
-                    "Server '{Server}' uses a plaintext password in darling.json — run --encrypt-password and switch to encryptedPassword, or reference it via env:/file:.",
+                    "Server '{Server}' uses a plaintext password in darling.json - run --encrypt-password and switch to encryptedPassword, or reference it via env:/file:.",
                     config.DisplayName);
             }
         }
@@ -541,7 +541,7 @@ SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogDebug(ex, "pg_wait_sampling extension probe did not succeed; treating the extension as absent (#3604)");
+            logger?.LogDebug(ex, "pg_wait_sampling extension probe did not succeed; treating the extension as absent");
             return false;
         }
     }
@@ -704,7 +704,7 @@ SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
         var hasWaitSampling = await ProbeWaitSamplingExtensionAsync(connection, cancellationToken, logger);
 
         logger?.LogInformation(
-            "Connected to PostgreSQL target '{Server}': major {Major} (server_version_num {Num}), {Role}, Aurora: {Aurora}, pg_wait_sampling: {WaitSampling}, pg_stat_statements: {StatementsExtension} — {VersionText}",
+            "Connected to PostgreSQL target '{Server}': major {Major} (server_version_num {Num}), {Role}, Aurora: {Aurora}, pg_wait_sampling: {WaitSampling}, pg_stat_statements: {StatementsExtension} - {VersionText}",
             config.DisplayName, majorVersion, versionNum, isInRecovery ? "reader (in recovery)" : "writer", isAurora,
             hasWaitSampling ? "present (extension_sampled tier)" : isAurora ? "n/a (engine_cumulative tier)" : "absent (service_sampled tier)",
             statementsExtension.ExtensionVersion is { } extversion
@@ -1094,7 +1094,7 @@ FROM pg_catalog.pg_control_system() AS s";
               $"(skipped: {string.Join(", ", skipped)})";
 
         return $"PostgreSQL {probe.PostgresMajorVersion} (server_version_num {probe.PostgresVersionNum}), " +
-            $"{role}, {flavour} — {applies}";
+            $"{role}, {flavour} - {applies}";
     }
 
     /// <summary>Human-readable SERVERPROPERTY('EngineEdition') description for the probe result.

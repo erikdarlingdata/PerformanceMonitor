@@ -839,7 +839,7 @@ public sealed partial class DarlingWorker : BackgroundService
             if (config.Postgres.Network?.IsConfigured == true)
             {
                 warnings.Add(
-                    "postgres.network.* is set but postgres.managed is false — it is IGNORED in bring-your-own mode; your own PostgreSQL governs its network exposure (pg_hba / listen_addresses / TLS).");
+                    "postgres.network.* is set but postgres.managed is false - it is IGNORED in bring-your-own mode; your own PostgreSQL governs its network exposure (pg_hba / listen_addresses / TLS).");
             }
 
             /* #1804: in a container the mcp/web network blocks ARE honored (the bind ladder's container
@@ -866,7 +866,7 @@ public sealed partial class DarlingWorker : BackgroundService
                would read as wrong to the operator who wrote "admin,viewer" and invite them to dismiss the one
                warning that matters here. */
             warnings.Add(
-                "postgres.network.role admits 'admin' — a REMOTE admin connection can write config_command (the test_connect service-credential pivot), config_monitored_servers, and config_notification (webhook exfil). This is an explicit opt-in; the secure default is 'viewer' (read-only). Only expose admin on a trusted network.");
+                "postgres.network.role admits 'admin' - a REMOTE admin connection can write config_command (the test_connect service-credential pivot), config_monitored_servers, and config_notification (webhook exfil). This is an explicit opt-in; the secure default is 'viewer' (read-only). Only expose admin on a trusted network.");
         }
 
         return warnings;

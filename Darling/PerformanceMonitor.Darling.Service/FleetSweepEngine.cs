@@ -264,7 +264,7 @@ public static class FleetSweepEngine
                    header cannot read green over this card. */
                 band = DailyHealthBandCalculator.Label(DailyHealthBand.NoData);
                 reason = "The sweep could not read this server's signals: " + fault
-                    + ". Unreadable is not quiet — instrument liveness is red for this sweep.";
+                    + ". Unreadable is not quiet - instrument liveness is red for this sweep.";
                 readFaults.Add((reading.ServerName, fault));
             }
             else
@@ -294,7 +294,7 @@ public static class FleetSweepEngine
                         + "before the service started (" + instruments.ServiceStartedUtc.ToString("o")
                         + "), so it was already offline before the restart: classified offline, not startup-transient.",
                     DailyHealthBand.NoData when inSettleWindow =>
-                        "No collection inside the sweep span — inside the post-restart settle window (service started "
+                        "No collection inside the sweep span - inside the post-restart settle window (service started "
                         + instruments.ServiceStartedUtc.ToString("o") + "), classified startup-transient, not an outage.",
                     DailyHealthBand.NoData => "No collection inside the sweep span.",
                     _ => string.Join("; ", DailyHealthBandCalculator.BuildReasons(reading.Signals, reading.PeakBlockWaitMs)),
@@ -523,19 +523,19 @@ public static class FleetSweepEngine
         if (readFaults.Count > 0)
         {
             alive = false;
-            notes.Add($"{CountText.Plural(readFaults.Count, "server signal read")} failed — {(readFaults.Count == 1 ? "that server is" : "those servers are")} unreadable, not quiet.");
+            notes.Add($"{CountText.Plural(readFaults.Count, "server signal read")} failed - {(readFaults.Count == 1 ? "that server is" : "those servers are")} unreadable, not quiet.");
         }
 
         if (serversExpected > 0 && serversReported == 0)
         {
             if (inSettleWindow)
             {
-                notes.Add("Fleet-wide quiet inside the post-restart settle window — startup transient, not judged.");
+                notes.Add("Fleet-wide quiet inside the post-restart settle window - startup transient, not judged.");
             }
             else
             {
                 alive = false;
-                notes.Add("No server reported any collection inside the span — the collection instruments are not advancing.");
+                notes.Add("No server reported any collection inside the span - the collection instruments are not advancing.");
             }
         }
 
@@ -561,11 +561,11 @@ public static class FleetSweepEngine
             {
                 alive = false;
                 notes.Add($"The alert-pass counter is frozen at {instruments.AlertPassesTotal} since the previous sweep "
-                    + "while alerts are enabled and servers are reporting — the alert path's instruments are not advancing.");
+                    + "while alerts are enabled and servers are reporting - the alert path's instruments are not advancing.");
             }
             else if (!alertsEnabled || previousRun is { AlertsEnabled: false })
             {
-                notes.Add("The alert-pass counter did not advance — expected under the alert master switch, which stops "
+                notes.Add("The alert-pass counter did not advance - expected under the alert master switch, which stops "
                     + "the pass before it is counted; stated so the frozen counter reads as the mute, not as a dead path.");
             }
             else
@@ -690,7 +690,7 @@ public static class FleetSweepEngine
         if (!instrumentsAlive)
         {
             hits[(FleetSweepStore.FleetScopeServerId, InstrumentsDeadItemKey)] = (
-                "The sweep's instrument-liveness verdict was false — see the run's liveness block.",
+                "The sweep's instrument-liveness verdict was false - see the run's liveness block.",
                 JsonSerializer.Serialize(new { sweep_id = sweepId }));
         }
 
@@ -864,7 +864,7 @@ public static class FleetSweepEngine
         {
             return JsonSerializer.Serialize(new
             {
-                derivation = "summary-scoring critical trigger under alerts_enabled: false — not an alert-engine replay",
+                derivation = "summary-scoring critical trigger under alerts_enabled: false - not an alert-engine replay",
                 trigger = "longest single block in the sweep span, seconds",
                 value = peakBlockSeconds,
                 threshold = tiers.CriticalWaitSeconds,
@@ -877,7 +877,7 @@ public static class FleetSweepEngine
         {
             return JsonSerializer.Serialize(new
             {
-                derivation = "summary-scoring critical trigger under alerts_enabled: false — not an alert-engine replay",
+                derivation = "summary-scoring critical trigger under alerts_enabled: false - not an alert-engine replay",
                 trigger = "largest total blocked wait of one DMV snapshot in the sweep span (after the Blocking Wait Time persistence gate), seconds",
                 value = peakSnapshotSeconds.Value,
                 threshold = tiers.CriticalSnapshotWaitSeconds,
@@ -890,7 +890,7 @@ public static class FleetSweepEngine
         var ratePerHour = ServerHealthClassifier.BlockingRatePerHour(count, window)!.Value;
         return JsonSerializer.Serialize(new
         {
-            derivation = "summary-scoring critical trigger under alerts_enabled: false — not an alert-engine replay",
+            derivation = "summary-scoring critical trigger under alerts_enabled: false - not an alert-engine replay",
             trigger = "blocking waits per hour over the sweep span",
             value = ratePerHour,
             threshold = tiers.CriticalPerHour,
@@ -901,7 +901,7 @@ public static class FleetSweepEngine
     private static string Evidence(string what, long value, double threshold) =>
         JsonSerializer.Serialize(new
         {
-            derivation = "summary-scoring critical trigger under alerts_enabled: false — not an alert-engine replay",
+            derivation = "summary-scoring critical trigger under alerts_enabled: false - not an alert-engine replay",
             trigger = what,
             value,
             threshold,
@@ -913,7 +913,7 @@ public static class FleetSweepEngine
     private static string DeadlockRateEvidence(double ratePerHour, double criticalPerHour, long count) =>
         JsonSerializer.Serialize(new
         {
-            derivation = "summary-scoring critical trigger under alerts_enabled: false — not an alert-engine replay",
+            derivation = "summary-scoring critical trigger under alerts_enabled: false - not an alert-engine replay",
             trigger = "deadlocks per hour over the sweep span",
             value = ratePerHour,
             threshold = criticalPerHour,

@@ -277,7 +277,7 @@ public sealed class RdsCpuIngestor
                whichever replica happened to answer this cycle — not a coherent series for any one instance. */
             throw new InvalidOperationException(
                 $"'{host}' is an Aurora {(parsed.Kind == RdsEndpointKind.ClusterReader ? "reader" : "custom")} "
-                + "endpoint, which does not resolve to a stable instance — it moves between replicas call to "
+                + "endpoint, which does not resolve to a stable instance - it moves between replicas call to "
                 + "call. Point the target at the cluster writer endpoint or at a specific instance so CPU "
                 + "readings belong to a server that can be named.");
         }
@@ -356,7 +356,7 @@ public sealed class RdsCpuIngestor
                PERMISSIONS, naming which kind of nothing was found, instead of a SUCCESS row claiming CPU was
                read and simply had nothing new — the same trap #2633 fixed for the log-download route. */
             _logger?.LogWarning(
-                "PI/RDS CPU metrics unavailable for {Server}: {Message} — CPU capture is skipped for this "
+                "PI/RDS CPU metrics unavailable for {Server}: {Message} - CPU capture is skipped for this "
                 + "target this cycle; every other collector is unaffected.",
                 storageName, ex.Message);
 

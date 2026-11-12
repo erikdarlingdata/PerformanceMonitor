@@ -146,13 +146,13 @@ public sealed partial class DarlingCollectorRunner
     /// the self-hosted sentence names <c>log_directory</c> and a 4 MB read, neither of which exists there.</summary>
     internal const string RdsLogResumeLostNote =
         "The RDS log file this collector had read up to is no longer listed, so this read fell back to the newest "
-        + "file's last 10,000 lines and whatever the old file received after the previous read was not collected (#4708)";
+        + "file's last 10,000 lines and whatever the old file received after the previous read was not collected";
 
     /// <summary>The sentence beside <see cref="PgServerLogTail.FilesSkippedByRotationMeasurement"/> on the RDS route (#4708).</summary>
     internal const string RdsLogFilesSkippedNote =
         "More than one RDS log rotation happened between two reads: this read finished the file the previous read stopped "
         + "in and read the newest one, and log_files_skipped_by_rotation counts the files between them that no read "
-        + "opened (#4708)";
+        + "opened";
 
     /// <summary>
     /// <paramref name="result"/> with the resume notes of the stderr log tail merged into its host note for each
@@ -354,7 +354,7 @@ public sealed partial class DarlingCollectorRunner
                that went unseen while every call failed (#4051 review H1). At most once an hour per server,
                though, with Debug in between (#4051 round-2 review, L-2). */
             _logger?.Log(LogTimezoneReadFailureLevel(_logTimezoneReadWarnedUtc, server.ServerId, DateTime.UtcNow), ex,
-                "Could not read log_timezone for '{Server}' (#4046 part 1b) — a foreign-zone "
+                "Could not read log_timezone for '{Server}' (#4046 part 1b) - a foreign-zone "
                 + "line this cycle is refused as before.", server.Config.DisplayName);
             return (false, null);
         }
@@ -578,7 +578,7 @@ public sealed partial class DarlingCollectorRunner
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger?.Log(LogTimezoneReadFailureLevel(_pgLogUsesCsvlogReadWarnedUtc, server.ServerId, DateTime.UtcNow), ex,
-                "Could not read log_destination for '{Server}' (#4053 part c1) — every RDS csvlog-aware "
+                "Could not read log_destination for '{Server}' (#4053 part c1) - every RDS csvlog-aware "
                 + "route reads the {Fallback} file this cycle, its last known-good verdict.", server.Config.DisplayName,
                 _lastPgLogUsesCsvlogVerdict.TryGetValue(server.ServerId, out var lastGood) && lastGood ? "csv" : "stderr");
 
@@ -920,7 +920,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
         }
         catch (DbException ex)
         {
-            logger?.LogDebug(ex, "Reading extension schemas for {Collector} did not succeed (#6143)", definition.Name);
+            logger?.LogDebug(ex, "Reading extension schemas for {Collector} did not succeed", definition.Name);
             throw new InvalidOperationException(
                 $"{definition.Name} did not run: reading the schema of each extension it uses from pg_catalog.pg_extension "
                 + $"did not succeed, and the collector does not guess a schema. {ex.Message}",
@@ -1003,7 +1003,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
         if (isWindowsTarget && !readable && PgFileSettingsCapability.ShouldLogUnreadable(targetKey))
         {
             logger?.LogInformation(
-                "[{Server}] pg_file_settings is not readable by the monitoring role (#4251), so pending_restart "
+                "[{Server}] pg_file_settings is not readable by the monitoring role, so pending_restart "
                 + "is computed from pg_settings alone, which can read false on this Windows target for a "
                 + "setting that changed and reloaded but is still pending a restart: a connection opened after "
                 + "pg_reload_conf() reads pending_restart = false, and this collector opens a new connection "
@@ -1011,7 +1011,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                 + "FUNCTION pg_show_all_file_settings() to the monitoring role. Both are superuser-only by "
                 + "default for a reason: they show every line of every configuration file, including lines "
                 + "that are not the running value (a superseded or misspelled primary_conninfo with its "
-                + "password, for example) and each file's path — grant them only if that exposure is "
+                + "password, for example) and each file's path - grant them only if that exposure is "
                 + "acceptable for this role.",
                 server.Config.DisplayName);
         }

@@ -478,7 +478,7 @@ public static class AlertContextBuilders
 
             context.Details.Add(new AlertDetailItem
             {
-                Heading = $"{f.DatabaseName}.{f.FileName} — {f.TotalSizeGb:F1} GB ({(f.VolumeTotalMb is double headTotal && headTotal > 0 ? $"{f.VolumePercent:F0}% of {(string.IsNullOrEmpty(f.VolumeMountPoint) ? "(unknown)" : f.VolumeMountPoint)}" : "volume unknown")})",
+                Heading = $"{f.DatabaseName}.{f.FileName} - {f.TotalSizeGb:F1} GB ({(f.VolumeTotalMb is double headTotal && headTotal > 0 ? $"{f.VolumePercent:F0}% of {(string.IsNullOrEmpty(f.VolumeMountPoint) ? "(unknown)" : f.VolumeMountPoint)}" : "volume unknown")})",
                 Fields = fields
             });
         }
@@ -974,7 +974,7 @@ public static class AlertContextBuilders
         {
             var item = new AlertDetailItem
             {
-                Heading = $"Session #{q.SessionId} — {q.ElapsedSeconds / 60}m {q.ElapsedSeconds % 60}s",
+                Heading = $"Session #{q.SessionId} - {q.ElapsedSeconds / 60}m {q.ElapsedSeconds % 60}s",
                 Fields = new()
             };
 
@@ -1264,7 +1264,7 @@ public static class AlertContextBuilders
         {
             context.Details.Add(new AlertDetailItem
             {
-                Heading = $"{v.MountPoint} — {v.FreePercent:F0}% Free",
+                Heading = $"{v.MountPoint} - {v.FreePercent:F0}% Free",
                 Fields = new()
                 {
                     ("Free Space", $"{v.FreeGb:F1} GB"),
@@ -1340,7 +1340,7 @@ public static class AlertContextBuilders
             }
             context.Details.Add(new AlertDetailItem
             {
-                Heading = $"{d.DatabaseName} — PVS {d.PvsPercent:F0}% of database",
+                Heading = $"{d.DatabaseName} - PVS {d.PvsPercent:F0}% of database",
                 Fields = fields
             });
         }
@@ -1354,7 +1354,7 @@ public static class AlertContextBuilders
         var context = new AlertContext();
         context.Details.Add(new AlertDetailItem
         {
-            Heading = $"tempdb — {tempDb.ReservedPercent:F0}% Reserved",
+            Heading = $"tempdb - {tempDb.ReservedPercent:F0}% Reserved",
             Fields = new()
             {
                 ("Total Reserved", $"{tempDb.TotalReservedMb:F0} MB"),
@@ -1408,7 +1408,7 @@ public static class AlertContextBuilders
 
         return new AlertDetailItem
         {
-            Heading = $"Blocking Wait Time — {current.TotalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked {(current.BlockedSessionCount == 1 ? "session" : "sessions")}",
+            Heading = $"Blocking Wait Time - {current.TotalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked {(current.BlockedSessionCount == 1 ? "session" : "sessions")}",
             Fields = new()
             {
                 (BlockingWaitFiredByLabel, firedBy),
@@ -1490,7 +1490,7 @@ public static class AlertContextBuilders
             item.Fields.Add(("Job", j.JobName));
             item.Fields.Add(("Failed At", j.RunDateTimeFormatted));
             if (j.StepId > 0 && !string.IsNullOrEmpty(j.StepName))
-                item.Fields.Add(("Step", $"{j.StepId} — {j.StepName}"));
+                item.Fields.Add(("Step", $"{j.StepId} - {j.StepName}"));
             if (!string.IsNullOrEmpty(j.Message))
                 item.Fields.Add(("Message", TruncateText(j.Message, 300)));
             context.Details.Add(item);

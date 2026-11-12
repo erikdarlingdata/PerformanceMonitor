@@ -739,7 +739,7 @@ public static class PgTableTuning
                 else
                 {
                     logger?.LogWarning(
-                        "Composer performance-tuning statement failed — the store keeps working without it ({Statement}): {Message}",
+                        "Composer performance-tuning statement failed - the store keeps working without it ({Statement}): {Message}",
                         statement, ex.Message);
                 }
 
@@ -803,7 +803,7 @@ public static class PgTableTuning
         catch (Exception rollbackEx) when (rollbackEx is not OperationCanceledException)
         {
             logger?.LogWarning(
-                "Post-failure ROLLBACK also failed — the connection may be unusable for the rest of this sweep: {Message}",
+                "Post-failure ROLLBACK also failed - the connection may be unusable for the rest of this sweep: {Message}",
                 rollbackEx.Message);
         }
     }
@@ -900,7 +900,7 @@ WHERE COALESCE(array_to_string(c.reloptions, ','), '') NOT LIKE '%insert_scale_f
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger?.LogWarning(
-                    "Insert-autovacuum tuning failed for {Table} — the store keeps working without it: {Message}",
+                    "Insert-autovacuum tuning failed for {Table} - the store keeps working without it: {Message}",
                     target, ex.Message);
                 await RollbackBestEffortAsync(connection, logger, cancellationToken);
             }

@@ -164,7 +164,7 @@ public sealed class RdsDeadlockIngestor
                naming which kind of nothing was found, instead of a SUCCESS row claiming the log was opened
                and empty. */
             _logger?.LogWarning(
-                "RDS deadlock log unavailable for {Server}: {Message} — deadlock capture is skipped for "
+                "RDS deadlock log unavailable for {Server}: {Message} - deadlock capture is skipped for "
                 + "this target this cycle; every other collector is unaffected.",
                 storageName, ex.Message);
 

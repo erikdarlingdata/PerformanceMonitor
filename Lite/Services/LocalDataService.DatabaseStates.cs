@@ -125,10 +125,10 @@ SELECT
     /// had (5 s in the shipped app, two minutes in Lite.Tests), not a number written into the text.
     /// </summary>
     internal static string MaintenanceSkippedWarning(int serverId, string holder, TimeSpan budget) =>
-        $"server {serverId}: skipped this cycle's database-state maintenance — could not acquire the " +
+        $"server {serverId}: skipped this cycle's database-state maintenance - could not acquire the " +
             $"store write lock within {budget.TotalSeconds.ToString("0.##", CultureInfo.InvariantCulture)}s ({holder}). Baselines are not being " +
             "seeded or healed while this persists (#2189/#2203); deviations are still read. Expected " +
-            "occasionally — if it repeats, the write lock is contended.";
+            "occasionally - if it repeats, the write lock is contended.";
 
     /// <summary>
     /// The databases whose collected state deviates from their expected state, for the baseline-deviation

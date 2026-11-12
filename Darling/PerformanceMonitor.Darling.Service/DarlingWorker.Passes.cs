@@ -78,7 +78,7 @@ public sealed partial class DarlingWorker
             {
                 _logger.LogInformation(
                     "a retention purge (the previous daily run, or a manual purge_now) was still running at the "
-                    + "daily purge's next scheduled time — skipping this launch; it will be retried on the next "
+                    + "daily purge's next scheduled time - skipping this launch; it will be retried on the next "
                     + "tick once the current run completes");
                 return false;
             }
@@ -175,7 +175,7 @@ public sealed partial class DarlingWorker
             if (_purgeTask is { IsCompleted: false })
             {
                 _logger.LogInformation(
-                    "purge_now: a retention purge (the daily run, or an earlier purge_now) is already running — starting nothing");
+                    "purge_now: a retention purge (the daily run, or an earlier purge_now) is already running - starting nothing");
                 return new CommandOutcome(
                     true,
                     "purge already running",
@@ -213,7 +213,7 @@ public sealed partial class DarlingWorker
         if (_storeMaintenanceTick is { IsCompleted: false })
         {
             _logger.LogWarning(
-                "the previous hourly store-maintenance tick was still running at this tick's due time — skipping this hour; the next due time keeps its :30 phase");
+                "the previous hourly store-maintenance tick was still running at this tick's due time - skipping this hour; the next due time keeps its :30 phase");
             return false;
         }
 
@@ -460,7 +460,7 @@ public sealed partial class DarlingWorker
     {
         if (_composeStampTick is { IsCompleted: false })
         {
-            _logger.LogDebug("the previous Query Store compose rollup tick was still running at this tick's due time — skipping this slot");
+            _logger.LogDebug("the previous Query Store compose rollup tick was still running at this tick's due time - skipping this slot");
             return false;
         }
 
@@ -492,7 +492,7 @@ public sealed partial class DarlingWorker
         if (_storeMetricsTick is { IsCompleted: false })
         {
             _logger.LogWarning(
-                "the previous hourly store self-metrics tick was still running at this tick's due time — skipping this hour");
+                "the previous hourly store self-metrics tick was still running at this tick's due time - skipping this hour");
             return false;
         }
 
@@ -1641,15 +1641,15 @@ public sealed partial class DarlingWorker
     internal static string DescribeRawPurgeNowOutcome(string outcome, TimescaleSupport.RawLastPurgeReadState readState) => outcome switch
     {
         "ran" => "The gated purge ran this pass.",
-        "not_covered" => "Held — the rollup does not yet cover the oldest rows.",
-        "hole" => "Held — a hole was found inside the range the gate would have dropped.",
-        "epoch_stale" => "Held — no materialization repair has finished under the current start yet.",
-        "gate_error" => "Held — the gate's own check failed partway through.",
-        "no_chunks" => "Nothing to purge — no chunks exist yet.",
-        "run_failed" => "Held — the gate passed, but the purge run itself failed.",
+        "not_covered" => "Held - the rollup does not yet cover the oldest rows.",
+        "hole" => "Held - a hole was found inside the range the gate would have dropped.",
+        "epoch_stale" => "Held - no materialization repair has finished under the current start yet.",
+        "gate_error" => "Held - the gate's own check failed partway through.",
+        "no_chunks" => "Nothing to purge - no chunks exist yet.",
+        "run_failed" => "Held - the gate passed, but the purge run itself failed.",
         _ => readState == TimescaleSupport.RawLastPurgeReadState.NeverWritten
-            ? "Held — a successor's materialization could not be resolved, or no purge pass has recorded an outcome for it yet."
-            : "Held — a successor's materialization could not be resolved, or the last outcome could not be read.",
+            ? "Held - a successor's materialization could not be resolved, or no purge pass has recorded an outcome for it yet."
+            : "Held - a successor's materialization could not be resolved, or the last outcome could not be read.",
     };
 
     /// <summary>

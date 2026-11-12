@@ -916,7 +916,7 @@ public static partial class DarlingWebEndpoints
             ["get_alert_history"] = R(CatAlerts, "Recent fired-alert history for a server, newest first and bounded by limit. Excludes operator-dismissed alerts unless include_dismissed is true (dismissed_excluded_count says how many the default hid). include_streak adds streak_days to each row: days in a row this metric fired at this time of day before the alert, muted fires counting.", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("include_dismissed", false), PText("metric_name"), PText("family"), PBool("include_streak", false)),
             ["get_alert_badge_summary"] = R(CatAlerts, "What the sidebar's alert badge shows, one entry per server with something to show: the count of actionable alerts in the last 24 hours (not muted, not dismissed, not a resolution), whether any fired critical, and the newest alert's time. Grouped in the store, so it is never cut short by a row cap the way a page of get_alert_history is."),
             ["get_alert_settings"] = R(CatAlerts, "The current alert-settings configuration."),
-            ["get_daily_health_report"] = R(CatAlerts, "The Daily Health Report for one day (#7041), built from the store and sent nowhere. date is a local date in the report's time zone, default the latest finished period.", PText("date")),
+            ["get_daily_health_report"] = R(CatAlerts, "The Daily Health Report for one day, built from the store and sent nowhere. date is a local date in the report's time zone, default the latest finished period.", PText("date")),
             /* #5241: a web-only read (no MCP tool behind it, see WebOnlyReadNames): one alert's advice and fix script,
                fetched when its Analysis row is first expanded. The key is the page's own row identity. */
             ["get_alert_details"] = R(CatAlerts, "One fired alert's advice: the heading, fields, advice text and fix script the desktop's Alert Detail shows (never the Apply payload), found by server_id, metric_name and alert_time exactly as get_alert_history reports them. An alert with no advice, or no match, answers an empty details list. For High CPU, Blocking Detected, Blocking Wait Time and Deadlocks Detected it also answers attached_findings: the analysis findings held back from paging because that alert was open.", new CatalogParam("server_id", TypeInt, true, null), PReqText("metric_name"), PReqText("alert_time")),
@@ -928,7 +928,7 @@ public static partial class DarlingWebEndpoints
             /* #3598: a read the web host's viewer role can serve — the tool selects only the non-secret carve
                (route_id, metric_match, the GENERATED configured_channels presence column, smtp_recipients,
                enabled), never a destination URL. */
-            ["get_notification_routes"] = R(CatAlerts, "The alert-family taxonomy (self-monitor / reports / agent-jobs / performance, with every metric each owns) and the notification routes layered over the parent channels — which channels each route sets, never the destination values."),
+            ["get_notification_routes"] = R(CatAlerts, "The alert-family taxonomy (self-monitor / reports / agent-jobs / performance, with every metric each owns) and the notification routes layered over the parent channels - which channels each route sets, never the destination values."),
 
             /* ── blocking / deadlocks (DarlingMcpBlockingTools) ── */
             ["get_blocked_process_xml"] = R(CatBlocking, "Blocked-process-report XML captures.", PServer(), PHours(24), PLimit(5), PDatabases(), PAsOf()),
@@ -961,9 +961,9 @@ public static partial class DarlingWebEndpoints
 
             /* ── core data reads (DarlingMcpDataTools + long-query / fleet tools) ── */
             ["get_collection_health"] = R(CatData, "Per-collector collection health for a server. server=* with collector_name answers for that one collector on every enabled server (hours: default 24).", PServer(), PText("collector_name")),
-            ["get_collection_log"] = R(CatData, "Raw per-run collector log for a server, newest first — or slowest first when min_duration_ms is supplied.", PServer(), PHours(24), PLimit(200), PAsOf(), PText("collector_name"), PDouble("min_duration_ms"), PText("status")),
+            ["get_collection_log"] = R(CatData, "Raw per-run collector log for a server, newest first - or slowest first when min_duration_ms is supplied.", PServer(), PHours(24), PLimit(200), PAsOf(), PText("collector_name"), PDouble("min_duration_ms"), PText("status")),
             ["get_current_waits_trend"] = R(CatData, "Waiting-task and blocked-session series over time, in time buckets.", PServer(), PHours(4), PDatabases(), PAsOf(), PInt("bucket_minutes")),
-            ["get_client_timeouts"] = R(CatData, "Client-timeout (attention) counts, rate and top databases, applications and statements over the window, with the newest sampled events (#5640).", PServer(), PHours(1), PLimit(20), PAsOf()),
+            ["get_client_timeouts"] = R(CatData, "Client-timeout (attention) counts, rate and top databases, applications and statements over the window, with the newest sampled events.", PServer(), PHours(1), PLimit(20), PAsOf()),
             ["get_blocking_stats"] = R(CatData, "Blocking duration and deadlock severity per minute.", PServer(), PHours(24), PDatabases(), PAsOf()),
             ["get_cpu_utilization"] = R(CatData, "CPU utilization over time.", PServer(), PHours(4), PAsOf(), PInt("bucket_minutes")),
             ["get_file_io_stats"] = R(CatData, "Per-file IO stall/throughput stats.", PServer(), PDatabases()),
@@ -1002,7 +1002,7 @@ public static partial class DarlingWebEndpoints
             ["get_pg_wait_sampling"] = R(CatData, "Sampled PostgreSQL waits by query shape, from pg_wait_sampling - the stock-PostgreSQL counterpart of get_pg_wait_stats. Sample counts, not measured durations; event_type CPU means running rather than waiting. query_text is the statement behind each queryid.", PServer(), PHours(24), PLimit(20), PBool("full_text", true), PAsOf()),
             ["get_pg_kernel_stats"] = R(CatData, "Per-query OS CPU (user and system), device bytes and major faults, from pg_stat_kcache. The CPU half of the elapsed time get_pg_top_queries reports. query_text is the statement behind each queryid.", PServer(), PHours(24), PLimit(20), PBool("full_text", true), PAsOf()),
             ["get_pg_predicate_stats"] = R(CatData, "Which columns queries actually filter on and how selectively, from pg_qualstats. SAMPLED counts - the evidence behind an index recommendation. query_text is the statement behind each queryid.", PServer(), PHours(24), PLimit(25), PBool("full_text", true), PAsOf()),
-            ["get_pg_index_bloat"] = R(CatData, "ESTIMATED PostgreSQL index bloat from catalog statistics: reclaimable bytes, the modelled inputs behind them, and a reason instead of an answer where the statistics cannot support one. Answerless rows sort FIRST by design, so pass answered_only for the ranking on a server whose answerless population exceeds the row cap — read the reach field, which says whether raising the limit would help at all. The complete btree census, no size floor, so it counts MORE indexes than get_pg_index_usage (which floors at 64 kB).", PServer(), PHours(168), PLimit(25), PBool("answered_only", false), PAsOf()),
+            ["get_pg_index_bloat"] = R(CatData, "ESTIMATED PostgreSQL index bloat from catalog statistics: reclaimable bytes, the modelled inputs behind them, and a reason instead of an answer where the statistics cannot support one. Answerless rows sort FIRST by design, so pass answered_only for the ranking on a server whose answerless population exceeds the row cap - read the reach field, which says whether raising the limit would help at all. The complete btree census, no size floor, so it counts MORE indexes than get_pg_index_usage (which floors at 64 kB).", PServer(), PHours(168), PLimit(25), PBool("answered_only", false), PAsOf()),
             ["get_pg_column_stats"] = R(CatData, "Per-column distribution statistics the PLANNER uses: n_distinct, null fraction, correlation and top-value frequency.", PServer(), PHours(168), PLimit(25), PAsOf()),
             ["get_pg_buffer_usage"] = R(CatData, "What is resident in the shared buffer pool per relation, from pg_buffercache. Residency, not read volume.", PServer(), PHours(24), PLimit(25), PAsOf()),
             ["get_pg_extensions"] = R(CatData, "Which PostgreSQL extensions are installed, outdated, available or absent, per database. Usually the reason another read is empty. Rows are databases x extension names, so a multi-database host outgrows any row cap: read install_census for what is installed where (aggregated, limit-independent), or pass database_name to complete one database at a time.", PServer(), PHours(168), PLimit(50), PText("database_name"), PAsOf()),
@@ -1020,7 +1020,7 @@ public static partial class DarlingWebEndpoints
             ["get_pg_replication_stats"] = R(CatData, "Health of CONNECTED replicas from pg_stat_replication, with the worst lag in the window beside the latest. Counterpart of get_pg_replication_slots.", PServer(), PHours(24), PLimit(25), PAsOf()),
             ["get_pg_blocking"] = R(CatData, "PostgreSQL blocking chains that were sampled, with the root blocker attributed. A sample, not an event log.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_pg_database_stats"] = R(CatData, "PostgreSQL per-database temp-file spills, cache hit ratio, deadlocks and commit/rollback split, differenced across the window.", PServer(), PHours(24), PLimit(20), PAsOf()),
-            ["get_pg_index_usage"] = R(CatData, "PostgreSQL per-index scan counts and size, with the constraint, replica-identity and validity facts that decide whether an unused index can actually be dropped. Reports indexes of at least 64 kB plus any invalid index at any size, so it counts FEWER indexes than get_pg_index_bloat (the complete btree census) — that floor is the whole difference.", PServer(), PHours(168), PLimit(25), PAsOf()),
+            ["get_pg_index_usage"] = R(CatData, "PostgreSQL per-index scan counts and size, with the constraint, replica-identity and validity facts that decide whether an unused index can actually be dropped. Reports indexes of at least 64 kB plus any invalid index at any size, so it counts FEWER indexes than get_pg_index_bloat (the complete btree census) - that floor is the whole difference.", PServer(), PHours(168), PLimit(25), PAsOf()),
             ["get_pg_table_bloat"] = R(CatData, "PostgreSQL per-table bloat ESTIMATE with its measured sizes and dead-tuple counts. The estimate is suppressed, not captioned, when its statistics cannot be trusted.", PServer(), PHours(168), PLimit(25), PAsOf()),
             ["get_pg_session_states"] = R(CatData, "PostgreSQL sessions holding a transaction open, and whether each one actually pins the xmin horizon - which is not the same question as how long it has been idle in transaction. last_query_text is the statement behind last_query_id.", PServer(), PHours(24), PLimit(25), PBool("full_text", true), PAsOf()),
             ["get_wait_stats"] = R(CatData, "Top wait statistics in the window.", PServer(), PHours(24), PLimit(20), PAsOf()),
@@ -1407,11 +1407,11 @@ public static partial class DarlingWebEndpoints
             ["filterOps"] = JsonNode.Parse(full["filterOps"]!.ToJsonString()),
             ["viz"] = JsonNode.Parse(full["viz"]!.ToJsonString()),
             ["compact"] = true,
-            ["note"] = "Compact by default (#4198): each source lists its measures' key/displayName/kind/unitFamily/validAggregates " +
+            ["note"] = "Compact by default: each source lists its measures' key/displayName/kind/unitFamily/validAggregates " +
                 "only. Call describe_custom_view_catalog(source=\"<name>\") for that source's FULL per-measure detail " +
                 "(category, archetype, nativeUnit, defaultUnit, defaultAggregate, allowedDimensions, appliesTo) plus its own " +
                 "dimensions, or full_detail=true for the complete catalog (measures/dimensions/annotationSources as flat arrays, " +
-                "every field, exactly like this tool returned before #4198).",
+                "every field, exactly like this tool returned before the compact form).",
         };
     }
 

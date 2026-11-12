@@ -395,7 +395,7 @@ public static class FactRemediation
         sb.AppendLine($"-- Database: {db}");
         sb.AppendLine($"ALTER DATABASE {quoted} SET READ_COMMITTED_SNAPSHOT ON;   -- was OFF");
         sb.AppendLine();
-        sb.AppendLine("-- To back out (itself a destructive change — blocking returns):");
+        sb.AppendLine("-- To back out (itself a destructive change - blocking returns):");
         sb.AppendLine($"-- ALTER DATABASE {quoted} SET READ_COMMITTED_SNAPSHOT OFF;");
         sb.AppendLine();
         sb.Append("-- Test on a copy first if the application relies on default locking behavior or uses NOLOCK hints.");
@@ -1546,7 +1546,7 @@ public static class FactRemediation
                 {
                     // Close out the previous database group with its RCSI note (if any).
                     if (rcsiOffDatabases.Contains(currentDb))
-                        sb.AppendLine($"-- NOTE: {QuoteName(currentDb)} also has RCSI OFF — intentionally NOT auto-fixed (test on a copy first).");
+                        sb.AppendLine($"-- NOTE: {QuoteName(currentDb)} also has RCSI OFF - intentionally NOT auto-fixed (test on a copy first).");
                     sb.AppendLine();
                 }
                 currentDb = target.Database;
@@ -1557,7 +1557,7 @@ public static class FactRemediation
         }
 
         if (currentDb is not null && rcsiOffDatabases.Contains(currentDb))
-            sb.AppendLine($"-- NOTE: {QuoteName(currentDb)} also has RCSI OFF — intentionally NOT auto-fixed (test on a copy first).");
+            sb.AppendLine($"-- NOTE: {QuoteName(currentDb)} also has RCSI OFF - intentionally NOT auto-fixed (test on a copy first).");
 
         return sb.ToString().TrimEnd();
     }

@@ -488,7 +488,7 @@ public static class DarlingRetention
                 {
                     /* Impossible while the retention coverage test holds — belt-and-suspenders so schedule
                        drift degrades to a loud warning (and a WARNING run-record) instead of killing the sweep. */
-                    logger?.LogWarning("Retention purge: no schedule entry for '{Collector}' — {Table} was not purged",
+                    logger?.LogWarning("Retention purge: no schedule entry for '{Collector}' - {Table} was not purged",
                         definition.Name, definition.TargetTable);
                     tablesFailed++;
                     continue;
@@ -537,7 +537,7 @@ public static class DarlingRetention
                 if (gatedRawRelations.Contains(definition.TargetTable))
                 {
                     logger?.LogInformation(
-                        "Retention purge for {Table} is owned by the service-triggered, gated raw purge (#4299); the sweep does not drop it.",
+                        "Retention purge for {Table} is owned by the service-triggered, gated raw purge; the sweep does not drop it.",
                         definition.TargetTable);
                     continue;
                 }
@@ -2197,7 +2197,7 @@ WHERE NOT EXISTS
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogWarning("Could not drop the aged buckets of {View} (#8549): {Message}", TimescaleSupport.JobHistoryOldestDailyView, ex.Message);
+            logger?.LogWarning("Could not drop the aged buckets of {View}: {Message}", TimescaleSupport.JobHistoryOldestDailyView, ex.Message);
         }
     }
 
@@ -2268,13 +2268,13 @@ $do$";
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.DeadlockDetected && attempt == 1)
             {
                 logger?.LogWarning(
-                    "Retention purge (drop_chunks) deadlocked for {Table} — retrying once (the partner clears in milliseconds): {Message}",
+                    "Retention purge (drop_chunks) deadlocked for {Table} - retrying once (the partner clears in milliseconds): {Message}",
                     tableName, ex.Message);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 /* Failure-isolated per table — warned here, then the caller's DELETE fallback runs. */
-                logger?.LogWarning("Retention purge (drop_chunks) failed for {Table} — falling back to DELETE: {Message}",
+                logger?.LogWarning("Retention purge (drop_chunks) failed for {Table} - falling back to DELETE: {Message}",
                     tableName, ex.Message);
                 return null;
             }
@@ -2318,7 +2318,7 @@ $do$";
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(
-                "Could not read this store's TimescaleDB state ({Message}) — keeping the three raw tables out of this sweep's drop path rather than deleting on a guess.",
+                "Could not read this store's TimescaleDB state ({Message}) - keeping the three raw tables out of this sweep's drop path rather than deleting on a guess.",
                 ex.Message);
             return new HashSet<string>(TimescaleSupport.RawRelations, StringComparer.Ordinal);
         }
@@ -2363,7 +2363,7 @@ $do$";
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(
-                "Could not establish rollup coverage for {Table} ({Message}) — skipping its drop this cycle rather than deleting history on an assumption.",
+                "Could not establish rollup coverage for {Table} ({Message}) - skipping its drop this cycle rather than deleting history on an assumption.",
                 tableName, ex.Message);
             return false;
         }

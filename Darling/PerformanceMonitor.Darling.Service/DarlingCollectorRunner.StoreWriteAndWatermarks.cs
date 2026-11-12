@@ -313,7 +313,7 @@ public sealed partial class DarlingCollectorRunner
                than store rows this server might already hold. The #3099 retry above still applies to
                whatever failure the store write itself produces; this read is not part of that retry. */
             _logger?.LogWarning(
-                "job_history pre-insert dedupe read failed for server {ServerId} — failing this batch " +
+                "job_history pre-insert dedupe read failed for server {ServerId} - failing this batch " +
                 "rather than risk storing duplicate rows: {Message}",
                 server.ServerId, ex.Message);
             throw;
@@ -378,7 +378,7 @@ public sealed partial class DarlingCollectorRunner
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger?.LogWarning(
-                "Deadlock pre-insert dedupe read failed for server {ServerId} — failing this batch " +
+                "Deadlock pre-insert dedupe read failed for server {ServerId} - failing this batch " +
                 "rather than risk storing a duplicate: {Message}",
                 server.ServerId, ex.Message);
             throw;
@@ -468,7 +468,7 @@ public sealed partial class DarlingCollectorRunner
     /// </summary>
     internal const string StoreWriteReattemptLogTemplate =
         "{Collector} on '{Server}': the store write of {Rows} row(s) failed on a transport fault " +
-        "({Message}) — re-attempting once on a fresh store connection (#3099). The batch is still in " +
+        "({Message}) - re-attempting once on a fresh store connection. The batch is still in " +
         "memory and nothing was committed, so a successful re-attempt costs no sample.";
 
     /// <summary>
@@ -512,7 +512,7 @@ public sealed partial class DarlingCollectorRunner
     /// for replay, and the note is what keeps a failing apply visible on a cycle that otherwise reads as a success.
     /// </summary>
     internal const string QueryStoreIntervalMissNoteFormat =
-        "{0} Query Store batch(es) this cycle stored their raw rows but missed the interval table (#3953); they are " +
+        "{0} Query Store batch(es) this cycle stored their raw rows but missed the interval table; they are " +
         "queued for replay, and PLAN_REGRESSION reads raw for this server until they apply";
 
     /// <summary><see cref="QueryStoreIntervalMissNoteFormat"/> parsed once (CA1863).</summary>
@@ -1213,7 +1213,7 @@ public sealed partial class DarlingCollectorRunner
                and logging it as one would put a misleading warning per in-flight collector on every
                normal stop. */
             _logger?.LogWarning(
-                "Watermark read failed for server {ServerId} on {Table}.{Column} — falling back to the "
+                "Watermark read failed for server {ServerId} on {Table}.{Column} - falling back to the "
                 + "collector's default window, which re-collects data already stored: {Message}",
                 serverId, tableName, columnName, ex.Message);
         }
@@ -1337,7 +1337,7 @@ public sealed partial class DarlingCollectorRunner
                reads as a first run, and for this collector a first run re-collects the ring buffer's whole
                retained history under stamps the store already holds. */
             _logger?.LogWarning(
-                "Watermark read failed for server {ServerId} on {Table}.{Column}/{UtcColumn} — falling back to the "
+                "Watermark read failed for server {ServerId} on {Table}.{Column}/{UtcColumn} - falling back to the "
                 + "collector's default window, which re-collects data already stored: {Message}",
                 serverId, tableName, columnName, utcColumnName, ex.Message);
         }

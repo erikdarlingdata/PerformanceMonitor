@@ -445,9 +445,9 @@ LIMIT 16", connection)
     /// </summary>
     private static readonly Regex SafeStateUnavailableLine = new(
         @"\Astate_unavailable: (?:" +
-        @"the forcing and automatic-plan-correction state read failed \([A-Za-z][A-Za-z0-9]*(?:, SQLSTATE [0-9A-Z]{5})?; (?:the log has the full error|a table or column the read needs is missing, logged only at Debug level)\) — an unattended force cannot proceed on an unknown engine state" +
+        @"the forcing and automatic-plan-correction state read failed \([A-Za-z][A-Za-z0-9]*(?:, SQLSTATE [0-9A-Z]{5})?; (?:the log has the full error|a table or column the read needs is missing, logged only at Debug level)\) - an unattended force cannot proceed on an unknown engine state" +
         @"|the forcing and automatic-plan-correction state read returned no row for plan -?[0-9]+ of query -?[0-9]+ in [^\r\n\u2028\u2029]{1,256}; an unattended force cannot proceed on an unknown engine state" +
-        @"|the forcing and automatic-plan-correction state read ran and observed nothing for this target inside the last [0-9]+ hours: no query_store_stats row for plan -?[0-9]+, no forced sibling plan of query -?[0-9]+, no plan_correction recommendation, and no plan_correction capture for [^\r\n\u2028\u2029]{1,256} at all — FORCE_LAST_GOOD_PLAN enablement is unknown for this database, and an unattended force cannot proceed on unknown" +
+        @"|the forcing and automatic-plan-correction state read ran and observed nothing for this target inside the last [0-9]+ hours: no query_store_stats row for plan -?[0-9]+, no forced sibling plan of query -?[0-9]+, no plan_correction recommendation, and no plan_correction capture for [^\r\n\u2028\u2029]{1,256} at all - FORCE_LAST_GOOD_PLAN enablement is unknown for this database, and an unattended force cannot proceed on unknown" +
         @")\z",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -458,7 +458,7 @@ LIMIT 16", connection)
     /// carries no exception text either — it says the SAME thing #4326 says now, minus the exception.
     /// </summary>
     private const string LegacyStateUnavailableLine =
-        "state_unavailable: the forcing and automatic-plan-correction state read failed — an unattended force cannot proceed on an unknown engine state";
+        "state_unavailable: the forcing and automatic-plan-correction state read failed - an unattended force cannot proceed on an unknown engine state";
 
     /// <summary>
     /// Matches the whole <c>state_unavailable</c> BLOCK — from its prefix to the END of the string, not to

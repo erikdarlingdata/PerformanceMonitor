@@ -159,7 +159,7 @@ public sealed partial class DarlingWorker
                    kills the service harder than the failure it was retrying. */
                 _logger.LogWarning(
                     ex,
-                    "Cannot reach or migrate the Postgres store yet ({Message}) — attempt {Attempt} of " +
+                    "Cannot reach or migrate the Postgres store yet ({Message}) - attempt {Attempt} of " +
                     "{Total}, retrying in {Delay}s. A store that is restarting, failing over or still " +
                     "coming up recovers on its own; after the last attempt this keeps retrying more slowly " +
                     "instead of giving up.",
@@ -199,7 +199,7 @@ public sealed partial class DarlingWorker
                 {
                     _logger.LogWarning(
                         ex,
-                        "Still cannot reach or migrate the Postgres store ({Message}) — attempt {Attempt}, " +
+                        "Still cannot reach or migrate the Postgres store ({Message}) - attempt {Attempt}, " +
                         "retrying in {Delay}s.",
                         ex.Message, attempt, (int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds);
                 }
@@ -329,7 +329,7 @@ public sealed partial class DarlingWorker
                 /* The hourly store-maintenance tick retries it (RetryRoleProvisioningAsync), and every start does. */
                 _roleProvisioningRetryDirectory = provisioningDirectory;
                 _logger.LogError(ex, 
-                    "Least-privilege role provisioning failed — the Viewer's admin/viewer roles may be stale, and " +
+                    "Least-privilege role provisioning failed - the Viewer's admin/viewer roles may be stale, and " +
                     "a role credential file the web and MCP hosts wait for is not written until an attempt " +
                     "succeeds; it is retried on the hourly store-maintenance tick and on the next start: {Message}",
                     ex.Message);
@@ -514,7 +514,7 @@ public sealed partial class DarlingWorker
             /* A partially-converted store is fine: DELETE-based retention works on hypertables
                too, so falling back to plain-PG mode is always safe. */
             _timescaleAvailable = false;
-            _logger.LogWarning("TimescaleDB setup failed — continuing in plain-PostgreSQL mode: {Message}", ex.Message);
+            _logger.LogWarning("TimescaleDB setup failed - continuing in plain-PostgreSQL mode: {Message}", ex.Message);
         }
 
         /* #1757: the provider reads the seven baseline relations BY NAME — a missing one throws,
@@ -546,7 +546,7 @@ public sealed partial class DarlingWorker
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(
-                "Baseline relations could not be checked or backed by plain views — some anomaly baselines may silently return nothing: {Message}",
+                "Baseline relations could not be checked or backed by plain views - some anomaly baselines may silently return nothing: {Message}",
                 ex.Message);
         }
 
@@ -582,7 +582,7 @@ public sealed partial class DarlingWorker
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning("Composer performance tuning failed — queries fall back to un-indexed scans: {Message}", ex.Message);
+            _logger.LogWarning("Composer performance tuning failed - queries fall back to un-indexed scans: {Message}", ex.Message);
         }
 
         /* #3817: the ONE line this start's convergence pass writes, UNCONDITIONALLY — the #3756 discipline,
@@ -888,13 +888,13 @@ public sealed partial class DarlingWorker
                 _loggerFactory.CreateLogger<CustomAlertEvaluator>(),
                 muteRuleService.DigestWindowReason);
             _logger.LogInformation(
-                "Custom alert evaluator ready (#3285) — evaluating user rules on the viewer-role pool every {Seconds}s.",
+                "Custom alert evaluator ready - evaluating user rules on the viewer-role pool every {Seconds}s.",
                 (int)s_customAlertSweepInterval.TotalSeconds);
         }
         else
         {
             _logger.LogInformation(
-                "Custom alert evaluator not started: this deployment has no viewer-role login to evaluate custom alerts with — a managed Windows store or the Linux compose store's own provisioned viewer role are required; a bring-your-own store is not (#3285, #3970).");
+                "Custom alert evaluator not started: this deployment has no viewer-role login to evaluate custom alerts with - a managed Windows store or the Linux compose store's own provisioned viewer role are required; a bring-your-own store is not.");
         }
 
         /* Stage 4: the service self-alerts, over the SAME deliverer + history + mute check the engine uses.
@@ -1479,7 +1479,7 @@ public sealed partial class DarlingWorker
                         : 0;
 
                     _logger.LogDebug(
-                        "[{Server}] collection body still in flight after {Elapsed:F0}s ({State}) — skipping this sweep",
+                        "[{Server}] collection body still in flight after {Elapsed:F0}s ({State}) - skipping this sweep",
                         server.Config.DisplayName,
                         episodeSeconds,
                         SweepInFlightWording.DebugState(running, runningSeconds, connecting, connectSeconds));
@@ -1492,7 +1492,7 @@ public sealed partial class DarlingWorker
                         case SweepEpisodeSignal.Hang:
                             server.WarnedThisEpisode = true;
                             _logger.LogWarning(
-                                "[{Server}] collection body has not completed after {Elapsed:F0}s of execution — skipping relaunch",
+                                "[{Server}] collection body has not completed after {Elapsed:F0}s of execution - skipping relaunch",
                                 server.Config.DisplayName, runningSeconds);
                             break;
 
@@ -2856,14 +2856,14 @@ public sealed partial class DarlingWorker
             if (backfilled > 0)
             {
                 _logger.LogInformation(
-                    "TimescaleDB: baseline backfill complete — {Backfilled} aggregate(s) materialized over pre-existing history.",
+                    "TimescaleDB: baseline backfill complete - {Backfilled} aggregate(s) materialized over pre-existing history.",
                     backfilled);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(
-                "Baseline aggregate backfill could not run — baselines are computed from however much history the aggregates already hold: {Message}",
+                "Baseline aggregate backfill could not run - baselines are computed from however much history the aggregates already hold: {Message}",
                 ex.Message);
         }
     }
@@ -2884,7 +2884,7 @@ public sealed partial class DarlingWorker
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(
-                "Could not open a connection to refresh the collection-health rollup (#4812) - it fills on its refresh policy's first run: {Message}",
+                "Could not open a connection to refresh the collection-health rollup - it fills on its refresh policy's first run: {Message}",
                 ex.Message);
         }
     }
@@ -2952,7 +2952,7 @@ public sealed partial class DarlingWorker
                buckets found = repaired + deferred; a range the cap split counts once as found and once on each
                side), and the elapsed is the pass's clock, not this method's connection open. */
             _logger.LogInformation(
-                "TimescaleDB: materialization hole scan (#3653 Q10) — {Scanned} aggregate(s) walked, {Skipped} skipped, {HolesFound} hole(s) found spanning {BucketsFound} bucket(s), {HolesRepaired} hole(s) / {BucketsRepaired} bucket(s) repaired ({Forced} needed the forced refresh), {HolesDeferred} hole(s) / {BucketsDeferred} bucket(s) deferred past the cap, {Remaining} bucket(s) still reading as holes after repair, {DailyChained} successor-daily bucket(s) chained (#4300), {Failures} isolated failure(s), in {ElapsedMs} ms.",
+                "TimescaleDB: materialization hole scan (#3653 Q10) - {Scanned} aggregate(s) walked, {Skipped} skipped, {HolesFound} hole(s) found spanning {BucketsFound} bucket(s), {HolesRepaired} hole(s) / {BucketsRepaired} bucket(s) repaired ({Forced} needed the forced refresh), {HolesDeferred} hole(s) / {BucketsDeferred} bucket(s) deferred past the cap, {Remaining} bucket(s) still reading as holes after repair, {DailyChained} successor-daily bucket(s) chained, {Failures} isolated failure(s), in {ElapsedMs} ms.",
                 summary.AggregatesScanned, summary.AggregatesSkipped, summary.HolesFound, summary.BucketsFound,
                 summary.HolesRepaired, summary.BucketsRepaired, summary.HolesForced, summary.HolesDeferred, summary.BucketsDeferred,
                 summary.HolesRemaining, summary.DailyBucketsChained, summary.Failures, (long)summary.Elapsed.TotalMilliseconds);
@@ -2985,7 +2985,7 @@ public sealed partial class DarlingWorker
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
                         _logger.LogWarning(
-                            "Materialization-hole repair finished, but stamping the repair epoch on {Relation}'s raw retention job failed — the Periodic trigger will not purge it until a later repair stamps it: {Message}",
+                            "Materialization-hole repair finished, but stamping the repair epoch on {Relation}'s raw retention job failed - the Periodic trigger will not purge it until a later repair stamps it: {Message}",
                             relation, ex.Message);
                     }
                 }
@@ -3016,13 +3016,13 @@ public sealed partial class DarlingWorker
                exactly the nothing a scan that never ran leaves. Rethrown so the drain's contract is untouched (it
                swallows this as "expected on shutdown"); the line is the whole of the change. */
             _logger.LogInformation(
-                "TimescaleDB: materialization hole scan (#3653 Q10) was cancelled before it could report — at shutdown that is expected, and the next start's scan re-finds anything this one left, because the scan reads the materialization rather than a ledger of what this start meant to do.");
+                "TimescaleDB: materialization hole scan (#3653 Q10) was cancelled before it could report - at shutdown that is expected, and the next start's scan re-finds anything this one left, because the scan reads the materialization rather than a ledger of what this start meant to do.");
             throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(
-                "Materialization-hole repair could not run — any pre-outage tail the refresh policies skipped stays unmaterialized until the next start retries: {Message}",
+                "Materialization-hole repair could not run - any pre-outage tail the refresh policies skipped stays unmaterialized until the next start retries: {Message}",
                 ex.Message);
         }
         finally
@@ -3044,20 +3044,20 @@ public sealed partial class DarlingWorker
         {
             var summary = await PartialDailyHeal.RunAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
             _logger.LogInformation(
-                "Partial-daily heal (#4716): {Checked} daily rollup(s) checked, {AlreadyDone} already done, {Compared} day(s) compared, {Partial} partial, {Refreshed} refreshed ({Chained} more chained to dependent dailies), {Failures} failure(s), in {Seconds:F1} s.",
+                "Partial-daily heal: {Checked} daily rollup(s) checked, {AlreadyDone} already done, {Compared} day(s) compared, {Partial} partial, {Refreshed} refreshed ({Chained} more chained to dependent dailies), {Failures} failure(s), in {Seconds:F1} s.",
                 summary.DailiesChecked, summary.DailiesAlreadyDone, summary.DaysCompared, summary.DaysPartial,
                 summary.DaysRefreshed, summary.DaysChained, summary.Failures, summary.Elapsed.TotalSeconds);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
             _logger.LogInformation(
-                "Partial-daily heal (#4716) was cancelled before it could report — at shutdown that is expected, and a daily it had not finished has no marker, so the next start walks it again.");
+                "Partial-daily heal was cancelled before it could report - at shutdown that is expected, and a daily it had not finished has no marker, so the next start walks it again.");
         }
         catch (Exception ex)
         {
             var sqlState = ex is NpgsqlException { SqlState: { Length: > 0 } state } ? state : null;
             _logger.LogWarning(
-                "Partial-daily heal (#4716) could not run — a daily it had not finished has no marker, so the next start walks it again: {ExceptionType}{SqlState}",
+                "Partial-daily heal could not run - a daily it had not finished has no marker, so the next start walks it again: {ExceptionType}{SqlState}",
                 ex.GetType().Name, sqlState is null ? "" : $", SQLSTATE {sqlState}");
         }
     }
@@ -3073,19 +3073,19 @@ public sealed partial class DarlingWorker
         {
             var summary = await TimescaleSupport.RepairDailyChildHolesAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
             _logger.LogInformation(
-                "Daily-child hole repair (#6070): {Scanned} daily-parented rollup(s) scanned, {Found} day(s) missing that the parent holds, {Refreshed} refreshed, {Failures} failure(s){More}, in {Seconds:F1} s",
+                "Daily-child hole repair: {Scanned} daily-parented rollup(s) scanned, {Found} day(s) missing that the parent holds, {Refreshed} refreshed, {Failures} failure(s){More}, in {Seconds:F1} s",
                 summary.DailiesScanned, summary.DaysFound, summary.DaysRefreshed, summary.Failures,
                 summary.DaysRemaining ? " - more remain for the next start" : string.Empty, summary.Elapsed.TotalSeconds);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
             _logger.LogInformation(
-                "Daily-child hole repair (#6070) was cancelled before it could report - at shutdown that is expected, and the next start scans again.");
+                "Daily-child hole repair was cancelled before it could report - at shutdown that is expected, and the next start scans again.");
         }
         catch (Exception ex)
         {
             _logger.LogWarning(
-                "Daily-child hole repair (#6070) could not run - the next start scans again: {ExceptionType}",
+                "Daily-child hole repair could not run - the next start scans again: {ExceptionType}",
                 ex.GetType().Name);
         }
     }
@@ -3104,25 +3104,25 @@ public sealed partial class DarlingWorker
             var summary = await PgSettingScrub.RunAsync(postgres, _logger, stoppingToken);
             if (summary.AlreadyDone)
             {
-                _logger.LogInformation("Postgres setting scrub (#4348): already scrubbed at the current rules version — nothing to do.");
+                _logger.LogInformation("Postgres setting scrub: already scrubbed at the current rules version - nothing to do.");
             }
             else
             {
                 _logger.LogInformation(
-                    "Postgres setting scrub (#4348): {Candidates} candidate row(s) read, {Updated} row(s) redacted across {Days} day(s).",
+                    "Postgres setting scrub: {Candidates} candidate row(s) read, {Updated} row(s) redacted across {Days} day(s).",
                     summary.CandidatesRead, summary.RowsUpdated, summary.DaysTouched);
             }
         }
         catch (OperationCanceledException)
         {
             _logger.LogInformation(
-                "Postgres setting scrub (#4348) was cancelled before it could report — at shutdown that is expected, and the next start retries from the top because the marker is only written after every batch completes.");
+                "Postgres setting scrub was cancelled before it could report - at shutdown that is expected, and the next start retries from the top because the marker is only written after every batch completes.");
             throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(
-                "Postgres setting scrub (#4348) could not run — any row an older collector build stored unredacted stays as it is until the next start retries: {Message}",
+                "Postgres setting scrub could not run - any row an older collector build stored unredacted stays as it is until the next start retries: {Message}",
                 ex.Message);
         }
     }
@@ -3140,19 +3140,19 @@ public sealed partial class DarlingWorker
             var summary = await PgStatementTextScrub.RunAsync(postgres, _logger, stoppingToken);
             if (summary.AlreadyDone)
             {
-                _logger.LogInformation("Postgres statement-text scrub (#4348): already scrubbed at the current scrub version — nothing to do.");
+                _logger.LogInformation("Postgres statement-text scrub: already scrubbed at the current scrub version - nothing to do.");
             }
             else
             {
                 _logger.LogInformation(
-                    "Postgres statement-text scrub (#4348): {StatementTextUpdated} pg_statement_text row(s) and {BlockingEdgesUpdated} pg_blocking_edges row(s) updated.",
+                    "Postgres statement-text scrub: {StatementTextUpdated} pg_statement_text row(s) and {BlockingEdgesUpdated} pg_blocking_edges row(s) updated.",
                     summary.StatementTextRowsUpdated, summary.BlockingEdgesRowsUpdated);
             }
         }
         catch (OperationCanceledException)
         {
             _logger.LogInformation(
-                "Postgres statement-text scrub (#4348) was cancelled before it could report — at shutdown that is expected, and the next start retries from the top because the marker is only written after every batch completes.");
+                "Postgres statement-text scrub was cancelled before it could report - at shutdown that is expected, and the next start retries from the top because the marker is only written after every batch completes.");
             throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -3160,7 +3160,7 @@ public sealed partial class DarlingWorker
             /* Never the exception TEXT — just the exception type and SQLSTATE (when it is an NpgsqlException),
                the same discipline PgStatementTextScrub's own per-server/per-day catches apply. */
             _logger.LogWarning(
-                "Postgres statement-text scrub (#4348) could not run ({ExceptionType}{SqlState}) — the scrub retries at the next start.",
+                "Postgres statement-text scrub could not run ({ExceptionType}{SqlState}) - the scrub retries at the next start.",
                 ex.GetType().Name, ex is NpgsqlException npgsqlEx ? $", SQLSTATE {npgsqlEx.SqlState}" : string.Empty);
         }
     }
@@ -3177,7 +3177,7 @@ public sealed partial class DarlingWorker
             var summary = await DeadlockDuplicateCleanup.RunAsync(postgres, _logger, stoppingToken);
             if (summary.AlreadyDone)
             {
-                _logger.LogInformation("Deadlock duplicate cleanup: already done at the current cleanup version — nothing to do.");
+                _logger.LogInformation("Deadlock duplicate cleanup: already done at the current cleanup version - nothing to do.");
             }
             else
             {
@@ -3189,14 +3189,14 @@ public sealed partial class DarlingWorker
         catch (OperationCanceledException)
         {
             _logger.LogInformation(
-                "Deadlock duplicate cleanup was cancelled before it could report — at shutdown that is expected, and the next start retries because the marker is only written after every batch completes.");
+                "Deadlock duplicate cleanup was cancelled before it could report - at shutdown that is expected, and the next start retries because the marker is only written after every batch completes.");
             throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* Never the exception TEXT — just the exception type and SQLSTATE (when it is an NpgsqlException). */
             _logger.LogWarning(
-                "Deadlock duplicate cleanup could not run ({ExceptionType}{SqlState}) — the cleanup retries at the next start.",
+                "Deadlock duplicate cleanup could not run ({ExceptionType}{SqlState}) - the cleanup retries at the next start.",
                 ex.GetType().Name, ex is NpgsqlException npgsqlEx ? $", SQLSTATE {npgsqlEx.SqlState}" : string.Empty);
         }
     }
@@ -3214,19 +3214,19 @@ public sealed partial class DarlingWorker
             var summary = await PlanForceActionDetailScrub.RunAsync(postgres, _logger, stoppingToken);
             if (summary.AlreadyDone)
             {
-                _logger.LogInformation("Plan-force-action detail scrub (#4346): already scrubbed — nothing to do.");
+                _logger.LogInformation("Plan-force-action detail scrub: already scrubbed - nothing to do.");
             }
             else
             {
                 _logger.LogInformation(
-                    "Plan-force-action detail scrub (#4346): {Candidates} candidate row(s) read, {Updated} row(s) redacted.",
+                    "Plan-force-action detail scrub: {Candidates} candidate row(s) read, {Updated} row(s) redacted.",
                     summary.CandidatesRead, summary.RowsUpdated);
             }
         }
         catch (OperationCanceledException)
         {
             _logger.LogInformation(
-                "Plan-force-action detail scrub (#4346) was cancelled before it could report — at shutdown that is expected, and the next start retries from the top because the marker is only written after every batch completes.");
+                "Plan-force-action detail scrub was cancelled before it could report - at shutdown that is expected, and the next start retries from the top because the marker is only written after every batch completes.");
             throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -3237,7 +3237,7 @@ public sealed partial class DarlingWorker
                templates and CollectionFailure.Describe use. */
             var sqlState = ex is Npgsql.NpgsqlException { SqlState: { Length: > 0 } state } ? state : null;
             _logger.LogWarning(
-                "Plan-force-action detail scrub (#4346) could not run — any legacy row stays as it is until the next start retries: {ExceptionType}{SqlState}",
+                "Plan-force-action detail scrub could not run - any legacy row stays as it is until the next start retries: {ExceptionType}{SqlState}",
                 ex.GetType().Name, sqlState is null ? "" : $", SQLSTATE {sqlState}");
         }
     }
