@@ -1328,6 +1328,16 @@ public sealed partial class ViewerDataService
     public async Task<List<TimeSliceBucket>> GetQueryStoreSlicerDataAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null,
         CancellationToken cancellationToken = default)
+        => (await GetQueryStoreSlicerWithReachAsync(serverId, startUtc, endUtc, databaseNames, cancellationToken)).Buckets;
+
+    /// <summary>
+    /// <see cref="GetQueryStoreSlicerDataAsync"/> plus the read plan when the interval table served the buckets: the plan's
+    /// <see cref="QueryStoreIntervalWide.WideReadPlan.ReadStart"/> is where the slicer's points start, which reaches below raw's chunk
+    /// floor, so the grid banner names the slicer's start from the source that drew it. The plan is null when the read was raw.
+    /// </summary>
+    public async Task<(List<TimeSliceBucket> Buckets, QueryStoreIntervalWide.WideReadPlan? Plan)> GetQueryStoreSlicerWithReachAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null,
+        CancellationToken cancellationToken = default)
     {
         if (endUtc - startUtc >= QueryStoreIntervalWide.SlicerWideMinWindow)
         {
@@ -1337,20 +1347,20 @@ public sealed partial class ViewerDataService
                 var served = await TryGetQueryStoreSlicerFromTableAsync(serverId, startUtc, endUtc, databaseNames, cancellationToken);
                 if (served is not null)
                 {
-                    return served;
+                    return served.Value;
                 }
             }
         }
 
-        return await ReadQueryStatsSlicerAsync(QueryStoreSlicerSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
+        return (await ReadQueryStatsSlicerAsync(QueryStoreSlicerSql, serverId, startUtc, endUtc, databaseNames, cancellationToken), null);
     }
 
     /// <summary>The slicer's interval-table read, or null for "read raw instead" (the gate said no, or any fault except cancellation), as
     /// <see cref="TryGetQueryStoreTopQueriesFromTableAsync"/> does. No literal window end is passed: the raw statement keeps the newest
     /// snapshot of every interval that starts in the window, whatever the end, so the table's newer snapshots are the same answer.
     /// The legacy-row probe is skipped (<see cref="QueryStoreIntervalWide.LegacyRows.Allow"/>) because one snapshot per identity is
-    /// what both statements keep for a legacy row too.</summary>
-    private async Task<List<TimeSliceBucket>?> TryGetQueryStoreSlicerFromTableAsync(
+    /// what both statements keep for a legacy row too. The plan that served goes back with the buckets.</summary>
+    private async Task<(List<TimeSliceBucket> Buckets, QueryStoreIntervalWide.WideReadPlan? Plan)?> TryGetQueryStoreSlicerFromTableAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
         var elapsed = System.Diagnostics.Stopwatch.StartNew();
@@ -1384,7 +1394,7 @@ public sealed partial class ViewerDataService
             command.Parameters.Add(DatabaseFilterParameter(databaseNames));
             command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = SlicerBuckets.MinutesFor(startUtc, endUtc) });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            return await ReadSlicerBucketsAsync(reader, cancellationToken);
+            return (await ReadSlicerBucketsAsync(reader, cancellationToken), plan);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

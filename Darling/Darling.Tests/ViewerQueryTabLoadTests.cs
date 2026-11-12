@@ -38,7 +38,7 @@ public sealed class ViewerQueryTabLoadTests
     [Theory]
     [InlineData("LoadTopQueriesAsync", "GetQueryStatsSlicerDataAsync", "AwaitReadWatchingProbeAsync(dataReadTask, floorTask, \"Query Stats\")")]
     [InlineData("LoadTopProceduresAsync", "GetProcStatsSlicerDataAsync", "AwaitReadWatchingProbeAsync(dataReadTask, floorTask, \"Procedure Stats\")")]
-    [InlineData("LoadQueryStoreAsync", "GetQueryStoreSlicerDataAsync", "AwaitReadWatchingProbeAsync(dataReadTask, floorTask, \"Query Store\")")]
+    [InlineData("LoadQueryStoreAsync", "GetQueryStoreSlicerWithReachAsync", "AwaitReadWatchingProbeAsync(dataReadTask, floorTask, \"Query Store\")")]
     public void EachGridLoad_StartsItsSlicerRead_BesideTheGridRead_NotAfterIt(string loader, string slicerRead, string gridAwait)
     {
         var source = Source("ViewerServerTab.Queries.cs");
