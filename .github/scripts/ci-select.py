@@ -2670,6 +2670,46 @@ def quarantine_args(path: str, suite: str) -> list[str]:
     return out
 
 
+# #8753: the pinned-hour pass of a pull request. A live test that seeds against the real clock can pass at one hour of the UTC
+# day and fail at another (#8752). The pass runs the live classes of the test files the pull request adds or changes with
+# DARLING_TEST_CLOCK_UTC (LiveClock.cs reads it) pinned to the late-day edge and to the midnight edge. It selects only the
+# Darling.Tests classes of those files that hold a test and that the test host lists (the same two checks the plan uses for a
+# changed test file, #6734 and #7739), and of those only the live ones: a file that reads a DARLING_TEST_PG* variable or LiveClock.
+PINNED_TEST_TREE = "Darling/Darling.Tests/"
+PINNED_LIVE = re.compile(r"DARLING_TEST_PG|\bLiveClock\b")
+PINNED_CLASS_LIMIT = 40
+
+
+def pinned_classes(root: str, files: "list[str]", limit: int = PINNED_CLASS_LIMIT) -> "tuple[list[str], list[str]]":
+    """(class names, notes): the live classes of the Darling.Tests files in `files` that still exist at `root`, sorted, at most
+    `limit`. A note says why the list is empty, or how many classes the limit left out."""
+    changed = {f for f in files if f.startswith(PINNED_TEST_TREE) and f.endswith(".cs") and os.path.isfile(os.path.join(root, f))}
+    if not changed:
+        return [], ["the pull request adds or changes no Darling.Tests file"]
+    live: "set[str]" = set()
+    for rel in changed:
+        try:
+            if PINNED_LIVE.search(read_source(os.path.join(root, rel), "replace")):
+                live.add(rel)
+        except OSError:
+            continue
+    if not live:
+        return [], [f"{len(changed)} Darling.Tests file(s) changed, none of them a live class (no DARLING_TEST_PG or LiveClock)"]
+    discovered = scan_classes(root)["darling"]
+    listed = listed_checker(root)
+    names = sorted({name for suite, rel, name, _t in _walk_classes(root)
+                    if suite == "darling" and rel in live and NO_TESTS_TRAIT not in discovered.get(name, set())
+                    and listed("darling", name)})
+    if not names:
+        return [], [f"{len(live)} live Darling.Tests file(s) changed, but none declares a class that holds a test"]
+    notes = []
+    if len(names) > limit:
+        notes.append(f"{len(names)} live classes sit in the changed files; the pass runs the first {limit} by name and leaves "
+                     f"{len(names) - limit} out")
+        names = names[:limit]
+    return names, notes
+
+
 def _bool(s: str) -> bool:
     return s.strip().lower() == "true"
 
@@ -2784,6 +2824,12 @@ def main(argv: list[str]) -> int:
     sc.add_argument("--jobs", help="the latest attempt's jobs, one {name, conclusion} JSON object per line; "
                                    "the row lists the failed ones")
 
+    pc = sub.add_parser("pinned-classes", help="the live Darling.Tests classes of the test files a pull request adds or changes, for the pinned-hour pass (workflow step, #8753)")
+    pc.add_argument("--files-from", required=True, help="one changed path per line (the plan's changed.txt)")
+    pc.add_argument("--limit", type=int, default=PINNED_CLASS_LIMIT, help="the most classes the pass runs (default: %(default)s)")
+    pc.add_argument("--github-output", help="append pinned=true|false and pinned_classes=A,B to this file")
+    pc.add_argument("--root", default=ROOT, help="the repository (default: this one)")
+
     args = ap.parse_args(argv)
     if args.replay:
         misses = replay(args.corpus)
@@ -2847,6 +2893,17 @@ def main(argv: list[str]) -> int:
         if lines:
             print("\n".join(lines))
         return code
+    if args.cmd == "pinned-classes":
+        with open(args.files_from, encoding="utf-8") as fh:
+            files = [ln.strip() for ln in fh if ln.strip()]
+        names, notes = pinned_classes(args.root, files, args.limit)
+        for n in notes:
+            print(f"pinned-classes: {n}")
+        print(f"pinned-classes: {len(names)} class(es)" + (": " + " ".join(names) if names else ""))
+        if args.github_output:
+            with open(args.github_output, "a", encoding="utf-8", newline="\n") as fh:
+                fh.write(f"pinned={'true' if names else 'false'}\npinned_classes={','.join(names)}\n")
+        return 0
     if args.cmd == "map-keep":
         # Line 1 is `SELECTED <n>` (then one class name per line) or `FULL <reason>`; the exit code is always 0, so a
         # caller that cannot read the answer runs everything.
