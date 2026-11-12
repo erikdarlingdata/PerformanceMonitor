@@ -21,67 +21,747 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ## [Unreleased]
 
+## [3.13.0] - 2026-11-12
+
+Full entries: [docs/changelog/3.13.md](docs/changelog/3.13.md)
+
 ### Important
 
-- **Self-managed stores: re-run `provision-roles.sql` after upgrading** ([#7107]) - Run `Darling/tools/provision-roles.sql` again after the upgrade. Start the service on the new version first, so it applies store migration V237. The investigation journal trigger now refuses eight new people events (`person_added`, `person_renamed`, `person_enabled`, `person_disabled`, `person_identity_added`, `person_identity_removed`, `person_grant_added` and `person_grant_removed`) from any login other than the store owner. The script also revokes every write on the new people tables and their identity sequences from the monitoring roles. It grants them read access to the tables. Until the script is re-run, the trigger keeps the older list. The `admin` and `mcp` roles can then write one of those events to the journal. Such a row changes no table, and nothing reads people events yet. The upgrade itself already makes the people tables owner-only. The script skips that step with a warning on a store below version 237. The compose store and managed provisioning do all of this on their own.
-- **Self-managed stores: re-run `provision-roles.sql` after upgrading for action approval** ([#7109]) - Store migration V238 adds the route settings `action_approval` and `approval_single_person` and the `config.agent_action_proposals` table. The upgrade sets approval to Off on every route that is already at Level 3, so those routes act as before. A person turns approval on for each route. A self-managed store is one where the service does not manage the roles. On such a store, start the service on the new version first, so it applies V238. Then run `Darling/tools/provision-roles.sql` again, because the script changed. The journal trigger now refuses twelve new events (eleven `proposal_` events and `person_message`) from any login other than the store owner. The script also makes the proposals table owner-only and grants the `admin`, `viewer` and `web` roles read access to it. It grants the `viewer`, `web` and `mcp` roles read access to the two new route settings. It replaces `config.set_notification_route_agent` with a version that takes the two approval settings. Until the script is re-run, MCP changes to a route's agent settings are refused with a message to re-run it. The trigger keeps the older list, so the `admin` and `mcp` roles can write one of the new events to the journal. The script skips the proposals step with a warning on a store below version 238. The compose store and managed provisioning do all of this on their own. To roll back, read the V238 line in the rollback list in `docs/darling/admin.md` ("Rolling back to an older build"). Before you roll back, lower every Level 3 route whose approval is required to Level 2 or below.
+- **Upgrading from 3.12 runs the Darling store migrations V230 through V266 on the service's first start**
+- **Lite's DuckDB schema moves from version 78 to 81 on its first start** ([#7497], [#7573], [#7691])
+- **Self-managed stores: re-run `provision-roles.sql` after upgrading** ([#7107])
+- **Self-managed stores: re-run `provision-roles.sql` after upgrading for action approval** ([#7109])
+- **The Darling container runs as user 1654, not root** ([#8141], [#8290])
 
 ### Added
 
-- **Plan analysis lists the statistics the optimizer loaded** ([#8147]) - The four plan analysis MCP tools (`analyze_query_plan`, `analyze_procedure_plan`, `analyze_query_store_plan`, `analyze_plan_xml`), in Darling and Lite, now give each statement a `statistics_loaded` list: the statistics the optimizer loaded while compiling the statement (`OptimizerStatsUsage`; the plan does not say which of them drove the estimates), most-modified first and capped at `statistics_cap`, with `modification_count`, `table_rows`, `modified_percent`, `stale_at_compile`, `last_update` and `sampling_percent` as of compile. `statistics_status` says whether the plan recorded them (`recorded`), has no record of them (`not_in_plan`), or had no query plan (`no_query_plan`). `stale_at_compile` is true when the modification count at compile passed the SQL Server 2016+ automatic update threshold at compatibility level 130 or higher, using the plan's table cardinality: 500 modifications for 500 rows or fewer, otherwise the smaller of 500 plus 20% of the rows and the square root of 1000 times the rows (null when the rows are unknown). It is a lead about the statistic's state at compile, not a cause of the estimate or plan shape. It is also approximate, because SQL Server counts the rows at the statistic's last update. Temp tables use other thresholds, and compatibility levels below 130 use 500 plus 20% of the rows. The Viewer's Statistics Used list now shows temp tables by their short name (`#orders`), as plan operators already do.
-- **Named MCP tokens can be read-only, and can ask for less data detail** ([#7023]) - A new `reader` role in `mcp.tokens` serves the read tools only, whatever `mcp.allowWrites`, `mcp.allowServerAdmin` and `mcp.allowInvestigations` say, and a reader is not an agent. Any token entry can also set `dataDetail` (`full`, `maskLiterals` or `metadataOnly`) to narrow `mcp.dataDetail` for that token; it can never widen it.
-- **GitHub Copilot in VS Code is documented as an MCP client** ([#7042]) - The MCP page has a setup section for Copilot, for Darling and Lite. It shows the `mcp.json` entry, with the token as a prompted input. For Darling it uses the `/core` URL, which serves 75 tools. VS Code allows at most 128 tools per chat request, and the root URL serves 190. It also suggests a `reader` token. Lite has no `/core` URL, and its 113 tools are under the limit.
-- **Darling mute rules can repeat on a schedule** ([#7040]) - A mute rule can now apply only on chosen days, between a daily start and end time. The times are in an IANA time zone. A time zone that the store's PostgreSQL does not know is refused when the rule is saved. A window can cross midnight, and it belongs to the day it starts on. The schedule works inside the rule's own start and expiry dates. Set it with `create_mute_rule` and `update_mute_rule`, on the Mute Rules web page, or in the Viewer's mute editor. `get_mute_rules` shows each rule's schedule, whether it is in a window now, and when the next window opens. Agent mutes cannot repeat. Store schema version 231. Lite is unchanged.
-- **Darling can send a Daily Health Report** ([#7041]) - The report is off by default. When it is on, Darling sends one report a day at the time you set. It uses the time zone you choose and the normal alert pipeline. Notification routes choose who gets it, by the `reports` family or the "Daily Health Report" metric, and mutes apply. The report covers the last 24 hours, worst servers first. It shows each server's health band, the alerts fired, failed Agent jobs, databases without a recent backup or CHECKDB, low disk space and collection problems. Email gets an HTML version. Slack, Teams and webhooks get a short text version. If the service is down at the send time, it sends when it comes back that day. It never sends twice in a day and never backfills. `get_daily_health_report` builds the report for any ended day without sending it. `send_daily_health_report_now` sends one at once when MCP writes are on. The settings are in `get_alert_settings`, `update_alert_settings`, the web Admin page (with a preview) and the Viewer settings window. Store schema version 232. Lite is unchanged.
-- **Notification routes can post a Slack or Teams notice when an agent files a report** ([#6979]) - Each route has a new `report_notice` setting: `off`, `needs_person_or_change` or `all`. It defaults to `off`, so nothing changes until you set it. `needs_person_or_change` posts for a report with a `needs_person` verdict or a request that made at least one change, and `all` posts for every report. The Viewer's route dialog and grid, the web route editor and the `create_notification_route`, `update_notification_route` and `get_notification_routes` MCP tools carry the setting. A notice goes out once for each request, within 30 minutes of the report. It goes to the route's Slack or Teams destination, or to the Settings channel when the route has none of its own. It names the server, metric and verdict, the first line of the root cause and up to 10 agent changes. It links to the request and to the Agent changes tab when `web.publicBaseUrl` is set. `mcp.dataDetail` applies: `maskLiterals` masks literals in the root cause and the change objects, and `metadataOnly` leaves out the root cause. Lite sends nothing. The Investigations page can open one request from its link. It now reads that request's agent changes by request id on the service, so an older request no longer shows an incomplete list.
-- **Mute rules can send alerts to the daily digest** ([#7083]) - A mute rule now has an action, `mute` or `digest`. A `digest` rule never mutes. While the rule is in force and its scope matches a fire, the fire is recorded as a Digest row that names the rule and its window. Nothing is sent. Outside the window the alert pages as before. When a mute rule and a digest rule both match, the row is muted. Set `action` with `create_mute_rule` and `update_mute_rule`. The Mute Rules web page and the Viewer's mute editor have an Action choice, Mute or Send to the daily digest. `get_mute_rules` returns it. An agent cannot set it. Store schema version 236 adds the column, and every existing rule stays a `mute` rule. A Viewer on a store below version 236 refuses to save a digest rule and says to upgrade the store. Darling only: Lite's mute rules have no schedule and never hold an alert.
-- **People, sign-ins and grants** ([#7107]) - Administrators can name people, link their web and Slack sign-ins, and give them grants. Only the store owner writes these tables, from the upgrade on. A sign-in key is shown only to its own session and to administrators, and removing a server or tag removes its grants.
-- **Alert details say why an alert was held or paged, in the Viewer and Lite** ([#7124]) - The Alert Details window has a "Routing reason" row, and "Copy all details" includes it. The Alerts grid shows the same text as a hover on the Status text. Rows with no routing record show nothing.
-- **A route's Level 3 server actions can wait for a person's approval** ([#7109]) - Each alert route has an Action approval setting and a single-person option. Action approval is Required by default and Off on routes that were already at Level 3. The single-person option lets the person who asked approve the proposal. On a route that needs approval, an agent's force, unforce, evict, kill, recompile and plan guide calls are stored as proposals. A person with the approve grant opens the proposal in the web dashboard (Proposals) or the Viewer (Agent changes). The person reads the fresh facts and presses twice. A changed plan or session ends the proposal as superseded. `kill_session` now refuses a session that ran something new since the dry run (`session_changed`). A new proposal sends one notice to the route's destinations. MCP can turn approval on but never off.
-- **Darling can read its password key from a secret** ([#8006]) - A new `passwordKey` setting in `darling.json` takes a `file:` or `env:` reference to the password key, so a container can keep it in a Kubernetes Secret or any secret store instead of the credentials volume. With it set, the service loads the key at start, checks it against the key the store publishes, and never generates, writes or retires a key file; after `--reset-password-key` it waits for a new key in that source. `--new-password-key <path>` writes a new key and prints only its fingerprint. Without the setting nothing changes. The password key's Linux self-check runs again on pull requests that touch the password key code, and nightly (`darling-linux-store.yml`); it had stopped running when `build.yml` became release-only.
+- **Plan analysis lists the statistics the optimizer loaded** ([#8147])
+- **Named MCP tokens can be read-only, and can ask for less data detail** ([#7023])
+- **GitHub Copilot in VS Code is documented as an MCP client** ([#7042])
+- **Darling mute rules can repeat on a schedule** ([#7040])
+- **Darling can send a Daily Health Report** ([#7041])
+- **Notification routes can post a Slack or Teams notice when an agent files a report** ([#6979])
+- **Mute rules can send alerts to the daily digest** ([#7083])
+- **People, sign-ins and grants** ([#7107])
+- **Alert details say why an alert was held or paged, in the Viewer and Lite** ([#7124])
+- **A route's Level 3 server actions can wait for a person's approval** ([#7109])
+- **Darling can read its password key from a secret** ([#8006])
+- **Store Autovacuum Behind self-alert** ([#7368])
+- **`darling-export` writes the Darling store to Parquet files** ([#7581])
+- **One read shows a statement on every server** ([#7609])
+- **Find the queries that contain a piece of SQL text** ([#7610])
+- **An opt-in trigram index lets `find_queries_by_text` search every server's plan-cache text at once** ([#7674])
+- **Darling can serve web and MCP TLS from a certificate in the Windows certificate store, and a new command grants the service its key** ([#7718])
+- **Web dashboard: named tokens with a read-only role, like mcp.tokens** ([#7735])
+- **Slack bot threads for investigation requests** ([#7656])
+- **Lite get_alert_history takes server_name and reaches 90 days** ([#7902])
+- **Slack Socket Mode listener for the bot** ([#7657])
+- **Slack buttons on the bot's thread posts** ([#7658])
+- **Slack mentions ask the agent** ([#7659])
+- **Notification routes: `Analysis: *` matches every analysis finding** ([#7999])
+- **Lost Extended Events ring buffer events are reported, and the ring buffer size is a setting** ([#8146])
+- **Schema tracking for tables and views** ([#7643])
+- **Darling has an opt-in health port for Kubernetes probes** ([#8184])
+- **Darling Helm chart** ([#8017])
+- **get_oversized_plan_backlog says whether a backlog is draining** ([#8404])
+- **Viewer-managed web access groups for the Darling dashboard** ([#8424])
+- **Darling web reader tokens can be scoped to server tags** ([#8527])
 
 ### Changed
 
-- **The Darling install guide says where PowerShell is used** ([#7272]) - A new section lists what uses it and what does not. It also gives install, upgrade and uninstall steps that use only `sc.exe`, `icacls`, `net localgroup` and `netsh`.
-- **Write-latency anomalies and the write latency fact now read log files and tempdb data files only** ([#6959]) - user data-file writes are checkpoint and lazy-writer work no session waits on, so databases with several data files no longer trip the gate. The write latency card now says its figure covers log files and tempdb, and a separate sentence gives the user data files' own write latency.
-- **The alert pass no longer reads old chunks to find a server's newest CPU and tempdb sample** ([#6968]) - each read now starts at the newest time the last read returned. Before, each 30-second pass read every chunk between a server's newest sample and now. For a server with an old sample, or no sample, that was many chunks. The change watch's database-scoped configuration check now reads only the databases captured since its last check.
-- **Six more alert-pass reads start from the newest row they last found** ([#7017]) - they use the same start point as the CPU and tempdb reads. These are the PVS pressure, SQL Agent status, volume free space and database state reads, and the two Availability Group state reads. The four database state upkeep statements use the same start point. On a production store, these reads used about 300 seconds of store time a day. The results do not change.
-- **The hourly store size snapshot estimates hypertables, aggregates and the catch-all rows from the catalog** ([#6971]) - it no longer gets a file size for each chunk. The named tables and the dimension rows are still measured exactly each hour, and the daily snapshot is still exact.
+- **The Darling install guide says where PowerShell is used** ([#7272])
+- **Write-latency anomalies and the write latency fact now read log files and tempdb data files only** ([#6959])
+- **The alert pass no longer reads old chunks to find a server's newest CPU and tempdb sample** ([#6968])
+- **Six more alert-pass reads start from the newest row they last found** ([#7017])
+- **The hourly store size snapshot estimates hypertables, aggregates and the catch-all rows from the catalog** ([#6971])
 - **The collection health refresh no longer reads every materialized hour of the aggregate to find missing hours** ([#6969])
-- **The Overview timeline's I/O Latency row loads one row for each time bucket** ([#6970]) - it loaded one row for each file before. On a server with 16 files, that was about 15 times as many rows. Darling and Lite draw the same line.
-- **Two hourly store upkeep reads no longer read the full index and job catalogs** ([#7016]) - the index check read every index in the database. It needs the indexes of one table only. The aggregate compression check read the job catalog once for each aggregate. On a test store with 8,321 chunks, the index check went from about 1.4 million buffer reads to about 100.
-
-- **The FinOps Server Inventory no longer rereads the whole archive for memory, size and properties** ([#7014]) - the Lite Server Inventory read looked up each server's newest memory row, database-size snapshot and properties row through views that include the Parquet archive, so its cost grew with archived days (807,552 archive rows with 8 archived days on a 40-database store). It now reads the live tables for a server that still has rows there. It reads the archive only for a server whose rows are all archived, so a stopped server still shows its last values. The idle-database coverage check behind the Idle DBs count and the Idle Databases grid no longer scans the whole `query_stats` archive either. It counts days inside its 7-day window. It then asks the live table whether the oldest sample is 7 days old, and runs one early-stopping archive probe per server it cannot decide. The answers are the same as before.
-- **The blocking health band counts waits, not report rows** ([#7028]) - Darling banded blocking on blocked-process report rows. This covered the fleet card, Overview, fleet sweep and Daily Health Calendar. SQL Server writes about eleven reports for one one-minute wait, so the band did not match the waits the blocking alerts count. The band now counts waits per hour. Each hour uses its blocked-process reports when it has any, and its DMV snapshots when it has none. The card shows the count it bands, as `waits/hr`. The 5 and 20 per hour tiers keep their stored values. A window where some hours have only DMV snapshots can now count more, because those hours are no longer dropped. One wait is still one count, however many reports SQL Server wrote for it. Two new tiers are off by default: `blocking_warn_snapshot_wait_seconds` and `blocking_critical_snapshot_wait_seconds`. They band on the largest total blocked wait in one DMV snapshot, which is the Blocking Wait Time alert's own measure. They apply the alert's consecutive-snapshot gate first. The gate runs on each server's own snapshot cadence, and a streak can cross midnight or the start of the window. The tiers are in `get_alert_settings`, `update_alert_settings`, the Viewer settings window and the web admin page. Store schema version 230. Lite is unchanged and keeps banding on report rows.
-- **Error and refusal messages name the object and the next step** ([#7077]) - Many Darling and Lite messages were reworded across the MCP tools, the web dashboard, the Viewer, Lite and the service start-up log. A server that does not resolve now reads "No monitored server matches 'X'." or "server_name is required because N servers are monitored.", still after the opening "Could not resolve server.". The Viewer's read-only message no longer sends everyone to `postgres.connectAs`: it covers the bundled store, a network login and your own PostgreSQL. The web dashboard says "Your session has expired. Sign in again." It names the Darling service when it cannot be reached. It names the HTTP status and path when an answer has no message. An oversized request names the limit in KB. A network token that cannot be decrypted names the setting and the `--encrypt-password` fix. Lite's fatal and error dialogs show the message and the log file path, without the exception type or stack frames. Plan, export and test-notification failures name the server or file and what to try. Messages no longer carry issue numbers or schema rung names. Release packages now include `provision-roles.sql`. An operator of a self-managed store can run it from the install folder beside the service exe (zip, MSI, Linux tarball and container image). The messages that tell them to re-run it name that location.
-- **SQL Server High CPU pages after 5 breaching samples, clears after 15 minutes under the bar, and no longer sends reminders** ([#7085]) - A High CPU incident used to open after 3 samples at or over the threshold and close after 2 under it. A flapping server closed and reopened the same incident within minutes and paged each time, and a standing incident paged again each time the alert cooldown ran out. An incident now opens after 5 samples in a row at or over the threshold, which is about 5 minutes at the one-minute CPU sample cadence. It clears only after CPU stays under the threshold for 15 minutes of sample time. CPU Resolved goes out once, when it clears. Inside an open incident only a rise from Warning to Critical pages, once. A drop back to Warning and a later return to Critical add nothing. The repeat page after the cooldown is gone, so the cooldown now only spaces retries after a failed send. Spikes of 1 to 4 samples and the held repeats are not sent, and they stay in the CPU history. The threshold (80% by default), the Warning and Critical levels and the cooldown setting keep their values. This covers Darling and Lite, and the Darling host's own CPU self-alert. The PostgreSQL target CPU gate keeps its own 3-sample open and 2-sample clear. Two fixes came with it. A High CPU page whose every channel failed, including a Warning to Critical escalation, is now retried. A restart no longer pages again for an open incident that was already paged, and a Warning paged long before a restart no longer swallows the Critical that follows. A restart in the middle of a dip starts the 15 minutes over. The old numbers were not settings, so every install gets the new rule on upgrade.
-- **Small alert types page less: Runnable Queue, deadlocks, forced plans, PostgreSQL long-running queries and two Darling store alerts** ([#7086]) - Alerts that paged on every small event now hold the minor ones back. A held alert is written to the alert history as a digest row and sends nothing, and a real page for the same alert right after it still goes out. Held alerts reach a person once a day in the Daily Digest (below). Runnable Queue pages at Critical only (16 runnable tasks per scheduler), and a Warning is held, in Darling and Lite. A deadlock whose victim is Darling's or Lite's own monitoring session is left out of the count, the rollup and the card. It is still stored and shown in the grids. A deadlock where a user session was the victim still counts. A deadlock episode pages once. More deadlocks inside it add nothing until the 1-hour count falls below the threshold and the Deadlocks Cleared row is written. A rise to the Critical rate of 20 an hour inside the episode still pages. Forced Plan Failing is judged for each plan. The first failure is held, and the plan pages when it fails again within 24 hours of the first failure. After 24 hours the plan starts over. PostgreSQL Long-Running Query, in Darling, no longer pages from a `pg_session_states` capture older than the larger of 2 collection cycles and 10 minutes, and its detail now names the longest query's pid, minutes and statement. The statement follows `mcp.dataDetail`: it is shown in full, with literals masked, or left out under `metadataOnly`. Store Checkpointer Pressure and Collection Falling Behind, in Darling, are held until the condition has stood. Collection Falling Behind pages after 30 minutes, and Store Checkpointer Pressure after 3 hourly checks in a row. Their repeat pages are unchanged. The Daily Digest keeps its metric name, `Analysis Singles Digest`, so existing routes and mute rules still match. Its title on email, Slack and Teams is now "Daily Digest". It lists the held alerts for the day, grouped by server and metric. Each line gives the count, the first and last time and the newest reason, for the 40 largest groups, then says how many more were left out. A day with only held alerts now sends the digest, and a day with none sends nothing. The Daily Health Report shows `(N held)` after a metric's count when some of its alerts were held. In Lite, the Daily Summary actionable alerts count now leaves out digest rows, which also drops the existing analysis digest rows from it. No setting changed, and an install that set a Runnable Queue Warning level keeps it, but that Warning is now held. The forced plan and self-health memory lives in process only. After a restart the first failure of a plan or an episode can be held once more.
-- **PostgreSQL Poison Wait Warnings and High CPU pages no longer fire on routine conditions** ([#7082]) - A Poison Wait Warning now pages only when the 10 minute window ending now and the 10 minutes before it each average 1.0 or more waiting backends on the event. A Warning-level episode shorter than about 20 minutes is held for the digest. A Critical (10.0 or more) still pages at once. The page now names the top three wait events and up to three statements seen waiting on the alerting event, or says that none were recorded in the window. Statement text follows `mcp.dataDetail`. High CPU counts a sample as a breach only when capacity use (percent of the configured ACU ceiling) and instance CPU are both at or over `cpuThresholdPercent`. Capacity at the ceiling with low instance CPU no longer pages. Such a sample writes one held High CPU row at most once per cooldown. Provisioned RDS and Aurora PostgreSQL instances publish no capacity figure, so High CPU never paged on them. A target with no capacity figure in the last 7 days is now judged on instance CPU alone. A missing figure on any other target is still left out. A repeat deadlock between a statement pair already seen in the last 30 days is held for the digest unless 5 or more reports land in an hour. A pair not seen in 30 days pages. The page and the digest row name up to three statement pairs with their report counts. A page about a first-ever pair opens its investigation request. Held rows show as Digest in the Alerts grids, the web alerts page and `get_alert_history`. No setting or column changed, and installs that set `poisonWaitEnabled`, `deadlockEnabled`, `pgDeadlockCountThreshold` or `cpuThresholdPercent` keep their values. SQL Server and Lite are unchanged.
-- **Analysis findings for write latency, plan regressions and PostgreSQL wait profiles page only when they cost something** ([#7084]) - write latency pages at a 20 ms average or more, a plan-regression chain at 50% average CPU or more or when query timeouts rose, and a PostgreSQL wait profile at 1.0 or more waiting backends and at most once per server per story per 24 hours. A finding under its floor is still saved and shown but sends nothing. A story labelled as recurring (the same weekday and hour for 3 weeks in a row) now goes to the daily digest whatever else is true. So does a story with one fact and a matched check, when its severity is under the notify bar plus 0.25. That is 1.75 at the default bar of 1.5. Stories with two or more facts, absolution stories and same-statement pileups page as before. A held finding keeps its severity, is saved and shown, and is listed in the Analysis Singles Digest. Setting `analysis.uncorroboratedRoute` to `page` restores paging for both. A finding raised while High CPU, Blocking Detected, Blocking Wait Time or Deadlocks Detected is open on the same server now attaches to that alert instead of paging. Open means paged in the last 60 minutes and not resolved since. It is recorded as a Digest row that says `attached to <metric> fired HH:mm` and is listed under Attached findings in the engine alert's detail. If that lookup fails, the finding pages. This covers Darling and Lite, and the PostgreSQL wait profile rule is Darling only. No setting changed, and `analysis.notifySeverity` keeps its value and moves the page line with it.
-- **Blocking alerts show the statement that ran, and PostgreSQL blocking alerts name both statements and the wait** ([#7083]) - The always-on blocking snapshot read the whole batch or module text. A request inside a procedure therefore stored the procedure's `CREATE PROCEDURE` definition as its query. It now cuts the text to the statement the request is on. A blocker with no running request, such as a sleeping session holding an open transaction, shows its last batch and starts with `[no running statement, last batch or module text]`. This reaches Darling and Lite and every surface that reads the stored text. Rows stored before the upgrade keep their old text until they age out. In Darling, a PostgreSQL blocking alert now carries detail text. For each root blocker (the first 10, then a `+N more` line) it gives the worst victim's wait, the database, the blocked statement and the blocking statement. Statements follow `mcp.dataDetail`.
-- **Blocking pages need 3 events with a 15 second wait, or one event waiting 60 seconds** ([#7083]) - The count arm now pages when the events in the rolling hour reach `blockingCountThreshold` (3, was 1) and the worst wait among them is 15 seconds or more. One event now pages on its own when its wait reaches `blockingWaitSecondsThreshold` (60 seconds, was 0 which is off), whatever the count. A wait bar of 0 turns this route and the snapshot Blocking Wait Time alert off. Repeated blocked-process reports of one wait count as one event. Three or more events that all waited under 15 seconds, and one or two events under the wait bar, no longer page. PostgreSQL follows the same rule. An event is a root blocker, its wait is that root's worst victim wait, and `pgBlockingCountThreshold` is now 3. The Blocking Cleared text now says when the alert clears: when the last 60 minutes hold fewer than N blocked events and none of them waited the bar. It can arrive up to 60 minutes after the blocking ended. Severity, cooldown, edge trigger and the time an open incident clears are unchanged. Upgrade: Darling store migration V235 moves `blocking_count_threshold` from 1 to 3, `blocking_wait_seconds_threshold` from 0 to 60 and `pg_blocking_count_threshold` from 1 to 3, each only where it still holds the old shipped default. A store whose operator chose 1 and 0 on purpose is moved too, because the store cannot tell that apart from the default. Set it back once in the Settings window, the web settings page or `update_alert_settings`. Any other value is kept. An install that never set these sees 3, 60 and the 15 second floor. In Lite, a settings file that holds 1 or 0 for these loads as 3 or 60 once, and any other value is kept. Lite now writes a marker, `alert_blocking_defaults_applied`, with each save, and a 1 or 0 saved by this build is kept.
-- **Blocking that no longer pages is kept for the daily digest** ([#7083]) - When the events in the hour reach the count bar but none waited 15 seconds, nothing pages, as before. One held Blocking Detected row per server is now recorded for the burst, such as `14 blocking events, worst wait 9 s, longest chain 2`. Another row is written only after the alert cooldown, and only when a newer wait arrives. A real page right after a held row still goes out. It shows as Digest in the Alerts tab in Darling and Lite, and sends nothing. No row is written when a Blocking Detected incident is open, when the server is silenced or muted, when the count bar is 0, or when the read fails. On PostgreSQL the line reads `N root blockers, worst wait X s, longest chain Y`. No setting or default changes with this part. An install with Blocking on and a count at the bar with waits under 15 seconds now gets held rows where it got nothing before. Nobody gets a new page.
-- **Darling docs now cover Azure SQL with Entra** ([#7253]) - An Entra identity needs a `CREATE USER ... FROM EXTERNAL PROVIDER` user, and the interactive Entra ID (MFA) mode is Lite only. The service still needs a network route through the server firewall. The troubleshooting pages list error 40615 and `AADSTS` failures.
+- **The Overview timeline's I/O Latency row loads one row for each time bucket** ([#6970])
+- **Two hourly store upkeep reads no longer read the full index and job catalogs** ([#7016])
+- **The FinOps Server Inventory no longer rereads the whole archive for memory, size and properties** ([#7014])
+- **The blocking health band counts waits, not report rows** ([#7028])
+- **Error and refusal messages name the object and the next step** ([#7077])
+- **SQL Server High CPU pages after 5 breaching samples, clears after 15 minutes under the bar, and no longer sends reminders** ([#7085])
+- **Small alert types page less: Runnable Queue, deadlocks, forced plans, PostgreSQL long-running queries and two Darling store alerts** ([#7086])
+- **PostgreSQL Poison Wait Warnings and High CPU pages no longer fire on routine conditions** ([#7082])
+- **Analysis findings for write latency, plan regressions and PostgreSQL wait profiles page only when they cost something** ([#7084])
+- **Blocking alerts show the statement that ran, and PostgreSQL blocking alerts name both statements and the wait** ([#7083])
+- **Blocking pages need 3 events with a 15 second wait, or one event waiting 60 seconds** ([#7083])
+- **Blocking that no longer pages is kept for the daily digest** ([#7083])
+- **Darling docs now cover Azure SQL with Entra** ([#7253])
+- **The web dashboard now has its own store login, and the read-only `viewer` login is read-only** ([#6991])
+- **Fleet-wide Query Store panels read a pre-summed rollup** ([#7146])
+- **Removed an Entra MFA username box that did nothing from the Viewer's Add Server dialog** ([#7227])
+- **Removed unused web UI code** ([#7226])
+- **Removed two remediation builders that could never produce an action** ([#7220])
+- **The blocking trend chart now says it counts blocked-process reports, or DMV snapshot rows when the window has none** ([#7219])
+- **Documented that a bring-your-own store's TimescaleDB jobs follow the server time zone, and what the sample's certificate setting does** ([#7229])
+- **`create_mute_rule` gives the same end-before-start sentence as the web, and route parameter descriptions state the real defaults** ([#7224])
+- **Darling runs 4 long reads at once by default, up from 2** ([#7357])
+- **The fleet resource-use-by-tag read splits its hourly Query Store part into plain hour ranges** ([#7365])
+- **PostgreSQL trend sections in the web viewer are now charts** ([#7394])
+- **PostgreSQL panels say what is missing in one plain sentence** ([#7423])
+- **Query stats stores only the statements that carry the work in each run, and Darling reads statement text only for new statements** ([#7419])
+- **The daily query count is labeled as queries stored** ([#7491])
+- **Trend and chart panels say what is empty in plain words** ([#7410])
+- **Query Store, Query Heatmap, Alerts, Mute rules and Known patterns say what is empty in plain words** ([#7410])
+- **The Database Protection overdue ages are now settings** ([#7611])
+- **FinOps, Fleet Sweeps and Availability Groups display details read right** ([#7562])
+- **Lite and Viewer charts spend less space on chrome** ([#8086])
+- **The Lite tempdb chart now sits in a titled card** ([#8144])
+- **Every Lite chart now sits in a titled card with only its unit on the Y axis** ([#8144])
+- **Viewer charts now sit in titled cards and the Y axis shows only the unit** ([#8151])
+- **Overview timeline strips fill their height and the Lite server card matches the Viewer's** ([#8162])
+- **Lite's server tabs and sidebar now match the Viewer** ([#8169])
+- **Grid headers are never cut, an empty window shows one message, and long notes wrap, in Lite and the Viewer** ([#8197])
+- **Lite fits its 900x600 minimum window** ([#8219])
+- **Lite's top tabs, tab rows and menus are flatter and never cut a tab name** ([#8222])
+- **Scroll bars are themed and only show when there is something to scroll** ([#8223])
+- **Chart legends follow one rule in both apps** ([#8220])
+- **Empty, loading and count text in Lite and the Darling Viewer uses the refreshed look** ([#8225])
+- **The MCP server instructions give the real collection cadence** ([#8240])
+- **Chart units read one way, the slicer and heatmap carry one title each, and the Overview strips fit at 1280x800** ([#8224])
+- **The remaining old-layout panels in Lite and the Darling Viewer take the card look** ([#8226])
+- **MCP tool answers and service messages write counts as "1 server" and "3 servers" instead of "server(s)"** ([#8283])
+- **Lite serves the two investigation reads in every configuration, as Darling does** ([#8461])
+- **Lite's default per-event alert limit is now 5, the same as Darling's** ([#8466])
+- **Window text, notes, advice and CLI output write counts as "1 thing" and "3 things" instead of "thing(s)"** ([#8468])
+- **Daily Summary unique queries count only queries with credited executions** ([#8672])
 
 ### Fixed
 
-- **`uninstall-darling.ps1 -PurgeData` now removes the `PerformanceMonitor Darling Operators` group the install created** ([#6953]) - the purge deleted the store but left the local group behind. It now removes the group, with its members, only when its description is the one the installer sets. A group with any other description stays, and the script prints the command to remove it by hand.
-- **Clicking the triage link in a Slack alert no longer shows "This app is not configured to handle interactive responses"** ([#6965]) - the link was a Slack button. Slack sends a request to the app on every button click, even when the button only opens a link. A Slack app set up with only an incoming webhook has nowhere to receive that request, so Slack showed the warning. The link is now plain text in the alert. It opens the triage page and sends nothing to the app.
-- **The record of chunk-interval reconcile runs is now deleted after 30 days** ([#6977]) - before, no rows were deleted. The record gets one row a day, plus one for each service start.
-- **Lite's windowed MCP reads now say when the window reaches past the data Lite holds** ([#7005]) - an empty answer over a window that starts before Lite's oldest data used to read as a quiet server. It now carries `window_truncated`, so an agent can tell "nothing happened" from "we hold no data that old". Answers that return rows carry `effective_start`, `window_truncated` and `truncation_note` as well. This covers the Queries, Wait Stats, System Health, Blocking, Latch and Spinlock, CPU, Memory, File I/O, TempDB, Perfmon, Plan Cache, Client Timeout and Current Waits reads. It also covers `get_alert_history`, `get_analysis_facts`, `get_analysis_findings` and `get_resource_use_by_tag`. A window that is fully covered still says so, including an empty alert log or no findings.
-- **Darling's MCP reads now say when the window reaches past the data the store holds** ([#7010]) - this covers the SQL Server reads and the PostgreSQL reads. The PostgreSQL ones include the wait, query duration, I/O and database trends, autovacuum health, replication slots, wraparound risk, table bloat and extensions. Over a window that starts before the store's data, a data answer carries `effective_start`, `window_truncated` and `truncation_note`. An empty answer carries them under `hints`, so a quiet-looking answer no longer reads as an all-clear. Five reads used to answer `window_truncated` false over such a window: the query duration, procedure duration and Query Store duration trends, `get_job_history` and `get_query_store_aborts`. `get_fleet_overview` marks the server cards that hold less data than the window. The autovacuum and replication slot all-clear no longer claims the whole window was quiet when the store holds only part of it. `get_pg_index_bloat` and `get_pg_column_stats` carry no notice, because their own coverage verdict says what the window held. Reads that answer one newest snapshot, such as `get_pg_buffer_usage` and `get_pg_plan_capture_readiness`, state `captured_at` and `age_seconds` instead.
-- **`backtest_custom_alert_rule` now says when the span reaches back past the stored samples** ([#7015]) - a replay over a span older than the store's raw samples did not say so, so a no-fire answer over a partly uncovered span read as complete. It now carries `effective_start`, `window_truncated` and `truncation_note`, as the other windowed tools do, and over several servers it reports the least covered one. `get_daily_summary_range` is unchanged: each day it returns already carries its own data state.
-- **Client Timeouts no longer alerts on cancels under 1 ms or on Azure Data Studio's own metadata queries** ([#7061]) - Sampled events that lasted under 1 ms (SqlClient attentions on commands that had already finished) and Azure Data Studio's SMO metadata reads (`create table #SVer` and the column read) are left out of the judged count, in Darling and Lite. An event with no recorded duration still counts. Azure Data Studio's query editor still counts. It connects under the same `azdata` name as its metadata reads, so only those two statement shapes are left out. The baseline now leaves out the same events plus SSMS IntelliSense and VS Code metadata connections, so they no longer inflate it. The new baseline is read at the next service or Lite start. The alert text and `get_client_timeouts` name the left-out events: `excluded_from_alert` gains `below_duration_floor_events` and `azdata_metadata_events`, and each sampled event carries `below_duration_floor` and `azdata_metadata` flags.
-- **The Darling service log no longer repeats connect failures and permanent precondition warnings** ([#7067]) - While a server's connect failure has the same cause, "Connect still failing" is logged at most once an hour for that server, with the attempt count and the time down, and the `Connected` line reports how many attempts failed over how long. A precondition warning such as `EXTENSION_MISSING` is logged when first seen and when its text changes, then as a reminder at most once a day. One host with seven switched-off servers had logged 1,982 "Connect still failing" lines in a day. `collection_log` rows, collection health, alerts and MCP reads are unchanged. Lite is unchanged.
-- **Standing alerts no longer fire again after a service restart** ([#7068]) - A condition that stood across a restart wrote a new history row, logged `ALERT TRIGGERED` and offered a send again, because the alert engine kept its last-alerted level and cooldown only in memory. On the first sweep after a start the engine now reads the alert's open fire row, and a standing condition at the same level stays quiet. This covers Volume Free Space, Version Store (PVS), Force Plan Failures, Database File Growth, Capture Down, Collection Stopped, Agent Not Running, Agent Alert Gaps, Backup Overdue, Log Backup Overdue, CheckDB Overdue, Identity Capacity, AG Sync Fell Behind and the Custom Alert Rules Unhealthy, External Alerts Undelivered and Collection Falling Behind fleet alerts. Lite has the fix for the alerts it runs. A worse level, a lower free percent past the worsening margin, a different volume, file, plan or database, and a condition that cleared before the restart still fire. Database File Growth now remembers every breached file, so a tempdb with 8 files that breach together no longer announces files 6 to 8 again. The store-wide alerts keyed by job (Store Job Over Cadence, Retention Held, Raw Purge Over Horizon, Compose Rollup Hours Stuck and the Policy Job band alerts) are covered by the [#7076] entry below.
-- **Store-wide alerts keyed by job no longer fire again after a service restart** ([#7076]) - Store Job Over Cadence (one alert per job), Retention Held, Raw Purge Over Horizon, Compose Rollup Hours Stuck and the Policy Job band alerts (compression, refresh and retention jobs) announced again after each restart while their condition stood, because their history rows carried nothing that told one key from another. Their rows now carry the key, so a standing condition stays quiet across a restart and a second job that sticks still fires. A stuck Policy Job that was re-armed before a restart still sends the one "re-hung" escalation it was owed and does not re-arm again. A job that cleared while the service was down is closed in the history and announced again if it sticks later. Store schema version 234 adds a nullable `alert_key` column to `config.config_alert_log`, with no backfill, and needs no action. Rows written before the upgrade have no key, so each of these alerts that is standing announces once after the upgrade and then stays quiet across restarts. Darling only: Lite does not write these alerts.
-- **A report notice's root cause keeps its sentence under `maskLiterals`** ([#7106]) - with `mcp.dataDetail` set to `maskLiterals`, the notice text for a report treated every apostrophe as the start of a quoted string, so "The session's blocker has held 3 locks" became "The session'?'" and "both sessions' locks are held" lost the rest of its line. Text an agent wrote (the root cause and the object of each change) now keeps an apostrophe that follows a letter or digit (`session's`, `doesn't`, `sessions' locks`) and no longer reads ` -- ` or `/*` as a comment, so "the blocker -- session 87 -- held 3 locks" is not cut off. Quoted values (`'alice'`, `name='abc'`, `N'abc'`) and numbers are still replaced. SQL text is masked as before.
-- **A retention hold no longer outlives its consumer's own retention** ([#7114]) - The coverage gate called a consumer short whenever its oldest bucket was later than the held tier's oldest row, ignoring the consumer's own retention. A hold on `query_store_stats_interval_hourly` that lasted more than 3 days became permanent, because `query_store_stats_interval_daily` trimmed itself to its 10-day horizon every day. A consumer with armed retention, whose own coverage check also passes, is now checked only as far back as it keeps, so such a store arms on the first hourly pass after the upgrade. The Retention Held alert no longer says arming by hand drops the only copy, and the `--backfill-rollups` race warning is gone.
-- **The Viewer's Mute Rules list shows each rule's action, and the rule dialog's text matches it** ([#7122]) - A mute rule that sends matches to the daily digest looked the same as a plain mute in the list, and the dialog still said alerts were suppressed or muted. The list now has an Action column ("Mute" or "Daily digest"). The window's intro line, and the dialog's intro, daily-window text, filter hints and no-filter warning, follow the chosen action. The Mute Rules window opens wider to fit the new column.
-- **The Blocking alert settings now say what they do, in the Viewer and Lite** ([#7123]) - The Settings windows labeled the count "Blocking sessions" and the wait "Total blocked wait". The count is blocking events in the last hour, and it pages only when the longest wait among them is 15 seconds or more. The wait box is also the bar at which one blocked session pages at once. The labels are now "Blocking events" and "Long blocking wait", the help text says so, and the boxes start at the current defaults (3 and 60).
-- **The "Starts" label in the Viewer's mute rule dialog now shows in full** ([#7138]) - It was cut off at the right edge of the dialog. It now wraps onto a second line.
-- **The multiple boxes in Settings, Alert rules, now fit two digits, in the Viewer and Lite** ([#7139]) - The client timeouts warning and critical multiples and the Agent jobs "x historical average" box were narrower than the boxes beside them, so a value like 10 was cut off. They now match.
-- **The 31-day Daily Summary and calendar read far fewer pages on a store without TimescaleDB** ([#7147]) - On a bring-your-own PostgreSQL store with plain tables, the month read scanned every heap page of the month, and its distinct-query count read through a view that kept PostgreSQL from using an index-only scan. On a store with 14.2 M `wait_stats` rows the read timed out at 15 s. The count now reads `collect.query_stats` directly, and the service builds a covering `wait_stats` index once at startup on stores without TimescaleDB. The numbers are the same, and a measured run read about 7 times fewer pages.
+- **`uninstall-darling.ps1 -PurgeData` now removes the `PerformanceMonitor Darling Operators` group the install created** ([#6953])
+- **Clicking the triage link in a Slack alert no longer shows "This app is not configured to handle interactive responses"** ([#6965])
+- **The record of chunk-interval reconcile runs is now deleted after 30 days** ([#6977])
+- **Lite's windowed MCP reads now say when the window reaches past the data Lite holds** ([#7005])
+- **Darling's MCP reads now say when the window reaches past the data the store holds** ([#7010])
+- **`backtest_custom_alert_rule` now says when the span reaches back past the stored samples** ([#7015])
+- **Client Timeouts no longer alerts on cancels under 1 ms or on Azure Data Studio's own metadata queries** ([#7061])
+- **The Darling service log no longer repeats connect failures and permanent precondition warnings** ([#7067])
+- **Standing alerts no longer fire again after a service restart** ([#7068], [#7076])
+- **Store-wide alerts keyed by job no longer fire again after a service restart** ([#7076])
+- **A report notice's root cause keeps its sentence under `maskLiterals`** ([#7106])
+- **A retention hold no longer outlives its consumer's own retention** ([#7114])
+- **The Viewer's Mute Rules list shows each rule's action, and the rule dialog's text matches it** ([#7122])
+- **The Blocking alert settings now say what they do, in the Viewer and Lite** ([#7123])
+- **The "Starts" label in the Viewer's mute rule dialog now shows in full** ([#7138])
+- **The multiple boxes in Settings, Alert rules, now fit two digits, in the Viewer and Lite** ([#7139])
+- **The 31-day Daily Summary and calendar read far fewer pages on a store without TimescaleDB** ([#7147])
+- **`upgrade-darling.ps1` tries the backup-folder step before it stops the service, and has a `-Check` switch** ([#6982])
+- **The statement filter now withholds more password shapes** ([#6993])
+- **`metadataOnly` now masks the login in `set_by` and in the investigation write answers** ([#6997])
+- **`get_investigation_evidence` no longer journals a refused claim-token read** ([#6997])
+- **On Linux the diagnostics bundle's alias map file is readable by its owner only** ([#6997])
+- **An analysis finding's alert notebook shows its database name and story text as plain text** ([#6997])
+- **A store owner with any name now migrates** ([#7003])
+- **Overview utilization card no longer reads the whole archive for its newest-row lookups** ([#7000])
+- **`upgrade-darling.ps1` refuses to replace a self-contained install with a framework-dependent build** ([#7063])
+- **The Daily Summary wait_stats index is now built when wait_stats is a plain table** ([#7152])
+- **An external alert that rises to critical is no longer held back by the delivery cooldown** ([#7158])
+- **A short failure of the deadlock or blocked-process session check no longer blocks reads for an hour** ([#7164])
+- **The Darling service now writes its read-latency and collector cost samples when it stops** ([#7153])
+- **PostgreSQL wraparound, replication slot and poison wait alerts now carry the server in their PagerDuty dedup key** ([#7157])
+- **A managed store no longer stays running after a cancelled or failed startup** ([#7162])
+- **Query-tag rollup blocking figures count each wait once** ([#7163])
+- **Dismiss All no longer dismisses alerts you cannot see** ([#7160])
+- **Query trend charts no longer dip when a query that runs every 15 or 30 minutes appears** ([#7161])
+- **Top Queries no longer misses a query whose plan just recompiled or regressed** ([#7156], [#7337], [#7344])
+- **A PostgreSQL target no longer gets made-up zero counts and Healthy days from the daily summary tools** ([#7159])
+- **Fleet resource use by tag stays on the hourly rollup after a quiet spell** ([#7240])
+- **The Collection Health tab header counts a collector only while its latest attempt was refused after its last success** ([#7241])
+- **The Agent Alerts "Last fired (server clock)" column now uses the display format** ([#7243])
+- **A first start whose database setup was interrupted no longer gets stuck** ([#7191])
+- **An idle server no longer reads WARNING after the Darling service was stopped for a weekend** ([#7242])
+- **Default email recipients are now checked when saved** ([#7184])
+- **Viewer credential profiles survive an unreadable or interrupted save** ([#7209])
+- **A long overdue-database list no longer makes Teams reject the alert** ([#7202])
+- **Lite investigation reads no longer run under a database reset** ([#7217])
+- **Stale Mute Rules no longer flags recurring windows or digest rules** ([#7183])
+- **Query Store plans and statement text are no longer lost when a fetch times out** ([#7187])
+- **The web dashboard now switches to its write login by itself after a slow first start** ([#7192])
+- **RDS PostgreSQL stderr logs no longer lose a plan or a log event cut at a portion boundary** ([#7186])
+- **Lite alert reads no longer scan every Parquet archive file, and slow reads say where the time went** ([#7256])
+- **Opening a server tab no longer mixes its collector timings and notes with the scheduled sweep's** ([#7215])
+- **A saved custom view loads its panels two at a time and retries a busy read** ([#7257])
+- **A deadlock signature merge made with MCP writes on can now be undone** ([#7185])
+- **Darling and Lite MCP reads no longer call an offline SQL Server's empty window an all-clear** ([#7167])
+- **The Viewer Proposals tab no longer shows an empty list when the service did not answer** ([#7168])
+- **The wait-profile card's "x its baseline" multiple now matches the numbers beside it** ([#7177])
+- **The disk space card now quotes the free space of the volume that triggered it** ([#7179])
+- **set_notification_route_fallback no longer reports a write that did not happen** ([#7199])
+- **Schema-modification lock waits now reach their own SCH_M analysis card** ([#7178])
+- **pvs_stats now collects every database on an Azure SQL Database logical server** ([#7165])
+- **Daily Health Report no longer ends its period in the future inside a daylight saving gap** ([#7201])
+- **Editing a mute rule no longer changes when it expires** ([#7173])
+- **The High CPU and Runnable Queue alert notebooks now plot the hourly peak instead of the hourly average** ([#7203])
+- **Query Store top queries average and rank by how often each interval ran** ([#7169])
+- **By-tag resource use no longer opens every retained chunk to read blocking reports and deadlocks** ([#7204])
+- **FinOps Database Sizes cost share is now of the whole server** ([#7174])
+- **FinOps Server Inventory Uptime is right when the server is in another time zone** ([#7176])
+- **Query and procedure history windows now save and show the clicked row's own plan** ([#7175])
+- **FinOps high-impact memory is now the current plan's peak grant, not a sum over collection rows** ([#7166])
+- **PostgreSQL plan-capture readiness no longer reports ready when plans cannot be read, and no longer misjudges csvlog and jsonlog targets** ([#7182], [#7292])
+- **Lite query tag, server tag, database-state baseline and repair-marker times are now UTC** ([#7200])
+- **Opening an engine alert's details no longer freezes Lite** ([#7180])
+- **A PostgreSQL deadlock alert no longer pages for an old pair because of a stale new one** ([#7188])
+- **A new PostgreSQL statement's first interval now records its real counts, and a statement idle across a restart keeps its first interval** ([#7189], [#7252])
+- **Closing a Lite server tab now cancels a running Get Actual Plan query** ([#7181])
+- **A SQL Server CPU reading from days ago is no longer shown or banded as current** ([#7196])
+- **A fleet-wide Query Store panel on a large fleet is no longer refused before it runs** ([#7285])
+- **`get_daily_summary` answers `unavailable` for a day nothing was collected** ([#7193])
+- **A collection cycle no longer re-runs collectors that a tab open just ran** ([#7269])
+- **Creating a mute rule with an expiry already in the past is now refused** ([#7198])
+- **A bad monthly cost in the Add/Edit Server dialogs is now refused instead of stored as 0 or misread** ([#7197])
+- **The fleet Query Store tag read takes its hourly rows with fewer rows read** ([#7240])
+- **get_analysis_findings, get_analysis_facts and get_alert_history check the right table on a PostgreSQL target** ([#7194], [#7309])
+- **The default PostgreSQL wait event no longer follows lifetime totals across a target restart** ([#7205])
+- **A refused press on the Proposals page shows the service's reason, and the press buttons lock while a press runs** ([#7207])
+- **A slow schema check no longer resets notification route settings when you save** ([#7208])
+- **An approved agent action that fails in the store before it is sent is now journaled as failed** ([#7206])
+- **`get_compiles_after_evict` no longer says a cheap statement may never appear** ([#7315])
+- **The People screens no longer say grants do nothing** ([#7170])
+- **A failed plan save in the Lite and Viewer history windows now says so** ([#7228])
+- **Underscores inside words now show in notebook cells** ([#7172])
+- **A signed-in admin on the bundled store is no longer told to sign in on the proposals page** ([#7171])
+- **Double-clicking a column header or scrollbar in a Lite or Viewer grid no longer opens a drill window or editor** ([#7210])
+- **Renaming a server now updates its open tab in Lite and the Viewer** ([#7212])
+- **Availability Groups cards in Lite now draw their border** ([#7218])
+- **A PostgreSQL fleet card now sends its threads waiting counts as null** ([#7195])
+- **A new PostgreSQL deadlock pair counted before a service restart now still pages** ([#7295])
+- **Alert History Server filter no longer shrinks or goes blank** ([#7211])
+- **Plan error messages name the right source** ([#7214])
+- **People window counts and dates sort correctly, and its times follow the display mode** ([#7213])
+- **Lite's newest-value reads no longer scan the whole archive** ([#7216])
+- **Lite no longer opens every archive file for short-window reads** ([#7256])
+- **The Viewer's Added column and the agent alert, database protection and identity capacity times now follow the Server / Local / UTC switch** ([#7343])
+- **The statement filter's judging budget now counts XML parse time on its own clock** ([#7348])
+- **The Viewer's Overview keeps its Search box when a search matches no server** ([#7354])
+- **A hand-made store folder the 3.12 service refuses now gets repair steps that finish the job, and the upgrade script takes it over in place** ([#7267])
+- **The fleet 24 hour tag read no longer fails under the 1 GB temp file limit** ([#7240])
+- **The Query Store size guard no longer refuses the fleet 24 hour Custom Views panel for half of each hour on a large fleet, and the service analyzes the current day's Query Store partition every hour without cancelling an autovacuum** ([#7353])
+- **The Darling service no longer rewrites the permissions of a whole drive when the data directory sits directly under a drive root** ([#7363])
+- **The upgrade script no longer says the service changes the permissions of a drive root** ([#7363])
+- **An operator's own `random_page_cost` above the include in `postgresql.conf` is no longer overridden** ([#7370])
+- **Lite no longer asks you to look at the Always On collectors on a server without Always On** ([#7375])
+- **A PostgreSQL server with no SQL Server data reads not_collected in the roll-up by query tag** ([#7374])
+- **The first Query Store daily rebuild after the V240 upgrade no longer times out on a store with many days of history** ([#7379])
+- **The collector count no longer says "no permission" for a missing extension** ([#7384])
+- **The query tag roll-up now says a readable secondary's Query Store is not collected** ([#7376])
+- **A multi-line statement no longer makes one Long Queries row fill the grid** ([#7382])
+- **Grids with a fill column no longer squeeze their other columns** ([#7383])
+- **PostgreSQL session states no longer rate the monitor's own sampler Critical** ([#7381])
+- **Number column headers in web grids line up with their numbers** ([#7392])
+- **Long web grids scroll inside their own box and keep their header** ([#7393])
+- **PostgreSQL log reads no longer scan every time zone file on each read** ([#7397])
+- **Charts shown together keep the same plot size, and their layout follows the window** ([#7385])
+- **The server page's tiles use the page width and a long tile stops at three lines** ([#7395])
+- **Config audit no longer suggests a negative max server memory on a server with under 4 GB of RAM, and the MAXDOP note names the figure it used** ([#7400])
+- **A quiet PostgreSQL target no longer gets a Warning for a statement that held almost none of the window** ([#7396])
+- **Web viewer line charts no longer repeat a color at a sixth series, and the first two colors are easy to tell apart** ([#7401])
+- **Web viewer layout and wording fixes** ([#7402])
+- **PostgreSQL tabs state what the data proves** ([#7409])
+- **An agent token can now silence an alert storm without a claim, within limits** ([#7414])
+- **Storage latency cards no longer fire on a handful of I/Os, and the plan regression card leads with the query that cost the most** ([#7417])
+- **PostgreSQL backend counts no longer claim backends where nothing waited, and the trend and checkpoint panels say what they show** ([#7428])
+- **The PostgreSQL Vacuum tab no longer says freezing is not keeping up on a healthy server** ([#7432])
+- **PostgreSQL grids and notes read as plain text** ([#7410])
+- **The Overview tab's baseline band now draws** ([#7433])
+- **Memory pressure events no longer repeat on a quiet server** ([#7441])
+- **An empty top-queries reply no longer says the collector may have stopped when it ran** ([#7442])
+- **A blocking Warning on a fleet card now says what fired it** ([#7444])
+- **PostgreSQL `audit_config` no longer says autovacuum is off when it is on** ([#7447])
+- **A small plan cache is no longer called bloated, and the advice puts ad hoc workloads first** ([#7445])
+- **The managed store no longer sends TimescaleDB's daily usage report** ([#7446])
+- **The monitor's own statements no longer rank as real work in Query Store and Top Queries** ([#7443])
+- **"Recurring at this hour" no longer appears on results that fire all the time** ([#7450])
+- **Per-file latency under an I/O finding now adds up to its headline, and memory pressure, range-lock waits and other cards point at next tools** ([#7449])
+- **The database settings card now shows real RCSI blocking figures, and the RCSI recommendation can appear** ([#7448])
+- **Table bloat and index usage no longer read as if PostgreSQL statistics were never lost after crash recovery** ([#7456])
+- **compare_analysis no longer reports worse and new issues against a window nobody collected** ([#7458])
+- **A quiet PostgreSQL server is no longer said to lack WAL figures because it is Aurora** ([#7457])
+- **Empty MCP replies now mean somebody looked** ([#7459])
+- **Memory conditions show gigabytes with 2 decimals** ([#7465])
+- **The memory broker health read now returns SHRINK events** ([#7466])
+- **get_finops rounds its numbers and get_finops_inventory trims the OS version** ([#7467])
+- **Grid cells that open a detail line up with the cells beside them, and the opened text stays readable in a right-hand column** ([#7482])
+- **A configuration change that only adds or removes white space now says so** ([#7483])
+- **Overview tiles: a long wait type wraps inside its tile and Total wait names its unit** ([#7485])
+- **Analysis findings show plain category names** ([#7486])
+- **Lite's `get_procedure_duration_trend` answers `empty` when no procedure ran in the window** ([#7498])
+- **`get_active_queries` flags only the top of a blocking chain as `is_head_blocker`** ([#7502])
+- **`get_daily_summary_range` with `as_of` rates its last day correctly** ([#7504])
+- **The Blocking and Deadlocks tiles now say which window they cover** ([#7507])
+- **Blocking rows now show the head blocker's open transaction count from the blocked process report** ([#7497])
+- **Web chart axes in GB now land on round numbers** ([#7488])
+- **MCP replies now say that a stamp with no offset is UTC** ([#7499])
+- **The Overview "Queries stored" tile no longer reads low for today** ([#7505])
+- **Query Store Duration Trend no longer breaks its hourly part into lone dots** ([#7508])
+- **Triage and notebook pages use a wide screen, Query Tag Usage fits a narrow one** ([#7479])
+- **Charts keep a usable height on small windows** ([#7478])
+- **Lite plan tool text now says plans are never kept** ([#7522])
+- **`get_memory_pressure_events` no longer answers with half a million characters** ([#7516])
+- **`get_pg_session_states` answers null instead of -1 for durations it did not measure** ([#7528])
+- **Lite's `list_servers` answers JSON like Darling's** ([#7527])
+- **Lite shows the right last collection time for a server that has CPU data but no collection log row** ([#7527])
+- **Analysis no longer shows two different counts as the same "blocking events"** ([#7537])
+- **The Blocked Process Reports panel on the web shows every report the read selected, and says the true reason when some have no XML** ([#7545])
+- **PostgreSQL Bloat Estimates says "No estimate published" instead of 0 B, and counts the whole window** ([#7551])
+- **The Alert Details link now switches to the server tab** ([#7554])
+- **Dropped databases no longer count in Identity Capacity or show as "Scanned, clean"** ([#7547])
+- **PostgreSQL Analysis no longer raises standing Warnings on the monitoring service's own statements** ([#7567])
+- **A blocking spike on a server with no blocked process reports names its unit correctly** ([#7537])
+- **Active Queries leaves out the monitor's own statements by default** ([#7573])
+- **The Blocked Sessions chart no longer counts a parallel query's own threads as blocked** ([#7577])
+- **Identity Capacity keeps a new database listed until the next database snapshot names it** ([#7547])
+- **Query Store Health on a readable secondary now says why it is empty in Lite and Darling** ([#7584])
+- **A server the service cannot connect to now reads Offline at once and says why, including one that has never connected, and stops reading Offline once collection resumes** ([#7590])
+- **Analysis now scores a nearly full volume Critical** ([#7583])
+- **PostgreSQL Statement Calls per Second no longer reads high for a statement that runs in bursts** ([#7566])
+- **The Analysis Findings grid and Recommendations tab show one row per sentence** ([#7582])
+- **Waiting Tasks and Blocked Sessions on the Blocking tab are now stacked bars** ([#7571])
+- **Query Store Regressions no longer marks a query CRITICAL or HIGH when it added little time** ([#7592])
+- **A PostgreSQL bad-actor statement's calls per second now matches the trend** ([#7566])
+- **A server with a full identity column now counts as Critical** ([#7561])
+- **A PostgreSQL server's Memory and Blocking tiles no longer print OK and 0** ([#7560])
+- **The Fleet page fills its row with server cards at every window width** ([#7559])
+- **Byte and MB chart axes tick on round numbers in one unit** ([#7555])
+- **Long names, narrow wrapping columns, Active Queries width and the Plan buttons are fixed in the web grids** ([#7533])
+- **A series keeps one color across File I/O Latency and across reloads of a Custom View** ([#7535])
+- **Quiet charts and range strips now break where nothing was collected** ([#7572])
+- **Size cells on the PostgreSQL Storage, I/O and Waits tabs no longer print digits that were never measured, and small sizes no longer read 0 MB** ([#7564])
+- **PostgreSQL Index Usage tiles count every index in the window** ([#7575])
+- **`get_query_trend` reads up to 90 days and gives one point per hour or per collection** ([#7608])
+- **Name grids open in the same order as a header click** ([#7550])
+- **Overview I/O latency stops marking buckets with only a few reads as anomalies** ([#7624])
+- **A per-second perfmon counter in a Custom View or an alert rule now charts as a rate** ([#7565])
+- **Count charts label whole numbers and the last time label stays inside the chart** ([#7606])
+- **Web chart axes label the right gridline, and four Queries and I/O Trends details** ([#7586])
+- **Web panels with no partner take the whole row** ([#7534])
+- **Web counter charts with only zeros show one line** ([#7549])
+- **Query Heatmap columns fill the panel** ([#7542])
+- **Blocking trend charts line up** ([#7543])
+- **The PostgreSQL Logging Settings Audit fits more settings on screen and names no tools** ([#7539])
+- **The PostgreSQL Configuration Audit's Why column names tabs, not tools** ([#7557])
+- **The blocking spike on servers without blocked process reports now compares like with like in Darling and Lite** ([#7588])
+- **PostgreSQL panels say one plain line when there is nothing wrong** ([#7548])
+- **Lite says which Azure SQL Database databases have no deadlock session, and stops retrying a create Azure keeps refusing** ([#7639])
+- **The system_health CPU legend no longer lists System CPU when the chart says it is not shown** ([#7593])
+- **Admin and FinOps explanations are quiet text and only real warnings are yellow** ([#7558])
+- **Configuration Audit review rows are coloured, ids print without separators and chart ticks drop needless decimals** ([#7552])
+- **The Overview timeline no longer waits for its baseline bands, and the I/O band matches its line** ([#7644])
+- **Seven small display details on the Memory, CPU, Wait Stats and File I/O tabs** ([#7578])
+- **The collector's delta cache no longer grows without a limit** ([#7649])
+- **The Database State alert no longer stores a number taken from the database name** ([#7646])
+- **Config Changes says when a change was first seen, not when it happened** ([#7662])
+- **A server with databases down no longer reads Healthy on the Fleet page** ([#7647])
+- **Skipped Cycles no longer stretches its tiles** ([#7660])
+- **Web rate charts draw the points the plot can show** ([#7661])
+- **The service's own PostgreSQL statements are now recognized on servers it monitored before the upgrade** ([#7681])
+- **A server that cannot report host CPU no longer shows it as 0 or 100% idle** ([#7682])
+- **Scheduler Issues no longer lists every minute as 100% other-process CPU on SQL Server on Linux** ([#7688])
+- **Fleet Sweeps now band a server Critical when a column is at its identity limit** ([#7669])
+- **Alert Settings, Pending Notes, Practice Scores and the Close request form no longer offer changes the service refuses** ([#7700])
+- **FinOps High Impact names the database that did the most work** ([#7695])
+- **The PostgreSQL Fleet card, server header and Viewer now show Blocking** ([#7616])
+- **SQL Server on Linux now gets a Volume Free Space alert, a disk fact and a report row** ([#7704])
+- **Index Analysis marks databases whose snapshot is left over and keeps them out of the totals** ([#7701])
+- **The Query Heatmap shows a quiet server's few bins at their own place in the range** ([#7683])
+- **Database names sort without regard to case in the Databases picker and its sibling grids** ([#7689])
+- **One condition no longer shows up twice on the Analysis tab when its headline figure differs** ([#7696])
+- **FinOps no longer right-sizes an availability group secondary from its own load** ([#7705])
+- **A Query Store in the ERROR state is now marked, raised and noted** ([#7675])
+- **Recommendations cards open the tab that holds their evidence** ([#7677])
+- **The Memory tab now shows the small-query resource semaphore** ([#7676])
+- **An offline server's empty panels and trends say what was collected** ([#7724])
+- **Top Procedures and Top Queries now show work from databases the server no longer lists** ([#7725])
+- **Query Store pages no longer lose real rows to the monitor's own statements, and old unmarked statements are recognized** ([#7736])
+- **The Overview timeline says why a strip has no band, and marks runs outside the band once** ([#7663])
+- **PostgreSQL Top Query Shapes names the database** ([#7731])
+- **Small display details on the web pages** ([#7690])
+- **Small wording and display fixes on web pages and MCP texts** ([#7684])
+- **Query Duration Trend and its range strip no longer draw a line across hours with no data** ([#7692])
+- **Custom View charts with a second axis are readable, and a saved running-total panel says so** ([#7692])
+- **Ten small display details on the web pages are fixed** ([#7699])
+- **Memory Pressure Events rows now carry their memory node, and the web grid shows a Node column on multi-node servers** ([#7691])
+- **The PostgreSQL configuration audit no longer says a sentence twice, and six other web details read right** ([#7670])
+- **The web pages name the databases a read left out** ([#7538])
+- **FinOps grids now mark databases the server no longer lists in Lite and the Viewer** ([#7725])
+- **The CPU note and chip on a server with no host CPU figure read in plain words** ([#7682])
+- **FinOps page details corrected** ([#7706])
+- **Recommendations and restart notes read in plain words** ([#7726])
+- **Small web details corrected** ([#7679])
+- **Small details on the web pages** ([#7729])
+- **Lite no longer deletes its database file when it cannot back it up** ([#7769])
+- **Lite's Import Data names the real cause when it cannot read the old database** ([#7779])
+- **The Viewer shows a disabled server as disabled, not Offline** ([#7773])
+- **The Viewer retries a failed server-list reload instead of locking the shell until restart** ([#7774])
+- **Query Store grid rows match the slicer bars** ([#7776])
+- **Perfmon trends plot a counter's _Total row instead of adding it to its instances** ([#7771])
+- **Top Procedures by Duration keeps long-waiting procedures on hourly windows** ([#7772])
+- **The grid keeps a narrowed slicer selection after an auto-refresh** ([#7775])
+- **The Compare baseline no longer overlaps the current window** ([#7777])
+- **The Darling Viewer's Overview search narrows the fleet panel's blocking and deadlock totals to the matching servers** ([#7778])
+- **The Viewer and Lite say when a read failed instead of showing it as data** ([#7780])
+- **Statement text stores are pruned on the horizon of the collectors whose facts reference them** ([#7784])
+- **Lite runs its daily cleanups soon after launch** ([#7785])
+- **Webhook failure health is counted per route destination, and the failing alert names the route** ([#7786])
+- **A service stop during a database read is recorded as a cancellation** ([#7787])
+- **The fleet sweep's per-target store lookups run inside the tracked sweep task** ([#7788])
+- **A broken store connection during the procedure totals gap fill is now logged** ([#7790])
+- **The sweep failure log line now carries the full exception** ([#7791])
+- **Counter collectors no longer lose an interval when the store write fails** ([#7782])
+- **Lite tells you where your old database went when it has to start without all of its old data** ([#7812])
+- **The web Query Store grid and the MCP get_query_store_top and get_query_store_aborts windows now match the duration strip** ([#7814])
+- **get_pvs_stats no longer tells you to check the primary replica on servers with no persistent version store** ([#7822])
+- **Lite no longer mistakes an unrelated DuckDB open failure for a storage version mismatch or a lock** ([#7824])
+- **The Lite and Viewer Version Store grids no longer say to check the primary replica on SQL Server 2016 and 2017 availability group secondaries** ([#7822])
+- **A newly enrolled server reads the Query Store interval table from its first day, and keeps the fleet rollup on for the panel** ([#7746])
+- **Darling settles a stressed server's timeouts with one liveness probe, keeps the runtime when the probe itself times out, and still drops a server that never answers** ([#7810])
+- **Darling counts a daily run lost behind its own unfinished run and shows the permit backlog beside it** ([#7811])
+- **Shared alerting and notification catch-alls log the exception, not only its message** ([#7816])
+- **The Query Heatmap's last label never runs past the table** ([#7653])
+- **Lite's Overview tab no longer says "Last refresh" after the strips control itself fails** ([#7837])
+- **A web dashboard link that passes through a redirect page (Teams Safe Links, a mail gateway) now opens signed in when your session is live** ([#7846])
+- **The 24 hour fleet Query Store panel reads a shorter tail of recent rows** ([#7762])
+- **A server that reconnects after being dropped no longer inherits a stale liveness answer** ([#7851])
+- **Long chart unit captions are no longer cut off at the chart edge** ([#7856])
+- **The Blocking page's blocked process report and deadlock trends no longer draw a 0 over time the collector did not read** ([#7850])
+- **The warm-up gate counts its waits, so the warm-up's own-calls test needs no clock** ([#7733])
+- **Waiting Tasks and Lock Waits name their unit, PostgreSQL Severity tiles and grids print a word, and a finding's sentence wraps** ([#7655])
+- **PostgreSQL statement statistics no longer load query text every minute** ([#7783])
+- **A long right-axis unit caption no longer sits under the chart's menu button** ([#7863])
+- **The Automatic Tuning empty text says which case applies** ([#7813])
+- **A TLS certificate store entry in subject mode no longer takes the web dashboard and MCP to loopback only after a renewal that leaves an older certificate in the store** ([#7865])
+- **The regression baseline read no longer logs a built-days failure and falls back to the slower read** ([#7873])
+- **Lite get_memory_grants shows the newest collection in grants[] on windows over 25 hours** ([#7879])
+- **Lite Query Store regressions no longer count one interval on both sides of the window start** ([#7875])
+- **get_pg_wait_trend reads the right rate on servers without pg_wait_sampling** ([#7876])
+- **Memory grant waits read in the right unit** ([#7882])
+- **A modified table variable counts once in the warning totals** ([#7882])
+- **get_current_waits_trend gives the same bucketed answer in Lite and Darling** ([#7877])
+- **A cleared xmin holder, a vacuumed table, a dropped replication slot and a dropped database stop being reported as current** ([#7878])
+- **A single long-running Agent job now counts as one job in the analysis** ([#7883])
+- **Alert History Dismiss All and Dismiss Selected on the web page only act on the alerts the column filters leave showing** ([#7919])
+- **The web page asks again for your edit access after a failed check** ([#7928])
+- **An empty Query Store regressions answer no longer claims recent activity that the read did not see** ([#7962])
+- **A zoomed or drilled panel on a saved dashboard stays zoomed and drilled when the dashboard refreshes** ([#7923])
+- **A refused note decision or threshold override on the Admin page now shows the service's own sentence** ([#7955])
+- **Editing a route for a disabled server keeps its scope** ([#7949])
+- **The query heatmap counts distinct queries per cell** ([#7881])
+- **Plan tools rank top_operators by each operator's own time** ([#7887])
+- **Plan warning counts no longer multiply by how often a plan was seen** ([#7886])
+- **Raw Query Store retention purges again after a store outage instead of going back on hold** ([#7961])
+- **Investigations keeps the Close reason being typed across the 60 s refresh** ([#7956])
+- **Known Patterns saves a new entry once when Save is clicked twice** ([#7958])
+- **The alert notebook opens the dismissed firing its link names** ([#7918])
+- **FinOps Database Resources keeps the window you picked** ([#7922])
+- **A tiny CXPACKET or CXCONSUMER wait is no longer a Critical plan finding** ([#7888])
+- **get_current_waits_trend averages each series over every collection that ran** ([#7974])
+- **The Admin page says which web changes are off and that servers still save** ([#7950])
+- **Servers with a negative id can now have an environment profile and a known pattern** ([#7975])
+- **A skewed parallel plan no longer blames the operator above an exchange** ([#7979])
+- **A route save refused because someone else changed the route no longer refuses every later save** ([#7952])
+- **Report feedback shows on the page as soon as it is recorded** ([#7952])
+- **Admin asks before removing an override, flipping the agent switch, undoing an agent change, removing a person's sign-in or grant or disabling a person** ([#7952])
+- **A time slicer drag to the right edge stops at the window end** ([#7931])
+- **A picked range that ends later today is drawn up to now** ([#7931])
+- **A time range of a fractional number of minutes is named by the minutes it holds** ([#7931])
+- **Plan analysis no longer flags a TOP over an ordered index scan** ([#7890])
+- **Bare Scan and Scan With Predicate no longer warn on small or barely filtered scans** ([#7890])
+- **Plan analysis text no longer contradicts the plan it describes** ([#7890])
+- **The QUERY_SPILLS finding grades spilled pages per observed hour, not the window total** ([#7884])
+- **The blocking finding grades a storm in a short or partly collected bucket at its real rate** ([#7884])
+- **The web Custom Views list keeps pasted import text and open menus through its refresh** ([#7925])
+- **The web Alert Rules list refreshes with two requests and keeps its template menu open** ([#7925])
+- **The sidebar's Views list keeps the last good list when a poll read fails** ([#7925])
+- **Admin tabs keep what you are typing across the 60 s refresh** ([#7951])
+- **Query Store History chart tooltip names every plan at a hovered time** ([#7920])
+- **Investigations closes a request's pane when a Close takes it off the filtered list** ([#7957])
+- **Investigations keeps a Close reason being typed when another request's close finishes, and does not move the focus into the reason box when the page is opened again** ([#7957])
+- **Known Patterns keeps a form opened after Cancel when an earlier save answers** ([#7957])
+- **Overview strips say when a read failed** ([#7921])
+- **The Run Now result table shows each run's time in the browser's zone** ([#7930])
+- **The PostgreSQL Vacuum tab's Horizon Holders grid shows how many captures recorded each source** ([#7926])
+- **A Key Lookup warning is graded on what the lookup cost, not always Critical** ([#7889])
+- **A server page poll now swaps its new panels in when the last panel to answer is one that hides itself** ([#7934])
+- **A saved view panel the service refused as busy keeps its last figures through the retry wait** ([#7934])
+- **Alert History keeps its table through a failed poll, so an opened Detail line stays open** ([#7934])
+- **Resume and a tab return re-render the page at once, and a tick where the page and the sidebar are both due asks the store for one fleet roll-up** ([#7935])
+- **Investigations no longer redraws a request's pane when its detail read answers after the request was dropped, on the web page and in Lite's window** ([#8007])
+- **A held analysis finding no longer pages again when its story path gets shorter** ([#8012])
+- **Procedure History tooltips show small rates with their digits** ([#7933])
+- **Latest-snapshot reads plan against one chunk instead of every retained chunk** ([#8013])
+- **A markdown line of inline triple-backtick code no longer swallows the rest of the cell** ([#7944])
+- **The Viewer's xmin horizon "Held In" column now divides over every capture in the window** ([#8014])
+- **Small web values read in the right unit and keep their digits** ([#7945])
+- **The PostgreSQL replication slot total no longer adds up slots that hold the same WAL** ([#7939])
+- **Searching for a parent tag finds the servers tagged under it** ([#7984])
+- **--backfill-rollups no longer refreshes every slice for nothing after a rollup's own retention has trimmed it** ([#7981])
+- **get_pg_top_queries and the PG_BAD_ACTOR drill-down count a statement's block and WAL figures for every interval its calls cover** ([#7909])
+- **get_long_query_completions picks events by when they happened, not by when they were stored** ([#7900])
+- **The Queries tab reads each duration trend once per paint** ([#7941])
+- **A web read refused for temp_file_limit is recorded as a limit, not an error** ([#7938])
+- **Parallelism advice recommends only a change from the server's own MAXDOP and cost threshold** ([#7894])
+- **Object growth fires for a table that was empty the day before** ([#7894])
+- **The CPU spike drill-down lists each request once** ([#7896])
+- **An expired session's sign-in strip stays on the Availability Groups page** ([#7959])
+- **Job History no longer says more runs matched when only runs outside the window were cut** ([#7960])
+- **FinOps utilization says no data, not 0, for the memory grant figures when no grant sample exists** ([#7906])
+- **A deadlock storm grades the same on a 4 hour pass and a 24 hour read** ([#7893])
+- **Blocking and deadlock spike findings fire at 3 times a server's real baseline** ([#7885])
+- **get_analysis_findings refuses a limit of 0, a negative limit or one over 1000** ([#7901])
+- **get_perfmon_stats matches a counter or instance name whole before falling back to a substring** ([#7903])
+- **The blocking finding's top blocking chains list each wait once** ([#7892])
+- **find_queries_by_text lists a statement once for each database it runs in** ([#7905])
+- **Lite get_wait_trend hides ignored wait types** ([#7880])
+- **Lite get_query_trend is bucketed and capped like the other trends** ([#7880])
+- **Lite top procedures and CPU trend answer the same way every time** ([#7880])
+- **A saved notebook with auto-refresh on keeps your place when it refreshes** ([#7924])
+- **The notebook composer no longer rebuilds every cell when you add, move or remove one** ([#7936])
+- **The panel and alert-rule editors no longer let a slow reply overwrite what you chose while it was on its way** ([#7937])
+- **find_queries_by_text's all-servers search reads the samples by the matched texts instead of joining the whole raw window** ([#7849])
+- **get_pg_lock_stats and the PostgreSQL lock tab count every collector run as a capture** ([#8055])
+- **The corrected Query Store hourly rollup refreshes after the hourly it reads from** ([#8053])
+- **Lite tab reads keep flowing while a background write waits behind a long archive read** ([#7256])
+- **get_pg_top_queries and the PG temp-spill offender list read each statement's text once, after the ranking and the row cap** ([#8054])
+- **Darling get_query_trend is bucketed and capped like the other trends** ([#8063])
+- **A custom alert rule scope that names servers or a tag without a mode is refused instead of applying to every server** ([#8077])
+- **Web Mute Rules and Known Patterns tables scroll sideways inside their own box** ([#8082])
+- **memory_stats plan_cache_mb is the plan cache once** ([#8079])
+- **tempdb_stats measures the top session by the pages it holds** ([#8079])
+- **The PostgreSQL eviction note names the missing extension on Aurora** ([#8075])
+- **FinOps idle databases are judged on a store that keeps less than 7 days of raw query stats** ([#8076])
+- **The duration trends' execution_count is a count** ([#8073])
+- **Query Tag Usage on a store with no query tags says so instead of drawing one untagged = Total table per server** ([#8083])
+- **The total wait rate no longer drops when one wait type returns after missing some collections** ([#8078])
+- **Web dashboard: no opener-policy console error over plain http, a clipped card name readable on hover, and one-line Collection Log notes** ([#8096])
+- **get_pg_wait_trend and the Wait Trend chart serve Aurora PostgreSQL targets** ([#8074])
+- **get_sweep_reports and analyze_server fit the response budget and say when they cut** ([#8081])
+- **The FinOps High Impact read ships only the hashes it can keep** ([#8084])
+- **Three PostgreSQL reads say what their rows show** ([#8092])
+- **The Memory Overview chart's Y axis covers Target Memory and Memory Grants, not only Total Server Memory** ([#8100])
+- **Five MCP reads say what they served** ([#8090])
+- **Web pages say what the data beside them shows** ([#8095])
+- **The Lite server tab toolbar wraps instead of clipping at the window's edge** ([#8098])
+- **FinOps Query Preview cells show the statement on one line** ([#8110])
+- **The server Overview's five strips can all be reached at any window height** ([#8104])
+- **Darling Viewer: a read-only seat sees Collection Health's Purge Now, Run all collectors now and each row's Run now disabled, with the reason as their tooltip** ([#8103])
+- **Darling Viewer Overview cards keep their detail column readable** ([#8112])
+- **Collection Health says when one connection failure reached several collectors, and shows each row's last error beside its status** ([#8101])
+- **Memory Pressure Events bars sit inside their hour** ([#8109])
+- **Lite's Job History and the Darling Viewer's status bar read the same clock as the grids beside them, and say which** ([#8102])
+- **Server tab grids keep their figures on screen at common window widths** ([#8099])
+- **FinOps grids show long counts and totals in full** ([#8113])
+- **Nine small Darling Viewer details read right** ([#8115])
+- **Job History at All Servers shows every server's newest runs, and two more Viewer details read right** ([#8133])
+- **Top Queries by Duration and get_top_queries_by_cpu read the window once** ([#8136])
+- **The FinOps High Impact read looks up text and plans from one pick per hash, and Lite's read ships only the hashes it can keep** ([#8117])
+- **get_top_queries_by_cpu with roll_up_by_host_object reads the window once per ranking pass** ([#8138])
+- **Grid number filters read fractional values correctly in comma-decimal locales** ([#8159])
+- **PostgreSQL-target rates leave a collector gap out of the counter deltas** ([#8156])
+- **The pileup finding's baseline covers the 45 minutes it states on a busy server** ([#8157])
+- **Copy All Rows, Copy Row and Export to CSV carry the Query Stats bar columns** ([#8153])
+- **Hourly counter rollups carry the hour boundary, optional manifests list their columns, and a missed daily snapshot is caught up** ([#8168])
+- **An optional table named in --tables gets its column policy and schema gate** ([#8167])
+- **Deadlock rows name the locks for every lock kind, the CPU scheduler's CRITICAL exhaustion level is reachable, and alert streaks survive a DST change** ([#8160])
+- **Latch and spinlock legends tell long names apart** ([#8186])
+- **The plan viewer's Properties panel counts estimated executions the way the arrow does** ([#8185])
+- **A fully filtered grid says so, Sick Spinlocks ranks its five, and the crosshair and plan tooltips keep one format** ([#8187])
+- **Charts follow your color overrides, the hover keeps small values, and Lite's axis clock matches the hover** ([#8154])
+- **Light and Cool Breeze no longer keep dark colors after a theme switch, in Lite and the Darling Viewer** ([#8221])
+- **The compose quick start names its server, and an unknown key in a darling.json server entry is named at start** ([#8239])
+- **The grant script and the permissions page give the monitoring login SELECT on msdb.dbo.cdc_jobs** ([#8243])
+- **An SMTP relay that keeps refusing alert email is announced** ([#8245])
+- **Webhook alerts wait out a short rate limit instead of failing, and a long one holds only its destination** ([#8244])
+- **An alert whose delivery threw is tried again instead of being counted as sent** ([#8246])
+- **force_query_store_plan and unforce_query_store_plan refuse a database the plan was not collected in** ([#8234])
+- **kill_session honours the excluded-database list on SQL Server** ([#8235])
+- **create_plan_guide names the missing grant for an OBJECT guide** ([#8236])
+- **The wait-rate anomaly and its baseline no longer read low when one wait type returns after missing some collections** ([#8106])
+- **Plan force checks the query behind the ids, and an encrypted module's plan guide refusal says so** ([#8262])
+- **A new Darling store whose database already has TimescaleDB no longer logs a false "NO CLEARANCE" compression warning on its first housekeeping pass** ([#8275])
+- **Analysis and recommendation text reads with plain punctuation, rounds large baseline multiples, and no longer calls a one-reading window a sustained one** ([#7536])
+- **An anomaly alert no longer depends on how soon after a short burst the check runs** ([#8293])
+- **The Darling Viewer fits its 900x600 minimum window, and chart gridlines are easier to see in the Light and Cool Breeze themes** ([#8266])
+- **A crashed TimescaleDB job on a Darling store runs again within about 15 minutes, and a daily rollup no longer loses a day after an outage** ([#8302])
+- **An offline server's Overview card keeps its numbers readable, and in Lite its Last Collect counts only collections that reached the server** ([#8304])
+- **A BAD_ACTOR finding's drill-down describes the finding's own database** ([#8317])
+- **Latches & Spinlocks scrolls to what sits under an opened expander, its Latch Class column shows whole names, and Memory Broker matches its sibling sub-tabs** ([#8313])
+- **get_sweep_reports stays within the response budget on a store with a standing worklist, ships the newest sweep's document once, and its note says what was cut** ([#8318])
+- **The evict_cached_plan guide and the database overrides note read instead of coming back withheld** ([#8320])
+- **get_pg_wait_trend sizes its points to the window and fits the response budget** ([#8319])
+- **FinOps pages show what they hold** ([#8310])
+- **Lite's FinOps Server Inventory keeps a server it cannot reach** ([#8330])
+- **Pages keep to one scroll bar and show their data at small windows** ([#8307])
+- **The time range picker, the More menu and the data-start note at 900x600** ([#8305])
+- **Every server sub-tab fits the row at a maximized 1920x1080 window, and the "»" button says what it hides** ([#8331])
+- **Lite's collapsed sidebar shows whole status dots and icon buttons, and both apps' themes paint the scroll corner, scroll thumb, expander chevron, splitters and chart tooltip** ([#8306])
+- **Pages on older SQL Server versions say why they are empty, and a flat tempdb Size series reads flat** ([#8345])
+- **Lite's and the Viewer's dialogs explain themselves** ([#8347])
+- **Lite's and the Viewer's live screens say what is happening** ([#8350])
+- **PostgreSQL xmin and shared_buffers gradings no longer fire on a healthy target** ([#8322])
+- **Six SQL Server read tools stop answering with figures that are not measurements** ([#8321])
+- **Active Queries keeps the head blocker, the short time strip reaches the window's end, and a refresh keeps the selected row** ([#8357])
+- **The Job History tab's "Data starts" note** ([#8342])
+- **The Viewer shows grid cells whole, keeps its status bar to one line and to the tab on screen, and trims a long card title** ([#8332])
+- **The web dashboard's opener policy behind a proxy, the PostgreSQL Waits intro, the High CPU notebook on PostgreSQL, the compose timeout answer, and the inventory read's cache** ([#8323])
+- **query_store_hints no longer runs on a server whose every Query Store database is a readable secondary** ([#8361])
+- **An Overview chart whose read fails is cleared before it says so** ([#8368])
+- **The Daily Health Calendar no longer takes 7 to 13 seconds on a server's first Overview after a service start** ([#8370])
+- **A server tab stops its auto-refresh timer when its window closes** ([#8367])
+- **Plan analysis tools give each top operator an execution-aware row estimate** ([#8377])
+- **The plan viewer prints a fractional estimated execution count with its decimal** ([#8380])
+- **The scan rules report a plan that carries no row figure** ([#8381])
+- **The Viewer's status bar no longer says a fleet tab is refreshed after its read failed** ([#8379])
+- **The plan viewer's Wait Stats card fills a wide window instead of scrolling the Plan Insights strip** ([#8384])
+- **The plan viewer's Parameters card, warning headers and wait tooltips read with plain punctuation** ([#8387])
+- **Alert History shows a long alert type whole instead of cutting it at the column's edge** ([#8392])
+- **Settings and mute-rule dialogs read evenly in Lite and the Darling Viewer** ([#8391])
+- **Short time windows draw their strips by the minute, mute rule boxes fill the dialog, loading charts say so, narrow grid cells end with an ellipsis, Escape closes the toolbar overflow, and Settings notices use the app's own window** ([#8393])
+- **A BAD_ACTOR finding's per-execution CPU and reads now match its drill-down** ([#8403])
+- **query_store_hints stays off a readable standby whose Query Store data is frozen and whose role is not an Availability Group role** ([#8402])
+- **get_query_store_hints counts hints_returned as the page it lists** ([#8407])
+- **get_table_index_sizes names the snapshot each growth baseline was read from, and chooses it the way the database baselines are chosen** ([#8406])
+- **find_queries_by_text returns the matches it found when a plan-cache search runs out of its budget** ([#8408])
+- **MCP read-tool notes agree with their counts, lose their em dashes, and a sweep ships its worklist once** ([#8405])
+- **The Darling Viewer's About window describes what Darling monitors** ([#8412])
+- **A store whose database carries the TimescaleDB extension row purges its plain raw tables** ([#8422])
+- **FinOps day tables read in the selected time display, and long cells trim** ([#8389])
+- **The Viewer's FinOps day tables read in the selected time display** ([#8443])
+- **The plan viewer resets its panels when a plan is pasted over another** ([#8446])
+- **The plan viewer centres an operator it goes to, and rounds the zoom percentage** ([#8449])
+- **The FinOps Optimization tab's cold read is shorter and is kept per server** ([#8453])
+- **A Cleared alert's triage header no longer prints 0.0 against 0.0** ([#8454])
+- **The standalone plan viewer keeps a reloaded tab's label and says when Ctrl+V cannot read the clipboard** ([#8459])
+- **The plan viewer names a statement's parameterization type** ([#8460])
+- **The daily summary block the service builds before a server's first visitor is now the one the Overview reads** ([#8451])
+- **The Queries tab's small reads and the page's own status reads no longer wait behind its Query Store reads** ([#8452])
+- **The plan viewer's Parameters card shows a cut value in full on hover** ([#8455])
+- **The plan viewer shows Operator Details for every operator that has one** ([#8456])
+- **The plan viewer's Parameters card no longer flags names inside literals and comments as variables** ([#8457])
+- **Collapsing an operator's Warnings section in the plan viewer hides its warnings** ([#8458])
+- **The plan viewer counts a statement's warnings one way** ([#8447])
+- **A whole-hours time range hint names the rounded-up length** ([#8448])
+- **An agent's mute rule without a claim is held to the same scope as one under a claim** ([#8473])
+- **The Block Chain window's empty-state text reads the same in Lite and the Darling viewer** ([#8467])
+- **Darling's get_cpu_utilization description says sample_time is UTC** ([#8469])
+- **The FinOps Object Growth heatmap reads its days in the selected time display** ([#8450])
+- **An offline Lite server card hides its memory figure and says when the server was last collected** ([#8465])
+- **Lite and Darling share one MCP token floor, and Lite refuses a weak replacement token** ([#8462])
+- **The deadlock graph and the blocking chain round their zoom percentage** ([#8491])
+- **A saved Custom View's alert-history table no longer prints 0.00 for a Cleared alert** ([#8492])
+- **FinOps Server Inventory shows Edition, Version and Host OS whole** ([#8474])
+- **The MCP server instructions match each app's investigation gate** ([#8463])
+- **The FinOps day tables keep a sample stamped after the read took its clock** ([#8503])
+- **Apps & features shows the Lite and Viewer names and their publisher** ([#8414])
+- **Plan analysis words say "1 write", "1 lookup" and "1 wait type"** ([#8517])
+- **Every MCP time-series tool says which clock its stamps are on** ([#8502], [#8524])
+- **Alert toasts stay readable and follow the theme** ([#8475])
+- **Counts and the figures beside them read in one convention** ([#8522])
+- **Darling's Last Collect stamp and sidebar freshness dot count only successful collections** ([#8464])
+- **A recovery goes to the channel its firing went to** ([#8526])
+- **No false Capture Down after a failover or restart the service recovers from** ([#8530])
+- **The FinOps Object Growth Heatmap is readable in a small window, and the Server Inventory says what it has not collected** ([#8543])
+- **Daily Summary keeps its calendar readable after a day is clicked** ([#8544])
+- **Collection Health says which days its connection failures come from** ([#8545])
+- **Lite's status bar counts the seconds since the last collection** ([#8545])
+- **A Darling upgrade no longer refuses over a PostgreSQL backend that has just exited** ([#8546])
+- **Grids draw quickly when their rows arrive at an empty grid, and the deadlock graph and blocking chain open fitted in the middle of their window** ([#8556])
+- **Servers with a negative id work on the web dashboard, in the MCP tag tools and in external alert muting** ([#8557])
+- **Remediation SQL gives no force statement for a plan the store blocks** ([#8558])
+- **Check boxes show in every theme, long chart legend entries are no longer cut, and several texts stay readable on the light themes** ([#8559])
+- **The plan viewer starts each plan at 100%, keeps room for the plan beside its panels, and stops cutting Plan Insights text** ([#8560])
+- **Lite's Query Store grid opens a plan from its View button** ([#8560])
+- **Query Store collection stands down on a read replica whose role reads PRIMARY** ([#8561])
+- **Collection keeps its slots after a Darling restart** ([#8562])
+- **Alert notebooks read correctly for Capture Restored, External alerts, CPU Resolved and report rows** ([#8592])
+- **Notebook notes draw tables and quotes, and several small web texts read cleanly** ([#8592])
+- **Four MCP replies stop misleading callers** ([#8593])
+- **MCP replies: rounded numbers, no em dashes, clearer notes and advice that matches the data** ([#8595])
+- **Settings > Apps shows which nightly of the Darling Viewer is installed** ([#8596])
+- **The FinOps Optimization tab and the `get_finops` optimization view no longer scan a day of raw query stats on a first visit** ([#8597])
+- **Closing a plan tab, a plan window or a server tab gives its memory back** ([#8598], [#8680])
+- **The oversized-plan backlog no longer grows without bound, and its read no longer scans dropped rows** ([#8599], [#8696])
+- **get_oversized_plan_backlog answers a fleet call faster** ([#8675])
+- **analyze_server and get_analysis_facts no longer slow down with the number of database files and kept trace events** ([#8600])
+- **get_table_index_sizes and get_store_metrics read less on a first call** ([#8600])
+- **The FinOps Server Inventory reads less on a first call** ([#8600], [#8678])
+- **Five small Viewer defects are fixed** ([#8603])
+- **MCP reads fit the 32,768-byte response budget and say when they were cut for it** ([#8605], [#8668], [#8689])
+- **A server's page in the web dashboard paints sooner on a first visit** ([#8606], [#8687], [#8701])
+- **Lite refuses the reserved agent ids and logs wrong-token refusals, and two Darling gaps close** ([#8612])
+- **The MCP write-gate docs, tool descriptions and start logs now say what the gates do** ([#8613])
+- **The service log and the darling.json reference no longer say that `web.allowAdminWrites` off makes the dashboard list-only** ([#8614])
+- **The Viewer's Query Store by Duration slicer loads faster on stores with compressed history** ([#8617])
+- **get_top_queries_by_cpu reads half the pages on a server's default 24-hour window** ([#8618])
+- **get_forced_plans is faster on a first call and on stores with many databases** ([#8618], [#8641], [#8690])
+- **`get_query_fleet_summary` reads whole closed days from the daily rollup** ([#8641])
+- **The analysis plan fetch sorts far less** ([#8641])
+- **get_query_store_clutter and its web and Viewer twins no longer read the plan-churn window one pass after the other** ([#8675])
+- **MCP replies round the last long decimals, group the last long counts and drop the last tracker numbers** ([#8619], [#8676], [#8688])
+- **analyze_server returns every finding, trimming the ones that do not fit the response budget** ([#8579])
+- **The PostgreSQL "connection count high" starter alert now sees connections on every capture** ([#8580])
+- **compare_analysis rows say which reading they were banded on, and a negligible graded move gets no verdict** ([#8581])
+- **A read-only Viewer no longer offers Mute and Dismiss in the Alert History row menu, or Remove and Silence in the server menu** ([#8585])
+- **Investigations shows each server under one name, and a picked request now comes into view** ([#8586])
+- **The Query Store duration trend no longer reads low on its newest point** ([#8587])
+- **The web sidebar's alert badges no longer download 1,000 alert rows on every page load and every minute, and no longer undercount on a busy store** ([#8588])
+- **Viewer text and format fixes on PostgreSQL tabs, Job History and long hostnames** ([#8591])
+- **Darling reads no longer fail on a machine whose time separator is not a colon** ([#8607])
+- **PostgreSQL alert notebooks and triage pages show PostgreSQL reads for deadlocks, blocking and long-running queries** ([#8583], [#8594])
+- **A read chart in an alert notebook draws the hours it read, and says which window that is** ([#8589])
+- **Cleaner text in Lite and the Viewer after a click walk** ([#8622])
+- **analyze_server force-plan targets no longer tell you to wait for a revert that already happened** ([#8629])
+- **An alert notebook no longer calls its Server summary and Collection health cells "Pinned"** ([#8638])
+- **The web dashboard sidebar shows every page link when the window is tall enough** ([#8639])
+- **Viewer Active Queries cells end in an ellipsis, and Server Inventory labels all its times** ([#8640])
+- **Empty charts look the same in Lite and the Viewer, and Duration Trends breaks at collection gaps** ([#8648])
+- **Lite and Viewer text and layout fixes from a click-through** ([#8646])
+- **A server tab you just opened says "Loading..." until its first read returns** ([#8649])
+- **"Loading..." no longer stays on Top Queries by Duration, Top Procedures by Duration and Query Store by Duration** ([#8728])
+- **Darling's AWS Performance Insights client no longer pulls in a package with a security advisory** ([#8652])
+- **Job History's PostgreSQL message wraps to the width of the grid** ([#8669])
+- **The Job History time range picker uses your computer's time zone from the first open** ([#8669])
+- **The PostgreSQL Storage page shows several rows of each grid** ([#8671])
+- **PostgreSQL tab text is cleaner** ([#8671])
+- **The monitor's own PostgreSQL statements no longer carry long development notes** ([#8670])
+- **find_queries_by_text answers not_collected on a PostgreSQL server** ([#8685])
+- **A get_fleet_overview cards page is worst first all the way down** ([#8667])
+- **An idle Fleet Overview reads each store's fleet roll-up once per refresh, not twice** ([#8636])
+- **The web dashboard's own reads no longer wait behind the Queries tab's slow reads** ([#8635], [#8686])
+- **A slow first open in the Viewer now names the slow read** ([#8602], [#8642], [#8703])
+- **The status bar says the picked time range is loading, and no longer says "refreshed" over the old range's data** ([#8602])
+- **A 30-day Daily Summary read no longer re-reads a month the service has already cached** ([#8602])
+- **A server tab opened while the Overview is still loading no longer waits for it** ([#8693])
+- **The Top Queries by Duration grid reads a busy day window much faster** ([#8693])
+- **Top Queries by Duration finds each statement's module without sorting or scanning the whole procedure history** ([#8602], [#8674], [#8677])
+- **Lite's memory trim works once its indexes are large, runs when a server tab closes, and the log shows where the memory is** ([#8624], [#8643], [#8673])
+- **The 30-day Daily Summary reads a daily wait totals rollup instead of a month of raw waits** ([#8620])
+- **The Daily Summary reads collector run counts from the hourly rollup for the whole month** ([#8620], [#8704])
+- **The Daily Summary's unique-query count reads closed days from the rollups instead of raw query_stats** ([#8620], [#8702])
+- **The daily rollup backfill at start-up waits for a running refresh and no longer does thousands of empty refreshes** ([#8684])
+- **The Viewer's Query Store grid reads a long window once and sorts less** ([#8692], [#8695])
+- **The Viewer's Query Store tab opens faster the first time at Past 30 days** ([#8705])
+- **Past 30 days Query Store reads in the Viewer read far fewer pages on a store that has run for a few days** ([#8707])
+- **The Job History "Data starts" note reads a daily rollup instead of sorting the job history** ([#8679])
+- **The Job History grid and the MCP job history tools load faster on a long window** ([#8679])
+- **The Job History Category list opens fast on a busy store** ([#8694], [#8706])
+- **`get_oversized_plan_backlog` reads the backlog table once for its per-collector counts, not twice** ([#8570])
+- **MCP reply text is plainer and its windows are true** ([#8572])
+- **A server's page starts its reads at once when a database filter is saved in the browser** ([#8554])
+- **The server inventory plans the size history once, not three times** ([#8570])
+- **The plan regression read no longer sorts every plan to pick two plan ids** ([#8570])
+- **The Viewer's Query Store banner names the slicer's real start, and a server tab refresh loads its sub-tab without waiting for the header's reads** ([#8549])
+- **`get_query_fleet_summary` reads whole days of its Query Store source from the daily rollup** ([#8570])
+- **Query-tag sightings no longer rewrite every index on each re-sighting** ([#8716])
+- **The Viewer's Job History tab now logs slow loads** ([#8549])
+- **The attention table purge finds its oldest expired row through the server index** ([#8719])
+- **The Overview card words an empty Last Collect on the same clock it uses for its status** ([#8722])
+- **Job History loads faster on large stores and a quick re-pick no longer stacks reads** ([#8549])
+- **MCP tool guides send an agent only to tools the connected server serves** ([#8252])
+- **MCP reply text: three more small fixes** ([#8738])
+- **A Job History load stopped by a newer pick now names the read it was waiting on** ([#8549])
+- **A web server page opened by part of a server name now opens that server** ([#8741])
+- **The plan advisory read checks each plan once instead of once per snapshot** ([#8743])
 
 ## [3.12.0] - 2026-10-30
 
@@ -6372,3 +7052,647 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#7272]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7272
 [#8006]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8006
 [#8147]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8147
+[#6982]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6982
+[#6991]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6991
+[#6993]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6993
+[#6997]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/6997
+[#7000]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7000
+[#7003]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7003
+[#7063]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7063
+[#7146]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7146
+[#7152]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7152
+[#7153]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7153
+[#7156]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7156
+[#7157]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7157
+[#7158]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7158
+[#7159]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7159
+[#7160]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7160
+[#7161]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7161
+[#7162]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7162
+[#7163]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7163
+[#7164]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7164
+[#7165]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7165
+[#7166]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7166
+[#7167]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7167
+[#7168]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7168
+[#7169]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7169
+[#7170]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7170
+[#7171]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7171
+[#7172]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7172
+[#7173]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7173
+[#7174]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7174
+[#7175]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7175
+[#7176]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7176
+[#7177]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7177
+[#7178]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7178
+[#7179]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7179
+[#7180]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7180
+[#7181]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7181
+[#7182]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7182
+[#7183]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7183
+[#7184]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7184
+[#7185]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7185
+[#7186]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7186
+[#7187]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7187
+[#7188]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7188
+[#7189]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7189
+[#7191]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7191
+[#7192]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7192
+[#7193]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7193
+[#7194]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7194
+[#7195]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7195
+[#7196]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7196
+[#7197]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7197
+[#7198]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7198
+[#7199]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7199
+[#7200]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7200
+[#7201]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7201
+[#7202]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7202
+[#7203]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7203
+[#7204]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7204
+[#7205]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7205
+[#7206]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7206
+[#7207]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7207
+[#7208]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7208
+[#7209]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7209
+[#7210]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7210
+[#7211]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7211
+[#7212]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7212
+[#7213]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7213
+[#7214]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7214
+[#7215]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7215
+[#7216]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7216
+[#7217]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7217
+[#7218]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7218
+[#7219]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7219
+[#7220]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7220
+[#7224]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7224
+[#7226]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7226
+[#7227]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7227
+[#7228]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7228
+[#7229]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7229
+[#7240]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7240
+[#7241]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7241
+[#7242]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7242
+[#7243]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7243
+[#7252]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7252
+[#7256]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7256
+[#7257]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7257
+[#7267]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7267
+[#7269]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7269
+[#7285]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7285
+[#7292]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7292
+[#7295]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7295
+[#7309]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7309
+[#7315]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7315
+[#7337]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7337
+[#7343]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7343
+[#7344]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7344
+[#7348]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7348
+[#7353]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7353
+[#7354]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7354
+[#7357]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7357
+[#7363]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7363
+[#7365]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7365
+[#7368]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7368
+[#7370]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7370
+[#7374]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7374
+[#7375]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7375
+[#7376]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7376
+[#7379]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7379
+[#7381]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7381
+[#7382]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7382
+[#7383]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7383
+[#7384]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7384
+[#7385]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7385
+[#7392]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7392
+[#7393]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7393
+[#7394]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7394
+[#7395]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7395
+[#7396]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7396
+[#7397]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7397
+[#7400]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7400
+[#7401]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7401
+[#7402]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7402
+[#7409]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7409
+[#7410]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7410
+[#7414]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7414
+[#7417]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7417
+[#7419]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7419
+[#7423]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7423
+[#7428]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7428
+[#7432]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7432
+[#7433]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7433
+[#7441]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7441
+[#7442]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7442
+[#7443]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7443
+[#7444]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7444
+[#7445]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7445
+[#7446]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7446
+[#7447]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7447
+[#7448]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7448
+[#7449]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7449
+[#7450]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7450
+[#7456]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7456
+[#7457]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7457
+[#7458]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7458
+[#7459]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7459
+[#7465]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7465
+[#7466]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7466
+[#7467]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7467
+[#7478]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7478
+[#7479]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7479
+[#7482]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7482
+[#7483]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7483
+[#7485]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7485
+[#7486]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7486
+[#7488]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7488
+[#7491]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7491
+[#7497]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7497
+[#7498]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7498
+[#7499]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7499
+[#7502]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7502
+[#7504]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7504
+[#7505]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7505
+[#7507]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7507
+[#7508]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7508
+[#7516]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7516
+[#7522]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7522
+[#7527]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7527
+[#7528]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7528
+[#7533]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7533
+[#7534]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7534
+[#7535]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7535
+[#7536]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7536
+[#7537]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7537
+[#7538]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7538
+[#7539]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7539
+[#7542]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7542
+[#7543]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7543
+[#7545]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7545
+[#7547]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7547
+[#7548]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7548
+[#7549]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7549
+[#7550]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7550
+[#7551]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7551
+[#7552]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7552
+[#7554]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7554
+[#7555]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7555
+[#7557]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7557
+[#7558]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7558
+[#7559]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7559
+[#7560]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7560
+[#7561]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7561
+[#7562]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7562
+[#7564]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7564
+[#7565]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7565
+[#7566]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7566
+[#7567]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7567
+[#7571]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7571
+[#7572]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7572
+[#7573]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7573
+[#7575]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7575
+[#7577]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7577
+[#7578]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7578
+[#7581]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7581
+[#7582]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7582
+[#7583]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7583
+[#7584]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7584
+[#7586]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7586
+[#7588]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7588
+[#7590]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7590
+[#7592]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7592
+[#7593]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7593
+[#7606]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7606
+[#7608]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7608
+[#7609]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7609
+[#7610]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7610
+[#7611]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7611
+[#7616]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7616
+[#7624]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7624
+[#7639]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7639
+[#7643]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7643
+[#7644]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7644
+[#7646]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7646
+[#7647]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7647
+[#7649]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7649
+[#7653]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7653
+[#7655]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7655
+[#7656]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7656
+[#7657]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7657
+[#7658]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7658
+[#7659]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7659
+[#7660]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7660
+[#7661]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7661
+[#7662]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7662
+[#7663]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7663
+[#7669]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7669
+[#7670]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7670
+[#7674]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7674
+[#7675]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7675
+[#7676]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7676
+[#7677]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7677
+[#7679]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7679
+[#7681]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7681
+[#7682]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7682
+[#7683]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7683
+[#7684]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7684
+[#7688]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7688
+[#7689]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7689
+[#7690]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7690
+[#7691]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7691
+[#7692]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7692
+[#7695]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7695
+[#7696]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7696
+[#7699]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7699
+[#7700]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7700
+[#7701]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7701
+[#7704]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7704
+[#7705]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7705
+[#7706]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7706
+[#7718]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7718
+[#7724]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7724
+[#7725]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7725
+[#7726]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7726
+[#7729]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7729
+[#7731]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7731
+[#7733]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7733
+[#7735]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7735
+[#7736]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7736
+[#7746]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7746
+[#7762]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7762
+[#7769]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7769
+[#7771]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7771
+[#7772]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7772
+[#7773]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7773
+[#7774]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7774
+[#7775]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7775
+[#7776]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7776
+[#7777]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7777
+[#7778]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7778
+[#7779]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7779
+[#7780]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7780
+[#7782]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7782
+[#7783]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7783
+[#7784]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7784
+[#7785]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7785
+[#7786]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7786
+[#7787]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7787
+[#7788]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7788
+[#7790]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7790
+[#7791]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7791
+[#7810]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7810
+[#7811]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7811
+[#7812]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7812
+[#7813]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7813
+[#7814]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7814
+[#7816]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7816
+[#7822]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7822
+[#7824]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7824
+[#7837]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7837
+[#7846]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7846
+[#7849]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7849
+[#7850]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7850
+[#7851]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7851
+[#7856]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7856
+[#7863]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7863
+[#7865]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7865
+[#7873]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7873
+[#7875]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7875
+[#7876]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7876
+[#7877]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7877
+[#7878]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7878
+[#7879]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7879
+[#7880]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7880
+[#7881]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7881
+[#7882]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7882
+[#7883]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7883
+[#7884]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7884
+[#7885]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7885
+[#7886]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7886
+[#7887]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7887
+[#7888]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7888
+[#7889]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7889
+[#7890]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7890
+[#7892]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7892
+[#7893]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7893
+[#7894]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7894
+[#7896]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7896
+[#7900]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7900
+[#7901]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7901
+[#7902]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7902
+[#7903]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7903
+[#7905]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7905
+[#7906]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7906
+[#7909]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7909
+[#7918]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7918
+[#7919]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7919
+[#7920]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7920
+[#7921]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7921
+[#7922]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7922
+[#7923]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7923
+[#7924]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7924
+[#7925]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7925
+[#7926]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7926
+[#7928]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7928
+[#7930]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7930
+[#7931]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7931
+[#7933]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7933
+[#7934]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7934
+[#7935]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7935
+[#7936]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7936
+[#7937]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7937
+[#7938]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7938
+[#7939]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7939
+[#7941]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7941
+[#7944]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7944
+[#7945]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7945
+[#7949]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7949
+[#7950]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7950
+[#7951]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7951
+[#7952]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7952
+[#7955]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7955
+[#7956]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7956
+[#7957]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7957
+[#7958]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7958
+[#7959]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7959
+[#7960]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7960
+[#7961]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7961
+[#7962]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7962
+[#7974]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7974
+[#7975]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7975
+[#7979]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7979
+[#7981]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7981
+[#7984]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7984
+[#7999]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/7999
+[#8007]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8007
+[#8012]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8012
+[#8013]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8013
+[#8014]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8014
+[#8017]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8017
+[#8053]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8053
+[#8054]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8054
+[#8055]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8055
+[#8063]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8063
+[#8073]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8073
+[#8074]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8074
+[#8075]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8075
+[#8076]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8076
+[#8077]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8077
+[#8078]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8078
+[#8079]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8079
+[#8081]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8081
+[#8082]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8082
+[#8083]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8083
+[#8084]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8084
+[#8086]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8086
+[#8090]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8090
+[#8092]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8092
+[#8095]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8095
+[#8096]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8096
+[#8098]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8098
+[#8099]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8099
+[#8100]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8100
+[#8101]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8101
+[#8102]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8102
+[#8103]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8103
+[#8104]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8104
+[#8106]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8106
+[#8109]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8109
+[#8110]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8110
+[#8112]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8112
+[#8113]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8113
+[#8115]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8115
+[#8117]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8117
+[#8133]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8133
+[#8136]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8136
+[#8138]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8138
+[#8141]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8141
+[#8144]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8144
+[#8146]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8146
+[#8151]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8151
+[#8153]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8153
+[#8154]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8154
+[#8156]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8156
+[#8157]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8157
+[#8159]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8159
+[#8160]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8160
+[#8162]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8162
+[#8167]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8167
+[#8168]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8168
+[#8169]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8169
+[#8184]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8184
+[#8185]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8185
+[#8186]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8186
+[#8187]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8187
+[#8197]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8197
+[#8219]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8219
+[#8220]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8220
+[#8221]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8221
+[#8222]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8222
+[#8223]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8223
+[#8224]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8224
+[#8225]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8225
+[#8226]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8226
+[#8234]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8234
+[#8235]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8235
+[#8236]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8236
+[#8239]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8239
+[#8240]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8240
+[#8243]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8243
+[#8244]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8244
+[#8245]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8245
+[#8246]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8246
+[#8252]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8252
+[#8262]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8262
+[#8266]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8266
+[#8275]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8275
+[#8283]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8283
+[#8290]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8290
+[#8293]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8293
+[#8302]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8302
+[#8304]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8304
+[#8305]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8305
+[#8306]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8306
+[#8307]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8307
+[#8310]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8310
+[#8313]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8313
+[#8317]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8317
+[#8318]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8318
+[#8319]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8319
+[#8320]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8320
+[#8321]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8321
+[#8322]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8322
+[#8323]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8323
+[#8330]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8330
+[#8331]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8331
+[#8332]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8332
+[#8342]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8342
+[#8345]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8345
+[#8347]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8347
+[#8350]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8350
+[#8357]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8357
+[#8361]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8361
+[#8367]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8367
+[#8368]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8368
+[#8370]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8370
+[#8377]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8377
+[#8379]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8379
+[#8380]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8380
+[#8381]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8381
+[#8384]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8384
+[#8387]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8387
+[#8389]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8389
+[#8391]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8391
+[#8392]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8392
+[#8393]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8393
+[#8402]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8402
+[#8403]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8403
+[#8404]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8404
+[#8405]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8405
+[#8406]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8406
+[#8407]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8407
+[#8408]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8408
+[#8412]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8412
+[#8414]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8414
+[#8422]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8422
+[#8443]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8443
+[#8446]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8446
+[#8447]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8447
+[#8448]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8448
+[#8449]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8449
+[#8450]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8450
+[#8451]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8451
+[#8452]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8452
+[#8453]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8453
+[#8454]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8454
+[#8455]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8455
+[#8456]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8456
+[#8457]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8457
+[#8458]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8458
+[#8459]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8459
+[#8460]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8460
+[#8461]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8461
+[#8462]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8462
+[#8463]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8463
+[#8464]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8464
+[#8465]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8465
+[#8466]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8466
+[#8467]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8467
+[#8468]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8468
+[#8469]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8469
+[#8473]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8473
+[#8474]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8474
+[#8475]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8475
+[#8491]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8491
+[#8492]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8492
+[#8502]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8502
+[#8503]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8503
+[#8517]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8517
+[#8522]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8522
+[#8524]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8524
+[#8424]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8424
+[#8526]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8526
+[#8527]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8527
+[#8530]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8530
+[#8543]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8543
+[#8544]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8544
+[#8545]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8545
+[#8546]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8546
+[#8549]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8549
+[#8554]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8554
+[#8556]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8556
+[#8557]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8557
+[#8558]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8558
+[#8559]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8559
+[#8560]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8560
+[#8561]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8561
+[#8562]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8562
+[#8570]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8570
+[#8572]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8572
+[#8579]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8579
+[#8580]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8580
+[#8581]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8581
+[#8583]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8583
+[#8585]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8585
+[#8586]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8586
+[#8587]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8587
+[#8588]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8588
+[#8589]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8589
+[#8591]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8591
+[#8592]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8592
+[#8593]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8593
+[#8594]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8594
+[#8595]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8595
+[#8596]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8596
+[#8597]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8597
+[#8598]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8598
+[#8599]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8599
+[#8600]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8600
+[#8602]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8602
+[#8603]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8603
+[#8605]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8605
+[#8606]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8606
+[#8607]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8607
+[#8612]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8612
+[#8613]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8613
+[#8614]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8614
+[#8617]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8617
+[#8618]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8618
+[#8619]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8619
+[#8620]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8620
+[#8622]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8622
+[#8624]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8624
+[#8629]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8629
+[#8635]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8635
+[#8636]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8636
+[#8638]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8638
+[#8639]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8639
+[#8640]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8640
+[#8641]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8641
+[#8642]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8642
+[#8643]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8643
+[#8646]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8646
+[#8648]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8648
+[#8649]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8649
+[#8652]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8652
+[#8667]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8667
+[#8668]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8668
+[#8669]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8669
+[#8670]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8670
+[#8671]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8671
+[#8672]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8672
+[#8673]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8673
+[#8674]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8674
+[#8675]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8675
+[#8676]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8676
+[#8677]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8677
+[#8678]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8678
+[#8679]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8679
+[#8680]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8680
+[#8684]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8684
+[#8685]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8685
+[#8686]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8686
+[#8687]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8687
+[#8688]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8688
+[#8689]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8689
+[#8690]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8690
+[#8692]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8692
+[#8693]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8693
+[#8694]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8694
+[#8695]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8695
+[#8696]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8696
+[#8701]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8701
+[#8702]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8702
+[#8703]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8703
+[#8704]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8704
+[#8705]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8705
+[#8706]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8706
+[#8707]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8707
+[#8716]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8716
+[#8719]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8719
+[#8722]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8722
+[#8728]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8728
+[#8738]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8738
+[#8741]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8741
+[#8743]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/8743
