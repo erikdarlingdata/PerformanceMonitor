@@ -26,7 +26,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <para><b>One statement per flush, and no connection for an empty one.</b> The same identity sighted twice is
 /// collapsed first (a single <c>INSERT ... ON CONFLICT DO UPDATE</c> cannot touch one row twice), with the occurrences
 /// added to <c>seen_count</c>. The conflict target is the table's own unique index (V194), so a key seen under the same
-/// caller in the same database again bumps <c>last_seen</c> and <c>seen_count</c> and keeps its first text sample.</para>
+/// caller in the same database again adds to <c>seen_count</c>, moves <c>last_seen</c> at most once an hour (#8716) and keeps its first text sample.</para>
 ///
 /// <para><b>The database is part of the identity (V194).</b> One hash seen in two databases is two rows, so the map
 /// builder, which resolves a key against every sighting row it has, tests a database rule against each of them. An
@@ -55,7 +55,16 @@ public static class QueryTagSightingWriter
     /// </summary>
     public const int RowsPerStatement = 10_000;
 
-    /// <summary>Statement parameters: $1..$10, the ten columns of the flush as arrays (server id first, the count last).</summary>
+    /// <summary>
+    /// Statement parameters: $1..$10, the ten columns of the flush as arrays (server id first, the count last).
+    /// <para><b>A re-sighting moves <c>last_seen</c> at most once an hour (#8716).</b> <c>last_seen</c> is indexed, so bumping it on
+    /// every conflict made every update non-HOT: each one wrote all four indexes, and a busy store's table and its
+    /// <c>last_seen</c> index grew by hundreds of thousands of pages a day with autovacuum removing nothing. The count still
+    /// adds up on every conflict (it is not indexed). <c>last_seen</c> moves when the stored value is over an hour old, and
+    /// also when the conflict fills an object name or text sample the row lacked, because those are what the map resolver
+    /// reads and the map's changed-keys read (<see cref="QueryTagMapStore.ChangedKeysSql"/>) finds a key by this column.
+    /// The time source is the statement's own <c>now()</c>, as before, reached through the column default and read as <c>EXCLUDED.last_seen</c> (the insert list leaves <c>last_seen</c> out). That is the same clock as the stored value, and it keeps the comparison <c>timestamptz</c> against <c>timestamptz</c>.</para>
+    /// </summary>
     internal const string UpsertSql = """
 INSERT INTO collect.query_tag_sightings AS t
     (server_id, key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample, seen_count)
@@ -64,7 +73,11 @@ FROM unnest($1::integer[], $2::text[], $3::text[], $4::text[], $5::text[], $6::t
     AS u(server_id, key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample, seen_count)
 ON CONFLICT (server_id, key_kind, key, COALESCE(application_name, ''), COALESCE(login_name, ''), COALESCE(host_name, ''), COALESCE(database_name, ''))
 DO UPDATE SET
-    last_seen = now(),
+    last_seen = CASE
+        WHEN t.last_seen < EXCLUDED.last_seen - interval '1 hour'
+          OR (t.object_name IS NULL AND EXCLUDED.object_name IS NOT NULL)
+          OR (t.text_sample IS NULL AND EXCLUDED.text_sample IS NOT NULL)
+        THEN EXCLUDED.last_seen ELSE t.last_seen END,
     seen_count = t.seen_count + EXCLUDED.seen_count,
     object_name = COALESCE(t.object_name, EXCLUDED.object_name),
     text_sample = COALESCE(t.text_sample, EXCLUDED.text_sample)
