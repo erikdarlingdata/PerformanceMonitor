@@ -506,6 +506,29 @@ public sealed class QueryFleetSummaryQueryStoreDailyMidLiveTests
                 await DarlingMcpTestData.RegisterServerAsync(c, -858100 - i, "p8570q-" + i, ct);
             }
 
+            /* #8725: no autovacuum or autoanalyze on the relations this test reads. The page floor below counts the old statement's reads of the hourly
+               rollup's chunks, and those depend on the plan: with no statistics (as seeded) the planner walks the hash and bucket index with a heap
+               fetch per row, 2,000-odd pages; once an autoanalyze has run on the chunks (CI's slower runners reach one between the refresh and the
+               EXPLAIN) it picks a bitmap heap scan, which reads each page once, 335 pages, and the floor fails. The statistics sample is random, so the mid
+               statement's edge read flips between a bitmap scan and a bucket-index walk from run to run too. A table option set on the hypertable is
+               copied to the chunks created after it, so the option goes on before the seed and the rollups' refresh. */
+            await using (var relations = new NpgsqlCommand(@"SELECT 'collect.query_store_stats'
+                UNION ALL SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name) FROM timescaledb_information.continuous_aggregates", c))
+            await using (var reader = await relations.ExecuteReaderAsync(ct))
+            {
+                var tables = new List<string>();
+                while (await reader.ReadAsync(ct))
+                {
+                    tables.Add(reader.GetString(0));
+                }
+
+                await reader.CloseAsync();
+                foreach (var table in tables)
+                {
+                    await Exec(c, $"ALTER TABLE {table} SET (autovacuum_enabled = false)", ct);
+                }
+            }
+
             var from = t.Start.Date;
             await Exec(c, $@"INSERT INTO collect.query_store_stats
                   (collection_id, collection_time, server_id, server_name, database_name, module_name, query_hash, query_id, plan_id, execution_type_desc, replica_role,
